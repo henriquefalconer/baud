@@ -826,8 +826,56 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     h4.sh` now exists (mirrors `drive/h1.sh`-`h3.sh`'s pattern: host probe, then the named test)
     and passes end-to-end on real `/dev/kvm`.
 - H4 is done, including `drive/h4.sh` (`timer_tick_lands_at_identical_instruction` passing
-  repeatably on real KVM hardware, see immediately above); H5, H6, and the rest of the M-series
-  remain **not yet started**.
+  repeatably on real KVM hardware, see immediately above).
+- **H5 (snapshot/branch/restore, todo.md §10) — first slice done: `snapshot_roundtrip_is_bit_
+  identical` passes on real KVM hardware; `drive/h5.sh` exists and passes end-to-end.** Prior
+  iterations had built `Multiverse::snapshot`/`Multiverse::restore` and the underlying
+  `baud-snapshot::linux::capture`/`restore` but never called either against a real, running guest
+  (blocked on H1 existing at all). This iteration ran them for the first time
+  (`crates/baud-multiverse/src/linux/mod.rs`'s `linux::tests::snapshot_roundtrip_is_bit_identical`):
+  boot `timer-guest` (H4's fixture), deliver one tick, capture a `Universe` at that point (`K`),
+  restore into a brand-new `Multiverse`, deliver a second tick and run to halt — the restored run's
+  landed instruction (`rip`) and whole observation stream (console output, RAM hash) match a
+  straight, never-snapshotted two-tick run exactly. `drive/h5.sh` (new, mirrors `h1.sh`-`h4.sh`'s
+  pattern: host-probe gate, then the named test) passes end-to-end; `drive/h0.sh`-`h4.sh`
+  re-verified with zero regressions; `cargo build/test/clippy --workspace` all green, zero new
+  warnings in any touched file.
+  - **Two real, previously-undiscovered production bugs found and fixed**, neither reachable
+    without a real running guest to snapshot: (1) `baud_snapshot::linux::capture` unconditionally
+    called `KVM_GET_LAPIC`, which fails `EINVAL` on every boot in this workspace — this VMM never
+    calls `KVM_CREATE_IRQCHIP` (H4's arm-early-then-single-step engine injects interrupts directly
+    via `KVM_INTERRUPT`, bypassing in-kernel LAPIC emulation entirely), so there is no in-kernel
+    APIC state to capture in the first place; fixed by removing LAPIC from the capture set
+    (`VcpuState`, `RestoreStep`, `restore_plan`) — any interrupt bookkeeping direct-injection needs
+    is already covered by `KVM_GET_VCPU_EVENTS`. (2) `WorkClock::restore` only restored the
+    virtual-TSC base, not the cumulative RCB value — a restored guest's branch counter is a
+    brand-new `perf_event` fd (a process cannot resurrect another fd's already-elapsed hardware
+    count) and silently restarted counting from zero, corrupting every `target_rcb`
+    `inject_timer_tick` computes after a restore. Fixed by adding `WorkClock::rcb_offset` (added to
+    every raw counter read) and `ClockState::rcb_anchor` (the cumulative RCB captured at snapshot
+    time, threaded through `Multiverse::snapshot`/`restore`). Both fixes are also reflected in
+    specs/baud-snapshot.md §3/§6/§10 (the spec's original capture-set table listed LAPIC and only a
+    single-field "work-clock anchor," both now corrected to match this real-hardware finding).
+  - **A real-hardware precision finding (accepted, not fixed)**: even after both bugs above,
+    the *internal* `rcb` value at the restored run's second tick still disagrees with the straight
+    run's by several hundred branches (confirmed via instrumentation to be one-time `perf_event`
+    fd-creation/enable overhead — a cost a continuously-running counter never re-pays, since a
+    straight run's later ticks reuse the same fd created once at boot). This does not reach the
+    guest: `rip`, console output, and RAM hash are all exactly identical either way, the same
+    "precision vs. determinism" distinction already established by H3's `rcb_deterministic`
+    majority-of-3 heuristic and H4's `RCB_HARDWARE_JITTER_TOLERANCE`. `snapshot_roundtrip_is_bit_
+    identical` therefore does not assert `rcb` equality across the restore boundary at all (only
+    `rip` + the console/RAM observation stream, matching the spec's own pseudocode), with a doc
+    comment explaining why — a documented design decision, not a gap.
+  - **Not yet done** (§10's remaining H5 guarantees, unchanged from prior iterations): `Snapshot::
+    branch` (userfaultfd CoW branching) is still blocked on a real architecture gap — guest RAM is
+    a private anonymous mapping today, but `UFFDIO_CONTINUE` needs a shared (memfd/hugetlbfs)
+    backing; `thousand_branches_are_independent_and_deterministic`, `reset_cost_scales_with_
+    write_set` (the dirty-ring machinery exists and is wired into `Multiverse` but no test calls
+    `enable_dirty_ring`/`reset_dirty_pages` on real hardware yet), `shell_into_universe_resumes`,
+    and `restore_refuses_mismatched_cpu` on real hardware (currently only unit-tested at the pure
+    `universe::model_matches` level) are all still open. H6 and the rest of the M-series remain
+    **not yet started**.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and

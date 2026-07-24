@@ -42,46 +42,61 @@ pub struct WorkClock<C: BranchCounter> {
     base: u64,
     k: u64,
     counter: C,
+    /// Added to every raw [`BranchCounter::read`] before it is treated as "the" RCB value
+    /// (specs/baud-snapshot.md §3). `0` for a freshly booted guest ([`new`](Self::new)): a brand
+    /// new `perf_event` counter genuinely starts at zero, so no offset is needed. Nonzero after
+    /// [`restore`](Self::restore): the restored guest's `counter` is a *new* `perf_event` fd (a
+    /// process cannot resurrect another fd's already-elapsed hardware count), which restarts
+    /// counting from zero the instant it is created — without this offset, `current_rcb()` would
+    /// report a value discontinuous with the guest's true cumulative branch count, silently
+    /// rewinding the RCB space `Multiverse::inject_timer_tick` computes `target_rcb` from.
+    rcb_offset: u64,
     tsc_deadline: u64,
     tsc_aux: u64,
 }
 
 impl<C: BranchCounter> WorkClock<C> {
     pub fn new(base: u64, k: u64, counter: C) -> Self {
-        WorkClock { base, k, counter, tsc_deadline: 0, tsc_aux: 0 }
+        WorkClock { base, k, counter, rcb_offset: 0, tsc_deadline: 0, tsc_aux: 0 }
     }
 
     /// Reconstruct a [`WorkClock`] from a captured `Universe`'s clock state
-    /// (`baud-snapshot::universe::ClockState::work_clock_base`/`tsc_deadline`/`tsc_aux`) rather
-    /// than a fresh guest's zeroed defaults — the counterpart to [`new`](Self::new) that a
-    /// `Multiverse::restore` uses so a guest resumes reading the exact virtual-TSC/deadline/aux
-    /// sequence a straight run would have produced from this point, not a clock that appears to
-    /// have just reset to zero (specs/baud-snapshot.md §3: "Work-clock anchor | branch-count
-    /// base" is only half the served state — a guest that had already armed `IA32_TSC_DEADLINE` or
-    /// set `IA32_TSC_AUX` before the snapshot must see those same values after restore too, since
-    /// both MSRs are served entirely in software here and never reach KVM's own MSR storage once
-    /// the MSR filter routes them to userspace — see `linux::configure_msr_filter`'s doc).
-    pub fn restore(base: u64, k: u64, tsc_deadline: u64, tsc_aux: u64, counter: C) -> Self {
-        WorkClock { base, k, counter, tsc_deadline, tsc_aux }
+    /// (`baud-snapshot::universe::ClockState::work_clock_base`/`rcb_anchor`/`tsc_deadline`/
+    /// `tsc_aux`) rather than a fresh guest's zeroed defaults — the counterpart to
+    /// [`new`](Self::new) that a `Multiverse::restore` uses so a guest resumes reading the exact
+    /// virtual-TSC/RCB/deadline/aux sequence a straight run would have produced from this point,
+    /// not a clock that appears to have just reset to zero (specs/baud-snapshot.md §3: "Work-clock
+    /// anchor | branch-count base" is only half the served state — a guest that had already armed
+    /// `IA32_TSC_DEADLINE` or set `IA32_TSC_AUX` before the snapshot must see those same values
+    /// after restore too, since both MSRs are served entirely in software here and never reach
+    /// KVM's own MSR storage once the MSR filter routes them to userspace — see
+    /// `linux::configure_msr_filter`'s doc). `rcb_anchor` is the cumulative RCB value
+    /// [`current_rcb`](Self::current_rcb) reported at the moment of capture — see
+    /// [`rcb_offset`](WorkClock::rcb_offset)'s doc for why the restored `counter`'s own raw reads
+    /// cannot be trusted to continue that sequence unaided.
+    pub fn restore(base: u64, k: u64, rcb_anchor: u64, tsc_deadline: u64, tsc_aux: u64, counter: C) -> Self {
+        WorkClock { base, k, counter, rcb_offset: rcb_anchor, tsc_deadline, tsc_aux }
     }
 
     /// The current virtual TSC value: `base + k * rcb`. Saturating, not wrapping — a silent
     /// wraparound would itself be a determinism hole disguised as a valid-looking small number.
     pub fn virtual_tsc(&mut self) -> u64 {
-        let rcb = self.counter.read();
+        let rcb = self.current_rcb();
         self.base.saturating_add(self.k.saturating_mul(rcb))
     }
 
-    /// The current cumulative retired-conditional-branch count, straight from the underlying
-    /// [`BranchCounter`] — the same RCB space `virtual_tsc` derives from, and the space
-    /// `Multiverse::inject_timer_tick` (H4, specs/baud-vcpu.md §5) anchors a
-    /// `baud_vcpu::linux::pmu::LinuxPmuStepper`'s own armed counter to, so a `target_rcb` computed
-    /// from "now" means the same thing to both the work-clock and the interrupt-injection engine
-    /// (they are two distinct `perf_event` file descriptors counting the identical architectural
-    /// event on the identical thread — their deltas over the same interval agree by construction,
-    /// only their absolute epochs differ, which is exactly what this seeding reconciles).
+    /// The current cumulative retired-conditional-branch count: [`rcb_offset`](WorkClock::
+    /// rcb_offset) plus the underlying [`BranchCounter`]'s own raw reading — the same RCB space
+    /// `virtual_tsc` derives from, and the space `Multiverse::inject_timer_tick` (H4,
+    /// specs/baud-vcpu.md §5) anchors a `baud_vcpu::linux::pmu::LinuxPmuStepper`'s own armed
+    /// counter to, so a `target_rcb` computed from "now" means the same thing to both the
+    /// work-clock and the interrupt-injection engine (they are two distinct `perf_event` file
+    /// descriptors counting the identical architectural event on the identical thread — their
+    /// deltas over the same interval agree by construction, only their absolute epochs differ,
+    /// which is exactly what this seeding reconciles) on a fresh boot, and what `rcb_offset`
+    /// reconciles across a restore.
     pub fn current_rcb(&mut self) -> u64 {
-        self.counter.read()
+        self.rcb_offset.saturating_add(self.counter.read())
     }
 
     /// The work-clock anchor at the moment of the most recent `IA32_TSC` write (or construction, if
@@ -123,7 +138,7 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
                 // A guest write to IA32_TSC must make the *next* read return exactly `value`
                 // (some kernels write 0 at boot) — rebase `base` from the RCB at the moment of
                 // the write rather than ignoring the write outright.
-                let rcb = self.counter.read();
+                let rcb = self.current_rcb();
                 self.base = value.wrapping_sub(self.k.wrapping_mul(rcb));
             }
             MSR_IA32_TSC_DEADLINE => self.tsc_deadline = value,
@@ -224,11 +239,41 @@ mod tests {
         assert_eq!(original.tsc_deadline(), 0xABCD);
         assert_eq!(original.tsc_aux(), 42);
 
-        let mut restored =
-            WorkClock::restore(original.base(), 3, original.tsc_deadline(), original.tsc_aux(), ConstantCounter(7));
+        let mut restored = WorkClock::restore(
+            original.base(),
+            3,
+            original.current_rcb(),
+            original.tsc_deadline(),
+            original.tsc_aux(),
+            ConstantCounter(0),
+        );
         assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC), original.serve_rdmsr(MSR_IA32_TSC));
         assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC_DEADLINE), 0xABCD);
         assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC_AUX), 42);
+    }
+
+    /// The bug H5's real-hardware test surfaced: a restored `WorkClock`'s `counter` is a brand new
+    /// `perf_event` fd starting from zero, not a continuation of the original's hardware count —
+    /// without `rcb_offset`, `current_rcb()` after restore would silently report a value far
+    /// smaller than the guest's true cumulative branch count, corrupting every `target_rcb`
+    /// computed from "now" thereafter (`Multiverse::inject_timer_tick`, H4). Asserts `current_rcb`
+    /// after restore continues from the captured anchor, not from the new counter's raw zero.
+    #[test]
+    fn restore_continues_the_rcb_sequence_instead_of_resetting_it() {
+        let mut original = WorkClock::new(0, 1, ScriptedCounter::new(vec![50_000]));
+        let anchor = original.current_rcb();
+        assert_eq!(anchor, 50_000);
+
+        // The restored side's counter is a fresh fd: its own raw reads start small again, exactly
+        // like a real `LinuxBranchCounter::new()` would after `Multiverse::restore`.
+        let mut restored =
+            WorkClock::restore(original.base(), 1, anchor, 0, 0, ScriptedCounter::new(vec![7]));
+        assert_eq!(
+            restored.current_rcb(),
+            50_007,
+            "current_rcb after restore must continue from the captured anchor plus the new \
+             counter's own delta, not reset to the new counter's raw (small) reading"
+        );
     }
 
     #[test]

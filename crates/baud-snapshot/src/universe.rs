@@ -43,6 +43,18 @@ pub fn order_msrs_tsc_first(msrs: &mut [MsrWrite]) {
 /// `KVM_GET_*` returned (or, for `msrs`, the parsed entry list, already ordered by
 /// [`order_msrs_tsc_first`]) — this crate does not interpret the bytes, only sequences their
 /// restore.
+///
+/// **Deliberately excludes `KVM_GET_LAPIC`** (a real gap the spec's original capture-set list
+/// assumed away, found and fixed against real KVM hardware): `KVM_GET_LAPIC`/`KVM_SET_LAPIC` only
+/// succeed once `KVM_CREATE_IRQCHIP` has registered an in-kernel local APIC, but this workspace's
+/// VMM (`baud_multiverse::linux::create_vm_vcpu_shell`) never creates one — H4's arm-early-then-
+/// single-step engine (specs/baud-vcpu.md §5) injects interrupts directly via `KVM_INTERRUPT`,
+/// bypassing LAPIC emulation entirely, so there is no in-kernel APIC state to capture in the first
+/// place (`KVM_GET_LAPIC` fails with `EINVAL` on this VMM's vCPUs). Any interrupt state that
+/// direct-injection needs to preserve across a restore (e.g. a still-pending vector) is already
+/// covered by `events` (`KVM_GET_VCPU_EVENTS`, which mirrors `KVM_INTERRUPT`'s own injected-
+/// interrupt bookkeeping) — omitting LAPIC is not a missing field, it names a field this VMM's
+/// architecture has no analogue for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VcpuState {
     /// `KVM_GET_REGS` (`kvm_regs`, raw bytes).
@@ -51,8 +63,6 @@ pub struct VcpuState {
     pub sregs: Vec<u8>,
     /// `KVM_GET_MSRS`, already TSC-first ordered.
     pub msrs: Vec<MsrWrite>,
-    /// `KVM_GET_LAPIC` (`kvm_lapic_state`, raw bytes).
-    pub lapic: Vec<u8>,
     /// `KVM_GET_XSAVE2` (FPU/SSE/AVX/AMX extended state, raw bytes).
     pub xsave: Vec<u8>,
     /// `KVM_GET_XCRS` (extended control registers, raw bytes).
@@ -78,6 +88,12 @@ pub struct ClockState {
     /// `WorkClock`'s `base` at the moment of capture, so a restored `WorkClock` resumes reading
     /// exactly the same virtual-TSC sequence a straight run would have produced from this point.
     pub work_clock_base: u64,
+    /// `WorkClock::current_rcb()` at the moment of capture (found missing by H5's real-hardware
+    /// `snapshot_roundtrip_is_bit_identical` test): a restored guest's branch counter is a *new*
+    /// `perf_event` fd starting from zero, not a continuation of the original's hardware count, so
+    /// without this anchor a restored `WorkClock` would report an RCB value discontinuous with the
+    /// guest's true cumulative branch count (`WorkClock::rcb_offset`'s doc has the full mechanism).
+    pub rcb_anchor: u64,
     /// The last value the guest wrote to `IA32_TSC_DEADLINE`, as the software work-clock currently
     /// serves it (`baud_multiverse::timesource::WorkClock::tsc_deadline`) — captured separately
     /// from `vcpu.msrs` because once the MSR filter routes this MSR to userspace
@@ -139,7 +155,6 @@ pub enum RestoreStep {
     /// ([`order_msrs_tsc_first`]) — this step's *position* in the plan (after regs/sregs, before
     /// lapic/xsave/etc.) has no ordering requirement of its own beyond "before `SetVmClock`".
     SetVcpuMsrs,
-    SetVcpuLapic,
     SetVcpuXsave,
     SetVcpuXcrs,
     SetVcpuEvents,
@@ -158,7 +173,7 @@ pub enum RestoreStep {
 /// The fixed restore sequence for any [`Universe`] (specs/baud-snapshot.md §6, points 1-3).
 /// A pure function of nothing but the step kinds themselves — every `Universe` restores through
 /// the exact same ordered plan, so there is no per-universe variation for a caller to get wrong.
-pub fn restore_plan() -> [RestoreStep; 12] {
+pub fn restore_plan() -> [RestoreStep; 11] {
     use RestoreStep::*;
     [
         SetTscKhz,
@@ -166,7 +181,6 @@ pub fn restore_plan() -> [RestoreStep; 12] {
         SetVcpuRegs,
         SetVcpuSregs,
         SetVcpuMsrs,
-        SetVcpuLapic,
         SetVcpuXsave,
         SetVcpuXcrs,
         SetVcpuEvents,
@@ -267,7 +281,6 @@ mod tests {
                     RestoreStep::SetVcpuRegs
                         | RestoreStep::SetVcpuSregs
                         | RestoreStep::SetVcpuMsrs
-                        | RestoreStep::SetVcpuLapic
                         | RestoreStep::SetVcpuXsave
                         | RestoreStep::SetVcpuXcrs
                         | RestoreStep::SetVcpuEvents

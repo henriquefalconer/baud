@@ -450,6 +450,7 @@ impl Multiverse {
             layout::GUEST_RAM_SIZE,
             page_store,
             self.time.base(),
+            self.time.current_rcb(),
             self.time.tsc_deadline(),
             self.time.tsc_aux(),
             self.bus.tape.device().cursor(),
@@ -483,6 +484,7 @@ impl Multiverse {
         let time = WorkClock::restore(
             universe.clock.work_clock_base,
             k,
+            universe.clock.rcb_anchor,
             universe.clock.tsc_deadline,
             universe.clock.tsc_aux,
             counter,
@@ -904,6 +906,106 @@ mod tests {
             second_halt.ram_hash, first_halt.ram_hash,
             "guest RAM at first Hlt must be byte-identical across two boots even with \
              interrupts injected mid-run"
+        );
+    }
+
+    /// H5's named test (specs/baud-snapshot.md §7, todo.md §10): `Multiverse::snapshot`/`restore`
+    /// wired for the first time against a real guest and real KVM hardware (todo.md §14 tracked
+    /// this exact gap: "nothing calls snapshot/restore/DirtyRing on real KVM hardware yet").
+    /// Reuses `timer-guest` (H4's fixture, above) since it is the only fixture with a mid-run
+    /// observation stream (one console byte per delivered tick) long enough to define a capture
+    /// point `K` and a continuation `K+M`.
+    ///
+    /// Two runs are driven from the same image+tape: a *straight* run delivers both ticks and
+    /// halts without ever snapshotting; a *capture-then-restore* run delivers only the first tick,
+    /// captures a [`Universe`] at that point (`K`), reconstructs a brand-new `Multiverse` from it
+    /// via [`Multiverse::restore`], delivers the second tick on the restored instance (`K+M`), and
+    /// halts. If any field of the capture set (RAM, vCPU state, work-clock anchor, tape cursor,
+    /// console history) were missing or wrong, the restored run would diverge from the straight
+    /// run at or after the restore point — asserted here via the second tick's landing `rip` and
+    /// the final console output / RAM hash (the actual guest-observable "observation stream" the
+    /// spec's own pseudocode compares), which only matches if the restored console history
+    /// (`DeviceBus::restore`'s job, since `baud-snapshot::linux::restore` deliberately leaves
+    /// device state to the caller) was seeded correctly from the captured universe.
+    ///
+    /// **Deliberately does not assert `rcb` equality across the restore boundary** (unlike
+    /// `timer_tick_lands_at_identical_instruction`'s tight [`RCB_HARDWARE_JITTER_TOLERANCE`]):
+    /// real-hardware investigation this iteration found the two are not comparable quantities.
+    /// Within one continuously-running `Multiverse`, every `current_rcb()` read reuses the same
+    /// long-lived `perf_event` fd, so successive reads only ever disagree with another run's by
+    /// the documented ±8 hardware read-precision jitter. Across a restore, [`Multiverse::restore`]
+    /// necessarily creates a *brand-new* `perf_event` fd (a process cannot resurrect another fd's
+    /// already-elapsed hardware count) seeded with [`WorkClock::rcb_offset`](crate::timesource::
+    /// WorkClock) — and creating/enabling that fresh fd costs a real, one-time, few-hundred-branch
+    /// "warm-up" overhead (confirmed by instrumentation: a fresh counter read immediately after
+    /// `Multiverse::restore` returns already reads several hundred branches ahead of the anchor it
+    /// was seeded with) that a straight run's *second* tick never pays, because it reuses the
+    /// counter created once at boot. This warm-up cost does not represent a real determinism gap:
+    /// it never affects the guest's own instruction stream, and it is why `rip` (identical) and
+    /// the console/RAM observation stream (identical), not `rcb`, are this test's load-bearing
+    /// assertions — exactly mirroring `RCB_HARDWARE_JITTER_TOLERANCE`'s own framing ("not a
+    /// determinism escape hatch — rip is still required to be bit-identical, which is the
+    /// guarantee that actually matters").
+    #[test]
+    fn snapshot_roundtrip_is_bit_identical() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const PERIOD_RCB: u64 = 100_000;
+        const WORK_CLOCK_K: u64 = 1;
+
+        // The straight run: both ticks delivered on one continuous Multiverse, never snapshotted.
+        let mut straight =
+            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![]).expect("straight boot failed");
+        let straight_tick_1 = straight
+            .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
+            .expect("straight run: first tick failed");
+        let straight_tick_2 = straight
+            .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
+            .expect("straight run: second tick failed");
+        let straight_halt = straight.run_to_first_halt().expect("straight run: halt failed");
+
+        // The capture-then-restore run: only the first tick is delivered before capturing at K;
+        // the second tick and the halt happen on a brand-new `Multiverse` reconstructed from that
+        // capture, sharing nothing with the original beyond the `Universe` value itself.
+        let mut capture_run =
+            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![]).expect("capture-run boot failed");
+        let capture_tick_1 = capture_run
+            .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
+            .expect("capture run: first tick failed");
+        assert_eq!(
+            capture_tick_1.rip, straight_tick_1.rip,
+            "sanity check: the pre-capture tick must land identically to the straight run's first \
+             tick before restore is even involved"
+        );
+
+        let mut page_store = PageStore::new();
+        let universe = capture_run.snapshot(&mut page_store).expect("snapshot (capture at K) failed");
+
+        let mut restored = Multiverse::restore(&universe, vec![], WORK_CLOCK_K, false)
+            .expect("restore from captured universe failed");
+        let restored_tick_2 = restored
+            .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
+            .expect("restored run: second tick failed");
+        let restored_halt = restored.run_to_first_halt().expect("restored run: halt failed");
+
+        assert_eq!(
+            restored_tick_2.rip, straight_tick_2.rip,
+            "the second tick must land on the bit-identical instruction whether delivered on the \
+             straight run or on a Multiverse reconstructed via snapshot/restore at K — a missing \
+             capture field would desynchronize the restored guest's execution before K+M"
+        );
+        assert_eq!(
+            restored_halt.console_output, straight_halt.console_output,
+            "the observation stream K..K+M (console output through the second tick and halt) must \
+             be identical whether produced by the straight run or by continuing a restored \
+             universe — this only holds if DeviceBus::restore correctly reseeded the console's \
+             captured output history alongside the tape cursor"
+        );
+        assert_eq!(
+            restored_halt.ram_hash, straight_halt.ram_hash,
+            "guest RAM at the final halt must be byte-identical between the straight run and the \
+             capture-then-restore run — any state field baud-snapshot's capture set omitted would \
+             surface here as a RAM divergence introduced by the restored continuation"
         );
     }
 }

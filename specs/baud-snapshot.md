@@ -79,13 +79,29 @@ impl Snapshot {
 | Guest RAM                    | read each memslot backing (or dirty-ring delta) |
 | GP + segment registers       | `KVM_GET_REGS` / `KVM_GET_SREGS` |
 | MSRs (incl. TSC, TSC_AUX, deadline) | `KVM_GET_MSRS` (indices from `KVM_GET_MSR_INDEX_LIST`) |
-| Local APIC                   | `KVM_GET_LAPIC` |
 | Extended (FPU/SSE/AVX/AMX)   | `KVM_GET_XSAVE2` + `KVM_GET_XCRS` |
-| Pending events               | `KVM_GET_VCPU_EVENTS` |
+| Pending events                | `KVM_GET_VCPU_EVENTS` |
 | MP state                     | `KVM_GET_MP_STATE` |
 | VM clock + TSC freq          | `KVM_GET_CLOCK`, `KVM_GET_TSC_KHZ` |
 | Tape-device cursor + console | device model state |
-| Work-clock anchor            | branch-count base |
+| Work-clock anchor            | virtual-TSC base + the cumulative RCB value at capture |
+
+**No `KVM_GET_LAPIC` row** (real-hardware finding, corrects this table's original assumption): this
+workspace's VMM never calls `KVM_CREATE_IRQCHIP` — every interrupt is delivered by
+specs/baud-vcpu.md §5's arm-early-then-single-step engine via `KVM_INTERRUPT`, bypassing in-kernel
+LAPIC emulation entirely. `KVM_GET_LAPIC`/`KVM_SET_LAPIC` only succeed once an in-kernel APIC has
+been created, so calling them here fails with `EINVAL` on every real boot — confirmed the first
+time `Multiverse::snapshot` ran against actual `/dev/kvm` (H5). Any interrupt bookkeeping
+direct-injection needs to preserve is already covered by `KVM_GET_VCPU_EVENTS`.
+
+**The work-clock anchor is two numbers, not one** (also a real-hardware finding, H5): capturing
+only the virtual-TSC base (`base` in `virtual_tsc = base + k * rcb`) is not enough to resume the
+*RCB* sequence a restored guest's interrupt-injection engine depends on. A restored guest's branch
+counter is a brand-new `perf_event` file descriptor — a process cannot resurrect another fd's
+already-elapsed hardware count — so it restarts counting from zero the instant it is created. The
+capture set must therefore also record the cumulative RCB value at the moment of capture (an
+`rcb_anchor`), added back on restore so the new counter's raw reads continue the same sequence
+instead of silently rewinding it.
 
 ---
 
@@ -105,7 +121,8 @@ impl Snapshot {
 
 1. Set TSC frequency (`KVM_SET_TSC_KHZ`) **before** creating the vCPU.
 2. Restore `IA32_TSC` **before** `IA32_TSC_DEADLINE`.
-3. Restore RAM → vCPU registers/MSRs/LAPIC/XSAVE/events/MP → VM clock → device/console.
+3. Restore RAM → vCPU registers/MSRs/XSAVE/events/MP → VM clock → device/console (no LAPIC step —
+   see §3's note on why this workspace's VMM has no in-kernel APIC to restore).
 4. Refuse restore on a mismatched CPU model unless a fixed CPUID template is active.
 
 ---
@@ -118,6 +135,12 @@ impl Snapshot {
     let u = capture_at(image(), tape.clone(), K);
     let resumed = restore(u).run_to(K+M).obs_stream(K..K+M);
     assert_eq!(straight, resumed);          // a missing capture field would diverge here
+    // `obs_stream` is the guest-observable stream (instruction pointer at each interrupt, console
+    // output, RAM hash) — real-hardware run (H5) found the internal RCB bookkeeping value is *not*
+    // part of this comparison: a restored guest's branch counter is a brand-new perf_event fd, and
+    // creating/enabling it costs a real, one-time, few-hundred-branch "warm-up" a continuously
+    // running counter never re-pays. This warm-up never reaches the guest's own instruction stream
+    // (rip and every guest-visible byte still match exactly), so it is not a determinism gap.
 }
 
 #[test] fn thousand_branches_are_independent_and_deterministic() {
@@ -167,11 +190,22 @@ impl Snapshot {
 
 ## 10. Implementation status
 
-- **Capture/restore (§3, §6) — built.** `crates/baud-snapshot/src/universe.rs` (enumerated capture
-  set, ordered restore plan, CPU-model guard, the pure write-set diff) + `src/linux.rs`'s real
-  `capture`/`restore` walking every `KVM_GET_*`/`KVM_SET_*` the table above lists, in the plan's
-  exact order. Type-checked cross-target, unexercised on real hardware (no KVM host on the
-  reference dev machine — this applies to every claim in this section).
+- **Capture/restore (§3, §6) — built and exercised on real KVM hardware (H5).**
+  `crates/baud-snapshot/src/universe.rs` (enumerated capture set, ordered restore plan, CPU-model
+  guard, the pure write-set diff) + `src/linux.rs`'s real `capture`/`restore` walking every
+  `KVM_GET_*`/`KVM_SET_*` the table above lists, in the plan's exact order. `Multiverse::snapshot`/
+  `Multiverse::restore` (`crates/baud-multiverse/src/linux/mod.rs`) now drive this against a real,
+  running guest for the first time (`linux::tests::snapshot_roundtrip_is_bit_identical`,
+  `drive/h5.sh`): capture a `timer-guest` fixture mid-run (after its first delivered interrupt),
+  restore into a brand-new `Multiverse`, deliver a second interrupt and run to halt — the restored
+  run's landed instruction and whole observation stream (console output, RAM hash) match a
+  straight, never-snapshotted run exactly. Two real, previously-undiscovered bugs surfaced by this
+  first real exercise, both fixed: (1) `KVM_GET_LAPIC` unconditionally called during capture, which
+  fails `EINVAL` on this VMM's vCPUs since no in-kernel irqchip is ever created (§3's note) — LAPIC
+  removed from the capture set entirely; (2) the work-clock anchor only captured the virtual-TSC
+  base, not the cumulative RCB value, so a restored guest's brand-new branch counter silently
+  reset the RCB space `inject_timer_tick`'s target computation depends on — fixed by adding an
+  `rcb_anchor` field (§3's second note) via `WorkClock::rcb_offset`.
 - **Reset (§5) — built and wired into `baud-multiverse`.** `KVM_CAP_DIRTY_LOG_RING` is real:
   `crates/baud-snapshot/src/dirty_ring.rs` is the hardware-independent ring-scan protocol (decode a
   `kvm_dirty_gfn` ring into harvested `(slot, offset)` pairs, unit- and property-tested with no KVM

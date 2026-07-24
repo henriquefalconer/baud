@@ -65,7 +65,7 @@ pub enum RestoreError {
 }
 
 /// Copy `size_of::<T>()` bytes out of `v` verbatim. Every `T` this is called with below
-/// (`kvm_regs`, `kvm_sregs`, `kvm_lapic_state`, `kvm_xcrs`, `kvm_vcpu_events`, `kvm_mp_state`,
+/// (`kvm_regs`, `kvm_sregs`, `kvm_xcrs`, `kvm_vcpu_events`, `kvm_mp_state`,
 /// `kvm_xsave`, `kvm_clock_data`) is a `#[repr(C)]` plain-old-data struct from `kvm-bindings`; this
 /// module never inspects the bytes, only round-trips them back into the *same* struct type via
 /// [`bytes_to_struct`], so any uninitialized padding is written back unread.
@@ -144,6 +144,7 @@ pub fn capture(
     ram_size: usize,
     page_store: &mut PageStore,
     work_clock_base: u64,
+    rcb_anchor: u64,
     tsc_deadline: u64,
     tsc_aux: u64,
     tape_cursor: u64,
@@ -153,7 +154,6 @@ pub fn capture(
 
     let regs = vcpu.get_regs()?;
     let sregs = vcpu.get_sregs()?;
-    let lapic = vcpu.get_lapic()?;
     let xsave = vcpu.get_xsave()?;
     let xcrs = vcpu.get_xcrs()?;
     let events = vcpu.get_vcpu_events()?;
@@ -180,7 +180,6 @@ pub fn capture(
             regs: struct_to_bytes(&regs),
             sregs: struct_to_bytes(&sregs),
             msrs: msr_writes,
-            lapic: struct_to_bytes(&lapic),
             xsave: struct_to_bytes(&xsave),
             xcrs: struct_to_bytes(&xcrs),
             events: struct_to_bytes(&events),
@@ -192,6 +191,7 @@ pub fn capture(
         kvm_clock: unsafe { struct_to_bytes(&kvm_clock) },
         tsc_khz,
         work_clock_base,
+        rcb_anchor,
         tsc_deadline,
         tsc_aux,
     };
@@ -247,7 +247,6 @@ pub fn restore(
                 let msrs = Msrs::from_entries(&entries).map_err(RestoreError::MsrAlloc)?;
                 vcpu.set_msrs(&msrs)?;
             }
-            RestoreStep::SetVcpuLapic => vcpu.set_lapic(&unsafe { bytes_to_struct(&universe.vcpu.lapic) })?,
             // SAFETY: `set_xsave` is itself `unsafe` (kvm-ioctls: dynamically-enabled XSTATE
             // features could need more than the traditional 4096-byte `kvm_xsave`) — this crate
             // captures only via the fixed-size `KVM_GET_XSAVE` (not `KVM_GET_XSAVE2`), so the

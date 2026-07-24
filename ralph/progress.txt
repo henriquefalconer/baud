@@ -1608,3 +1608,38 @@ H4 test now passes reliably (8/8 in a row) after: fixing the ARMED_FD signal-mis
   - Accepted a residual +/-1-4 rcb hardware read-precision jitter (rip and guest state are proven bit-identical) with a small, documented tolerance in the test
   - Added drive/h4.sh, mirroring drive/h1.sh-h3.sh's pattern; updated todo.md's H4 status
 ---
+
+## 2026-07-24T21:15:02 UTC - Session usage — build-2 [sonnet]
+- cost (exact, from claude -p): $17.0810168 over 186 turn(s)
+- transcript: ralph/.run/003-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and progress.txt to understand current state.
+
+Chose H5 (snapshot capture/restore against real KVM hardware) — it's the next milestone in todo.md's build order, and the snapshot code already exists (baud-snapshot crate + Multiverse::snapshot()/restore()) but has never been exercised on real /dev/kvm; H1 (a real halted guest), which it was blocked on, now exists. Dispatched a research subagent to map the existing capture/restore API and fixture options before writing the real-hardware test.
+
+Confirmed while waiting: snapshot()/restore() live at crates/baud-multiverse/src/linux/mod.rs:440,474; capture()/restore() at crates/baud-snapshot/src/linux.rs:138,216; fixtures available are hello-guest, tape-echo-guest, rdrand-guest, timer-guest. Research subagent still running for deeper API details before writing the real-hardware H5 test.
+
+Confirmed API: Multiverse::snapshot(&mut self, &mut PageStore) -> Universe, Multiverse::restore(universe, tape, k, template_active) -> new Multiverse (associated fn), inject_timer_tick/run_to_first_halt already real-hardware-tested via H4's timer-guest fixture. Writing snapshot_roundtrip_is_bit_identical: capture after tick 1, restore, continue with tick 2, compare vs a straight 2-tick run.
+
+Found and root-caused a real bug: baud_snapshot::linux::capture() unconditionally calls vcpu.get_lapic(), which returns EINVAL on this VMM because it never calls KVM_CREATE_IRQCHIP (H4's design injects interrupts directly via KVM_INTERRUPT, bypassing any in-kernel LAPIC model entirely) — confirmed via targeted eprintln instrumentation, isolating the exact failing ioctl. Fixing by removing LAPIC from the capture/restore set (VcpuState, RestoreStep, restore_plan) since it has no in-kernel APIC to capture, and updating specs/baud-snapshot.md to match this project's actual architecture.
+
+Fixed a second real bug: WorkClock::restore restored the virtual-TSC anchor but not the RCB counter's own baseline (a freshly-restored perf_event counter starts at 0, discontinuous with the guest's true cumulative branch count) -- added WorkClock::rcb_offset + ClockState::rcb_anchor to close this. Confirmed via instrumentation that the remaining ~300-1000-branch internal rcb bookkeeping gap after restore is fresh-perf_event-counter creation overhead (a one-time cost a continuously-running counter never re-pays), not a guest-observable divergence -- rip, console output, and RAM hash are all bit-identical. Rewrote snapshot_roundtrip_is_bit_identical to assert rip+console+RAM (the true observation stream per spec) rather than rcb equality across a restore boundary, with a doc comment explaining why. Building and re-running the test 10x to confirm stability before moving on.
+
+snapshot_roundtrip_is_bit_identical passes 10/10 back-to-back on real KVM hardware. Running full workspace test suite + clippy to check for regressions from the VcpuState/ClockState/WorkClock signature changes (LAPIC removal, rcb_anchor addition).
+
+drive/h5.sh written and passes end-to-end (H5.1 host probe, H5.2 snapshot_roundtrip_is_bit_identical). Re-verifying drive/h0.sh through h4.sh for regressions before committing.
+
+## 2026-07-24T21:36:51 UTC - Changes committed.
+- H5 (snapshot/restore round trip) wired and verified on real /dev/kvm; timer_tick_lands... precedent extended to snapshot_roundtrip_is_bit_identical; drive/h5.sh added.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/src/timesource.rs, crates/baud-snapshot/src/linux.rs, crates/baud-snapshot/src/universe.rs, drive/h4.sh, drive/h5.sh (new), specs/baud-snapshot.md, todo.md.
+- **Brief description of changes:**
+  - Added snapshot_roundtrip_is_bit_identical: captures a running timer-guest mid-run, restores into a brand-new Multiverse, and proves the continuation matches a straight run's rip + console output + RAM hash exactly
+  - Fixed a real bug: baud_snapshot::linux::capture unconditionally called KVM_GET_LAPIC, which EINVALs on this VMM since no in-kernel irqchip is ever created (interrupts are injected directly via KVM_INTERRUPT, H4's design) -- removed LAPIC from the capture set entirely
+  - Fixed a second real bug: WorkClock::restore only restored the virtual-TSC base, not the cumulative RCB value, so a restored guest's brand-new perf_event counter silently reset the RCB space inject_timer_tick depends on -- added WorkClock::rcb_offset + ClockState::rcb_anchor
+  - Documented (spec + code + todo.md) a real-hardware precision finding: fresh-perf_event-counter creation overhead adds a real but guest-invisible few-hundred-branch internal rcb discrepancy across a restore boundary -- rip/console/RAM stay bit-identical, so the test asserts those, not rcb, mirroring H4's own precision-vs-determinism framing
+  - Added drive/h5.sh mirroring h1.sh-h4.sh's pattern; updated todo.md's H5 status and specs/baud-snapshot.md §3/§6/§10
+---

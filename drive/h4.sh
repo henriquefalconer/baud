@@ -92,4 +92,4 @@ echo "  - The guest actually takes each injected interrupt exactly once, in orde
 echo "  - Final halt state (console output, RAM hash) is identical across both boots even with"
 echo "    interrupts injected mid-run"
 echo ""
-echo "H-series H0-H4 complete. Proceed to H5: ./drive/h5.sh (not yet written)"
+echo "H-series H0-H4 complete. Proceed to H5: ./drive/h5.sh"
