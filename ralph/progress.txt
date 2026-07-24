@@ -1287,3 +1287,5 @@ drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (h0: regime=reje
   build/test/clippy --workspace all green, 0 regressions, 0 new clippy warnings in either touched
   crate; drive/h0.sh and drive/m0.sh both re-verified passing end-to-end.
 ---
+
+Post-push verification: git fetch confirms origin/main == local HEAD (05fbd21). No CI/post-push protocol defined in todo.md for this repo (no .github/workflows). Re-ran drive/h0.sh and drive/m0.sh against the pushed tip: both PASS (h0: regime=rejected as expected, H0.1-H0.3 all PASS; m0: PASS). Already had cargo build/test/clippy --workspace green (0 regressions) before pushing. todo.md still has substantial pending work (baud-snapshot's userfaultfd branch()/reset(), wiring baud-snapshot-store into baud-server/baud-driver, in-guest tape-device driver/shim in baud-packages, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
