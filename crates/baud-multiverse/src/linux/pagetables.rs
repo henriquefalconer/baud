@@ -40,6 +40,17 @@ pub fn write_identity_page_tables<M: GuestMemoryBackend>(
     Ok(())
 }
 
+/// Write [`layout::build_flat_gdt`]'s 3 descriptors (24 bytes) into guest memory at
+/// [`layout::GDT_ADDR`] — needed once a guest can receive a real interrupt (H4,
+/// specs/baud-vcpu.md §5): the IDT gate's far transfer reloads `CS` via a genuine GDT
+/// descriptor-table lookup regardless of `kvm_sregs`'s directly-loaded segment cache (see
+/// [`layout::GDT_ADDR`]'s doc for why this is not optional once `inject_at` is wired in).
+pub fn write_gdt<M: GuestMemoryBackend>(guest_mem: &M) -> Result<(), vm_memory::guest_memory::Error> {
+    let gdt = layout::build_flat_gdt();
+    let bytes: Vec<u8> = gdt.iter().flat_map(|entry| entry.to_le_bytes()).collect();
+    guest_mem.write_slice(&bytes, GuestAddress(layout::GDT_ADDR))
+}
+
 /// x86_64 `CR0`/`CR4`/`EFER` bits this boot flow sets, named (not left as bare hex in the
 /// assignment below) so the "why long mode is on" is legible at the call site.
 const CR0_PE: u64 = 1 << 0; // Protection Enable
@@ -53,12 +64,20 @@ const CR4_PAE: u64 = 1 << 5; // Physical Address Extension (required for long mo
 const EFER_LME: u64 = 1 << 8; // Long Mode Enable
 const EFER_LMA: u64 = 1 << 10; // Long Mode Active
 
+/// `layout::build_flat_gdt()`'s 3 entries × 8 bytes, minus one (a table limit is the address of
+/// its last valid byte, not its byte length).
+const FLAT_GDT_LIMIT: u16 = 3 * 8 - 1;
+
 /// Populate `kvm_sregs` for entry directly into 64-bit long mode: paging on with the identity map
 /// built by [`write_identity_page_tables`], a flat 64-bit code segment (selector `0x08`) and a
 /// flat data segment (selector `0x10`) covering all of guest-virtual address space, no local
-/// descriptor table, and `GDT`/`IDT` pointed at guest-physical `0` with limit `0` (KVM's shadow
-/// segment-descriptor cache is set directly through this struct; the guest never executes `LGDT`
-/// on this boot path, so no in-memory GDT is ever built or read).
+/// descriptor table, `GDT` pointed at the real in-memory table [`write_gdt`] writes at
+/// [`layout::GDT_ADDR`] (H4: an IDT-gate interrupt's far transfer reloads `CS` via a genuine GDT
+/// lookup even though ordinary execution never needs one — KVM's segment cache is set directly
+/// through this struct for everything *except* that gate transfer), and `IDT` left at
+/// guest-physical `0`/limit `0` until the guest itself calls `LIDT` (this boot flow never builds
+/// an IDT on the guest's behalf; a fixture that wants interrupts owns its own IDT contents, e.g.
+/// `tests/fixtures/timer-guest/`).
 pub fn long_mode_sregs() -> kvm_sregs {
     let code_segment = kvm_segment {
         base: 0,
@@ -90,7 +109,7 @@ pub fn long_mode_sregs() -> kvm_sregs {
         fs: data_segment,
         gs: data_segment,
         ss: data_segment,
-        gdt: kvm_dtable { base: 0, limit: 0, padding: [0; 3] },
+        gdt: kvm_dtable { base: layout::GDT_ADDR, limit: FLAT_GDT_LIMIT, padding: [0; 3] },
         idt: kvm_dtable { base: 0, limit: 0, padding: [0; 3] },
         cr0: CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG,
         cr3: layout::PML4_ADDR,
@@ -172,5 +191,7 @@ mod tests {
         assert_eq!(sregs.cr3, layout::PML4_ADDR, "CR3 must point at the identity map's PML4");
         assert_eq!(sregs.cs.l, 1, "code segment must be a 64-bit long-mode segment");
         assert_eq!(sregs.ds.l, 0, "data segments carry l=0 (Intel SDM 3A table 3-5)");
+        assert_eq!(sregs.gdt.base, layout::GDT_ADDR, "GDT must point at the real in-memory table");
+        assert_eq!(sregs.gdt.limit, FLAT_GDT_LIMIT, "GDT limit must cover exactly its 3 entries");
     }
 }

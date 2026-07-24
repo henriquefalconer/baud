@@ -72,6 +72,18 @@ impl<C: BranchCounter> WorkClock<C> {
         self.base.saturating_add(self.k.saturating_mul(rcb))
     }
 
+    /// The current cumulative retired-conditional-branch count, straight from the underlying
+    /// [`BranchCounter`] — the same RCB space `virtual_tsc` derives from, and the space
+    /// `Multiverse::inject_timer_tick` (H4, specs/baud-vcpu.md §5) anchors a
+    /// `baud_vcpu::linux::pmu::LinuxPmuStepper`'s own armed counter to, so a `target_rcb` computed
+    /// from "now" means the same thing to both the work-clock and the interrupt-injection engine
+    /// (they are two distinct `perf_event` file descriptors counting the identical architectural
+    /// event on the identical thread — their deltas over the same interval agree by construction,
+    /// only their absolute epochs differ, which is exactly what this seeding reconciles).
+    pub fn current_rcb(&mut self) -> u64 {
+        self.counter.read()
+    }
+
     /// The work-clock anchor at the moment of the most recent `IA32_TSC` write (or construction, if
     /// none yet) — the value `baud-snapshot::universe::ClockState::work_clock_base` captures
     /// (specs/baud-snapshot.md §3's "Work-clock anchor" row).

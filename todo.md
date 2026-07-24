@@ -435,9 +435,11 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   (`src/linux/mod.rs`'s `convert_exit`/`run_until_halted`/`run_one_exit`) is now called for real by
   `baud-multiverse::linux::Multiverse::run_to_first_halt` and confirmed correct against real
   `/dev/kvm` (`double_boot_memory_identical`, see below) — `pmu.rs`'s `LinuxPmuStepper` (interrupt
-  injection specifically, H4) remains unexercised. **Known gap**: `LinuxPmuStepper` uses
-  process-wide `F_SETOWN`, not `F_SETOWN_EX(F_OWNER_TID, ...)` — revisit once the one-VMM-thread/
-  one-vCPU-thread model lands (documented in `pmu.rs`'s module doc).
+  injection specifically, H4) is now exercised for real too, against a real vCPU and a real
+  delivered interrupt (`timer_tick_lands_at_identical_instruction`, see the H4 entry below). The
+  once-known `F_SETOWN`/SIGIO overflow-signal gap this line used to flag is moot: that whole
+  mechanism was found unfit for purpose at H4 (a design gap, not just a threading-model gap) and
+  removed outright in favor of RCB polling — see the H4 entry below for why.
 - **`baud-multiverse` boot flow (specs/baud-multiverse.md §2) — BOOTS A REAL GUEST on real KVM
   hardware (H1, todo.md §10 — this project's first real KVM boot).** `cpuid.rs` (determinism mask
   table, now 9 rows incl. two added this iteration — see below), `layout.rs` (fixed
@@ -474,11 +476,14 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     as "Update In Progress"), fixed with a new deterministic `Cmos` shim in `console.rs` (always
     reports UIP clear). All three fixes carry unit tests; full provenance and the exact bug
     mechanics are documented in `tests/fixtures/hello-guest/BUILD.md`.
-  - **Not yet done, now unblocked**: booting a *real* Linux kernel end-to-end needs H4 (timer
-    interrupt injection — `baud-vcpu::boundary`'s arm-early-then-single-step engine exists but
-    is not wired into this crate's run loop yet) so `calibrate_delay()`/the scheduler tick have
-    something to wait on; `hello-guest`'s hand-assembled payload deliberately has no such
-    dependency and is not a placeholder for that work, just this crate's own H1 fixture.
+  - **Not yet done**: booting a *real* Linux kernel end-to-end still needs more than the interrupt-
+    injection engine alone — `baud-vcpu::boundary`'s arm-early-then-single-step engine is now wired
+    into this crate's run loop (`Multiverse::inject_timer_tick`/`run_with_timer_ticks`, H4, see that
+    entry below) and proven against a real, if hand-assembled, guest, but a real Linux kernel's
+    `calibrate_delay()`/scheduler tick additionally needs a real periodic timer device (e.g. a
+    modeled LAPIC timer or PIT channel 0 driving those same injection calls on a schedule), which
+    does not exist yet; `hello-guest`'s hand-assembled payload deliberately has no such dependency
+    and is not a placeholder for that work, just this crate's own H1 fixture.
 - **`baud-tape-device` (specs/baud-tape-device.md) — built and wired into `baud-multiverse`'s
   device bus.** New crate (deps = `{baud-proto}` only): `TapeDevice` (pure function of tape bytes +
   guest register writes, `pio_read`/`pio_write` at DATA/CONTROL/STATUS), `ControlOp`
@@ -719,7 +724,110 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     self-#UD) — was not touched this iteration; H3's rdrand half is done, the RDTSC-compliance half
     of "randomness + time control" is unexplored territory for an adversarial-guest test (only
     compliant-guest work-clock tests exist so far, from H2).
-- H4-H6 and the rest of the M-series remain **not yet started** beyond the above.
+- **H4 (interrupt at an exact instruction boundary, specs/baud-vcpu.md §5, todo.md §10) —
+  `timer_tick_lands_at_identical_instruction` now passes for real against real KVM hardware;
+  `drive/h4.sh` now exists and passes end-to-end (H4.1 host probe, H4.2 the named test).** This
+  iteration picked up a previous session's uncommitted
+  work-in-progress — the real in-memory flat GDT (`crates/baud-multiverse/src/layout.rs`'s
+  `build_flat_gdt`/`GDT_ADDR`, `linux/pagetables.rs`'s `write_gdt`), `Multiverse::
+  inject_timer_tick`/`run_with_timer_ticks`/`TimerTick` (`crates/baud-multiverse/src/linux/mod.rs`),
+  `LinuxPmuStepper::with_baseline_rcb` (`crates/baud-vcpu/src/linux/pmu.rs`), and a new
+  `tests/fixtures/timer-guest/` fixture (a real 64-bit IDT + ISR + busy loop, `payload.s`/
+  `BUILD.md`) — none of which had ever been run to completion; the prior session's own notes
+  described the test as hanging. It was not a hang: `strace -p -c` on the live process showed
+  ~8,600 ioctl/sec (real work, not a stuck syscall), and `/proc/<pid>/task/*/stat` per-thread
+  utime/stime confirmed the vCPU thread was actively burning CPU — `inject_at`'s single-step
+  while-loop was closing a gap of tens of thousands of branches one `KVM_RUN` at a time, ~100,000
+  real round-trips, because `run_until_exit` was returning tens of thousands of branches short of
+  the real target. Running it for the first time surfaced three real, previously-undiscovered
+  production bugs, one host limitation, one design gap, and one hardware-precision finding:
+  - **Bug 1 — signal misattribution.** `LinuxPmuStepper` used to arm its branch counter's overflow
+    via a process-wide `F_SETSIG`/SIGIO handler (`on_branch_overflow`, since fully removed) with no
+    way to tell "this stepper's own counter fired" from "an earlier, already-superseded stepper's
+    counter fired late." On this project's own nested-virtualized dev host (CLAUDE.md), a PMU
+    overflow signal can arrive very late — sometimes only once the guest returns to userspace for
+    an unrelated reason, well after the owning `LinuxPmuStepper` was already dropped and a new one
+    armed for the next tick — which is the actual mechanism behind the "hang" above.
+  - **Bug 2 — sticky `kvm_run.immediate_exit`.** The (now-removed) SIGIO handler wrote
+    `kvm_run.immediate_exit = 1` to unblock a blocking `KVM_RUN`, but nothing ever cleared it back
+    to `0`. Since this is a kernel-owned byte in the vCPU's persistent mmap'd `kvm_run` struct, not
+    per-stepper state, once any overflow fired even once, every future `KVM_RUN` on that vCPU for
+    the rest of the process's life — including a totally different, later, non-stepper run loop
+    like `run_to_first_halt` — returned `-EINTR` instantly forever. This, not bug 1, was the actual
+    multi-minute-to-indefinite hang; fixed by resetting `immediate_exit = 0` the moment the overflow
+    was consumed (moot now that the SIGIO path is gone entirely, but the same stickiness class
+    recurred in bug 3).
+  - **Bug 3 — sticky `kvm_run.request_interrupt_window`.** Same class of bug, still present today:
+    `LinuxPmuStepper::request_interrupt_window` sets `kvm_run.request_interrupt_window = 1` but
+    nothing cleared it, so once the fallback "wait for an interrupt window" path was ever taken,
+    every later `KVM_RUN` on a genuinely non-stepper run loop could spuriously exit with
+    `KVM_EXIT_IRQ_WINDOW_OPEN`, which the generic dispatcher doesn't handle (hits the
+    determinism-hole catch-all). Fixed in `run_until_irq_window` (`crates/baud-vcpu/src/linux/
+    pmu.rs`) by clearing the flag the instant `ready_for_interrupt_injection` reports the window is
+    actually open.
+  - **Host limitation — `exclude_host(true)` is non-functional here.** The textbook "guest-filtered"
+    branch count (specs/baud-vcpu.md §5's own assumption) was tried on both the free-running
+    work-clock counter (`linux::mod::LinuxBranchCounter::new`) and the stepper's armed counter
+    (`pmu::LinuxPmuStepper::arm_overflow`); with it set, the counter reads back `0` for the whole
+    run. Root cause: perf's guest/host execution-mode discrimination needs the KVM module to
+    register `perf_guest_cbs`, which this host does not do under nested virtualization. Reverted;
+    documented in both call sites' doc comments as a real, tried-and-ruled-out host limitation, the
+    same family as the already-documented PMI-in-guest-mode signal-unreliability finding above.
+  - **Design gap — abandoned the SIGIO overflow signal entirely, not just its misattribution bug.**
+    Even with bugs 1-3 fixed, the test still failed nondeterministically (the RCB landing point
+    differed by tens to hundreds of branches between two boots of the identical image+tape) because
+    the signal's own wall-clock-driven arrival timing was itself a nondeterminism source — it forced
+    a real VM exit unrelated to the guest's deterministic instruction stream. Replaced with pure RCB
+    polling after every real `KVM_RUN` exit (`LinuxPmuStepper::run_until_exit`, `pmu.rs`): the
+    landing point is now a pure function of the guest's own deterministic execution trace, the only
+    thing that can move `current_rcb()` past `poll_target`. This required fixing
+    `tests/fixtures/timer-guest/payload.s` itself: its forced-trap interval (every 1000 branches,
+    via a harmless `out 0x80, al`) was coarser than `boundary::MARGIN` (64), so the "early exit"
+    always landed past the real target and silently skipped `inject_at`'s single-step phase every
+    time; shrunk to every 16 branches and the fixture's `bzImage` regenerated via `build.py`.
+  - **Hardware-precision finding (accepted, not fixed) — residual `rcb` read jitter.** Even after
+    all of the above, two runs could still disagree by ±1-4 in reported `rcb` while `rip` (the
+    actual injected-instruction landing point) was bit-identical every time and RAM hash/console
+    output were also exactly identical — proving genuine `perf_event` branch-counter read-precision
+    jitter on this host, not an execution/state divergence. `.pinned(true)` was applied to both
+    counter builders (the same fix `crates/baud-host/src/linux.rs`'s `measure_fixed_loop_branches`
+    already uses per the H3 entry above) — it did not eliminate the jitter but is still correct
+    practice. The test was changed to assert `rip` exactly and `rcb` within a small, documented
+    tolerance, `linux::tests::RCB_HARDWARE_JITTER_TOLERANCE = 8`, mirroring the precision-vs-
+    determinism distinction the H3 entry's `rcb_deterministic()` majority-of-3 heuristic already
+    established for this same host class ("still a heuristic, not a proof").
+  - **Verification**: `cargo test -p baud-multiverse --lib linux::tests::
+    timer_tick_lands_at_identical_instruction` run 20+ times back to back on real `/dev/kvm`
+    hardware, 100% pass rate after the final fix (was: hung indefinitely before the
+    `immediate_exit` fix, then failed ~50-100% of the time before the tolerance fix). Full
+    `cargo test --workspace` green, 0 failures across every crate (`baud-multiverse` 54/54, was
+    52/52). `cargo clippy --workspace --all-targets` — zero new warnings in any touched file
+    (`pmu.rs`, `boundary.rs`, `baud-vcpu`'s `linux/mod.rs`, `baud-multiverse`'s `layout.rs`/
+    `linux/mod.rs`/`linux/pagetables.rs`/`timesource.rs`); pre-existing warnings remain confined to
+    unrelated files, same as previous iterations.
+  - **Files touched**: `crates/baud-vcpu/src/linux/pmu.rs` (removed the whole SIGIO/signal-handler
+    apparatus — `F_SETSIG`/`ensure_signal_handler_installed`/`arm_signal_delivery`/
+    `on_branch_overflow` and its process-wide `AtomicBool` — kept `.pinned(true)`);
+    `crates/baud-vcpu/src/boundary.rs` (no functional change; debug instrumentation added then
+    removed while root-causing the hang); `crates/baud-multiverse/src/linux/mod.rs`
+    (`inject_timer_tick`/`run_with_timer_ticks`/`TimerTick` now real and tested;
+    `LinuxBranchCounter::new` gets `.pinned(true)`; the test itself with its new tolerance);
+    `crates/baud-multiverse/src/layout.rs`/`linux/pagetables.rs` (the GDT wiring, inherited from the
+    previous session, now actually exercised for the first time — see `tests/fixtures/timer-guest/
+    BUILD.md` for why an interrupt gate's far transfer needs a real in-memory GDT even though
+    ordinary execution never does); `crates/baud-multiverse/src/timesource.rs`
+    (`WorkClock::current_rcb`, inherited from the previous session); `crates/baud-multiverse/
+    tests/fixtures/timer-guest/payload.s` + regenerated `bzImage` + updated `BUILD.md`
+    (forced-trap interval 1000→16).
+  - **Not yet done**: `RCB_HARDWARE_JITTER_TOLERANCE = 8` is a documented heuristic, not a proof — a
+    future iteration could investigate PEBS (`precise_ip`) or a different counting approach to
+    eliminate the residual jitter, or accept it as a limitation of this host class alongside the
+    already-documented PMI-in-guest-mode and `exclude_host` non-functionality findings. `drive/
+    h4.sh` now exists (mirrors `drive/h1.sh`-`h3.sh`'s pattern: host probe, then the named test)
+    and passes end-to-end on real `/dev/kvm`.
+- H4 is done, including `drive/h4.sh` (`timer_tick_lands_at_identical_instruction` passing
+  repeatably on real KVM hardware, see immediately above); H5, H6, and the rest of the M-series
+  remain **not yet started**.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and

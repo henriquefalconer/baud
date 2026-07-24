@@ -54,6 +54,43 @@ pub const PDE_ADDR: u64 = 0x0000_B000;
 /// page above, growing down.
 pub const BOOT_STACK_POINTER: u64 = 0x0000_FFF0;
 
+/// A real in-memory flat GDT (H4, specs/baud-vcpu.md §5): `long_mode_sregs` used to set `GDT`
+/// base/limit to `0`/`0` on the theory that "the guest never executes `LGDT`, so no in-memory GDT
+/// is ever built or read" — true for ordinary instruction execution (KVM's segment-descriptor
+/// cache is loaded directly from `kvm_sregs`), but **not** true the moment a real interrupt is
+/// injected: per the Intel SDM, an IDT interrupt/trap gate's far transfer always reloads `CS` via
+/// a real GDT descriptor-table lookup of the gate's target selector, regardless of how the
+/// *current* CS got there. `inject_at` (`baud_vcpu::boundary`) landing an interrupt into a guest's
+/// IDT-registered handler therefore needs an actual GDT in guest memory or the CPU faults trying
+/// to read it. One page is reserved; only 3 entries (24 bytes) are ever written.
+pub const GDT_ADDR: u64 = 0x0000_C000;
+
+/// Selector for the flat 64-bit code segment ([`build_flat_gdt`]'s index 1) — matches
+/// `pagetables::long_mode_sregs`'s `cs.selector` exactly, so `kvm_sregs` (KVM's direct-loaded
+/// segment cache) and this in-memory table describe the identical segment.
+pub const GDT_CODE_SELECTOR: u16 = 0x08;
+/// Selector for the flat data segment ([`build_flat_gdt`]'s index 2) — matches
+/// `pagetables::long_mode_sregs`'s data-segment selector.
+pub const GDT_DATA_SELECTOR: u16 = 0x10;
+
+/// The minimal 3-entry flat GDT every long-mode direct-boot VMM needs once real IDT-gate interrupt
+/// delivery is possible (H4): a null descriptor, a flat 64-bit code segment (selector
+/// [`GDT_CODE_SELECTOR`], `L=1`, `D=0`, present, ring 0, execute/read), and a flat data segment
+/// (selector [`GDT_DATA_SELECTOR`], present, ring 0, read/write) — the standard "flat long-mode
+/// GDT" triple (base/limit ignored by the CPU for `L=1` code and any data segment in 64-bit mode,
+/// so both carry base=0/limit=0). Pure function of nothing (this table never varies), unit-tested
+/// byte-for-byte here exactly like [`build_identity_page_tables`].
+pub fn build_flat_gdt() -> [u64; 3] {
+    const NULL_DESCRIPTOR: u64 = 0;
+    // Access byte (bit 47..40 of the descriptor): P=1, DPL=00, S=1, Type=1010 (code, execute/read).
+    // Flags nibble (bit 55..52): G=1, D/B=0, L=1, AVL=0 -- base/limit fields left 0 (ignored, L=1).
+    const CODE_DESCRIPTOR: u64 = 0x00A0_9A00_0000_0000;
+    // Access byte: P=1, DPL=00, S=1, Type=0010 (data, read/write). Flags nibble: G=1, D/B=1, L=0
+    // (matches `pagetables::long_mode_sregs`'s data segment: `db=1`).
+    const DATA_DESCRIPTOR: u64 = 0x00C0_9200_0000_0000;
+    [NULL_DESCRIPTOR, CODE_DESCRIPTOR, DATA_DESCRIPTOR]
+}
+
 /// The command line must fit before the kernel load address, and the kernel must load at or above
 /// high memory — both sides of each comparison are `const`, so this is checked once at compile
 /// time rather than as a runtime assertion on values that can never change without recompiling
@@ -186,6 +223,30 @@ mod tests {
         assert_eq!(build_identity_page_tables(GUEST_RAM_SIZE), build_identity_page_tables(GUEST_RAM_SIZE));
     }
 
+    /// `build_flat_gdt`'s three entries decoded by hand against the Intel SDM's segment-descriptor
+    /// bit layout (byte 5 = access, byte 6 = flags nibble | limit-high nibble) — every field this
+    /// crate's own GDT actually depends on (present, S, type, DPL, L, D/B) checked explicitly
+    /// rather than trusted from the hex literal alone.
+    #[test]
+    fn flat_gdt_entries_have_the_expected_descriptor_fields() {
+        let gdt = build_flat_gdt();
+        assert_eq!(gdt[0], 0, "entry 0 must be the null descriptor");
+
+        let code = gdt[1].to_le_bytes();
+        assert_eq!(code[5] & 0x80, 0x80, "code segment must be present");
+        assert_eq!(code[5] & 0x60, 0, "code segment DPL must be 0 (ring 0)");
+        assert_eq!(code[5] & 0x10, 0x10, "code segment must be S=1 (code/data, not system)");
+        assert_eq!(code[5] & 0x0F, 0x0A, "code segment type must be execute/read (0xA)");
+        assert_eq!(code[6] & 0x20, 0x20, "code segment must be L=1 (64-bit long mode)");
+        assert_eq!(code[6] & 0x40, 0, "a 64-bit (L=1) code segment must have D=0");
+
+        let data = gdt[2].to_le_bytes();
+        assert_eq!(data[5] & 0x80, 0x80, "data segment must be present");
+        assert_eq!(data[5] & 0x10, 0x10, "data segment must be S=1");
+        assert_eq!(data[5] & 0x0F, 0x02, "data segment type must be read/write (0x2)");
+        assert_eq!(data[6] & 0x20, 0, "data segment must have L=0");
+    }
+
     /// The boot-flow fixed addresses must not overlap each other — a real overlap would silently
     /// corrupt whichever structure is written second. This is a static layout invariant, checked
     /// once here rather than trusted by inspection.
@@ -196,6 +257,7 @@ mod tests {
             ("pdpte", PDPTE_ADDR, 0x1000),
             ("pde", PDE_ADDR, 0x1000), // first PDE page; additional pages follow contiguously
             ("zero_page", ZERO_PAGE_ADDR, 0x1000),
+            ("gdt", GDT_ADDR, 0x1000),
         ];
         for (i, &(name_a, start_a, len_a)) in regions.iter().enumerate() {
             for &(name_b, start_b, len_b) in &regions[i + 1..] {

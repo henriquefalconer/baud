@@ -65,16 +65,26 @@ const AGENT_TYPE = 'general-purpose'
 // Single spawn point: applies AGENT_TYPE to every agent unless a call opts out.
 const spawn = (prompt, opts = {}) => agent(prompt, { agentType: AGENT_TYPE, ...opts })
 
-// $/MTok — from the claude-api skill (cached 2026-06). Cache write = 5m TTL rate.
+// $/MTok — from the claude-api skill (cached 2026-06-24). Cache read is 0.1x input;
+// a 5-minute ephemeral cache write is 1.25x input and a 1-HOUR write is 2x.
+// The two write rates are listed separately because this workload writes mostly at
+// the 1h TTL: one measured build session wrote 184,954 tokens at 1h against 138,200
+// at 5m, so pricing every write at the 5m rate understates cache cost by ~60%.
 const PRICING = {
-  sonnet: { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
-  haiku:  { input: 1.00, output: 5.00,  cacheRead: 0.10, cacheWrite: 1.25 },
+  opus:   { input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite5m: 6.25,  cacheWrite1h: 10.00 },
+  sonnet: { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite5m: 3.75,  cacheWrite1h: 6.00 },
+  haiku:  { input: 1.00, output: 5.00,  cacheRead: 0.10, cacheWrite5m: 1.25,  cacheWrite1h: 2.00 },
 }
 const PRICING_TABLE_MD = [
-  '| model | input $/MTok | output $/MTok | cache-read $/MTok | cache-write(5m) $/MTok |',
-  '|---|---|---|---|---|',
-  '| sonnet (claude-sonnet-4-6) | 3.00 | 15.00 | 0.30 | 3.75 |',
-  '| haiku (claude-haiku-4-5) | 1.00 | 5.00 | 0.10 | 1.25 |',
+  '| model | input $/MTok | output $/MTok | cache-read $/MTok | cache-write 5m | cache-write 1h |',
+  '|---|---|---|---|---|---|',
+  '| opus (claude-opus-5) | 5.00 | 25.00 | 0.50 | 6.25 | 10.00 |',
+  '| sonnet (claude-sonnet-5) | 3.00 | 15.00 | 0.30 | 3.75 | 6.00 |',
+  '| haiku (claude-haiku-4-5) | 1.00 | 5.00 | 0.10 | 1.25 | 2.00 |',
+  '',
+  'Split cache writes by TTL (usage.cache_creation.ephemeral_1h_input_tokens vs',
+  '_5m_) and price each at its own rate. Total prompt size for a request is',
+  'input_tokens + cache_read_input_tokens + cache_creation_input_tokens.',
 ].join('\n')
 
 // ─── Schemas (verification/ship only — build agents speak in promise tags) ──

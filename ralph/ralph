@@ -146,14 +146,140 @@ watchdog() { # <pid> <label>
   done
 }
 
+# Usage accounting. Self-contained: the python below reads the session JSON that
+# `claude -p --output-format json` wrote and, from it, that session's transcript
+# and its subagents' transcripts.
+#
+# WHAT IS EXACT AND WHAT IS NOT (measured against the server 2026-07-24):
+#   cost and per-model totals come from the session JSON (total_cost_usd,
+#   modelUsage) — server-computed, already covering subagents and thinking tokens.
+#   Context, input and cache figures are read from the transcripts and match the
+#   server exactly. Output tokens do NOT: with thinking display omitted (the
+#   default on Opus 5 / Sonnet 5) thinking blocks are written with empty text and
+#   no field carries their count, so a subagent showed 149 recorded output tokens
+#   against 9,481 billed. Output is therefore never reported per subagent.
+#
+# Context size for one inference call is input + cache_read + cache_creation:
+# every prompt token is billed exactly once into one of those three buckets, so
+# their sum is the whole prompt the model saw. Peak across calls is the headline;
+# a mid-session DROP means auto-compaction fired, which is worth seeing in the log.
 log_usage() { # <label> <json-file>
-  local label="$1" f="$2" cost turns
+  local label="$1" f="$2" cost
   cost=$(jsonfield "$f" total_cost_usd 2>/dev/null || echo "")
-  turns=$(jsonfield "$f" num_turns 2>/dev/null || echo "")
   [[ -z "$cost" ]] && return 0
   {
-    printf '\n## %s UTC - Session usage — %s [%s]\n' "$(date -u +%Y-%m-%dT%H:%M:%S)" "$label" "$MODEL"
-    printf -- '- cost (exact, from claude -p): $%s over %s turn(s)\n' "$cost" "${turns:-?}"
+    printf '\n## %s UTC - Session usage — %s [%s]\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S)" "$label" "$MODEL"
+    python3 - "$f" <<'PY'
+import glob, json, os, sys
+
+# The context window is NOT hardcoded: the session JSON reports it per model as
+# modelUsage[<model>].contextWindow (verified 2026-07-24: sonnet-5 and opus-5[1m]
+# 1000000, haiku-4-5 200000). A model absent from that map prints the raw peak
+# with no percentage rather than guessing.
+
+def base(model):
+    """Strip the [1m] variant marker and any -YYYYMMDD snapshot suffix."""
+    m = (model or "").split("[")[0]
+    parts = m.rsplit("-", 1)
+    return parts[0] if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 8 else m
+
+def short(model):
+    """Display name: drop the claude- prefix and any date snapshot, but KEEP a
+    [1m] variant marker — it distinguishes the 1M-context deployment."""
+    m = model or ""
+    variant = "[1m]" if "[1m]" in m else ""
+    return base(m).replace("claude-", "") + variant
+
+def calls(path):
+    """Per-inference-call usage, deduplicated by message id — a transcript writes
+    one line per content block and every line repeats the same usage object."""
+    seen, out = set(), []
+    try:
+        fh = open(path, errors="replace")
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue  # a partially-flushed final line
+            msg = rec.get("message")
+            if not (isinstance(msg, dict) and isinstance(msg.get("usage"), dict)):
+                continue
+            key = msg.get("id") or rec.get("requestId")
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            u = msg["usage"]
+            out.append({
+                "model": msg.get("model"),
+                "in": u.get("input_tokens") or 0,
+                "cr": u.get("cache_read_input_tokens") or 0,
+                "cw": u.get("cache_creation_input_tokens") or 0,
+            })
+    return out
+
+try:
+    meta = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+sid = meta.get("session_id")
+if not sid:
+    sys.exit(0)
+root = os.path.join(os.path.expanduser("~"), ".claude", "projects",
+                    (meta.get("cwd") or os.getcwd()).replace("/", "-"))
+
+# num_turns and duration_ms are deliberately NOT reported: on a 31-minute session
+# with 109 inference calls the server reported num_turns=14 and duration_ms=157840
+# (2.6 min). Neither could be reconciled with the transcript, so the ledger states
+# only the inference-call count, which is derived and verifiable.
+print(f"- cost ${meta.get('total_cost_usd', 0)} (exact, from claude -p)")
+
+session = calls(os.path.join(root, sid + ".jsonl"))
+if session:
+    ctx = [c["in"] + c["cr"] + c["cw"] for c in session]
+    peak = max(ctx)
+    mu_all = meta.get("modelUsage") or {}
+    last = session[-1]["model"]
+    entry = mu_all.get(last) or next(
+        (v for k, v in mu_all.items() if base(k) == base(last)), {})
+    win = entry.get("contextWindow")
+    of = pct = ""
+    if win:
+        of = f" of {win // 1_000_000}M" if win >= 1_000_000 else f" of {win // 1000}K"
+        pct = f" ({round(peak * 100 / win)}%)"
+    # Report the trajectory as measured, not a mechanism. Context normally only
+    # grows; a sustained drop means something reclaimed it (auto-compaction or
+    # context editing). No compaction event has been observed on this box, so the
+    # drop is reported as an observation and not labelled as compaction.
+    drops = sum(1 for i in range(1, len(ctx)) if ctx[i] < ctx[i - 1] * 0.8)
+    shape = "monotonic" if not drops else f"{drops} drop(s), final {ctx[-1]:,}"
+    print(f"- context {peak:,} tok peak{of}{pct} across {len(ctx)} inference calls, {shape}")
+
+mu = meta.get("modelUsage") or {}
+if mu:
+    parts = []
+    for model, d in sorted(mu.items(), key=lambda kv: -kv[1].get("costUSD", 0)):
+        detail = (f" (in {d.get('inputTokens', 0):,} / out {d.get('outputTokens', 0):,}"
+                  f" / cache-read {d.get('cacheReadInputTokens', 0):,})") if parts == [] else ""
+        parts.append(f"{short(model)} ${d.get('costUSD', 0):.4f}{detail}")
+    print("- models " + " · ".join(parts))
+
+subs = sorted(glob.glob(os.path.join(root, sid, "subagents", "agent-*.jsonl")))
+counts = {}
+for path in subs:
+    c = calls(path)
+    if c:
+        counts[short(c[-1]["model"])] = counts.get(short(c[-1]["model"]), 0) + 1
+if counts:
+    kinds = " · ".join(f"{m} x{n}" for m, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+    print(f"- subagents ({sum(counts.values())}) {kinds}")
+PY
     printf -- '- transcript: %s\n' "$f"
   } >> "$PROGRESS"
   printf '%s\n' "$cost" >> "$COST_FILE"
@@ -205,7 +331,7 @@ build_prompt_file() { # <iter> <extra-context> -> prints path
     printf '\n\n## Orchestrator notes (these refine, never override, the instructions above)\n'
     printf -- '- This is Ralph iteration %s. Every "[ralph-iteration]" above is already %s.\n' "$iter" "$iter"
     printf -- '- You are a fresh, clean-context session: all continuity is on disk (todo.md, %s, git history). Study before assuming.\n' "$PROGRESS"
-    printf -- '- A shell watchdog SIGTERMs this session after %s seconds with no append to %s. Narrate as you go.\n' "$WATCHDOG" "$PROGRESS"
+    printf -- '- This session is terminated after %s seconds with no append to %s. Narrate as you go.\n' "$WATCHDOG" "$PROGRESS"
     printf -- '- Your final message is parsed by the orchestrator for the promise tag ONLY: end with <promise>NEXT</promise> or <promise>COMPLETE</promise> and stop. A missing tag counts as an abnormal exit.\n'
     [[ -n "$extra" ]] && printf -- '\n### Context from the orchestrator\n%s\n' "$extra"
     env_note

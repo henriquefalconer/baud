@@ -48,3 +48,6 @@ keys.txt
 
 # ralph shell-loop run artifacts (session JSON, assembled prompts, findings)
 ralph/.run/
+
+# python bytecode from ralph/usage.py
+__pycache__/

@@ -85,3 +85,13 @@ After the post-push verification has resolved (green, red-but-worked-through, or
 - `<promise>COMPLETE</promise>` if @todo.md has zero pending items (verify by re-reading) and verification returned green. The outer loop will exit.
 
 Do not perform any additional work after the promise. All verification happens before the promise, not after.
+
+## You are operating autonomously
+
+Nothing will resume you: this session ends when you stop, and an unfinished step is lost.
+
+Long commands: pass `timeout` (max 600000 ms), append a progress note first (silent sessions get terminated), and split what will not fit — never background: notifications and `ScheduleWakeup` do nothing here, and `sleep N; cat` is blocked.
+
+Before ending, re-read your last paragraph. If it is a plan, a question, or a promise about work you have not done ("Waiting for…", "I'll…"), the step is not closed — do it now.
+
+End in one of two states: the step is closed, committed, pushed, and tagged; or you are blocked on something only the user can provide — record it in @todo.md and emit `<promise>NEXT</promise>`. Blocked-and-tagged beats no tag: an untagged final message is an abnormal exit and the whole iteration is retried.
