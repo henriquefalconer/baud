@@ -252,3 +252,22 @@
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 52931
 - est. output cost: $0.7940 (sonnet output rate)
 - exact accounting unavailable this entry
+
+## 2026-07-24T07:14:00 UTC - Ralph Build Iteration 10 Start
+- Resuming from M8 (committed at 840087c)
+- Plan: M9 — budget accounting (per-run) + baud shrink full implementation + docs/determinism.md + docs/protocol.md + drive/full-demo.sh
+
+## 2026-07-24T07:18:00 UTC - M9 complete (37c4881)
+- docs/determinism.md: prior-art (Antithesis), nondeterminism catalogue, H0 results, CPUID path selection, guest contract, observation planes, reconstruction, known limits
+- docs/protocol.md: full wire protocol spec (Hello, Draw*, Observe, SyscallRecord, EbpfRecord, FrameRecord, Checkpoint, GoalReached, Crash, Eof), tape format, journal format, shrink protocol, token format
+- crates/baud-server/migrations/0007_budget.sql: run_budget + shrink_results tables
+- crates/baud-server/src/routes/budget.rs: per-run breakdown + POST /budget/record
+- crates/baud-server/src/routes/shrink.rs: chunk-delete/zero/hold-shorten/dedup passes + GET previous result
+- crates/baud-cli/src/cmds/shrink.rs: fully implemented (was stub)
+- drive/full-demo.sh: 33 CLI commands across all milestones M0–M9, ALL 33 CHECKS PASSED
+- Total tests: 100 pass, 0 fail; workload-noun CI grep CLEAN
+- ALL MILESTONES M0–M9 COMPLETE
+
+## 2026-07-24T07:18:00 UTC - Session usage — iteration 10 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD
