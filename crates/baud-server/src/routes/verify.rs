@@ -230,15 +230,115 @@ pub async fn determinism_poisoned(
     }))
 }
 
-/// GET /verify/observation/:run_id — cross-check syscall log vs eBPF (M7 stub)
+/// GET /verify/observation/:run_id — cross-check syscall log vs eBPF (M7)
+///
+/// Fetches plane-1 (syscall_records) and plane-2 (ebpf_records) for the run,
+/// runs baud_tracing::cross_check, stores the result, and returns it.
 pub async fn observation(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Json<Value> {
+    // Ensure run exists
+    let run_exists = sqlx::query!("SELECT id FROM runs WHERE id = ?", run_id)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None)
+        .is_some();
+
+    if !run_exists {
+        return Json(json!({ "ok": false, "error": format!("run not found: {run_id}") }));
+    }
+
+    // Fetch plane-1: syscall records from supervisor
+    let syscall_rows = sqlx::query!(
+        "SELECT node, sysno, args_digest, ret, vtime FROM syscall_records
+         WHERE run_id = ? ORDER BY vtime ASC",
+        run_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let syscall_records: Vec<baud_proto::SyscallRecord> = syscall_rows.iter().map(|r| {
+        let mut digest = [0u8; 32];
+        let b = &r.args_digest;
+        let len = b.len().min(32);
+        digest[..len].copy_from_slice(&b[..len]);
+        baud_proto::SyscallRecord {
+            node: r.node as u16,
+            sysno: r.sysno as u32,
+            args_digest: baud_proto::Hash(digest),
+            ret: r.ret,
+            vtime: r.vtime as u64,
+        }
+    }).collect();
+
+    // Fetch plane-2: eBPF records
+    let ebpf_rows = sqlx::query!(
+        "SELECT node, event, value, vtime, source FROM ebpf_records
+         WHERE run_id = ? ORDER BY vtime ASC",
+        run_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    // Build a TracingSession from the stored eBPF records
+    let mut session = baud_tracing::TracingSession::new(&run_id);
+    // Register pids (synthetic: pid = 1000 + node)
+    for row in &ebpf_rows {
+        let node = row.node as u16;
+        let pid = 1000 + node as u32;
+        session.register_pid(pid, node);
+    }
+    // Replay eBPF records into the session to populate syscall counts
+    for row in &ebpf_rows {
+        if row.event.starts_with("syscall:") {
+            let node = row.node as u16;
+            // Directly increment the counter by injecting through the pid
+            let pid = 1000 + node as u32;
+            let sysno: u32 = row.event.trim_start_matches("syscall:").parse().unwrap_or(0);
+            session.ingest_syscall(pid, sysno, row.vtime as u64);
+        }
+    }
+
+    // Run the cross-check
+    let result = baud_tracing::cross_check(&run_id, &syscall_records, &session);
+
+    // Store the result
+    let now = crate::state::unix_now() as i64;
+    let passed_i = if result.passed { 1i64 } else { 0i64 };
+    let div_node = result.divergent_node.map(|n| n as i64);
+    let p2_source_str = if matches!(result.plane2_source, baud_proto::Source::Native) { "native" } else { "fallback" };
+    let _ = sqlx::query!(
+        "INSERT INTO observation_checks (run_id, passed, divergent_node, plane2_source, message, checked_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        run_id, passed_i, div_node, p2_source_str, result.message, now
+    )
+    .execute(&state.db)
+    .await;
+
+    let plane1_map: serde_json::Map<String, Value> = result.plane1_counts.iter()
+        .map(|(k, v)| (k.to_string(), json!(v)))
+        .collect();
+    let plane2_map: serde_json::Map<String, Value> = result.plane2_counts.iter()
+        .map(|(k, v)| (k.to_string(), json!(v)))
+        .collect();
+
+    let exit_code = if result.passed { 0 } else { 1 };
+
     Json(json!({
-        "ok": true,
+        "ok": result.passed,
         "run_id": run_id,
-        "note": "syscall-log vs eBPF cross-check not yet implemented (M7)"
+        "passed": result.passed,
+        "divergent_node": result.divergent_node,
+        "plane1_counts": plane1_map,
+        "plane2_counts": plane2_map,
+        "plane2_source": if matches!(result.plane2_source, baud_proto::Source::Native) { "native" } else { "fallback" },
+        "message": result.message,
+        "exit_code": exit_code,
+        "syscall_records_total": syscall_records.len(),
+        "ebpf_records_total": ebpf_rows.len(),
     }))
 }
 

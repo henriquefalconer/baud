@@ -15,4 +15,5 @@ pub mod server;
 pub mod spec;
 pub mod stream;
 pub mod tapes;
+pub mod tracing;
 pub mod verify;

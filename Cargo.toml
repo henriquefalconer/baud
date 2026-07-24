@@ -15,6 +15,7 @@ members = [
     "crates/baud-journal",
     "crates/baud-stream",
     "crates/baud-raftlet",
+    "crates/baud-tracing",
 ]
 
 [workspace.package]

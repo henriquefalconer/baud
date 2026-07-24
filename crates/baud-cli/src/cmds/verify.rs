@@ -70,7 +70,25 @@ pub async fn run(cmd: VerifyCmd, c: &Client, json: bool) -> Result<()> {
         }
         VerifyAction::Observation { run } => {
             let v = c.get(&format!("/verify/observation/{run}")).await?;
-            fmt::print(&v, json);
+            let passed = v["passed"].as_bool().unwrap_or(false);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                let msg = v["message"].as_str().unwrap_or("(no message)");
+                let p2_src = v["plane2_source"].as_str().unwrap_or("fallback");
+                let p1_total = v["syscall_records_total"].as_u64().unwrap_or(0);
+                let p2_total = v["ebpf_records_total"].as_u64().unwrap_or(0);
+                println!("verify observation: run={run}");
+                println!("  plane1 (supervisor syscall log): {p1_total} records");
+                println!("  plane2 ({p2_src}): {p2_total} records");
+                println!("  result: {msg}");
+                if let Some(dn) = v["divergent_node"].as_u64() {
+                    println!("  first divergent node: {dn}");
+                }
+            }
+            if !passed {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

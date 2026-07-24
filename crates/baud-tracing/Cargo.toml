@@ -1,0 +1,19 @@
+[package]
+name = "baud-tracing"
+description = "baud observation plane 2: kernel-side ground truth (eBPF/fallback)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# none needed

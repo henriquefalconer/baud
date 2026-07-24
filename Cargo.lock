@@ -328,6 +328,7 @@ dependencies = [
  "baud-secret",
  "baud-tape",
  "baud-tape-local",
+ "baud-tracing",
  "blake3",
  "rand",
  "rand_chacha",
@@ -384,6 +385,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "baud-tracing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "baud-proto",
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror",
  "uuid",
 ]
 

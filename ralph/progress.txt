@@ -175,3 +175,36 @@
 ## 2026-07-24T06:30:30 UTC - Session usage — iteration 7 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T06:25:57 UTC - Session usage — iteration 7 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 32505
+- est. output cost: $0.4876 (sonnet output rate)
+- exact accounting unavailable this entry
+
+## 2026-07-24T06:38:00 UTC - Ralph Build Iteration 8 Start
+- Resuming from M6 (committed at 57fcda6)
+- Plan: M7 — baud-tracing crate + syscall log routes + eBPF records + verify observation cross-check + drive/m7.sh
+
+## 2026-07-24T06:45:00 UTC - M7 complete
+- crates/baud-tracing/: eBPF observation plane 2; BpfAvailability::Fallback on macOS; TracingSession (ingest_syscall/exec/fault/sched); cross_check(plane1, plane2); synthetic_from_syscalls fallback path; 10 tests pass
+- crates/baud-server/migrations/0006_tracing.sql: ebpf_records + observation_checks tables (syscall_records was already in 0001)
+- crates/baud-server/src/routes/tracing.rs: GET /tracing/tail, GET /tracing/summary, POST /runs/:id/tracing/seed (fallback seeding), GET /runs/:id/ebpf, GET /runs/:id/syscalls, GET /runs/:id/syscalls/tail
+- crates/baud-server/src/routes/verify.rs: GET /verify/observation/:id fully implemented (plane1 vs plane2 cross-check, stored in observation_checks)
+- crates/baud-cli/src/cmds/tracing.rs: baud tracing tail/summary fully implemented
+- crates/baud-cli/src/cmds/syscalls.rs: baud syscalls get/tail fully implemented
+- crates/baud-cli/src/cmds/verify.rs: baud verify observation with human output + exit code
+- drive/m7.sh: ALL 8 CHECKS PASSED
+  - M7.1: tracing tail ok=true, 50 records
+  - M7.2: tracing summary plane1=120 records, plane2=120 events (source=fallback)
+  - M7.3: verify observation PASSED (plane1 counts match plane2 after seeding)
+  - M7.4: second run verify observation PASSED
+  - M7.5: eBPF records show source=fallback (macOS dev machine)
+  - M7.6: /runs/:id/syscalls returned 120 records
+  - M7.7: syscall tail returned 100 records
+  - M7.8: workload-noun CI grep CLEAN for baud-tracing
+- Total tests: 100 pass, 0 fail across all crates
+- NEXT iteration should implement M8 (Mario under the hypervisor — NES emulator + frame stream + drive/m8.sh)
+
+## 2026-07-24T06:45:30 UTC - Session usage — iteration 8 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD
