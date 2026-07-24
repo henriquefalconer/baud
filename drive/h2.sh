@@ -24,6 +24,13 @@
 #   H2.6  no_unmodeled_exit_is_silent: a fuzz smoke proptest over random `Exit::Unmodeled` values
 #         asserts the run loop's dispatch never returns anything but `Err(DeterminismHole)` for
 #         them — no wildcard arm, no silent continue
+#   H2.7  cpuid_leaves_are_fixed (real hardware): boots hello-guest twice against real /dev/kvm and
+#         reads every served CPUID leaf back from the live vCPU via KVM_GET_CPUID2, asserting the
+#         two full leaf sets are byte-identical and RDRAND/x2APIC/RDSEED/TSX read back cleared —
+#         H2.2 only ever fed a synthetic `kvm_cpuid_entry2` through the pure mask function; this
+#         closes the real-hardware readback half of the same named test (todo.md §14's H2 gap),
+#         which caught a genuine determinism bug (Initial APIC ID leaking host-core migration,
+#         fixed in `cpuid.rs`'s mask table this iteration)
 
 set -euo pipefail
 
@@ -125,6 +132,15 @@ UNMODELED_OUT=$(cargo test -q -p baud-vcpu no_unmodeled_exit_is_silent 2>&1)
 echo "$UNMODELED_OUT"
 echo "$UNMODELED_OUT" | grep -q "test result: ok" || fail "H2.6: no_unmodeled_exit_is_silent FAILED"
 pass "H2.6: no_unmodeled_exit_is_silent — every unmodeled exit fails loud, never a silent continue"
+
+# ---------------------------------------------------------------------------
+# H2.7 — cpuid_leaves_are_fixed (real hardware readback via KVM_GET_CPUID2)
+# ---------------------------------------------------------------------------
+log "Running cpuid_leaves_are_fixed (real hardware readback) against real /dev/kvm..."
+CPUID_RH_OUT=$(cargo test -q -p baud-multiverse --lib linux::tests::cpuid_leaves_are_fixed -- --test-threads=1 2>&1)
+echo "$CPUID_RH_OUT"
+echo "$CPUID_RH_OUT" | grep -q "test result: ok" || fail "H2.7: cpuid_leaves_are_fixed (real hardware) FAILED"
+pass "H2.7: cpuid_leaves_are_fixed (real hardware) — two real boots read back identical CPUID, RDRAND/x2APIC/RDSEED/TSX cleared"
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -643,11 +643,25 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   the new tape test together, end-to-end, against real `/dev/kvm` (ALL 6 CHECKS PASSED,
   regime=cooperative), replacing the fully stale pre-pivot version (which depended on `python3`,
   `examples/parser`, and the `/runs/fuzz` endpoint — none part of the current plan).
-  **Not yet done**: `cpuid_leaves_are_fixed`'s "read every served leaf twice across two real boots"
-  half is still only unit-tested against a synthetic `kvm_cpuid_entry2`, not read back from a live
-  vCPU via `KVM_GET_CPUID2` across two real boots — a real-hardware readback test would close this
-  more fully but was judged lower-value than the tape-derived-input gap this iteration closed
-  (the *masking*/`KVM_SET_CPUID2` half is already exercised for real by every boot since H1).
+  **`cpuid_leaves_are_fixed`'s real-hardware readback half is now closed too, and closing it found
+  a genuine, previously-undiscovered determinism bug (test-matrix row 20).** New
+  `linux::tests::cpuid_leaves_are_fixed` (`crates/baud-multiverse/src/linux/mod.rs`): boots
+  hello-guest twice, reads every served CPUID leaf back from each live vCPU via a real
+  `KVM_GET_CPUID2` (not the synthetic `kvm_cpuid_entry2` payload the pure-function unit tests use),
+  asserts the two full leaf sets are byte-identical, and asserts RDRAND/x2APIC (01H:ECX[30]/[21])
+  and RDSEED/TSX-HLE/TSX-RTM (07H:EBX[18]/[4]/[11]) all read back cleared. First few runs
+  intermittently failed (~1/7): leaf 01H:EBX bits[31:24] ("Initial APIC ID") disagreed across the
+  two boots. Root cause: `KVM_GET_SUPPORTED_CPUID` fills that specific field from a real `cpuid`
+  the kernel executes on whatever host logical CPU the ioctl call itself happens to run on — not a
+  virtualized/synthesized value — so it drifts whenever the host scheduler migrates the calling
+  thread between the two boots. `apply_determinism_mask` (`cpuid.rs`) never touched this field.
+  Fixed by pinning leaf 01H:EBX[31:24] to `0` (`EBX_INITIAL_APIC_ID_MASK`), matching the topology
+  leaves' existing "single vCPU is always APIC ID 0" convention (`pin_topology_sub_leaf`'s
+  `EDX = 0`). New unit test `initial_apic_id_is_pinned_on_leaf_1` (hardware-independent) plus 30/30
+  consecutive real-hardware reruns of `cpuid_leaves_are_fixed` confirm the fix (was flaky before).
+  `drive/h2.sh` gained a new H2.7 step running this test. `cargo test -p baud-multiverse`: 63/63
+  (was 61/61). `cargo build/test/clippy --workspace` and `drive/h0.sh`-`h5.sh` all re-verified
+  passing with zero regressions.
 - **H3 (randomness + time control, todo.md §10) — rdrand half done on real hardware, found a
   stronger-than-specified guarantee; `drive/h3.sh` rewritten to match.** New fixture
   `crates/baud-multiverse/tests/fixtures/rdrand-guest/` (hand-assembled x86-64 payload, same build

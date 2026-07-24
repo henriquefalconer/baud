@@ -1879,3 +1879,51 @@ cargo test --workspace: all green, baud-multiverse 61/61 confirmed (matches todo
 clippy --workspace --all-targets: clean, all warnings pre-existing in untouched files (tape-agent/transport.rs, server/routes/fuzz.rs, replay.rs, tracing.rs), none in console.rs or linux/mod.rs. Now running drive/h0.sh through h5.sh sequentially (h5.sh includes the new H5.6 shell_into_universe_resumes step).
 
 drive/h0.sh through h5.sh (H5.1-H5.6) all pass end-to-end on real /dev/kvm, zero regressions, exit 0 across the board. Full verification is now green: cargo build/test/clippy --workspace + all drive scripts. Appending the commit block and committing everything.
+
+Pushed 2c4841f to origin/main. Verifying post-push: local HEAD == origin/main, and re-confirming the exact tip that was pushed had already passed full build/test/clippy/drive-h0-h5 verification before commit (no further changes since).
+
+Post-push verification GREEN: local HEAD (2c4841f) == origin/main. This closes H5's shell_into_universe_resumes on real KVM hardware. todo.md still has pending items (Snapshot::branch's O(write-set) memory-efficiency guarantee via memfd/UFFDIO_CONTINUE, the baud shell-into CLI/server verb, H6, the whole M-series), so this iteration ends with NEXT.
+
+## 2026-07-24T23:31:55 UTC - Session usage — build-4 [sonnet]
+- cost $1.1551634 (exact, from claude -p)
+- context 109,928 tok peak of 1M (11%) across 24 inference calls, monotonic
+- models sonnet-5 $1.1522 (in 48 / out 6,771 / cache-read 2,122,968) · haiku-4-5 $0.0030
+- transcript: ralph/.run/006-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address, starting by reading todo.md and recent progress history...
+
+Chose the cpuid_leaves_are_fixed real-hardware readback gap (todo.md H2 'Not yet done': read every served CPUID leaf back via KVM_GET_CPUID2 across two real boots, assert identical + RDRAND/RDSEED/TSX/x2APIC bits are 0) — it's the smallest well-scoped remaining real-hardware gap that directly closes a named test-matrix guarantee, consistent with prior iterations' pattern. Checking kvm-ioctls API for get_cpuid2 support first.
+
+Wrote linux::tests::cpuid_leaves_are_fixed in crates/baud-multiverse/src/linux/mod.rs — boots the hello-guest fixture twice, reads back the served CPUID via a real KVM_GET_CPUID2 on each live vCPU, asserts full-set equality plus RDRAND/x2APIC/RDSEED/TSX bits are cleared. Building now...
+
+cpuid_leaves_are_fixed passes on real /dev/kvm on the first try. Re-running 5x to rule out flakiness before the full verification pass...
+
+5th consecutive run FAILED — flaky. Investigating the failure detail with --nocapture before deciding on a fix...
+
+Found a real, previously-undiscovered determinism bug via the new test: CPUID leaf 01H EBX bits[31:24] (Initial APIC ID) is NOT pinned by apply_determinism_mask, and KVM_GET_SUPPORTED_CPUID reflects the host physical core the ioctl call happens to run on (kernel executes a real cpuid instruction for that field) — so across two boots, if the calling thread migrates cores, the guest sees a different Initial APIC ID. This is exactly test-matrix row 20's documented risk ('CPUID leaks core index / topology nondeterminism'). Fixing apply_determinism_mask to zero that field, matching the topology leaves' fixed x2APIC ID = 0.
+
+Fix confirmed: cpuid_leaves_are_fixed passes 30/30 consecutive real-KVM runs after pinning Initial APIC ID (previously flaky ~1/7 due to host-core migration between the two boots' KVM_GET_SUPPORTED_CPUID calls). Also added a unit test (initial_apic_id_is_pinned_on_leaf_1) and confirmed the existing masked_bits_are_always_fixed_regardless_of_host_input proptest still passes. Now running the full workspace verification: cargo build, then clippy, then test, then drive/h0.sh-h5.sh individually.
+
+cargo build --workspace: clean (only pre-existing deprecation warnings in baud-tracing/lib.rs, unrelated to this change). Running clippy next...
+
+clippy --workspace --all-targets: clean, zero warnings in cpuid.rs or linux/mod.rs (the touched files) — all reported warnings pre-existing in unrelated files (lib.rs NetDevice/ExitDevice derive suggestions, transport.rs, fuzz.rs, replay.rs, tracing.rs). Running cargo test --workspace next...
+
+cargo test --workspace: all green, 0 failures across every crate (baud-multiverse now 63/63, was 61/61 — +2 for cpuid_leaves_are_fixed and initial_apic_id_is_pinned_on_leaf_1). Now running drive/h0.sh through h5.sh individually per protocol...
+
+Added H2.7 to drive/h2.sh running the new real-hardware cpuid_leaves_are_fixed test (H2.2 only ever exercised the pure mask function against a synthetic payload). Re-running drive/h2.sh to confirm the new step passes end-to-end...
+
+All drive scripts h0.sh-h5.sh pass end-to-end on real /dev/kvm, zero regressions. Full verification green: build/test/clippy --workspace + all drive scripts. Updating todo.md with this iteration's findings, then committing.
+
+## 2026-07-24T23:55:03 UTC - Changes committed.
+- Closed the real-hardware readback half of H2's cpuid_leaves_are_fixed named test, and fixed a genuine determinism bug it found (Initial APIC ID leaking host-core migration)
+- Files changed: crates/baud-multiverse/src/linux/mod.rs (new test), crates/baud-multiverse/src/cpuid.rs (fix + unit test), drive/h2.sh (new H2.7 step), todo.md
+- **Brief description of changes:**
+  - Added linux::tests::cpuid_leaves_are_fixed: boots hello-guest twice on real /dev/kvm, reads back every served CPUID leaf via KVM_GET_CPUID2, asserts identical across boots and RDRAND/x2APIC/RDSEED/TSX cleared
+  - Found and fixed a real determinism bug: leaf 01H:EBX[31:24] (Initial APIC ID) was unpinned, leaking the host core KVM_GET_SUPPORTED_CPUID's ioctl happened to run on across boots — pinned to 0 in apply_determinism_mask
+  - Added cpuid.rs unit test initial_apic_id_is_pinned_on_leaf_1; confirmed fix with 30/30 consecutive real-hardware reruns (was ~1/7 flaky before)
+  - drive/h2.sh gained H2.7 running the new real-hardware test; todo.md updated
+---

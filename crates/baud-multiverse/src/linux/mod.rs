@@ -858,6 +858,60 @@ mod tests {
         );
     }
 
+    /// specs/baud-multiverse.md §4 / todo.md §3.2's `cpuid_leaves_are_fixed`, closed for real
+    /// against real KVM hardware for the first time (todo.md §14's H2 gap: only a synthetic
+    /// `kvm_cpuid_entry2` payload had ever been fed through `apply_determinism_mask` in isolation
+    /// — no test had ever read a leaf back from a live vCPU via `KVM_GET_CPUID2`, which is the
+    /// only way to know `KVM_SET_CPUID2` + the host's own leaf-merging behavior actually served
+    /// what the mask table intended). Boot the hello image twice, read every served leaf back from
+    /// each vCPU, and assert: (1) the two full leaf sets are byte-identical (masking is
+    /// reproducible end to end, not just at the pure-function level `cpuid.rs`'s own unit tests
+    /// already cover); (2) RDRAND/x2APIC (01H:ECX[30]/[21]) and RDSEED/TSX-HLE/TSX-RTM
+    /// (07H:EBX[18]/[4]/[11]) all read back cleared on the live vCPU, not merely in the
+    /// intermediate masked buffer `set_cpuid2` was given.
+    #[test]
+    fn cpuid_leaves_are_fixed() {
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_cpuid = first
+            .guest
+            .vcpu
+            .get_cpuid2(KVM_MAX_CPUID_ENTRIES)
+            .expect("KVM_GET_CPUID2 (first boot)");
+
+        let second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_cpuid = second
+            .guest
+            .vcpu
+            .get_cpuid2(KVM_MAX_CPUID_ENTRIES)
+            .expect("KVM_GET_CPUID2 (second boot)");
+
+        assert_eq!(
+            first_cpuid.as_slice(),
+            second_cpuid.as_slice(),
+            "every served CPUID leaf must read back identical across two boots of the same image"
+        );
+
+        let leaf1 = first_cpuid
+            .as_slice()
+            .iter()
+            .find(|e| e.function == 0x1 && e.index == 0)
+            .expect("leaf 01H:0 must be present in the served CPUID set");
+        assert_eq!(leaf1.ecx & (1 << 30), 0, "RDRAND (01H:ECX[30]) must read back cleared");
+        assert_eq!(leaf1.ecx & (1 << 21), 0, "x2APIC (01H:ECX[21]) must read back cleared");
+
+        let leaf7 = first_cpuid
+            .as_slice()
+            .iter()
+            .find(|e| e.function == 0x7 && e.index == 0)
+            .expect("leaf 07H:0 must be present in the served CPUID set");
+        assert_eq!(leaf7.ebx & (1 << 18), 0, "RDSEED (07H:EBX[18]) must read back cleared");
+        assert_eq!(leaf7.ebx & (1 << 4), 0, "TSX HLE (07H:EBX[4]) must read back cleared");
+        assert_eq!(leaf7.ebx & (1 << 11), 0, "TSX RTM (07H:EBX[11]) must read back cleared");
+    }
+
     /// `tests/fixtures/tape-echo-guest/`'s payload: reads exactly 4 bytes from the tape device's
     /// `DATA` port (`tape_bus::TAPE_DEVICE_BASE + baud_tape_device::reg::DATA` = `0x0500`, one
     /// real single-byte `IN` per byte) and echoes each one straight to COM1 (`out dx, al`, port

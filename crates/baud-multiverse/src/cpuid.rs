@@ -99,6 +99,15 @@ const EBX_RDSEED_BIT: u32 = 18;
 const EBX_TSX_HLE_BIT: u32 = 4;
 const EBX_TSX_RTM_BIT: u32 = 11;
 const EDX_INVARIANT_TSC_BIT: u32 = 8;
+/// Leaf 01H:EBX[31:24] ("Initial APIC ID", SDM Vol. 2A Table 3-11) — found nondeterministic on
+/// real KVM hardware by `cpuid_leaves_are_fixed`: `KVM_GET_SUPPORTED_CPUID` reflects the *host*
+/// logical CPU the ioctl call itself happened to execute on for this field (the kernel serves it
+/// from a real `cpuid` executed inside the ioctl handler, not a virtualized/synthesized value), so
+/// two otherwise-identical boots disagree here whenever the calling thread is scheduled onto a
+/// different host core between them — exactly test-matrix row 20's "CPUID leaks core index /
+/// topology nondeterminism" risk. Pinned to `0`, matching every topology sub-leaf's x2APIC ID
+/// (`pin_topology_sub_leaf`'s `EDX = 0`) — the single vCPU is always APIC ID 0.
+const EBX_INITIAL_APIC_ID_MASK: u32 = 0xFF00_0000;
 
 /// Topology sub-leaf level types (Intel SDM Vol. 2A, CPUID.(EAX=0BH/1FH,ECX=n):ECX[15:8]):
 /// `0` = invalid (enumeration stops here), `1` = SMT, `2` = Core.
@@ -127,6 +136,7 @@ pub fn apply_determinism_mask<E: CpuidEntry>(entries: &mut [E]) {
                 entry.set_ecx(clear_bit(entry.ecx(), ECX_RDRAND_BIT));
                 entry.set_ecx(clear_bit(entry.ecx(), ECX_X2APIC_BIT));
                 entry.set_ecx(set_bit(entry.ecx(), ECX_HYPERVISOR_PRESENT_BIT));
+                entry.set_ebx(entry.ebx() & !EBX_INITIAL_APIC_ID_MASK);
             }
             LEAF_EXTENDED_FEATURES if entry.index() == 0 => {
                 entry.set_ebx(clear_bit(entry.ebx(), EBX_RDSEED_BIT));
@@ -234,6 +244,21 @@ mod tests {
         assert!(!bit_is_set(ecx, ECX_RDRAND_BIT), "RDRAND (01H:ECX[30]) must be cleared");
         assert!(!bit_is_set(ecx, ECX_X2APIC_BIT), "x2APIC (01H:ECX[21]) must be cleared");
         assert!(bit_is_set(ecx, ECX_HYPERVISOR_PRESENT_BIT), "hypervisor-present must be fixed on");
+    }
+
+    /// Real-hardware finding (todo.md §14, test-matrix row 20): `KVM_GET_SUPPORTED_CPUID` fills
+    /// leaf 01H:EBX[31:24] from the host core the ioctl call happened to run on, so it must be
+    /// pinned like every other topology-leaking field or `cpuid_leaves_are_fixed` sees it drift
+    /// across boots whenever the host scheduler migrates the calling thread between them.
+    #[test]
+    fn initial_apic_id_is_pinned_on_leaf_1() {
+        let mut entries = [all_bits_set_leaf(LEAF_FEATURES, 0)];
+        apply_determinism_mask(&mut entries);
+        assert_eq!(
+            entries[0].ebx & EBX_INITIAL_APIC_ID_MASK,
+            0,
+            "Initial APIC ID (01H:EBX[31:24]) must be pinned to 0 regardless of host core"
+        );
     }
 
     #[test]
