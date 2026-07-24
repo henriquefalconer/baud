@@ -1170,3 +1170,5 @@ Verified end-to-end: cargo test -p baud-proto -p baud-tape-device -p baud-multiv
   check`/`clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean for
   every touched/new file; `drive/h0.sh` and `drive/m0.sh` both re-verified passing end-to-end.
 ---
+
+Post-push verification: no CI/post-push protocol is defined in todo.md for this repo (no .github/workflows); verified instead by confirming git fetch shows origin/main == local HEAD (9eb3358) and by having already run cargo build/test/clippy --workspace (green), the linux-target cross-compile check/clippy for the new/touched baud-multiverse code (clean), and drive/h0.sh + drive/m0.sh (both green) before pushing. todo.md still has substantial pending work (H1-H6 real-hardware validation, baud-snapshot, baud-snapshot-store, guest images/baud-packages tape-device shim, the full M-series) so this iteration ends with NEXT.
