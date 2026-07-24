@@ -271,3 +271,65 @@
 ## 2026-07-24T07:18:00 UTC - Session usage — iteration 10 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T07:18:23 UTC - Session usage — iteration 10 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 43810
+- est. output cost: $0.6572 (sonnet output rate)
+- exact (from transcript): in=17536 out=1380 cache_read=235638 cache_write=48626 → $0.3263
+
+[verify:deterministic-supervisor] 2026-07-24T - Starting verification round 1. Key finding: baud-multiverse crate (the deterministic supervisor itself - the 'first deliverable') is ABSENT from the workspace. No seccomp/ptrace/TSC/CPUID trapping code exists anywhere. All supervisor behavior is simulated server-side. H-series drive scripts (h0.sh-h3.sh) are absent. Spec tests (double_run_is_bit_identical, clone_syscall_is_killed, rdtsc_is_trapped) do not exist. Journal encryption (age) is not implemented (stores plaintext). BpfAvailability::probe() always returns Fallback even on Linux. StrategySpec is duplicated with different shapes in baud-driver vs baud-proto.
+
+[verify:core-protocol] completed source analysis and test run. All 19 tests pass. Found gaps vs spec.
+
+[verify:core-protocol] Completed. Found gaps: baud-proto missing proptest + golden vectors + decode_lenient + length caps; baud-secret Debug format wrong, missing expose_mut/into_inner/PartialEq/Eq, load_secret_env returns Option not Result; baud-identity missing expired_token and wrong_root_key tests; baud-keys secrets path wrong (secrets/baud.enc.yaml vs infra/secrets/baud.enc.yaml), nested YAML not handled so daytona_api_key always fails, DoctorReport missing ssh-to-age, missing edit/show/rotate commands, missing show_redacted and rotate_invalidates tests.
+
+[verify:provisioning-agent] 2026-07-24 - Starting verification round 1 for domain: provisioning-agent (baud-tape-agent, baud-init, baud-packages, M2 drive script)
+
+[verify:provisioning-agent] Found key issues:
+1. baud-tape-agent crate MISSING from workspace (no crates/baud-tape-agent/ directory, not in Cargo.toml)
+2. Workload-noun CI grep FAILS: 47 occurrences in crates/baud-server/src/ (mario.rs, raftlet.rs routes contain workload-specific simulation code), 3 in crates/baud-raftlet/src/
+3. full-demo.sh narrows the CI grep to exclude baud-server and baud-raftlet, hiding the violations
+4. NIXPKGS_REV is '23.11' (a branch/tag, not a pinned content-addressed commit hash) - violates reproducibility guarantee
+5. nix copy is not implemented (spec says 'wraps nix build and nix copy'; implementation only calls nix build and nix path-info)
+6. Top-level 'adapters' directive is accepted but silently ignored - SpecDoc has no adapters field
+7. spec test guest_is_static_no_pie not tested against a real ELF (only stub skips the check)
+
+[verify:server-cli-lifecycle] 2026-07-24 - Starting verification of server-cli-lifecycle domain. Build passes. 97 unit tests pass. Running m0.sh and m1.sh drive scripts.
+
+[verify:server-cli-lifecycle] 2026-07-24 - Completed verification. Key findings: (1) workload-noun CI grep fails in m1.sh (50 occurrences in baud-server/baud-raftlet); full-demo.sh silently excludes baud-server from the grep check. (2) server start/stop are stub no-ops (just print messages). (3) tape exec bypasses Backend trait entirely - runs bare sh in server CWD instead of sandbox dirs. (4) error responses return HTTP 200 with no CLI exit code 1. (5) Backend conformance suite never invoked in any test. (6) TapeState::Gone absent from spec - only Deleted. (7) baud-server directly imports and calls baud_raftlet (workload target crate). (8) probe-caps maps to endpoint URL, not probe capability query. Filing 6 structured findings.
+
+[verify:journal-replay-determinism] Starting domain verification round 1. Reading specs and source code for baud-journal, baud-driver, baud-server/verify routes, drive/m3.sh. Running unit tests and drive script.
+
+[verify:journal-replay-determinism] Unit tests: baud-driver 9/9 pass, baud-journal 7/7 pass. Drive script m3.sh FAILS at M3.8 workload-noun CI grep: 'raftlet' and 'mario' appear in crates/baud-server/src/routes/*.rs and crates/baud-raftlet/src/ (50 matches total). The constraint from todo.md §1 says 'workload names may appear only under examples/, drive/, and docs/ — enforced by a CI grep over crates/baud-*/src from M0 on'.
+
+[verify:journal-replay-determinism] Key finding: age encryption not implemented in baud-journal (plaintext stored). Spec §3 and todo.md §4 require chunks age-encrypted at rest. Implementation comment in lib.rs line 19 explicitly defers this to M5+. The spec-required test 'chunk_bodies_are_ciphertext' is absent. This is a blocker spec gap.
+
+[verify:journal-replay-determinism] Key finding: first-divergent-step reporting in verify/determinism/poisoned returns a hardcoded step=9999 (from verify.rs line 203) rather than comparing two actual runs step-by-step to find the real first diverging step. The spec (§5 and todo.md §3) requires reporting the first mismatching step naming the node/probe/syscall that diverged. The poisoned endpoint always reports 9999.
+
+[verify:journal-replay-determinism] Key finding: verify determinism is synthetic (no real supervisor). The generate_deterministic_observations function produces identical synthetic observations for both runs, not driven by the actual baud-driver + supervisor. This means it verifies synthetic determinism rather than real workload determinism. The M3 gate (§7) says 'verify determinism --spec hello-deterministic passes' but the test passes by fabricating identical data, not running the workload.
+
+[verify:journal-replay-determinism] Summary of findings:
+1. BLOCKER: baud-journal stores chunk bodies in plaintext (not age-encrypted). Spec §3 requires all chunk bodies age-encrypted at rest. Comment in lib.rs line 17-20 explicitly defers this to M5+. The spec test chunk_bodies_are_ciphertext from §6 is absent.
+2. MAJOR: CI workload-noun grep fails. todo.md §1 says 'Workload names may appear only under examples/, drive/, and docs/ — enforced by a CI grep over crates/baud-*/src from M0 on'. The grep finds 50 matches in crates/baud-server/src/ (mario, raftlet, joypad) and crates/baud-raftlet/src/ (raftlet). M3.8 step fails.
+3. MAJOR: first-divergent-step reporting is hardcoded (step=9999). Spec §5 requires reporting the first mismatching step with node/probe/syscall. The poisoned endpoint always reports divergent_step=9999 regardless of actual divergence point.
+4. MAJOR: verify determinism and replay use synthetic observations, not real supervisor execution. generate_deterministic_observations uses DefaultHasher (not ChaCha20) to produce fake data, bypassing baud-driver and baud-multiverse entirely.
+5. MINOR: Driver::new signature differs from spec API (missing TacticsSpec param). Spec §5 API says Driver::new(seed, strategy, tactics); impl has Driver::new(seed, strategy).
+6. MINOR: draw_bits returns u64 not Vec<u8> as specified in spec §3 API table.
+7. MINOR: replay verification checks observation count equality not stream hash equality (replay.rs line 131: verified = replayed.len() == orig_obs_count || orig_obs_count == 0).
+
+[verify:fuzzing-and-distributed-bugs] Round 1: Verified baud-raftlet, baud-driver, M4 and M6 drive scripts. Found: (1) workload nouns (mario, raftlet, joypad, nes) appear in crates/baud-server/src and crates/baud-raftlet/src — CI grep fails both M4.7 and M6.9. (2) Planted bug in baud-raftlet/src/lib.rs is a no-op — both branches of the conditional are identical (term >= self.current_term). (3) Probe names in the implementation (max_commit, has_leader, max_term, partition_active) do not match spec section 5 (probe:op_depth, probe:leader_count, probe:partition_state, probe:term_band). (4) M6 drive script omits the shrink step specified in baud-raftlet.md section 6. (5) draw_weather in baud-driver ignores p_stop parameter, implementing a stateless approximation rather than a stateful Markov process.
+
+[verify:observation-planes] round-1 complete. baud-tracing: 10/10 tests pass; cross_check function only compares per-node syscall COUNTS (not sequences per spec §4/§6). BpfAvailability::probe() always returns Fallback on all platforms including Linux (never returns Native). Spec-mandated test names planes_agree_on_healthy_run and fallback_emits_same_schema are absent. baud-stream: 22/22 tests pass; fingerprint errors surface as FrameError not Outcome::Crash{detail:"frame-format"} as specified in §4/§7. Spec test names (frame_hashes_double_run_identical, render_is_byte_identical, bad_geometry_is_a_crash) absent. M5 drive fails workload-noun grep (mario/raftlet in baud-server/src). M7 drive passes all checks.
+
+## 2026-07-24T07:33:43 UTC - Session usage — verification round 1 (7 domain sessions) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 71824
+- est. output cost: $1.0774 (sonnet output rate)
+- exact accounting unavailable this entry
+
+## 2026-07-24 - Triage: verification round 1 findings
+- 42 raw findings from 7 domain verification sessions triaged into todo.md §12
+- After deduplication (workload-noun CI grep appeared in 6 domains; baud-tape-agent absence appeared in 2; journal encryption appeared in 2): 11 blockers, 20 major, 11 minor items
+- Blockers (VR1-B1 through VR1-B11): baud-multiverse crate absent; H-series scripts absent; supervisor tests absent; verify determinism tautological; baud-tape-agent absent; baud-journal plaintext; baud-server embeds workload code + CI grep fails; tape exec bypasses Backend trait; baud-keys wrong secrets path; baud-keys nested YAML broken; raftlet planted bug is no-op
+- Major (VR1-M1 through VR1-M20): baud-proto proptest/golden/length-caps; baud-secret API gaps; baud-secret load_secret_env return type; baud-identity security tests absent; baud-keys missing commands; HTTP 200 on errors; conformance suite dead; journal reconstruction path missing decryption; first-divergent-step hardcoded; verify/replay synthetic; NIXPKGS_REV branch tag; nix copy absent; raftlet probe names wrong; M6 missing shrink step; draw_weather stateless; cross_check counts-only; BpfAvailability always Fallback; baud-stream FrameError not Crash
+- Minor (VR1-m1 through VR1-m11): baud-secret Debug format; proptest tests absent; doctor missing ssh-to-age/recipient; baud-keys missing tests; StrategySpec schema split; adapters directive silently ignored; Driver::new missing TacticsSpec; draw_bits wrong return type; replay count vs hash; server start/stop no-ops; spec test names wrong
+- Next: build agent should work blockers first (VR1-B7 workload-noun violation is prerequisite for all drive scripts to pass; VR1-B1 baud-multiverse is the core deliverable)

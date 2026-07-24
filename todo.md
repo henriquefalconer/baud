@@ -343,3 +343,348 @@ infra/machines/
 ### 11.5 Build order
 
 `infra/pkgs` (unblocks H1 cross-builds + M2 image) → `infra/secrets` (multi-recipient, once a second dev/CI exists) → `infra/nixos-modules` + `infra/machines` (when the CI/continuous-testing host is wanted). Nix is already on baud's critical path via `baud-packages`, so `infra/` adds no new dependency class.
+
+---
+
+## 12. Pending items — verification round 1 triage (2026-07-24)
+
+Items are ordered: blockers first, then major, then minor. Each item is scoped to approximately one build iteration. Spec citations and repro notes are included inline.
+
+---
+
+### BLOCKERS
+
+#### VR1-B1: baud-multiverse crate is entirely absent
+
+The core deliverable does not exist. No `crates/baud-multiverse/` directory, not listed in `Cargo.toml` workspace members. No seccomp user-notify code, no ptrace trap handler, no virtual clock device model, no entropy/fs/net/input/exit device models, no allowlist enforcement, no guest process launcher. The public API (`Multiverse::load(manifest, guests) -> Result<Self>` and `run(&mut self, tape: impl DrawSource) -> ObservationStream`) has zero implementation. The H-series and M2–M9 milestones all claim to run guests through this supervisor — none of them do.
+
+- Spec: `specs/baud-multiverse.md:39-48` (Crate Architecture), `:98-103` (API), `:129-148` (§8 Testing); `todo.md:45-81` (§3 baud-multiverse)
+- Repro: `ls crates/` — no `baud-multiverse`; `grep -r "seccomp\|ptrace\|PR_SET_TSC\|ARCH_SET_CPUID" crates/ --include="*.rs"` returns nothing.
+- Scope: scaffold the crate, implement seccomp user-notify syscall interception + ptrace trap handler for TSC/CPUID + the six device models (clock, entropy, fs, input, net, exit) + the allowlist enforcer + the guest launcher; wire up `Multiverse::load` / `run` returning a real `ObservationStream`.
+
+#### VR1-B2: H-series drive scripts (h0.sh–h3.sh) are absent
+
+`drive/h0.sh`, `drive/h1.sh`, `drive/h2.sh`, `drive/h3.sh` do not exist. `drive/` contains only `m0.sh–m8.sh` and `full-demo.sh`. The H-series milestones (H0 capability spike, H1 supervisor MVP, H2 tape integration, H3 multi-guest + net device) each have a normative drive script per the plan.
+
+- Spec: `todo.md:175` (H0 drive), `:178` (H1 drive), `:180` (H2 drive), `:182` (H3 drive); `todo.md:263` (drive/ repo layout listing h0–h3)
+- Repro: `ls drive/` — h0–h3 absent.
+- Scope: create `drive/h0.sh` through `drive/h3.sh` validating the corresponding supervisor milestones once VR1-B1 lands.
+
+#### VR1-B3: Supervisor normative tests absent (double_run_is_bit_identical, clone_syscall_is_killed, rdtsc_is_trapped)
+
+Section 8 of `specs/baud-multiverse.md` defines three named Rust tests with exact assertions. None exist anywhere in the codebase. The H1 exit criterion is "the double-run test passes on a static hello guest."
+
+- Spec: `specs/baud-multiverse.md:129-148` (§8 Testing); `todo.md:77` (H1 exit criterion)
+- Repro: `grep -rn "double_run_is_bit_identical\|clone_syscall_is_killed\|rdtsc_is_trapped" crates/` — no results.
+- Scope: add `#[test] fn double_run_is_bit_identical`, `fn clone_syscall_is_killed`, `fn rdtsc_is_trapped_and_served_virtual_time` to `crates/baud-multiverse/` once VR1-B1 scaffolds the crate.
+
+#### VR1-B4: verify determinism is tautological — no real supervisor execution
+
+`POST /verify/determinism` calls `generate_deterministic_observations(seed, spec_hash, spec_doc)` twice with identical arguments. The function is a pure mathematical formula (DefaultHasher, no guest, no supervisor, no tape replay). Both runs trivially produce identical output by construction. A comment at line 83 of `crates/baud-server/src/routes/verify.rs` explicitly acknowledges this: "For M3, we implement the verification harness: generate observations deterministically…"
+
+- Spec: `specs/baud-multiverse.md:119` (§7 Determinism Claim), `:129-132` (§8 double-run test); `todo.md:75` ("The claim is verified, not assumed"); `todo.md:189` (verify determinism as CLI command)
+- Repro: `curl -s -X POST http://localhost:3000/verify/determinism -H 'Content-Type: application/json' -d '{"spec":"hello-deterministic","seed":42}' | jq .` — always returns `ok:true` regardless of workload.
+- Scope: wire `verify/determinism` to run the workload through `baud-multiverse` twice and compare real observation-stream hashes. Depends on VR1-B1.
+
+#### VR1-B5: baud-tape-agent crate is absent from the workspace
+
+No `crates/baud-tape-agent/` directory exists; not listed in `Cargo.toml` members. The spec defines it as the static musl x86_64-linux binary running inside the sandbox that launches `baud-multiverse`, mediates protocol draws, streams observations. The spec test `unmodified_agent_runs_a_new_workload` does not exist. The M2 milestone requires this binary to be built and provisioned.
+
+- Spec: `todo.md:104-108` (baud-tape-agent spec), `:247` (workspace crate map); `specs/baud-tape-agent.md §2` Crate Architecture, `§5` Testing
+- Repro: `ls crates/` — no `baud-tape-agent`; `grep "baud-tape-agent" Cargo.toml` — not listed.
+- Scope: scaffold `crates/baud-tape-agent/` as a static musl binary crate; implement provisioning via baud-init, multiverse launch, draw relay, observation streaming; add `unmodified_agent_runs_a_new_workload` test.
+
+#### VR1-B6: baud-journal stores chunk bodies in plaintext — age encryption not implemented
+
+`crates/baud-journal/src/lib.rs` lines 17–20 contain an explicit comment deferring encryption to "M5+." All chunks are written as raw CBOR bytes. The spec-required test `chunk_bodies_are_ciphertext` does not exist. A leaked journal directory reproduces the entire deterministic execution including any secrets the workload processed.
+
+- Spec: `todo.md:120-127` (encryption at rest requirement); `specs/baud-journal.md §3` (Encryption at Rest), `§6` (Testing: `chunk_bodies_are_ciphertext`)
+- Repro: `hexdump -C <any journal chunk file>` — readable CBOR, not age ciphertext.
+- Scope: integrate `baud-keys` age key resolution into `baud-journal`; encrypt each chunk body with `age` before writing, decrypt on read; content-address over plaintext (blake3); add `chunk_bodies_are_ciphertext` test.
+
+#### VR1-B7: baud-server embeds Mario and raftlet workload code, violating the hard constraint
+
+`crates/baud-server/src/routes/mario.rs` contains ~400 LOC of NES physics simulation (BTN_RIGHT, BTN_LEFT, world/level, joypad bytes). `crates/baud-server/src/routes/raftlet.rs` directly calls `baud_raftlet::simulate()`. `baud-server/Cargo.toml` lists `baud-raftlet` as a direct dependency. The CI grep over `crates/baud-*/src/` for workload nouns (mario, raftlet, joypad, nes) finds 47–50 violations. `full-demo.sh` hides this by narrowing the grep to exclude `baud-server` and `baud-raftlet`.
+
+- Spec: `specs/baud-server.md:28` (Non-Goals: "No workload interpretation"); `todo.md:28-29` (hard constraints: crate communication via baud-proto only; workload-noun CI grep)
+- Repro: `grep -rn --include="*.rs" -E '\b(mario|raftlet|emulator|joypad)\b|\bnes\b' crates/baud-*/src/` — exits 1 with 47+ hits. `bash drive/m1.sh` — fails at workload-noun CI grep step.
+- Scope: remove `crates/baud-server/src/routes/mario.rs` and `raftlet.rs`; remove `baud-raftlet` from `baud-server/Cargo.toml`; replace embedded simulation with generic fuzz/run endpoints that accept opaque workload specs (the server must store and serve, not interpret). Fix `full-demo.sh` CI grep to use the correct broad pattern.
+
+#### VR1-B8: tape exec bypasses the Backend trait — runs bare sh in server CWD, not sandbox directory
+
+`POST /tapes/{id}/exec` (lines 363–376 of `crates/baud-server/src/routes/tapes.rs`) runs `tokio::process::Command::new("sh").arg("-c").arg(&shell_cmd).output()` with no cwd override. Every exec runs in the baud-server process directory. The `LocalBackend` created during tape creation is discarded immediately. Sandbox isolation for exec is completely absent.
+
+- Spec: `specs/baud-tape-local.md:56` (exec: Run argv in the sandbox dir); `specs/baud-tape.md:62` (Backend trait `exec` method)
+- Repro: create two tapes, exec `pwd` on each — both return the same working directory (`/Users/vm/code/baud`).
+- Scope: persist the `Backend` instance per tape ID (or re-create it from stored metadata); route exec through `backend.exec(id, argv)` so that local tapes run in the temp sandbox dir.
+
+#### VR1-B9: baud-keys secrets_file() hardcodes wrong path ('secrets/baud.enc.yaml')
+
+`crates/baud-keys/src/lib.rs:82` returns `PathBuf::from("secrets/baud.enc.yaml")`. The actual encrypted secrets file is at `infra/secrets/baud.enc.yaml`. `doctor()` always reports `secrets_file_exists: false`. Any call to `decrypt_secrets(&secrets_file())` fails with file-not-found.
+
+- Spec: `specs/baud-keys.md:60-84`
+- Repro: `baud doctor --json | jq .secrets_file_exists` → `false`. `ls secrets/baud.enc.yaml` → no such file; `ls infra/secrets/baud.enc.yaml` → exists.
+- Scope: change `secrets_file()` to return `PathBuf::from("infra/secrets/baud.enc.yaml")` (or derive from workspace root).
+
+#### VR1-B10: baud-keys decrypt_secrets cannot extract nested YAML — daytona_api_key() always returns MissingKey
+
+The encrypted secrets file has a nested YAML structure (`daytona: { api_key: ... }`). After sops decryption, `decrypt_secrets` iterates only top-level object keys and calls `v.as_str()`, which returns `None` for nested objects. The nested values are silently dropped. `daytona_api_key()` calls `secrets.require("daytona_api_key")` and always returns `KeysError::MissingKey`.
+
+- Spec: `specs/baud-keys.md:65-72`
+- Repro: with a valid age key and `infra/secrets/baud.enc.yaml` decryptable, calling `baud keys show --redacted` reports MissingKey for daytona_api_key and identity_root_key.
+- Scope: fix `decrypt_secrets` to flatten nested YAML objects using dotted-key or structured extraction (e.g., `daytona.api_key` → `"daytona_api_key"`); update `require()` call sites to match the flattened key names.
+
+#### VR1-B11: Planted bug in baud-raftlet is a no-op — both conditional branches are identical
+
+Lines 257–265 of `crates/baud-raftlet/src/lib.rs`: the `planted_bug_active` conditional has `term >= self.current_term` in both branches. The comment says the bug branch should use `>=` and the normal branch should use `>`, but neither branch uses `>`. The flag has zero effect on cluster behavior. The M6 drive script finds a violation through a different unintended mechanism, not through the planted bug path.
+
+- Spec: `specs/baud-raftlet.md:56-58` (Section 3: The Planted Bug)
+- Repro: set `planted_bug_active = false`; run the M6 markov-crash-restart guided run — the `log_prefix_agreement` violation is still found because the identical bug paths make the two modes indistinguishable.
+- Scope: fix the conditional so the normal branch uses strict `>` (reject stale leaders) and the bug branch uses `>=` (accept stale leaders, overwriting committed entries).
+
+---
+
+### MAJOR
+
+#### VR1-M1: baud-proto missing proptest suite (cbor_roundtrips, unknown_trailing_field_still_decodes)
+
+Spec §6 requires two proptest-based property tests over arbitrary `Msg` and `Observation` values. Neither exists. The implementation has only 6 hand-written unit tests. Additionally, `decode_lenient` and `with_extra_field` helper functions required by the spec tests are not implemented.
+
+- Spec: `specs/baud-proto.md:138-149`
+- Repro: `grep -rn "proptest\|cbor_roundtrips\|unknown_trailing" crates/baud-proto/` — no results.
+- Scope: add `proptest` dev-dependency; implement `decode_lenient` and `with_extra_field`; add `cbor_roundtrips` and `unknown_trailing_field_still_decodes` property tests.
+
+#### VR1-M2: baud-proto no golden vectors checked in
+
+Spec §6 states: "Golden vectors: fixed CBOR byte strings checked in, so wire drift is caught." No golden vector fixtures exist anywhere in `crates/baud-proto/`.
+
+- Spec: `specs/baud-proto.md:152`
+- Repro: `ls crates/baud-proto/tests/` — no fixture files.
+- Scope: serialize one canonical value of each `Msg` variant; check in the hex-encoded CBOR bytes as test fixtures; add a test that re-decodes them and asserts structural equality.
+
+#### VR1-M3: baud-proto no length caps on collection fields (security §8)
+
+Spec §8 states "Bounded decoders; length caps on collection fields" as the mitigation for hostile/oversized CBOR. Vec fields (e.g., `bytes` in `ChoiceChunk`/`DrawResult`/`Value::Bytes`, `argv` in `NodeSpec`, `maximize`/`buckets` in `StrategySpec`) have no length limits. Unbounded CBOR inputs can cause OOM.
+
+- Spec: `specs/baud-proto.md:165-168`
+- Repro: craft a CBOR map with a `bytes` field containing 1 GiB of zeros; deserializing it allocates the full buffer.
+- Scope: add a serde `deserialize_with` wrapper or a manual `Deserialize` impl that rejects any collection field exceeding a specified cap (e.g., 64 MiB for byte arrays, 1024 entries for string lists).
+
+#### VR1-M4: baud-secret missing expose_mut, into_inner, PartialEq, and Eq
+
+Spec §3 API table defines `expose_mut(&mut self) -> &mut T`, `into_inner(self) -> T where T: Clone`, and lists `PartialEq`/`Eq` as key properties. None are implemented. The struct derives only `Clone` and `ZeroizeOnDrop`.
+
+- Spec: `specs/baud-secret.md:93-103`
+- Repro: compile a callsite using `secret.expose_mut()` or `Secret::into_inner(s)` — compile error.
+- Scope: add `expose_mut`, `into_inner` methods; derive or impl `PartialEq` and `Eq` for `Secret<T: PartialEq>`.
+
+#### VR1-M5: baud-secret load_secret_env returns Option instead of Result<Option, SecretEnvError>
+
+Spec §4 API specifies `fn load_secret_env(var: &str) -> Result<Option<SecretString>, SecretEnvError>`. Implementation at `crates/baud-secret/src/lib.rs:92` returns `Option<SecretString>`. File read failures on `{VAR}_FILE` paths are silently swallowed.
+
+- Spec: `specs/baud-secret.md:119`
+- Repro: set `MY_SECRET_FILE=/nonexistent/path`; call `load_secret_env("MY_SECRET")` — returns `None` instead of `Err(SecretEnvError::FileReadError(...))`.
+- Scope: define `SecretEnvError` enum; change `load_secret_env` signature to `Result<Option<SecretString>, SecretEnvError>`; propagate IO errors from `_FILE` path reads.
+
+#### VR1-M6: baud-identity missing expired_token_is_refused and wrong_root_key_is_refused tests
+
+Spec §5 requires two security tests. (1) `expired_token_is_refused`: a token minted 11 minutes ago must be rejected by `verify()`. (2) `wrong_root_key_is_refused`: a token minted by one root key must be rejected by a different root's `verify()`. Neither exists. The existing `should_renew_expired` test (line 394) only checks the renewal predicate, not that `verify()` rejects an expired token.
+
+- Spec: `specs/baud-identity.md:82-93`
+- Repro: `grep -rn "expired_token_is_refused\|wrong_root_key_is_refused" crates/baud-identity/` — no results.
+- Scope: add both tests to `crates/baud-identity/src/lib.rs`; mock or manipulate `issued_at` to simulate an 11-minute-old token; generate two separate `RootKey` instances and verify cross-rejection.
+
+#### VR1-M7: baud-keys edit, show --redacted, and rotate commands not implemented
+
+Spec §4 defines four commands: `baud keys init`, `baud keys edit`, `baud keys show --redacted`, and `baud keys rotate`. Only `init_secrets` is implemented. `edit` (decrypt → `$EDITOR` → re-encrypt → verify), `show --redacted` (print keys with `[REDACTED]` values), and `rotate` (sops rotate to new recipients) are absent.
+
+- Spec: `specs/baud-keys.md:108-111`
+- Repro: `baud keys edit` → unimplemented stub; `baud keys show --redacted` → unimplemented stub; `baud keys rotate` → unimplemented stub.
+- Scope: implement `edit_secrets` (shell out to sops decrypt → `$EDITOR` → re-encrypt), `show_redacted` (decrypt then replace values with `[REDACTED]`), and `rotate` (sops rotate command); wire them to the CLI.
+
+#### VR1-M8: Error responses return HTTP 200; CLI exits 0 for server-side errors on tape subcommands
+
+Routes like `GET /tapes/{id}` and `DELETE /tapes/{id}` return JSON `{"error": "tape X not found"}` with HTTP 200. The CLI client (`client.rs` lines 28–30) checks HTTP status only; since status is 200 it returns `Ok` and exits 0. By contrast, `run.rs` lines 102–104 manually check `v.get("error")` — but `tape.rs` has no such check.
+
+- Spec: `specs/baud-cli.md:83` (Exit codes: 0 completed · 1 error · 2 goal/violation)
+- Repro: `baud tape status nonexistent-tape --json`; observe exit code 0 and `{"error":"tape nonexistent-tape not found"}`.
+- Scope: fix error-returning routes to return appropriate HTTP status codes (404, 500, etc.); update CLI client to map non-2xx status to exit code 1.
+
+#### VR1-M9: Backend conformance suite never invoked in any test
+
+`baud_tape::backend::conformance::run_conformance` is defined in `crates/baud-tape/src/backend.rs` lines 77–120 but never called from any `#[test]` in `baud-tape` or `baud-tape-local`. The lifecycle sequence (stop → ensure → archive → ensure → gone) specified in `baud-tape.md §6` is also absent from the suite.
+
+- Spec: `specs/baud-tape.md:92-101` (`backend_conformance_parity`); `specs/baud-tape-local.md:72-76`
+- Repro: `grep -rn "run_conformance" crates/` — only the definition, no call sites.
+- Scope: add `#[test]` functions in both `baud-tape` and `baud-tape-local` that call `run_conformance` against each backend; extend the suite to cover the full stop→ensure→archive→ensure→gone lifecycle.
+
+#### VR1-M10: Journal encryption deferred — baud-journal plaintext (duplicate of VR1-B6, major angle)
+
+Beyond the blocker, the spec-required test `chunk_bodies_are_ciphertext` is absent and the journal reconstruction path never decrypts. Replay and replay-hash comparison operate on plaintext CBOR, so when encryption lands the reconstruction code must also be updated.
+
+- Spec: `specs/baud-journal.md §6` (Testing: `chunk_bodies_are_ciphertext`)
+- Scope: add `chunk_bodies_are_ciphertext` test alongside the encryption implementation (VR1-B6); update the streaming reader and `reconstruct` path to call the baud-keys identity for decryption.
+
+#### VR1-M11: First-divergent-step is hardcoded to 9999, not computed
+
+`determinism_poisoned` endpoint (`crates/baud-server/src/routes/verify.rs` line 203–204) always sets `divergent_step = Some(9999)` without comparing two runs step-by-step.
+
+- Spec: `specs/baud-journal.md §5` (Divergence); `todo.md §3` ("reports the first divergent step")
+- Repro: `POST /verify/determinism/poisoned` always returns `divergent_step: 9999`.
+- Scope: implement step-by-step comparison of two observation runs; report the index of the first differing step along with the node/probe/syscall identity.
+
+#### VR1-M12: verify determinism and replay use synthetic observations, bypassing real execution
+
+`generate_deterministic_observations` and `generate_replay_observations` in `crates/baud-server/src/routes/verify.rs` and `replay.rs` produce fake observations from `DefaultHasher(seed, spec_hash)`. They bypass `baud-driver`, `baud-journal`, and `baud-multiverse` entirely.
+
+- Spec: `todo.md §7` M3 milestone ("verify determinism passes"; "time()-poisoned variant fails with first-divergent-step report"; "replay reproduces a prior run exactly"); `todo.md §4` baud-driver API spec
+- Repro: `baud verify determinism --spec hello-deterministic` returns `ok:true` even if the spec does not exist.
+- Scope: wire `verify/determinism` to run the spec through the real driver + supervisor (depends on VR1-B1, VR1-B5); wire `replay` to re-feed the journaled tape through the supervisor and compare observation stream hashes.
+
+#### VR1-M13: NIXPKGS_REV is a branch tag, not a pinned commit hash
+
+`crates/baud-packages/src/lib.rs:34` sets `pub const NIXPKGS_REV: &str = "23.11"`. This is a mutable branch tag; the generated flake pins `nixpkgs.url = "github:NixOS/nixpkgs/23.11"` which upstream can update at any time, destroying reproducibility.
+
+- Spec: `specs/baud-packages.md §1` Goals; `specs/baud-packages.md §3` Spec→Flake
+- Repro: the generated flake has `nixpkgs/23.11` not a SHA like `nixpkgs/e96e4ef`.
+- Scope: replace `NIXPKGS_REV` with a full commit SHA; update the generated flake template accordingly.
+
+#### VR1-M14: nix copy not implemented in baud-packages
+
+`build_real()` in `crates/baud-packages/src/lib.rs` calls `nix build` and `nix path-info` but never calls `nix copy`. The store-warming step required for 1-minute sandbox economics is absent.
+
+- Spec: `specs/baud-packages.md §3` Spec→Flake, `§4` Economics
+- Repro: trace the code in `crates/baud-packages/src/lib.rs:173-222` — no `nix copy` invocation.
+- Scope: add a `nix copy --to <store-url> <closure>` call after the successful build path in `build_real()`.
+
+#### VR1-M15: Strategy probe names in baud-raftlet don't match spec names
+
+Spec §5 (`specs/baud-raftlet.md:83`) specifies `maximize = ["probe:op_depth"]`, `buckets = ["probe:leader_count","probe:partition_state","probe:term_band"]`. Implementation exposes probes named `max_commit`, `has_leader`, `max_term`, `partition_active`, `pending_msgs`. The fuzz loop uses `maximize = ["max_commit","max_term"]`, `buckets = ["max_term"]`. None match the spec. `op_depth`, `leader_count`, `partition_state`, `term_band` do not exist.
+
+- Spec: `specs/baud-raftlet.md:83` (Section 5: Strategy & Tactics)
+- Repro: `grep -n "op_depth\|leader_count\|partition_state\|term_band" crates/baud-raftlet/src/lib.rs` — no results.
+- Scope: rename probe extractors to `probe:op_depth`, `probe:leader_count`, `probe:partition_state`, `probe:term_band`; update the fuzz route `StrategySpec` accordingly.
+
+#### VR1-M16: M6 drive script omits the shrink step required by the spec
+
+`drive/m6.sh` covers negative control, guided run, net weather, tape kill + reconstruct, and replay, but has no step exercising `baud shrink` or the shrink endpoint. Spec §6 of `baud-raftlet.md` includes shrink as a mandatory step in the M6 drive sequence.
+
+- Spec: `specs/baud-raftlet.md:101-103` (Section 6: Testing — M6 drive)
+- Repro: `grep -n "shrink" drive/m6.sh` — no results.
+- Scope: add a shrink step to `drive/m6.sh` that calls `baud shrink <run>` and verifies the output; add a replay step on the shrunk tape.
+
+#### VR1-M17: draw_weather ignores p_stop, implements stateless not Markov tactic
+
+`draw_weather` in `crates/baud-driver/src/lib.rs` lines 284–290 discards `p_stop` (`let _ = p_stop;`) and uses a stateless per-call coin flip. The stateful Markov logic in the raftlet fuzz loop uses an external `rng` (ChaCha20Rng) not part of the driver tape, so weather decisions are not recorded and are not reproducible via tape replay.
+
+- Spec: `todo.md:168` (TacticsSpec built-ins: `markov-partition{p_start, p_stop}`)
+- Repro: call `driver.draw_weather(0.1, 0.1)` twice with the same driver state — the result is independent of previous calls (stateless).
+- Scope: track a `partition_state: bool` in `Driver`; use `p_stop` to transition out of the active state; ensure all weather draws are recorded on the tape via the standard `record_draw` path.
+
+#### VR1-M18: cross_check() verifies syscall counts only, not ordered sequences
+
+`cross_check` at `crates/baud-tracing/src/lib.rs:279` computes only per-node total syscall counts (`HashMap<u16,u64>`) and compares them. It never compares the ordered sequence of syscall numbers by virtual time. A supervisor bug swapping the order of two different syscalls would pass undetected.
+
+- Spec: `specs/baud-tracing.md:68-71` (§4 Cross-Check): "Per-guest syscall counts and sequences must agree"; `specs/baud-tracing.md:93-100` (§6 Testing — `planes_agree_on_healthy_run`)
+- Repro: feed `cross_check` with plane1 and plane2 containing the same syscall counts but different orderings — returns `Ok(())`.
+- Scope: extend `cross_check` to compare per-node ordered `Vec<sysno>` sorted by `vtime`; return a mismatch error if sequences differ.
+
+#### VR1-M19: BpfAvailability::probe() always returns Fallback on Linux — Native path is dead code
+
+`crates/baud-tracing/src/lib.rs:85-104` unconditionally returns `BpfAvailability::Fallback` on both the `cfg!(target_os = "linux")` branch and the else branch. A comment acknowledges that BPF detection is possible but was skipped "for safety." The independent-witness property of plane 2 is not achieved; the cross-check always passes because plane 2 is derived from plane 1 via `synthetic_from_syscalls`.
+
+- Spec: `specs/baud-tracing.md:43-48` (§2 Crate Architecture); `specs/baud-tracing.md:77-83` (§5 Fallback); `todo.md:130-133` (baud-tracing: "independent witness")
+- Repro: on Linux, `BpfAvailability::probe()` returns `Fallback`; `grep -n "Native" crates/baud-tracing/src/lib.rs` — variant exists but is never constructed.
+- Scope: implement `bpf(BPF_PROG_LOAD, ...)` availability probe on Linux; return `Native` when BPF is available; load prebuilt CO-RE probes via aya on the `Native` path; keep `Fallback` path for denied environments.
+
+#### VR1-M20: baud-stream bad frame geometry returns FrameError, not Outcome::Crash
+
+`crates/baud-stream/src/lib.rs:30-39` and `frame.rs:49-63` return `FrameError::SizeMismatch` — a Rust error type — not `baud_proto::Outcome::Crash`. The spec-required test `bad_geometry_is_a_crash` asserts `matches!(ingest(short_buffer()), Outcome::Crash { .. })`.
+
+- Spec: `specs/baud-stream.md:72-74` (§4 Ingest & Fingerprint); `specs/baud-stream.md:119-121` (§7 Testing — `bad_geometry_is_a_crash`)
+- Repro: call `ingest` with a buffer shorter than `width×height×format_bytes` — returns `Err(FrameError::SizeMismatch {...})` not `Outcome::Crash`.
+- Scope: change the ingest return type to emit `Outcome::Crash{detail: "frame-format", node, step}` on geometry mismatch; add `bad_geometry_is_a_crash` test.
+
+---
+
+### MINOR
+
+#### VR1-m1: baud-secret Debug format outputs '[REDACTED]' instead of 'Secret("[REDACTED]")'
+
+`crates/baud-secret/src/lib.rs:45` writes `{REDACTED}` (i.e., `[REDACTED]`) not `Secret("[REDACTED]")`. The test at line 124 asserts equality with the `REDACTED` constant (wrong assertion), masking the discrepancy.
+
+- Spec: `specs/baud-secret.md:88`
+- Repro: `format!("{:?}", Secret::new("x".to_string()))` → `"[REDACTED]"` instead of `Secret("[REDACTED]")`.
+- Scope: fix the `Debug` impl to emit `Secret("[REDACTED]")`; fix the test assertion to compare against the correct string.
+
+#### VR1-m2: baud-secret missing proptest-based debug_never_contains_secret and serialize_never_contains_secret tests
+
+Spec §5 requires two proptest tests over arbitrary secret strings. Only fixed-value unit tests exist.
+
+- Spec: `specs/baud-secret.md:134-147`
+- Repro: `grep -rn "debug_never_contains_secret\|serialize_never_contains_secret" crates/baud-secret/` — no results.
+- Scope: add `proptest` dev-dependency; add `debug_never_contains_secret` and `serialize_never_contains_secret` property tests.
+
+#### VR1-m3: baud-keys DoctorReport missing ssh-to-age check and recipient check
+
+Spec §3 states `doctor` checks that `sops`, `age`, and `ssh-to-age` are installed, the OS-correct key path exists, and the current key is a recipient of the selected environment file. The `DoctorReport` struct and `doctor()` check only `sops` and `age` binaries plus key path.
+
+- Spec: `specs/baud-keys.md:98`
+- Scope: add `ssh_to_age_present: bool` field to `DoctorReport`; add a `is_recipient: bool` check verifying the current age key is listed in the sops recipients of the selected yaml file.
+
+#### VR1-m4: baud-keys missing show_redacted_hides_value and rotate_invalidates_old_key tests
+
+Spec §6 requires `show_redacted_hides_value` (output contains `[REDACTED]`, not the real API key) and `rotate_invalidates_old_key` (decryption with old key fails after rotation). Neither exists.
+
+- Spec: `specs/baud-keys.md:128-138`
+- Scope: add both tests once the `show --redacted` and `rotate` commands are implemented (depends on VR1-M7).
+
+#### VR1-m5: StrategySpec is defined with incompatible schemas in baud-driver and baud-proto
+
+`baud-driver/src/lib.rs` defines `StrategySpec` with flat scalar fields (`reservoir_keep: u32`, `reservoir_p_backoff: f64`, `goal_probe: Option<String>`, `goal_value: Option<f64>`). `baud-proto/src/lib.rs` defines a different `StrategySpec` with nested types (`reservoir: Option<Reservoir>`, `goal: Option<Predicate>`). A future `baud-tape-agent` integrating both will encounter a type mismatch.
+
+- Spec: `todo.md:84-85`; `specs/baud-multiverse.md:47`
+- Scope: resolve to one canonical `StrategySpec` in `baud-proto`; update `baud-driver` to import and use it.
+
+#### VR1-m6: Top-level 'adapters' directive in baud-init is silently ignored
+
+`SpecDoc` in `crates/baud-init/src/parse.rs` has no `adapters` field. A spec document with a top-level `adapters:` block lints successfully but the content is silently discarded.
+
+- Spec: `specs/baud-init.md §3` Directives
+- Repro: write a spec with top-level `adapters:` key; `baud spec lint` passes with no warning.
+- Scope: add `adapters` field to `SpecDoc`; parse and validate top-level adapter declarations with the same schema as node-level adapters; add a test for top-level adapter round-trip.
+
+#### VR1-m7: Driver::new missing TacticsSpec parameter from spec API
+
+Spec (baud-driver.md §5 API) defines `Driver::new(seed: u64, strategy: StrategySpec, tactics: TacticsSpec) -> Self`. Implementation has `Driver::new(seed: u64, strategy: StrategySpec)`. The `TacticsSpec` type and tactics tiers are unimplemented.
+
+- Spec: `specs/baud-driver.md §5` (API); `todo.md §4`
+- Scope: define `TacticsSpec` struct with built-in tactic variants; add `tactics` parameter to `Driver::new`; use `tactics` in `next_draw()` to select the appropriate draw strategy.
+
+#### VR1-m8: draw_bits returns u64 instead of Vec<u8> as specified
+
+`crates/baud-driver/src/lib.rs:237` returns `u64`. The spec declares `fn draw_bits(&mut self, n: u32) -> Vec<u8>`.
+
+- Spec: `specs/baud-driver.md §3` (Draw API)
+- Scope: change `draw_bits` return type to `Vec<u8>`; update all call sites.
+
+#### VR1-m9: Replay verification checks observation count not stream hash equality
+
+`crates/baud-server/src/routes/replay.rs:131` sets `verified = replayed.len() == orig_obs_count || orig_obs_count == 0`. A replay producing different observation values but the same count is falsely reported as verified.
+
+- Spec: `specs/baud-journal.md §4` (Reconstruction): "verify observation-stream-hash prefix equality"; `todo.md §7` M3.4 ("replay: ok=true, replay_stream_hash present")
+- Scope: compute a blake3 hash over the ordered observation stream; compare against the stored stream hash from the original run.
+
+#### VR1-m10: baud-server start and stop are no-ops that only print to stderr
+
+`ServerAction::Start` (line 33–36) prints an `eprintln!` and returns `Ok()`. `ServerAction::Stop` (line 37–40) prints and returns `Ok()`. Neither starts nor stops the server process. The `--follow` flag for `baud server logs` is parsed but ignored (route returns a static empty array).
+
+- Spec: `specs/baud-cli.md:55` (baud server start|stop|status|logs [--follow]); `specs/baud-server.md §1`
+- Scope: implement `ServerAction::Start` to spawn the `baud-server` binary as a background process (writing PID to a lock file); implement `Stop` to send SIGTERM to the stored PID; implement `--follow` for `logs` via SSE or file tail.
+
+#### VR1-m11: Spec-mandated test names absent from baud-tracing and baud-stream
+
+`specs/baud-tracing.md §6` specifies `planes_agree_on_healthy_run` and `fallback_emits_same_schema`. `specs/baud-stream.md §7` specifies `frame_hashes_double_run_identical`, `render_is_byte_identical`, and `bad_geometry_is_a_crash`. None of these function names exist in either crate.
+
+- Spec: `specs/baud-tracing.md:91-101`; `specs/baud-stream.md:107-122`
+- Scope: rename or add test functions to match the spec-mandated names exactly; `bad_geometry_is_a_crash` also requires the type fix from VR1-M20.
