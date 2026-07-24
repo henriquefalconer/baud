@@ -44,3 +44,12 @@
 - output tokens (orchestrator-measured): estimated ~8000
 - est. output cost: ~$0.12 (sonnet output rate)
 - All M1 deliverables committed (a689bb9)
+
+## 2026-07-24T05:30:26 UTC - Session usage — iteration 2 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 51691
+- est. output cost: $0.7754 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.1632
+
+## 2026-07-24T06:00:00 UTC - Ralph Build Iteration 3 Start
+- Resuming from M1 (committed at a689bb9)
+- Plan: M2 — baud-init (spec YAML parser + adapter schema) + baud-packages (spec.toml → closure hash) + run routes in server + CLI spec commands + drive/m2.sh

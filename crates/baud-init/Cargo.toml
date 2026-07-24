@@ -1,0 +1,15 @@
+[package]
+name = "baud-init"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Declarative first-boot provisioning: YAML user-data → provision steps + adapters"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

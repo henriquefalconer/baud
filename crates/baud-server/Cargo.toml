@@ -16,6 +16,9 @@ baud-keys = { path = "../baud-keys" }
 baud-tape = { path = "../baud-tape" }
 baud-tape-local = { path = "../baud-tape-local" }
 baud-identity = { path = "../baud-identity" }
+baud-init = { path = "../baud-init" }
+baud-packages = { path = "../baud-packages" }
+serde_yaml = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -28,3 +31,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+blake3 = { workspace = true }

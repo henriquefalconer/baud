@@ -9,6 +9,8 @@ members = [
     "crates/baud-identity",
     "crates/baud-tape",
     "crates/baud-tape-local",
+    "crates/baud-init",
+    "crates/baud-packages",
 ]
 
 [workspace.package]
@@ -39,6 +41,10 @@ hyper = "1"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json"] }
 
+# Config / spec parsing
+serde_yaml = "0.9"
+toml = "0.8"
+
 # Utilities
 anyhow = "1"
 thiserror = "2"
@@ -50,3 +56,4 @@ blake3 = "1"
 rand = "0.8"
 rand_chacha = "0.3"
 async-trait = "0.1"
+tempfile = "3"

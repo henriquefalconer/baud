@@ -1,0 +1,7 @@
+# baud-packages spec for hello-deterministic
+# Produces a static, no-PIE, musl-built C binary from a simple hello program.
+
+[workload]
+name = "hello-deterministic"
+packages = ["stdenv", "musl", "gcc"]
+build = "cc -static -no-pie -o guest hello.c"

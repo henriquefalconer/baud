@@ -1,0 +1,22 @@
+# baud workload spec: hello-deterministic
+#
+# A seeded-PRNG hello program. Single node, reads entropy from the
+# tape via the supervisor's entropy device, writes key=value probes
+# to stdout.
+#
+# This is the first workload spec used in M2 validation.
+# The binary is a static, no-PIE, musl-built C program.
+
+nix: "./flake.nix#hello-deterministic"
+
+env:
+  RUST_BACKTRACE: "0"
+
+nodes:
+  - name: n0
+    argv: ["hello-deterministic"]
+    adapters:
+      input: stdin
+      probes:
+        - stdout-kv
+        - exit-hash

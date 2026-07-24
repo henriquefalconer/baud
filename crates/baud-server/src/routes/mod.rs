@@ -5,6 +5,8 @@ pub mod budget;
 pub mod doctor;
 pub mod health;
 pub mod keys;
+pub mod obs;
 pub mod runs;
 pub mod server;
+pub mod spec;
 pub mod tapes;
