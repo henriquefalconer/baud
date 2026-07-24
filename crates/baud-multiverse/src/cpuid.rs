@@ -80,6 +80,17 @@ const LEAF_EXTENDED_FEATURES: u32 = 0x07; // RDSEED (EBX[18]), TSX HLE (EBX[4]) 
 const LEAF_EXTENDED_TOPOLOGY_V1: u32 = 0x0B;
 const LEAF_EXTENDED_TOPOLOGY_V2: u32 = 0x1F;
 const LEAF_EXTENDED_POWER_MGMT: u32 = 0x8000_0007; // invariant TSC (EDX[8])
+const LEAF_TSC_CRYSTAL: u32 = 0x15; // TSC/core-crystal-clock ratio (EAX=denom, EBX=numer, ECX=Hz)
+const LEAF_PROCESSOR_FREQ: u32 = 0x16; // base/max/bus MHz (EAX/EBX/ECX)
+
+/// The nominal core-crystal-clock frequency (Hz) this table synthesizes into CPUID leaf 15H,
+/// matching `linux::VIRTUAL_TSC_KHZ` exactly (that constant is defined as `TSC_CRYSTAL_HZ / 1000`
+/// so the two never drift apart — one numeric source of truth for "what frequency does baud's
+/// virtual TSC run at").
+pub const TSC_CRYSTAL_HZ: u32 = 1_000_000_000; // 1 GHz
+/// Leaf 16H's base-frequency field is reported in MHz, not Hz — derived from [`TSC_CRYSTAL_HZ`]
+/// (not a second independently-chosen number) for the same reason as `VIRTUAL_TSC_KHZ`.
+pub const PROCESSOR_BASE_MHZ: u32 = TSC_CRYSTAL_HZ / 1_000_000;
 
 const ECX_RDRAND_BIT: u32 = 30;
 const ECX_X2APIC_BIT: u32 = 21;
@@ -97,9 +108,14 @@ const TOPOLOGY_LEVEL_CORE: u32 = 2;
 
 /// Apply the determinism mask table to every served CPUID leaf (specs/baud-multiverse.md §4,
 /// todo.md §3.2): clear RDRAND/RDSEED/TSX-HLE/TSX-RTM/x2APIC, pin the extended-topology leaves to
-/// one core, set the invariant-TSC bit and a fixed hypervisor-present bit. A leaf this table does
-/// not recognize is left untouched — masking is purely subtractive/pinning, never adds new leaves
-/// (leaf presence/absence is `KVM_GET_SUPPORTED_CPUID`'s job, this only edits values).
+/// one core, set the invariant-TSC bit and a fixed hypervisor-present bit, and synthesize the
+/// TSC/crystal-clock ratio leaf (15H) to a fixed value host-independent of whatever (if anything)
+/// the real CPU reports there. Every other leaf this table does not recognize is left untouched —
+/// masking is purely subtractive/pinning, never adds a leaf that was not already present (leaf
+/// presence/absence is otherwise `KVM_GET_SUPPORTED_CPUID`'s job) — 15H is the sole, deliberate
+/// exception: KVM includes it in the supported set on every observed host (present, just often
+/// all-zero), so this only ever overwrites values on an already-present entry, exactly like every
+/// other row here.
 ///
 /// Pure and total: same input entries always produce the same output (`mask_is_deterministic`),
 /// which is what makes a served leaf reproducible across the two runs `cpuid_leaves_are_fixed`
@@ -122,6 +138,36 @@ pub fn apply_determinism_mask<E: CpuidEntry>(entries: &mut [E]) {
             }
             LEAF_EXTENDED_POWER_MGMT if entry.index() == 0 => {
                 entry.set_edx(set_bit(entry.edx(), EDX_INVARIANT_TSC_BIT));
+            }
+            LEAF_TSC_CRYSTAL if entry.index() == 0 => {
+                // Denominator/numerator 1/1 (frequency = crystal Hz, unscaled) + a fixed crystal
+                // Hz: Linux's `native_calibrate_tsc()` (arch/x86/kernel/tsc.c) trusts this leaf
+                // whenever it is non-zero and returns immediately — skipping every other
+                // calibration path, in particular `quick_pit_calibrate()`'s busy-poll of PIT
+                // channel 2 (port 0x42), which hangs forever on baud's subtractive-rule machine
+                // (no PIT is ever emulated). Discovered as a real guest hang on the first real
+                // boot this crate was ever exercised against on actual KVM hardware — every
+                // previous iteration only `cargo check`'d this code, which cannot see a guest
+                // spin forever waiting on an unemulated device.
+                entry.set_eax(1);
+                entry.set_ebx(1);
+                entry.set_ecx(TSC_CRYSTAL_HZ);
+                entry.set_edx(0); // reserved
+            }
+            LEAF_PROCESSOR_FREQ if entry.index() == 0 => {
+                // A *second*, independent early-boot calibration path
+                // (`native_calibrate_cpu_early()`, arch/x86/kernel/tsc.c) tries this leaf (via
+                // `cpu_khz_from_cpuid()`) before falling back to the same unemulated-PIT
+                // `quick_pit_calibrate()` leaf 15H's fix above was written to avoid — synthesizing
+                // 15H alone was not sufficient to stop every PIT-polling path; this leaf needed
+                // the identical treatment, discovered only because the guest kept hanging on port
+                // 0x42 even after the first fix landed. `cpu_khz_from_cpuid()` only requires a
+                // non-zero base-MHz (EAX); base/max are set equal (no boost state to model) and
+                // bus MHz (ECX) is an arbitrary conventional value no calibration path reads.
+                entry.set_eax(PROCESSOR_BASE_MHZ);
+                entry.set_ebx(PROCESSOR_BASE_MHZ);
+                entry.set_ecx(100);
+                entry.set_edx(0);
             }
             _ => {}
         }

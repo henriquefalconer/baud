@@ -411,39 +411,69 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 
 ## 14. Build status (updated as milestones land — not a duplicate of ralph/progress.txt)
 
-- **H0 (capability spike) — logic complete, unvalidated on real hardware.** `crates/baud-host`:
+- **H0 (capability spike) — VALIDATED FOR REAL on real KVM hardware.** The dev machine is now a
+  bare-metal Dell XPS 13 running Ubuntu on WSL2 with `/dev/kvm` genuinely present (`CLAUDE.md`) —
+  the first real KVM host this project has ever had. `drive/h0.sh` passes end-to-end for real:
+  `baud host probe --json` reports `regime="cooperative"`, `kvm/vmx/cpuid/msr_filter/singlestep/
+  rcb_deterministic/tsc_stable/nested = true`, `vendor="intel"`, `capacity=3`. `crates/baud-host`:
   `Host::probe()`/`Probe`/`Regime`/`Vendor`/fleet `Placement` (specs/baud-host.md §3-§5), wired to
   `GET /host/probe` + `baud host probe --json`. Regime-decision logic is hardware-independent and
-  unit-tested via an injectable `CapabilityChecks` seam (`cargo test -p baud-host`). The real Linux
-  backend (`src/linux.rs`: `/dev/kvm`, `/proc/cpuinfo`, `kvm-ioctls`/`kvm-bindings`
-  CPUID/TSC/MSR-filter/single-step, a `perf-event` branch-counter smoke test, `/sys` topology)
-  type-checks (`cargo check --target x86_64-unknown-linux-gnu -p baud-host`) but is **not yet run
-  on real KVM hardware** (no Linux/KVM host on this dev machine — see `CLAUDE.md`,
-  `docs/determinism.md`). `docs/determinism.md` still describes the superseded ptrace/seccomp
-  mechanism below its pivot notice; a full rewrite for KVM/VT-x is still open.
-- **`baud-vcpu` (specs/baud-vcpu.md) — core built, not yet wired into a real VMM.** Exit-dispatch
-  match (`Exit`/`Bus`/`TimeSource`/`dispatch_exit`/`DeterminismHole`, `src/lib.rs`, no wildcard arm
-  — `Exit::Unmodeled` is the only path to `Err`) and the arm-early-then-single-step
-  interrupt-injection engine (`ExecPoint`/`PmuStepper`/`inject_at`, `src/boundary.rs`) are
-  hardware-independent, 15/15 tests pass with no KVM at all. Real Linux half (`src/linux/{mod,
-  pmu}.rs`: `VcpuExit`→`Exit` conversion, thread affinity, `KVM_SET_GUEST_DEBUG` single-step,
-  `perf_event_open` branch counter + SIGIO `LinuxPmuStepper`) type-checks clean but unexercised on
-  real hardware. **Known gap**: `LinuxPmuStepper` uses process-wide `F_SETOWN`, not
-  `F_SETOWN_EX(F_OWNER_TID, ...)` — revisit once the one-VMM-thread/one-vCPU-thread model lands
-  (documented in `pmu.rs`'s module doc). Not yet a dependency of `baud-multiverse`.
-- **`baud-multiverse` boot flow (specs/baud-multiverse.md §2) — built, unexercised on real
-  hardware.** `cpuid.rs` (determinism mask table, 7 tests incl. a proptest fuzz), `layout.rs`
-  (fixed guest-physical addresses + `build_identity_page_tables`, 6 tests), `linux/{mod,
-  pagetables,bootparams}.rs` (`Kvm::new`→`create_vm`→zeroed RAM→`create_vcpu`→CPUID mask→identity
-  page tables→64-bit long mode via `KVM_SET_SREGS`→MSR filter for
-  `IA32_TSC`/`_DEADLINE`/`_AUX`→`KVM_SET_TSC_KHZ`→`linux_loader` kernel load→`boot_params`→RIP at
-  direct-boot entry), `timesource.rs` (`WorkClock<C: BranchCounter>`: `virtual_tsc = base + k *
-  rcb`, 5 tests, hardware-independent), `console.rs` (`Console`: COM1 16550 UART on
-  `vm_superio::Serial`, `DeviceBus` composing console + open-bus fallback, 5 tests,
-  hardware-independent), `linux/mod.rs`'s `LinuxBranchCounter` (perf-event-based) and
-  `linux::Multiverse` (`boot`/`run_to_first_halt` → `HaltOutcome{console_output, ram_hash}` — H1's
-  target). All type-check/clippy-clean cross-target but **not yet booted on real KVM hardware**
-  (same missing-host caveat throughout). 28/28 native tests pass (`cargo test -p baud-multiverse`).
+  unit-tested via an injectable `CapabilityChecks` seam (`cargo test -p baud-host`); the real Linux
+  backend (`src/linux.rs`) is no longer just type-checked, it is confirmed correct against real
+  hardware. `docs/determinism.md` still describes the superseded ptrace/seccomp mechanism below its
+  pivot notice; a full rewrite for KVM/VT-x is still open.
+- **`baud-vcpu` (specs/baud-vcpu.md) — core built; the real Linux run loop is now exercised for
+  real.** Exit-dispatch match (`Exit`/`Bus`/`TimeSource`/`dispatch_exit`/`DeterminismHole`,
+  `src/lib.rs`, no wildcard arm — `Exit::Unmodeled` is the only path to `Err`) and the
+  arm-early-then-single-step interrupt-injection engine (`ExecPoint`/`PmuStepper`/`inject_at`,
+  `src/boundary.rs`) are hardware-independent, 15/15 tests pass with no KVM at all. Real Linux half
+  (`src/linux/mod.rs`'s `convert_exit`/`run_until_halted`/`run_one_exit`) is now called for real by
+  `baud-multiverse::linux::Multiverse::run_to_first_halt` and confirmed correct against real
+  `/dev/kvm` (`double_boot_memory_identical`, see below) — `pmu.rs`'s `LinuxPmuStepper` (interrupt
+  injection specifically, H4) remains unexercised. **Known gap**: `LinuxPmuStepper` uses
+  process-wide `F_SETOWN`, not `F_SETOWN_EX(F_OWNER_TID, ...)` — revisit once the one-VMM-thread/
+  one-vCPU-thread model lands (documented in `pmu.rs`'s module doc).
+- **`baud-multiverse` boot flow (specs/baud-multiverse.md §2) — BOOTS A REAL GUEST on real KVM
+  hardware (H1, todo.md §10 — this project's first real KVM boot).** `cpuid.rs` (determinism mask
+  table, now 9 rows incl. two added this iteration — see below), `layout.rs` (fixed
+  guest-physical addresses + `build_identity_page_tables`, 6 tests), `linux/{mod,pagetables,
+  bootparams}.rs` (`Kvm::new`→`create_vm`→zeroed RAM→`create_vcpu`→CPUID mask→identity page
+  tables→64-bit long mode via `KVM_SET_SREGS`→MSR filter for `IA32_TSC`/`_DEADLINE`/`_AUX`→
+  `KVM_SET_TSC_KHZ`→`linux_loader` bzImage load→`boot_params`→RIP at direct-boot entry),
+  `timesource.rs` (`WorkClock<C: BranchCounter>`, hardware-independent), `console.rs` (`Console`:
+  COM1 16550 UART, plus a new `Cmos` shim — see below), `linux::Multiverse` (`boot`/
+  `run_to_first_halt` → `HaltOutcome{console_output, ram_hash}`). 50/50 native tests pass
+  (`cargo test -p baud-multiverse`, up from 28), and `linux::tests::double_boot_memory_identical`
+  (specs/baud-multiverse.md §3.1's named test) now runs for real: boots `tests/fixtures/hello-guest/
+  bzImage` (a hand-assembled 17-byte payload wrapped in a minimal valid bzImage — see that
+  directory's `BUILD.md` for exactly why, and why *not* a real Linux kernel yet) twice against
+  actual `/dev/kvm`, asserts the console marker and RAM `blake3` hash are byte-identical across
+  both boots. `drive/h1.sh` was rewritten to drive this for real (superseding the pre-pivot
+  ptrace-era version).
+  - **Three real, previously-unexercised production bugs found and fixed by this first real
+    boot** (none reachable by `cargo check --target x86_64-unknown-linux-gnu`, all in code no
+    prior iteration could run): (1) `linux::configure_msr_filter` set an empty
+    `MsrFilterRangeFlags` (kernel rejects `flags == 0` outright, `KVM_X86_SET_MSR_FILTER`) with an
+    "allow" bitmap bit (backwards — would have let TSC MSR accesses bypass the work-clock even
+    past the flags bug); fixed to `READ | WRITE` flags + a "deny" bit. (2) `pagetables::
+    long_mode_sregs` left `TR` an all-zero `kvm_segment` (`present=0`, `unusable` also `0`) — VMX
+    requires TR always present with a valid busy-TSS type (its unusable bit is reserved, unlike
+    every other segment register) — VM-entry failed outright (`KVM_EXIT_FAIL_ENTRY`,
+    `EXIT_REASON_INVALID_STATE`); fixed with a minimal valid TR descriptor, `LDTR` explicitly
+    marked unusable. (3) A real Linux kernel (the fixture's first, since-replaced version) hung
+    forever polling PIT channel 2 (port `0x42`, `quick_pit_calibrate`/
+    `native_calibrate_cpu_early`) because CPUID leaves `15H`/`16H` were present-but-zero; fixed by
+    synthesizing both leaves in `cpuid.rs`'s mask table to a value matching `VIRTUAL_TSC_KHZ`
+    (`LEAF_TSC_CRYSTAL`/`LEAF_PROCESSOR_FREQ`, `TSC_CRYSTAL_HZ`/`PROCESSOR_BASE_MHZ`) — and a
+    second hang on CMOS RTC ports `0x70`/`0x71` (the open-bus fallback's fixed `0xFF` always read
+    as "Update In Progress"), fixed with a new deterministic `Cmos` shim in `console.rs` (always
+    reports UIP clear). All three fixes carry unit tests; full provenance and the exact bug
+    mechanics are documented in `tests/fixtures/hello-guest/BUILD.md`.
+  - **Not yet done, now unblocked**: booting a *real* Linux kernel end-to-end needs H4 (timer
+    interrupt injection — `baud-vcpu::boundary`'s arm-early-then-single-step engine exists but
+    is not wired into this crate's run loop yet) so `calibrate_delay()`/the scheduler tick have
+    something to wait on; `hello-guest`'s hand-assembled payload deliberately has no such
+    dependency and is not a placeholder for that work, just this crate's own H1 fixture.
 - **`baud-tape-device` (specs/baud-tape-device.md) — built and wired into `baud-multiverse`'s
   device bus.** New crate (deps = `{baud-proto}` only): `TapeDevice` (pure function of tape bytes +
   guest register writes, `pio_read`/`pio_write` at DATA/CONTROL/STATUS), `ControlOp`
@@ -584,16 +614,14 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     driver/shim binary itself (the code `CONFIG_BAUD_TAPE_DEVICE=y` would compile), remain open —
     both need a real kernel-build toolchain (Nix + a Linux kernel source tree), not available on
     this dev machine, and are the natural next `baud-packages` increment.
-- **Stale pre-pivot drive scripts found this iteration (not fixed — out of scope, documented for
-  whoever touches `drive/` next)**: `drive/h1.sh`/`h2.sh`/`h3.sh` already exist as files but
-  validate the *old* ptrace-era H1-H3 definitions (`clone_syscall_is_killed`,
-  `rdtsc_is_trapped_and_served_virtual_time`, "supervisor MVP") from before the KVM-pivot rewrite
-  of this plan — they do **not** match the H1-H3 this document's §10 now defines (boot a guest,
-  deterministic double-run, randomness/time control via KVM). They still pass (they test
-  `crates/baud-multiverse`'s untouched pre-pivot `lib.rs` simulation code, which nothing has
-  removed), so they are not lying about anything they claim, but they are testing a different,
-  no-longer-current plan. A future iteration should either rewrite them to match the current H1-H3
-  (needs a real KVM host to mean anything) or clearly mark/rename them as legacy until then.
+- **`drive/h1.sh` rewritten this iteration to match the current KVM-era H1** (the prior version
+  tested the pre-pivot ptrace-era "supervisor MVP" — see the H1 boot-flow entry above): now runs
+  `baud host probe` (asserts a non-rejected regime) then `cargo test -p baud-multiverse
+  double_boot_memory_identical`, both against real `/dev/kvm`. **`drive/h2.sh`/`h3.sh` remain
+  stale** (still validate the old ptrace-era `rdtsc_is_trapped_and_served_virtual_time`/etc.
+  definitions, not this document's §10 H2/H3) — the natural next drive-script increment, same
+  rewrite pattern `h1.sh` now demonstrates, needs H2's actual double-run/CPUID-fixed-leaves
+  behavior exercised for real first.
 - H2-H6 and the rest of the M-series remain **not yet started** beyond the above.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a

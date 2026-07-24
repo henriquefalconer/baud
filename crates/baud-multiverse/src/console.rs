@@ -133,14 +133,77 @@ impl Bus for Console {
     fn mmio_write(&mut self, _addr: u64, _data: &[u8]) {}
 }
 
-/// Composes [`Console`] (COM1) and [`TapeBus`] (the tape device, specs/baud-tape-device.md) with
-/// [`OpenBusFallback`] for every other address — the device bus the boot flow's run loop
-/// dispatches every exit through (`linux::Multiverse`). Matches todo.md §3.6's subtractive rule:
-/// "down to a console plus the tape device."
+/// The legacy CMOS RTC index/data port pair (ports 0x70/0x71) — not a real clock (todo.md §3.6:
+/// "no real RTC ... deleted entirely"), but Linux's `mach_get_cmos_time()` (`arch/x86/kernel/
+/// rtc.c`) reads these two ports unconditionally at boot on every x86 kernel, regardless of any
+/// `CONFIG_RTC_*` setting (those Kconfig symbols — the ones `baud image lint` checks, todo.md §4 —
+/// gate the `/dev/rtc` *driver*, not this always-compiled-in early-boot platform code). Found as a
+/// second real guest hang on the very first real-KVM boot this crate was ever exercised against,
+/// right after the CPUID-leaf PIT-calibration hang (`cpuid.rs`'s `LEAF_TSC_CRYSTAL`/
+/// `LEAF_PROCESSOR_FREQ` doc): `mach_get_cmos_time` first polls Status Register A's "Update In
+/// Progress" bit (bit 7) until it reads clear, but this port pair was previously unhandled and
+/// fell through to [`OPEN_BUS_BYTE`] (`0xFF`) — all bits set, so the UIP bit *always* read as
+/// "busy", spinning the guest forever. [`Cmos`] answers deterministically instead: UIP (and every
+/// other register this shim is asked for) always reads `0`, so the poll loop exits on its first
+/// read and `mach_get_cmos_time` parses a fixed (all-BCD-zero, binary/BCD mode from Status
+/// Register B's cleared bit 2) but *reproducible* date — accuracy of the parsed date is not a
+/// baud guarantee (no real clock exists on this machine), determinism of it is.
+pub const CMOS_ADDR_PORT: u16 = 0x70;
+pub const CMOS_DATA_PORT: u16 = 0x71;
+
+/// A minimal, stateless-in-effect CMOS/MC146818 RTC index+data port shim: every data-register read
+/// returns a fixed `0`, regardless of which register was last selected via the index port. This
+/// happens to already answer "Update In Progress" (Status Register A, bit 7) as clear and
+/// "binary/BCD + 12/24h" (Status Register B) as BCD/12h — the two register reads
+/// `mach_get_cmos_time` actually branches on — so no register-selection state needs to be modeled,
+/// tracked, or captured by a snapshot for this shim's output to stay reproducible.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Cmos;
+
+impl Cmos {
+    pub(crate) fn in_range(port: u16) -> bool {
+        port == CMOS_ADDR_PORT || port == CMOS_DATA_PORT
+    }
+}
+
+impl Bus for Cmos {
+    fn pio_read(&mut self, port: u16, data: &mut [u8]) {
+        // Both the index port (0x70, real hardware treats it as write-only/undefined-on-read) and
+        // the data port (0x71) read as a fixed `0` here — see this type's doc for why that value
+        // in particular is what keeps `mach_get_cmos_time`'s poll loop from hanging.
+        debug_assert!(Self::in_range(port));
+        if let Some(first) = data.first_mut() {
+            *first = 0;
+        }
+        if data.len() > 1 {
+            data[1..].fill(OPEN_BUS_BYTE);
+        }
+    }
+
+    fn pio_write(&mut self, _port: u16, _data: &[u8]) {
+        // Register-index writes (0x70) and any data writes (0x71, real hardware only accepts
+        // these when unlocked for clock-setting) are both absorbed silently: this shim never
+        // varies its read response by selected register, so there is nothing to record.
+    }
+
+    fn mmio_read(&mut self, _addr: u64, data: &mut [u8]) {
+        data.fill(OPEN_BUS_BYTE);
+    }
+
+    fn mmio_write(&mut self, _addr: u64, _data: &[u8]) {}
+}
+
+/// Composes [`Console`] (COM1), [`Cmos`] (ports 0x70/0x71), and [`TapeBus`] (the tape device,
+/// specs/baud-tape-device.md) with [`OpenBusFallback`] for every other address — the device bus
+/// the boot flow's run loop dispatches every exit through (`linux::Multiverse`). Matches todo.md
+/// §3.6's subtractive rule: "down to a console plus the tape device" (`Cmos` is not a fourth real
+/// device in the same sense — it never reads real time or real hardware, it exists only to
+/// terminate a boot-time poll loop deterministically, see that type's doc).
 #[derive(Default)]
 pub struct DeviceBus {
     pub console: Console,
     pub tape: TapeBus,
+    cmos: Cmos,
     fallback: OpenBusFallback,
 }
 
@@ -163,7 +226,12 @@ impl DeviceBus {
     pub fn restore(tape: Vec<u8>, tape_cursor: u64, console_output: Vec<u8>) -> Self {
         let mut tape_bus = TapeBus::new(tape);
         tape_bus.device_mut().restore_cursor(tape_cursor);
-        DeviceBus { console: Console::with_output(console_output), tape: tape_bus, fallback: OpenBusFallback }
+        DeviceBus {
+            console: Console::with_output(console_output),
+            tape: tape_bus,
+            cmos: Cmos,
+            fallback: OpenBusFallback,
+        }
     }
 }
 
@@ -173,6 +241,8 @@ impl Bus for DeviceBus {
             self.console.pio_read(port, data);
         } else if TapeBus::in_range(port).is_some() {
             self.tape.pio_read(port, data);
+        } else if Cmos::in_range(port) {
+            self.cmos.pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -183,6 +253,8 @@ impl Bus for DeviceBus {
             self.console.pio_write(port, data);
         } else if TapeBus::in_range(port).is_some() {
             self.tape.pio_write(port, data);
+        } else if Cmos::in_range(port) {
+            self.cmos.pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }
@@ -240,6 +312,29 @@ mod tests {
         let mut other_port = [0u8; 1];
         bus.pio_read(0x80, &mut other_port); // POST diagnostic port, not COM1 or the tape device
         assert_eq!(other_port, [OPEN_BUS_BYTE]);
+    }
+
+    /// The bug this type exists to fix, made concrete: reading Status Register A's "Update In
+    /// Progress" bit (bit 7) through the raw [`Cmos`] shim (not the fixed [`OPEN_BUS_BYTE`] a
+    /// pre-fix unhandled port would have returned) must never read as set, or
+    /// `mach_get_cmos_time`'s poll loop hangs forever (this crate's `linux::tests::
+    /// double_boot_memory_identical` hung on exactly this, against real KVM hardware, before this
+    /// device existed).
+    #[test]
+    fn cmos_status_register_a_never_reports_update_in_progress() {
+        let mut cmos = Cmos;
+        cmos.pio_write(CMOS_ADDR_PORT, &[0x0A]); // select Status Register A
+        let mut value = [0xFFu8]; // start from a value that WOULD show UIP set, to prove it's overwritten
+        cmos.pio_read(CMOS_DATA_PORT, &mut value);
+        assert_eq!(value[0] & 0b1000_0000, 0, "UIP bit must read clear or the guest's poll loop hangs");
+    }
+
+    #[test]
+    fn device_bus_routes_cmos_ports_to_the_cmos_shim_not_open_bus() {
+        let mut bus = DeviceBus::default();
+        let mut value = [0xFFu8];
+        bus.pio_read(CMOS_DATA_PORT, &mut value);
+        assert_eq!(value, [0], "CMOS data-port reads must not fall through to open-bus (0xFF)");
     }
 
     #[test]

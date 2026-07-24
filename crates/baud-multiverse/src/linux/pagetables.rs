@@ -98,11 +98,51 @@ pub fn long_mode_sregs() -> kvm_sregs {
         efer: EFER_LME | EFER_LMA,
         ..Default::default()
     };
-    // `tr`/`ldt` stay unusable (default-zeroed `kvm_segment`, `unusable` left `0`... KVM treats an
-    // all-zero segment with `present = 0` as not present, which is correct here: this boot flow
-    // never uses a task register or an LDT).
-    sregs.tr.selector = 0;
-    sregs.ldt.selector = 0;
+    // VMX's guest-state-area checks (Intel SDM Vol 3C S26.3.1.2) treat TR and LDTR asymmetrically:
+    // LDTR has a real "unusable" bit (16) it is legal to set, but TR's corresponding bit is
+    // *reserved and must be 0* -- TR must always be a valid, present segment of type 3 (16-bit
+    // busy TSS) or 11 (32-bit/64-bit busy TSS), never "unusable". A from-scratch all-zero
+    // `kvm_segment` (this function's earlier revision left `tr` at `Default::default()`, only
+    // overwriting `selector`) has `present = 0` with `unusable` *also* 0 -- exactly the
+    // "not present, but not marked unusable either" combination VM-entry rejects outright
+    // (`KVM_EXIT_FAIL_ENTRY`, `hardware_entry_failure_reason = EXIT_REASON_INVALID_STATE`,
+    // caught for real for the first time by this crate's own `scratch_real_boot_smoke` test
+    // against real KVM hardware; every previous iteration only `cargo check`'d this file, which
+    // cannot catch a hardware VM-entry rejection). This boot flow never executes `LTR`/`LLDT`, so
+    // there is no real in-memory TSS/LDT descriptor to point at -- give TR the smallest valid
+    // "busy 32-bit TSS" descriptor VMX will accept (present, correct type, zero base/limit, never
+    // referenced by the guest) and mark LDTR unusable (legal, and accurate: no LDT exists).
+    sregs.tr = kvm_segment {
+        base: 0,
+        limit: 0xFFFF,
+        selector: 0,
+        type_: 0xB, // busy 32-bit (or 64-bit, in long mode) TSS -- the only present-segment type
+        // VMX's invalid-guest-state check accepts for TR (SDM Vol 3C Table in S26.3.1.2).
+        present: 1,
+        dpl: 0,
+        db: 0,
+        s: 0, // TR is a system-segment descriptor, not code/data
+        l: 0,
+        g: 0,
+        avl: 0,
+        unusable: 0,
+        padding: 0,
+    };
+    sregs.ldt = kvm_segment {
+        base: 0,
+        limit: 0,
+        selector: 0,
+        type_: 0,
+        present: 0,
+        dpl: 0,
+        db: 0,
+        s: 0,
+        l: 0,
+        g: 0,
+        avl: 0,
+        unusable: 1, // legal for LDTR (unlike TR): no LDT exists on this boot path
+        padding: 0,
+    };
     sregs
 }
 

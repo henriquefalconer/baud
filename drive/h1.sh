@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Henrique Falconer. All rights reserved.
-# drive/h1.sh — H1 drive script: supervisor MVP
+# drive/h1.sh — H1 drive script: boot a real guest (specs/baud-multiverse.md's KVM/VT-x pivot,
+# todo.md §10's H1 definition)
 #
-# Validates the baud-multiverse supervisor MVP:
-#   H1.1  baud-multiverse crate builds
-#   H1.2  double_run_is_bit_identical test passes (core determinism claim)
-#   H1.3  clone_syscall_is_killed test passes (contract enforcement)
-#   H1.4  rdtsc_is_trapped_and_served_virtual_time test passes (TSC virtualization)
-#   H1.5  allowlist correctly permits/denies the expected syscall set
-#   H1.6  Two runs with the same tape produce identical observation stream hashes
-#   H1.7  workload-noun CI grep CLEAN
+# H1's spec: "The run loop boots a minimal guest kernel that prints to the serial console; clean
+# Hlt/Shutdown." This validates that for real against actual /dev/kvm — this is NOT the pre-pivot
+# ptrace/seccomp "supervisor MVP" a prior version of this script tested (todo.md §14 flagged that
+# version as testing a superseded milestone definition; this rewrite replaces it now that real KVM
+# hardware exists to make the current H1 meaningful, per that same todo.md entry's own suggestion).
+#
+#   H1.1  baud-multiverse crate builds for the real target (kvm-ioctls/kvm-bindings/linux-loader
+#         linked, not just `cargo check`)
+#   H1.2  double_boot_memory_identical passes: boots crates/baud-multiverse/tests/fixtures/
+#         hello-guest/bzImage twice against real /dev/kvm, asserts the console marker and
+#         guest-RAM blake3 hash are byte-identical across both boots
+#   H1.3  baud host probe still reports a non-rejected regime (the real hardware this milestone
+#         needs is still present — a fast, early sanity check before trusting H1.2's result)
 
 set -euo pipefail
 
@@ -22,121 +28,67 @@ pass() { echo "  [PASS] $*"; }
 fail() { echo "  [FAIL] $*" >&2; exit 1; }
 
 echo ""
-echo "=== H1: Supervisor MVP ==="
+echo "=== H1: Boot a real guest ==="
 echo ""
 
 # ---------------------------------------------------------------------------
-# H1.1 — build baud-multiverse
+# H1.3 (checked first — cheap, and everything below is meaningless without it) — real KVM present.
+# Same pattern as drive/h0.sh: `baud host probe` is a CLI-to-server call, so a server needs to be
+# up first.
+# ---------------------------------------------------------------------------
+log "Building baud-host/baud-server/baud-cli..."
+cargo build -q -p baud-host -p baud-server -p baud-cli 2>&1
+
+REPO_ROOT="$(pwd)"
+BAUD="$REPO_ROOT/target/debug/baud"
+BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
+DB_FILE="$(mktemp -t baud-h1-XXXXXX.sqlite)"
+DB_FILE="$(cygpath -m "$DB_FILE" 2>/dev/null || echo "$DB_FILE")"
+
+cleanup() {
+    if [[ -n "${SERVER_PID:-}" ]]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    sleep 0.2
+    rm -f "$DB_FILE" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+log "Starting baud-server..."
+pkill -f "baud-server" 2>/dev/null || true; sleep 0.2
+BAUD_DB="sqlite://${DB_FILE}?mode=rwc" "$BAUD_SERVER_BIN" &
+SERVER_PID=$!
+sleep 1
+
+log "baud host probe --json"
+PROBE_JSON="$("$BAUD" host probe --json)" || fail "H1.3: 'baud host probe --json' FAILED to run"
+echo "$PROBE_JSON"
+REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
+if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
+    fail "H1.3: host probe regime is '$REGIME' — no real /dev/kvm, H1 cannot mean anything here."
+fi
+pass "H1.3: host probe regime='$REGIME' (real KVM present)"
+
+# ---------------------------------------------------------------------------
+# H1.1 — build baud-multiverse for real (links kvm-ioctls/kvm-bindings/linux-loader)
 # ---------------------------------------------------------------------------
 log "Building baud-multiverse..."
 cargo build -q -p baud-multiverse 2>&1 || fail "H1.1: baud-multiverse build FAILED"
-pass "H1.1: baud-multiverse builds"
+pass "H1.1: baud-multiverse builds (real KVM boot flow linked)"
 
 # ---------------------------------------------------------------------------
-# H1.2-H1.5 — run the three normative tests (from specs/baud-multiverse.md §8)
+# H1.2 — the real boot, twice, against actual /dev/kvm
 # ---------------------------------------------------------------------------
-log "Running baud-multiverse normative tests..."
-TEST_OUT=$(cargo test -p baud-multiverse 2>&1)
+log "Running double_boot_memory_identical against real /dev/kvm..."
+TEST_OUT=$(cargo test -q -p baud-multiverse double_boot_memory_identical -- --test-threads=1 2>&1)
 echo "$TEST_OUT"
 
-if echo "$TEST_OUT" | grep -q "double_run_is_bit_identical ... ok"; then
-    pass "H1.2: double_run_is_bit_identical PASSED"
+if echo "$TEST_OUT" | grep -q "test result: ok"; then
+    pass "H1.2: double_boot_memory_identical PASSED — real guest booted, console marker matched, RAM hash identical across two boots"
 else
-    fail "H1.2: double_run_is_bit_identical FAILED"
+    fail "H1.2: double_boot_memory_identical FAILED"
 fi
-
-if echo "$TEST_OUT" | grep -q "clone_syscall_is_killed ... ok"; then
-    pass "H1.3: clone_syscall_is_killed PASSED"
-else
-    fail "H1.3: clone_syscall_is_killed FAILED"
-fi
-
-if echo "$TEST_OUT" | grep -q "rdtsc_is_trapped_and_served_virtual_time ... ok"; then
-    pass "H1.4: rdtsc_is_trapped_and_served_virtual_time PASSED"
-else
-    fail "H1.4: rdtsc_is_trapped_and_served_virtual_time FAILED"
-fi
-
-if echo "$TEST_OUT" | grep -q "allowlist_has_expected_syscalls ... ok"; then
-    pass "H1.5: allowlist_has_expected_syscalls PASSED"
-else
-    fail "H1.5: allowlist_has_expected_syscalls FAILED"
-fi
-
-# ---------------------------------------------------------------------------
-# H1.6 — programmatic double-run check via the Rust API
-# ---------------------------------------------------------------------------
-log "Verifying double-run determinism via inline Rust test..."
-
-DOUBLE_RUN_SCRIPT=$(cat << 'RUST_EOF'
-use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
-use std::path::PathBuf;
-
-fn make_manifest(n: usize) -> RunManifest {
-    let guests = (0..n).map(|i| GuestSpec {
-        node_id: i as u32,
-        binary: PathBuf::from(""),
-        argv: Vec::new(),
-    }).collect();
-    RunManifest { guests, ..Default::default() }
-}
-
-fn main() {
-    let tape: Vec<u8> = (0u8..=63).map(|i| i.wrapping_mul(37).wrapping_add(13)).collect();
-    let manifest = make_manifest(3);
-
-    // Run 1
-    let mut m1 = Multiverse::load(manifest.clone()).unwrap();
-    let mut t1 = TapeDrawSource::new(tape.clone());
-    let obs1 = m1.run(&mut t1).unwrap();
-
-    // Run 2
-    let mut m2 = Multiverse::load(manifest.clone()).unwrap();
-    let mut t2 = TapeDrawSource::new(tape.clone());
-    let obs2 = m2.run(&mut t2).unwrap();
-
-    if obs1.stream_hash() != obs2.stream_hash() {
-        eprintln!("DIVERGENCE: run1={} run2={}", obs1.stream_hash(), obs2.stream_hash());
-        std::process::exit(1);
-    }
-    println!("stream_hash={}", obs1.stream_hash());
-    println!("observations={}", obs1.observations.len());
-}
-RUST_EOF
-)
-
-# We rely on the cargo test passing H1.2 as the authoritative check.
-# The inline script above is documentation of the API shape.
-pass "H1.6: double-run determinism verified by double_run_is_bit_identical test"
-
-# ---------------------------------------------------------------------------
-# H1.7 — workload-noun CI grep
-# ---------------------------------------------------------------------------
-log "Checking workload-noun CI grep..."
-NOUN_HITS=$(grep -rn --include="*.rs" -E "\b(mario|emulator|joypad)\b|\bnes\b" \
-    crates/baud-*/src/ 2>/dev/null || true)
-RAFTLET_HITS=$(grep -rn --include="*.rs" -E "\braftlet\b" \
-    crates/baud-proto/src/ \
-    crates/baud-driver/src/ \
-    crates/baud-server/src/ \
-    crates/baud-journal/src/ \
-    crates/baud-stream/src/ \
-    crates/baud-init/src/ \
-    crates/baud-packages/src/ \
-    crates/baud-identity/src/ \
-    crates/baud-tape/src/ \
-    crates/baud-tape-local/src/ \
-    crates/baud-secret/src/ \
-    crates/baud-keys/src/ \
-    crates/baud-tracing/src/ \
-    crates/baud-multiverse/src/ \
-    2>/dev/null || true)
-if [[ -n "$NOUN_HITS" || -n "$RAFTLET_HITS" ]]; then
-    echo "$NOUN_HITS" >&2
-    echo "$RAFTLET_HITS" >&2
-    fail "H1.7: workload noun found in infra crates — CI grep FAILED"
-fi
-pass "H1.7: workload-noun CI grep CLEAN"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -144,15 +96,15 @@ pass "H1.7: workload-noun CI grep CLEAN"
 echo ""
 echo "=== H1 milestone: ALL CHECKS PASSED ==="
 echo ""
-echo "New crate: crates/baud-multiverse/"
-echo "  - Multiverse::load(manifest) -> Result<Multiverse>"
-echo "  - Multiverse::run(&mut self, tape) -> Result<ObservationStream>"
-echo "  - DrawSource trait + TapeDrawSource implementation"
-echo "  - Allowlist (25 permitted syscalls)"
-echo "  - Device models: ClockDevice, EntropyDevice, FsDevice, InputDevice, NetDevice, ExitDevice"
-echo "  - Syscall log (SyscallLogEntry)"
+echo "crates/baud-multiverse/src/linux/: real KVM/VT-x boot flow"
+echo "  - Kvm::new -> create_vm -> zeroed guest RAM -> create_vcpu -> CPUID mask + MSR filter"
+echo "    -> identity page tables -> 64-bit long mode -> linux-loader bzImage load -> KVM_RUN"
+echo "  - Multiverse::boot(kernel_path, cmdline, base, k, tape) -> Result<Multiverse>"
+echo "  - Multiverse::run_to_first_halt(&mut self) -> Result<HaltOutcome>"
 echo ""
-echo "Exit criterion met: double-run test passes on a static hello guest (simulation mode)."
-echo "Full ptrace/seccomp integration validated in H0 sandbox capability spike."
+echo "Fixture: crates/baud-multiverse/tests/fixtures/hello-guest/ (see BUILD.md)"
+echo ""
+echo "Exit criterion met: the same guest image + tape boots to an identical console + RAM state"
+echo "twice in a row on real /dev/kvm (regime=$REGIME)."
 echo ""
 echo "Run H2 next: ./drive/h2.sh"

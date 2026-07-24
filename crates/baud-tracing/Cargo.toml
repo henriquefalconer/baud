@@ -15,6 +15,7 @@ thiserror = { workspace = true }
 blake3 = { workspace = true }
 uuid = { workspace = true }
 libc = "0.2"
+tracing = { workspace = true }
 
 # aya: Linux-only eBPF library for loading prebuilt CO-RE probes.
 # On Linux, the Native path uses aya to load .bpf.o objects from the probe set

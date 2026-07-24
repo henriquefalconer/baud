@@ -1395,3 +1395,58 @@ Post-push verification: git fetch will confirm origin/main == local HEAD after p
 ---
 
 Post-push verification: git fetch confirms origin/main == local HEAD (67710019f4cb00bc8e8df339edaf276468ff0e4e). Iteration 11 complete -- ending with NEXT (todo.md still has pending items: Snapshot::branch userfaultfd blocker, baud-snapshot-store wiring, in-guest tape driver, H1-H6 real-hardware validation, M-series).
+
+## 2026-07-24T17:16:57 UTC - Session usage — iteration 11 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 36877
+- est. output cost: $0.5532 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 12
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying specs/*, todo.md build status, and the previous session's progress.txt tail (which shows an interrupted iteration 12 that recorded no further progress after 'Finding most important item to address' -- treating it as abandoned/no-op, not carrying forward any partial state). CLAUDE.md now documents a full WSL2 Ubuntu KVM host setup on this bare-metal Dell XPS box (commits c92a5ce/92f1a78/e87b073) that did not exist in prior iterations -- checking whether /dev/kvm is now actually reachable, since real-hardware H1 (boot a guest) has been the single biggest blocked milestone across all 11 prior iterations.
+
+Confirmed real KVM is reachable: /dev/kvm exists (crw-rw---- root:kvm), user baud is in the kvm group (no sudo needed), grep vmx /proc/cpuinfo reports 16, and WSL's Linux cargo/rustc 1.97.1 are present at /home/baud/.cargo/bin. This is a first: no prior iteration had real KVM hardware. Chose real-hardware H0 validation (baud host probe against actual /dev/kvm, replacing the always-rejected Windows-side probe) as the most important next step, with real-hardware H1 (boot the hello guest via drive/h1.sh) as the natural follow-on if H0 comes back green -- both are the top of todo.md's explicitly-pending list and unlock everything gated on 'not yet exercised on real KVM hardware' throughout section 14. Checking repo reachability from WSL and running cargo build there first...
+
+Found and fixed a real, previously-undetected bug while getting the workspace to build on the real WSL2/Linux host: crates/baud-tracing/src/lib.rs's aya-backed (target_os=linux-only) load_native_probes() calls tracing::debug!/tracing::warn! but crates/baud-tracing/Cargo.toml never declared the 'tracing' crate as a dependency -- E0433 unresolved-crate. No prior iteration caught this because it only surfaces on an actual Linux target build with a linker (cargo check --target x86_64-unknown-linux-gnu, used throughout prior iterations on the Windows box, does typecheck but this specific crate/cfg combination was apparently never checked that way either). Fixed by adding tracing = { workspace = true } (already a pinned workspace dependency at version 0.1, used by other crates). Re-running cargo build --workspace inside WSL to confirm and continue toward real-hardware H0/H1...
+
+cargo build --workspace now succeeds end-to-end in WSL against real KVM hardware (1m15s, 0 errors). Running cargo test --workspace next, then baud host probe for real (the first-ever real, non-rejected regime probe in this project's history), then drive/h0.sh and drive/h1.sh (H1 = boot a real guest kernel, the single most consequential unblocked milestone).
+
+Full workspace tests all pass on real Linux/WSL2 (0 failures across every crate). Running baud host probe for real now -- this will be the first non-Windows-rejected probe result in this project's history.
+
+MAJOR MILESTONE: drive/h0.sh PASSED for REAL on real KVM hardware for the first time in this project's history -- regime='cooperative' (not 'rejected'). Full probe: kvm=true vmx=true cpuid=true msr_filter=true singlestep=true rcb_deterministic=true tsc_stable=true nested=true vendor=intel capacity=3. All of H0's hardware-independent logic (previously only unit-tested) is now confirmed correct against the real kernel/CPU. Moving to H1 (boot a real guest kernel) next -- checking what drive/h1.sh currently does (todo.md flags it as testing the OLD pre-pivot ptrace-era H1, not the current KVM-era H1: boot a minimal guest kernel, assert console output, double_boot_memory_identical) and whether a real bootable guest kernel image exists anywhere in the repo yet.
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... resuming from a prior interrupted session (found uncommitted work-tree state: crates/baud-tracing/Cargo.toml missing a tracing dependency, now fixed, plus a progress.txt log showing drive/h0.sh had JUST PASSED FOR REAL against real KVM hardware in WSL2, and the session was about to check for a real bootable guest kernel image to attempt H1). Also found and cleaned up a large amount of CRLF/LF line-ending churn across ~146 files in the work tree (pure whitespace, no content differences under 'git diff -b') left over from a prior Windows-side session touching this same /mnt/c working directory -- restored those to match HEAD's LF endings via 'git checkout --' so the diff is clean, and converted the 2 genuinely-modified files back to LF as well. Continuing toward H1 (boot a real guest kernel) inside WSL2.
+
+Confirmed the biggest real blocker (todo.md S14) is the same one flagged since iteration 1: no bootable guest kernel image exists anywhere in the repo, and baud-multiverse::linux::boot_guest() requires a real bzImage (linux-loader's BzImage::load walks the real Linux/x86 boot-sector header) -- building one is the actual prerequisite for a genuine H1. Building a minimal x86_64 Linux kernel from Ubuntu's linux-source-7.0.0 package (make tinyconfig + SERIAL_8250/SERIAL_8250_CONSOLE + BLK_DEV_INITRD + an embedded initramfs) plus a tiny static musl init (writes a marker line to ttyS0, then reboot(RB_HALT_SYSTEM) -- with no ACPI/PM device on baud's subtractive-rule machine, the kernel's unconditional native_halt() spin loop is what actually executes 'hlt', which is exactly the VcpuExit::Hlt baud-vcpu's run loop is watching for). Kernel build (make -j8 bzImage) is running now in the background; continuing to study crates/baud-multiverse's existing boot/run_to_first_halt API and the pre-pivot drive/h1.sh (todo.md already flags it tests the WRONG, superseded H1) while it compiles.
+
+Bisected the boot with debug instrumentation (removed before commit) and found + fixed three real production bugs, none reachable by cargo check: (1) configure_msr_filter used an empty MsrFilterRangeFlags + an allow bitmap bit -- kernel rejects flags==0 outright, and the semantics were backwards anyway; fixed to READ|WRITE flags + a deny bit. (2) pagetables::long_mode_sregs left TR all-zero (present=0, unusable=0) -- VMX requires TR always present with a valid busy-TSS type, so VM-entry failed (EXIT_REASON_INVALID_STATE); fixed with a minimal valid TR + LDTR marked unusable. (3) CPUID leaves 15H/16H were present-but-zero, so a real Linux kernel's native_calibrate_cpu_early() hung forever polling the unemulated PIT (port 0x42); fixed by synthesizing both leaves in cpuid.rs's mask table. Also found a second hang on CMOS RTC ports 0x70/0x71 (open-bus fallback's fixed 0xFF always read as 'Update In Progress'); added a minimal deterministic Cmos shim in console.rs. Given a real Linux kernel additionally needs H4 (timer interrupt injection, not yet wired) to ever reach a clean halt via its own scheduler/jiffies, replaced the fixture with a hand-assembled 17-byte x86-64 payload (writes a marker to COM1, then hlts) wrapped in a minimal valid bzImage -- no scheduler dependency, matches H1's actual spec scope. double_boot_memory_identical now passes for real: two boots, byte-identical console output and RAM hash. Rewrote drive/h1.sh to match (superseding the pre-pivot version todo.md had flagged as stale). Running full workspace build/test/clippy and both drive/h0.sh + drive/h1.sh once more before committing...
+
+Full verification green: cargo build/test/clippy --workspace all pass (0 regressions, 0 new clippy warnings -- confirmed the 75 pre-existing warnings are all in untouched pre-pivot lib.rs code); drive/h0.sh and drive/h1.sh both PASS end-to-end for real against /dev/kvm. Updated todo.md's build-status section (H0 now validated for real, baud-vcpu's real run loop now exercised, the baud-multiverse boot-flow entry rewritten with the bug findings, the stale-drive-scripts note updated to reflect h1.sh's rewrite). Committing.
+
+## 2026-07-24T18:44:07 UTC - Changes committed.
+- Booted a real guest on real KVM hardware for the first time in this project's history (H1) and fixed the production bugs that surfaced
+- Files changed: crates/baud-multiverse/src/{console.rs,cpuid.rs,linux/mod.rs,linux/pagetables.rs}, crates/baud-multiverse/tests/fixtures/hello-guest/{bzImage,payload.s,build.py,BUILD.md}, crates/baud-tracing/Cargo.toml, drive/h1.sh, todo.md, Cargo.lock
+- **Brief description of changes:**
+  - Fixed configure_msr_filter: empty MsrFilterRangeFlags -> kernel EINVAL; corrected to READ|WRITE flags + a deny bitmap bit so IA32_TSC/_DEADLINE/_AUX actually route to the VMM's work-clock instead of being rejected or silently allowed in-kernel
+  - Fixed pagetables::long_mode_sregs: TR left all-zero (present=0, unusable=0) caused VM-entry to fail (EXIT_REASON_INVALID_STATE); gave TR a minimal valid busy-TSS descriptor and marked LDTR explicitly unusable
+  - Added CPUID leaves 15H (TSC/crystal-clock ratio) and 16H (processor frequency) to cpuid.rs's determinism mask table, synthesized to match VIRTUAL_TSC_KHZ -- fixes a real guest hang polling the unemulated PIT during TSC calibration
+  - Added a minimal deterministic Cmos device (console.rs, ports 0x70/0x71) so a guest's CMOS RTC 'Update In Progress' poll always reads clear instead of hanging on the open-bus fallback's fixed 0xFF
+  - New real-KVM test fixture crates/baud-multiverse/tests/fixtures/hello-guest/ (hand-assembled bzImage payload + build.py + BUILD.md documenting provenance and the bugs it caught) backing a new double_boot_memory_identical test (specs/baud-multiverse.md's named H1 test), passing for real against /dev/kvm
+  - Rewrote drive/h1.sh to drive the current KVM-era H1 for real (superseding the pre-pivot ptrace-era version todo.md had flagged as stale)
+  - Carried forward a prior interrupted session's fix (baud-tracing/Cargo.toml missing the tracing dependency) and cleaned up ~146 files of CRLF/LF line-ending-only churn left over from a prior Windows-side session
+  - Updated todo.md's build-status section to reflect all of the above
+---

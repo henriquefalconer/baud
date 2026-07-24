@@ -7,11 +7,15 @@
 // params at fixed addresses → enter the run loop (`baud_vcpu::linux::run_until_halted`).
 //
 // Like `crates/baud-host/src/linux.rs` and `crates/baud-vcpu/src/linux/`, this module is written
-// and type-checked against the real `kvm-ioctls`/`kvm-bindings`/`linux-loader`/`vm-memory` crate
-// sources (`cargo check --target x86_64-unknown-linux-gnu -p baud-multiverse`) but has not yet
-// been exercised on real KVM hardware — this dev machine has no Linux/KVM host (CLAUDE.md,
-// todo.md §14). It is additive: nothing in `baud-server`/`baud-tape-agent` calls into this module
-// yet (see the pivot notice at the top of `lib.rs`).
+// against the real `kvm-ioctls`/`kvm-bindings`/`linux-loader`/`vm-memory` crate sources and is now
+// also exercised for real: `tests::double_boot_memory_identical` boots `tests/fixtures/hello-
+// guest/bzImage` (see that directory's `BUILD.md`) against actual `/dev/kvm` on this project's
+// dev machine (a bare-metal Dell XPS 13 running Ubuntu on WSL2 with VT-x, CLAUDE.md) — the first
+// real KVM boot in this project's history, which caught and fixed two real bugs neither `cargo
+// check` nor any unit test without real hardware could have (`configure_msr_filter`'s MSR-filter
+// flags/bitmap semantics and `pagetables::long_mode_sregs`'s invalid TR segment, both documented
+// at their fix sites and in that fixture's `BUILD.md`). It is additive: nothing in `baud-server`/
+// `baud-tape-agent` calls into this module yet (see the pivot notice at the top of `lib.rs`).
 
 pub mod bootparams;
 pub mod pagetables;
@@ -46,8 +50,11 @@ pub type GuestMemory = GuestMemoryMmap<()>;
 /// The fixed virtual-TSC frequency every cooperative-regime run pins (todo.md §3.3: "cooperative =
 /// `KVM_SET_TSC_KHZ` pins a fixed frequency"). 1 GHz — a round, host-independent number; the point
 /// is that it is the *same* number on every host, not that it matches any particular host's native
-/// rate.
-pub const VIRTUAL_TSC_KHZ: u32 = 1_000_000;
+/// rate. Derived from `cpuid::TSC_CRYSTAL_HZ` (not a separately-chosen number) so the CPUID leaf
+/// 15H value the guest reads and the actual `KVM_SET_TSC_KHZ` frequency can never drift apart —
+/// a guest that trusts CPUID (as Linux's `native_calibrate_tsc()` does, see that constant's doc)
+/// computes exactly the frequency this VMM really programmed.
+pub const VIRTUAL_TSC_KHZ: u32 = cpuid::TSC_CRYSTAL_HZ / 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootError {
@@ -264,18 +271,29 @@ fn configure_msr_filter(vm: &VmFd) -> Result<(), kvm_ioctls::Error> {
     };
     vm.enable_cap(&cap)?;
 
-    // One bit each — "this exact MSR is covered by this range" — with empty `flags` (neither
-    // READ nor WRITE marked allowed), so a covered MSR is never allowed by KVM's own filter logic
-    // and instead exits to userspace (the `Filter` reason enabled above).
-    let covered_single_msr = [0b0000_0001u8];
+    // Documentation/virt/kvm/api.rst S4.97 (`KVM_X86_SET_MSR_FILTER`): a range's `flags` selects
+    // *which* access types (READ and/or WRITE) that range's bitmap governs -- the kernel rejects
+    // `flags == 0` outright (arch/x86/kvm/x86.c's `kvm_add_msr_filter`: "if (!user_range->flags)
+    // return -EINVAL") since a range covering neither access type is meaningless, not "cover
+    // nothing so it always exits". Each bitmap bit then means "a 1 allows the operation in
+    // flags, 0 denies" (same doc) -- allow routes the access through KVM's normal in-kernel
+    // handling; deny (with `Cap::X86UserSpaceMsr`'s `Filter` exit reason enabled above) is what
+    // actually turns the access into a `KVM_EXIT_X86_RDMSR`/`X86Wrmsr` exit to userspace instead
+    // of KVM injecting a #GP. So trapping these three MSRs to the VMM needs both bits of `flags`
+    // set (govern both reads and writes) *and* the bitmap bit cleared (deny, not allow) --
+    // the exact opposite of an earlier version of this function, which set an empty `flags` (an
+    // unconditional `-EINVAL`, never exercised until real KVM hardware existed to run it against)
+    // and an allow bit (which, even past the flags bug, would have let TSC reads/writes proceed
+    // silently in-kernel instead of reaching `dispatch_exit`'s work-clock).
+    let denied_single_msr = [0b0000_0000u8];
     let trapped_msrs = [MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX];
     let ranges: Vec<MsrFilterRange<'_>> = trapped_msrs
         .iter()
         .map(|&base| MsrFilterRange {
-            flags: MsrFilterRangeFlags::empty(),
+            flags: MsrFilterRangeFlags::READ | MsrFilterRangeFlags::WRITE,
             base,
             msr_count: 1,
-            bitmap: &covered_single_msr,
+            bitmap: &denied_single_msr,
         })
         .collect();
     vm.set_msr_filter(MsrFilterDefaultAction::ALLOW, &ranges)
@@ -563,5 +581,51 @@ mod tests {
         cpuid::apply_determinism_mask(&mut kvm_entries);
         assert_eq!(kvm_entries[0].ecx & (1 << 30), 0, "RDRAND must be cleared");
         assert_eq!(kvm_entries[0].ecx & (1 << 31), 1 << 31, "hypervisor-present must be set");
+    }
+
+    /// H1's real bootable fixture (`tests/fixtures/hello-guest/`, see that directory's
+    /// `BUILD.md` for exact provenance/regeneration steps and why it is a hand-assembled payload
+    /// rather than a real Linux kernel): a minimal, valid-per-the-loader's-own-checks bzImage
+    /// wrapping 17 bytes of hand-written x86-64 that writes a fixed marker line directly to COM1
+    /// (port `0x3f8`) then `hlt`s in a loop — no scheduler, no timer/jiffies dependency, so it
+    /// reaches a clean halt with nothing more than this crate's boot flow provides today.
+    fn hello_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello-guest/bzImage")
+    }
+
+    /// The exact marker byte string `tests/fixtures/hello-guest/payload.s` writes to the console
+    /// before halting — asserted against verbatim so a change to either side (fixture or this
+    /// test) is caught rather than silently drifting apart.
+    const HELLO_GUEST_MARKER: &str = "BAUD_HELLO_GUEST\n";
+
+    /// specs/baud-multiverse.md §3.1's `double_boot_memory_identical`, exercised for the first
+    /// time against real KVM hardware (todo.md §14 tracked this as "not yet booted on real KVM
+    /// hardware" across every prior iteration): boot the hello image twice from the same tape,
+    /// assert the guest reaches a clean halt with the expected console marker, and assert the two
+    /// runs' `ram_hash` (blake3 of the whole guest-RAM region at first `Hlt`) are byte-identical —
+    /// boot nondeterminism is a bug, per the spec's own framing of this test.
+    #[test]
+    fn double_boot_memory_identical() {
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("first boot failed");
+        let first_outcome = first.run_to_first_halt().expect("first run failed");
+        assert_eq!(
+            String::from_utf8_lossy(&first_outcome.console_output),
+            HELLO_GUEST_MARKER,
+            "guest must print exactly its marker line before halting"
+        );
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("second boot failed");
+        let second_outcome = second.run_to_first_halt().expect("second run failed");
+        assert_eq!(
+            second_outcome.console_output, first_outcome.console_output,
+            "console output must be identical across two boots of the same image+tape"
+        );
+        assert_eq!(
+            second_outcome.ram_hash, first_outcome.ram_hash,
+            "guest RAM at first Hlt must be byte-identical across two boots (boot nondeterminism is a bug)"
+        );
     }
 }
