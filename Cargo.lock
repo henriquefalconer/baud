@@ -355,6 +355,7 @@ dependencies = [
  "baud-multiverse",
  "baud-packages",
  "baud-proto",
+ "baud-raftlet",
  "baud-secret",
  "baud-stream",
  "baud-tape",
