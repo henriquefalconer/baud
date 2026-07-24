@@ -30,18 +30,26 @@ pub async fn replay(
     let body = body.unwrap_or(ReplayBody { tape_bytes: None, to_step: None });
 
     // 1. Look up the run
-    let row = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String)>(
-        "SELECT id, spec_content, spec_hash, closure_hash, seed, status FROM runs WHERE id = ?"
+    let row = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String, Option<String>)>(
+        "SELECT id, spec_content, spec_hash, closure_hash, seed, status, stream_hash FROM runs WHERE id = ?"
     )
     .bind(&run_id)
     .fetch_optional(&state.db)
     .await;
 
-    let (id, spec_content, spec_hash, closure_hash, seed, _status) = match row {
+    let (id, spec_content, spec_hash, closure_hash, seed, status, original_stored_hash) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return Json(json!({ "error": format!("run {run_id} not found") })),
         Err(e) => return Json(json!({ "error": format!("db error: {e}") })),
     };
+
+    // Guard: divergent runs are excluded from replay (spec baud-journal §5 / VR2-M15).
+    if status == "divergent" {
+        return Json(json!({
+            "error": format!("run {run_id} is marked divergent and cannot be replayed"),
+            "status": "divergent",
+        }));
+    }
 
     // 2. Parse spec to understand topology
     let spec_doc = match baud_init::lint(&spec_content) {
@@ -121,14 +129,24 @@ pub async fn replay(
         .await;
     }
 
-    // 8. Verify observation-stream-hash equality
-    // For proper verification we need original stream hash.
-    // Fetch the original run's obs_stream_hash from metadata if stored, else compute.
+    // 8. Verify observation-stream-hash equality (spec: "verify observation-stream-hash prefix equality")
+    //
+    // Use the stored stream_hash from the original run if available (set during verify/determinism).
+    // Fall back to counting observations (old behavior) if the column is missing.
     let orig_obs_count = original_obs.iter()
         .filter(|(step, ..)| to_step.map_or(true, |max| *step as u64 <= max))
         .count();
 
-    let verified = replayed.len() == orig_obs_count || orig_obs_count == 0;
+    let (original_stream_hash, verified) = if let Some(stored_hash) = &original_stored_hash {
+        // Compare replay stream hash against stored original hash
+        let v = replay_stream_hash == *stored_hash || orig_obs_count == 0;
+        (stored_hash.clone(), v)
+    } else {
+        // No stored hash: best-effort fallback using count equality
+        let hash_placeholder = format!("<no-stored-hash-for-{}>", id);
+        let v = replayed.len() == orig_obs_count || orig_obs_count == 0;
+        (hash_placeholder, v)
+    };
 
     Json(json!({
         "ok": true,
@@ -139,12 +157,13 @@ pub async fn replay(
         "to_step": to_step,
         "replayed_steps": replayed.len(),
         "original_obs_count": orig_obs_count,
+        "original_stream_hash": original_stream_hash,
         "replay_stream_hash": replay_stream_hash,
         "verified": verified,
         "message": if verified {
-            "replay: observation stream matches original run"
+            "replay: ok=true, observation stream hashes match"
         } else {
-            "replay: observation count mismatch (check logs)"
+            "replay: MISMATCH — observation stream hashes differ"
         },
     }))
 }
@@ -153,44 +172,50 @@ pub async fn replay(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Replay a spec through baud-multiverse using the stored tape (derived from seed).
+/// This is the real replay path: same (seed, spec) → same observation stream hash.
 fn generate_replay_observations(
     seed: u64,
-    spec_hash: &str,
+    _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
 ) -> Vec<Observation> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
+    use rand_chacha::ChaCha20Rng;
+    use rand::{RngCore, SeedableRng};
 
-    let mut hasher = DefaultHasher::new();
-    seed.hash(&mut hasher);
-    spec_hash.hash(&mut hasher);
-    let base = hasher.finish();
+    // Regenerate the same tape from seed (must match the tape used in the original run)
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut tape_bytes = vec![0u8; 4096];
+    rng.fill_bytes(&mut tape_bytes);
 
-    let mut obs = Vec::new();
-    for (node_idx, node) in spec_doc.nodes.iter().enumerate() {
-        let node_seed = base.wrapping_add(node_idx as u64 * 0x9e3779b9);
-        for step in 1..=10u64 {
-            let step_val = node_seed.wrapping_mul(step).wrapping_add(step * 7);
-            obs.push(Observation {
-                probe: "depth".into(),
-                node: node_idx as u16,
-                value: ProbeValue::U64(step_val % 1000),
-                step,
-            });
-            for (ai, _adapter) in node.adapters.probes.iter().enumerate() {
-                let probe_name = format!("{}.probe.{ai}", node.name);
-                let probe_val = step_val.wrapping_add(ai as u64 * 31) % 256;
-                obs.push(Observation {
-                    probe: probe_name,
-                    node: node_idx as u16,
-                    value: ProbeValue::U64(probe_val),
-                    step,
-                });
-            }
+    let manifest = RunManifest {
+        guests: spec_doc.nodes.iter().enumerate().map(|(i, n)| GuestSpec {
+            node_id: i as u32,
+            binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
+            argv: n.argv.clone(),
+        }).collect(),
+        env_override: spec_doc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        ..RunManifest::default()
+    };
+
+    let mut tape_source = TapeDrawSource::new(tape_bytes);
+
+    let mut mv = match Multiverse::load_from_manifest(manifest) {
+        Ok(mv) => mv,
+        Err(e) => {
+            tracing::warn!("replay Multiverse::load failed: {e}");
+            return Vec::new();
         }
-    }
-    obs.sort_by_key(|o| (o.step, o.node, o.probe.clone()));
-    obs
+    };
+
+    // run() is infallible (spec §5): errors surface as Crash observations
+    let stream = mv.run(&mut tape_source);
+    stream.observations.iter().map(|e| Observation {
+        probe: e.probe.clone(),
+        node: e.node as u16,
+        value: ProbeValue::Utf8(e.value.to_string()),
+        step: e.step,
+    }).collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

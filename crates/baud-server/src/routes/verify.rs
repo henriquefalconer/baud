@@ -81,7 +81,7 @@ pub async fn determinism(
         // In a real implementation, this would launch the supervisor and collect real observations.
         // For M3, we implement the verification harness: generate observations deterministically
         // from (seed, spec_hash, run_index=0) — the same for both runs to prove determinism.
-        let synthetic_obs = generate_deterministic_observations(seed, &spec_hash, &spec_doc);
+        let synthetic_obs = run_spec_through_multiverse(seed, &spec_hash, &spec_doc);
 
         // 4. Append observations to the run (in-process: write to SQLite + in-memory journal)
         let mut journal_hasher = blake3::Hasher::new();
@@ -111,12 +111,36 @@ pub async fn determinism(
         if i == 0 { first_obs_count = synthetic_obs.len(); }
 
         let stream_hash = hex_encode(journal_hasher.finalize().as_bytes());
+
+        // Store the stream_hash in the runs table for later replay verification
+        let _ = sqlx::query("UPDATE runs SET stream_hash = ? WHERE id = ?")
+            .bind(&stream_hash)
+            .bind(&run_id)
+            .execute(&state.db)
+            .await;
+
         run_hashes.push(stream_hash);
         run_ids.push(run_id);
     }
 
     // 5. Compare all hashes
     let all_match = run_hashes.windows(2).all(|w| w[0] == w[1]);
+
+    // Guard against false-positives on empty streams: if neither run produced
+    // any observations, we cannot claim determinism — the supervisor failed to run.
+    if all_match && first_obs_count == 0 {
+        return Json(json!({
+            "ok": false,
+            "verified": false,
+            "times": times,
+            "seed": seed,
+            "stream_hashes": run_hashes,
+            "run_ids": run_ids,
+            "observation_count": 0,
+            "error": "multiverse produced no observations — load or execution may have failed",
+            "message": "DETERMINISM UNVERIFIED: no observations produced (cannot verify empty streams)",
+        }));
+    }
 
     if all_match {
         Json(json!({
@@ -132,6 +156,15 @@ pub async fn determinism(
     } else {
         // Find first divergence
         let first_divergence = find_first_divergence(&run_hashes);
+        // Mark all runs from this divergent verification as 'divergent' so they
+        // are excluded from replay/shrink/reconstruct (spec baud-journal §5 / VR2-M15).
+        for rid in &run_ids {
+            let _ = sqlx::query("UPDATE runs SET status = 'divergent', updated_at = ? WHERE id = ?")
+                .bind(crate::state::unix_now() as i64)
+                .bind(rid)
+                .execute(&state.db)
+                .await;
+        }
         Json(json!({
             "ok": false,
             "verified": false,
@@ -162,7 +195,8 @@ pub async fn determinism_poisoned(
     let spec_hash = format!("blake3:{}", hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes()));
     let mut run_hashes: Vec<String> = Vec::new();
     let mut run_ids: Vec<String> = Vec::new();
-    let mut divergent_step: Option<u64> = None;
+    // Collect all observation streams for step-by-step comparison
+    let mut all_run_observations: Vec<Vec<Observation>> = Vec::new();
 
     for i in 0..times {
         let run_id = format!("poisoned-{}-{i}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(8).collect::<String>());
@@ -185,33 +219,78 @@ pub async fn determinism_poisoned(
         .await;
 
         let mut journal_hasher = blake3::Hasher::new();
-        let base_obs = generate_deterministic_observations(seed, &spec_hash, &spec_doc);
+        let base_obs = run_spec_through_multiverse(seed, &spec_hash, &spec_doc);
 
-        for obs in &base_obs {
-            let obs_cbor = baud_proto::encode(&baud_proto::Msg::Observe(obs.clone()))
-                .unwrap_or_default();
-            journal_hasher.update(&obs_cbor);
-        }
-
-        // Inject time-based poison: different for each run
+        // Inject time-based poison: different for each run (appended after base observations)
         let poison = crate::state::unix_now();
         let poison_obs = Observation {
             probe: "time_poison".into(),
             node: 0,
             value: ProbeValue::U64(poison + i as u64),
-            step: 9999,
+            step: base_obs.len() as u64, // Poison appears at index == base_obs.len()
         };
-        if i == 0 { divergent_step = Some(9999); }
-        let poison_cbor = baud_proto::encode(&baud_proto::Msg::Observe(poison_obs))
-            .unwrap_or_default();
-        journal_hasher.update(&poison_cbor);
+
+        let mut full_obs = base_obs;
+        full_obs.push(poison_obs);
+
+        for obs in &full_obs {
+            let obs_cbor = baud_proto::encode(&baud_proto::Msg::Observe(obs.clone()))
+                .unwrap_or_default();
+            journal_hasher.update(&obs_cbor);
+        }
 
         let stream_hash = hex_encode(journal_hasher.finalize().as_bytes());
         run_hashes.push(stream_hash);
         run_ids.push(run_id);
+        all_run_observations.push(full_obs);
     }
 
     let all_match = run_hashes.windows(2).all(|w| w[0] == w[1]);
+
+    // Find first divergent step by comparing observation sequences pairwise
+    struct DivergenceInfo {
+        step: u64,
+        node: Option<u16>,
+        probe: Option<String>,
+        detail: String,
+    }
+
+    let divergence: Option<DivergenceInfo> = if !all_match && all_run_observations.len() >= 2 {
+        let run0 = &all_run_observations[0];
+        let run1 = &all_run_observations[1];
+        let min_len = run0.len().min(run1.len());
+        let mut found: Option<DivergenceInfo> = None;
+        for idx in 0..min_len {
+            let o0_cbor = baud_proto::encode(&baud_proto::Msg::Observe(run0[idx].clone())).unwrap_or_default();
+            let o1_cbor = baud_proto::encode(&baud_proto::Msg::Observe(run1[idx].clone())).unwrap_or_default();
+            if o0_cbor != o1_cbor {
+                found = Some(DivergenceInfo {
+                    step: run0[idx].step,
+                    node: Some(run0[idx].node),
+                    probe: Some(run0[idx].probe.clone()),
+                    detail: format!(
+                        "probe '{}' on node {} diverged at step {}",
+                        run0[idx].probe, run0[idx].node, run0[idx].step
+                    ),
+                });
+                break;
+            }
+        }
+        // If all shared steps match but lengths differ, the divergence is at the next step
+        if found.is_none() && run0.len() != run1.len() {
+            let shorter = if run0.len() < run1.len() { run0 } else { run1 };
+            let step = shorter.last().map(|o| o.step + 1).unwrap_or(0);
+            found = Some(DivergenceInfo {
+                step,
+                node: None,
+                probe: None,
+                detail: format!("runs produced different observation counts ({} vs {})", run0.len(), run1.len()),
+            });
+        }
+        found
+    } else {
+        None
+    };
 
     Json(json!({
         "ok": false,
@@ -221,7 +300,10 @@ pub async fn determinism_poisoned(
         "seed": seed,
         "stream_hashes": run_hashes,
         "run_ids": run_ids,
-        "first_divergent_step": divergent_step,
+        "first_divergent_step": divergence.as_ref().map(|d| d.step),
+        "divergent_node": divergence.as_ref().and_then(|d| d.node),
+        "divergent_probe": divergence.as_ref().and_then(|d| d.probe.as_deref()),
+        "divergent_detail": divergence.as_ref().map(|d| d.detail.as_str()),
         "message": if all_match {
             "WARNING: poisoned run did not diverge (unexpected)"
         } else {
@@ -348,58 +430,66 @@ pub async fn observation(
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic observation generation (synthetic, for verify harness)
+// Real deterministic execution via baud-multiverse
 // ---------------------------------------------------------------------------
 
-/// Generate a deterministic set of observations from (seed, spec_hash, spec_doc).
-/// This is the core of the verify-determinism check: same inputs → same outputs.
-fn generate_deterministic_observations(
+/// Run the workload spec through baud-multiverse once and return the observation stream.
+///
+/// Uses a seeded tape (`TapeDrawSource`) generated from the seed. Because
+/// baud-multiverse's run is a pure function of (binary, manifest, tape),
+/// two calls with the same (seed, spec) must produce byte-identical observation
+/// stream hashes — that is what `verify/determinism` checks.
+fn run_spec_through_multiverse(
     seed: u64,
-    spec_hash: &str,
+    _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
 ) -> Vec<Observation> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
 
-    let mut hasher = DefaultHasher::new();
-    seed.hash(&mut hasher);
-    spec_hash.hash(&mut hasher);
-    let base = hasher.finish();
+    // Build the run manifest from the spec doc.
+    let manifest = RunManifest {
+        guests: spec_doc.nodes.iter().enumerate().map(|(i, n)| GuestSpec {
+            node_id: i as u32,
+            binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
+            argv: n.argv.clone(),
+        }).collect(),
+        env_override: spec_doc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        ..RunManifest::default()
+    };
 
-    let mut obs = Vec::new();
+    // Generate a deterministic tape from the seed (using seed bytes as tape content).
+    // In full implementation, this is the tape from baud-driver.
+    let tape_bytes = generate_tape_from_seed(seed, 4096);
+    let mut tape_source = TapeDrawSource::new(tape_bytes);
 
-    // Generate deterministic observations for each node
-    for (node_idx, node) in spec_doc.nodes.iter().enumerate() {
-        // Simulate N steps of probe outputs, deterministically from seed+spec
-        let node_seed = base.wrapping_add(node_idx as u64 * 0x9e3779b9);
-
-        for step in 1..=10u64 {
-            let step_val = node_seed.wrapping_mul(step).wrapping_add(step * 7);
-
-            obs.push(Observation {
-                probe: "depth".into(),
-                node: node_idx as u16,
-                value: ProbeValue::U64(step_val % 1000),
-                step,
-            });
-
-            // One probe per adapter declared in the node
-            for (ai, adapter) in node.adapters.probes.iter().enumerate() {
-                let probe_name = format!("{}.probe.{ai}", node.name);
-                let probe_val = step_val.wrapping_add(ai as u64 * 31) % 256;
-                obs.push(Observation {
-                    probe: probe_name,
-                    node: node_idx as u16,
-                    value: ProbeValue::U64(probe_val),
-                    step,
-                });
-            }
+    // Load and run the multiverse.
+    let mut mv = match Multiverse::load_from_manifest(manifest) {
+        Ok(mv) => mv,
+        Err(e) => {
+            tracing::warn!("Multiverse::load failed: {e}; using empty observation stream");
+            return Vec::new();
         }
-    }
+    };
 
-    // Sort by step for consistent ordering
-    obs.sort_by_key(|o| (o.step, o.node, o.probe.clone()));
-    obs
+    // run() is now infallible (returns ObservationStream directly, spec §5)
+    let stream = mv.run(&mut tape_source);
+    stream.observations.iter().map(|e| Observation {
+        probe: e.probe.clone(),
+        node: e.node as u16,
+        value: ProbeValue::Utf8(e.value.to_string()),
+        step: e.step,
+    }).collect()
+}
+
+/// Generate a deterministic tape from a seed (using ChaCha PRNG).
+fn generate_tape_from_seed(seed: u64, len: usize) -> Vec<u8> {
+    use rand_chacha::ChaCha20Rng;
+    use rand::{RngCore, SeedableRng};
+
+    let mut rng = ChaCha20Rng::seed_from_u64(seed);
+    let mut tape = vec![0u8; len];
+    rng.fill_bytes(&mut tape);
+    tape
 }
 
 fn find_first_divergence(hashes: &[String]) -> Option<usize> {

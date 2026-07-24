@@ -30,8 +30,10 @@ pub use flake::FlakeTemplate;
 // ---------------------------------------------------------------------------
 
 /// The nixpkgs revision pinned for all guest builds.
+/// Must be a full commit SHA (not a branch/tag) to guarantee reproducibility.
 /// Changing this is a deliberate, reviewed edit.
-pub const NIXPKGS_REV: &str = "23.11";
+/// Corresponds to nixos-23.11 branch tip (2024-04-20).
+pub const NIXPKGS_REV: &str = "e96e4ef4c18a19a1aa5b845fad8d1c6f32c2a06a";
 
 // ---------------------------------------------------------------------------
 // Build result
@@ -214,6 +216,31 @@ fn build_real(spec: &WorkloadSpec) -> Result<BuildResult> {
     let mut paths: Vec<&str> = closure_text.lines().collect();
     paths.sort();
     let closure_hash = blake3::hash(paths.join("\n").as_bytes());
+
+    // nix copy: warm the sandbox /nix/store for 1-minute economics.
+    // The store URL is taken from BAUD_NIX_STORE_URL (default: daemon store).
+    // On failure, log a warning but do not fail the build — the guest binary
+    // was built successfully; store-warming is a best-effort optimization.
+    if let Ok(store_url) = std::env::var("BAUD_NIX_STORE_URL") {
+        let copy_out = std::process::Command::new("nix")
+            .args(["copy", "--to", &store_url, &store_path])
+            .current_dir(dir.path())
+            .output();
+        match copy_out {
+            Ok(o) if !o.status.success() => {
+                eprintln!(
+                    "[baud-packages] warning: nix copy to {store_url} failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Err(e) => {
+                eprintln!("[baud-packages] warning: nix copy failed to launch: {e}");
+            }
+            Ok(_) => {
+                eprintln!("[baud-packages] nix copy to {store_url} succeeded");
+            }
+        }
+    }
 
     Ok(BuildResult {
         guest_path: PathBuf::from(format!("{}/bin/{}", store_path, spec.workload.name)),

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::AppState;
 use baud_driver::{Driver, StrategySpec};
+use baud_proto;
 use rand::RngCore;
 use rand_chacha::ChaCha20Rng;
 use rand::SeedableRng;
@@ -145,7 +146,7 @@ pub fn draw_parser_input(
         _ => {
             // Random tactics: pure white noise drawn from the driver (on-tape)
             for _ in 0..N {
-                bytes.push(driver.draw_bits(8) as u8);
+                bytes.push(driver.draw_bits(8).first().copied().unwrap_or(0));
             }
         }
     }
@@ -211,8 +212,12 @@ pub async fn start(
 
     // Build strategy
     let strategy = build_strategy(body.strategy.as_deref());
-    let _goal_probe = strategy.goal_probe.clone();
-    let _goal_value = strategy.goal_value;
+    let _goal_probe = strategy.goal.as_ref().map(|g| g.probe.clone());
+    let _goal_value: Option<f64> = strategy.goal.as_ref().and_then(|g| match &g.value {
+        baud_proto::Value::U64(v) => Some(*v as f64),
+        baud_proto::Value::I64(v) => Some(*v as f64),
+        _ => None,
+    });
 
     // Create a parent run record
     let run_id = make_id("run");
@@ -366,7 +371,7 @@ fn run_fuzz_loop(
     stop_on_crash: bool,
     _spec: &str,
 ) -> FuzzLoopResult {
-    let mut driver = Driver::new(seed, strategy);
+    let mut driver = Driver::new(seed, strategy, baud_driver::TacticsSpec::default());
     // Separate RNG for stateful-mask byte mutations (not on-tape, but seeded
     // deterministically so the fuzz loop is reproducible given the same seed).
     let mut tactics_rng = ChaCha20Rng::seed_from_u64(seed.wrapping_add(0xdeadbeef));
@@ -444,16 +449,22 @@ fn run_fuzz_loop(
 fn build_strategy(strategy_json: Option<&str>) -> StrategySpec {
     if let Some(s) = strategy_json {
         if let Ok(v) = serde_json::from_str::<Value>(s) {
+            let maximize = v.get("maximize")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_else(|| vec!["depth".to_string()]);
+            let goal = v.get("goal_probe").and_then(|gp| gp.as_str()).map(|probe| {
+                let goal_val = v.get("goal_value").and_then(|gv| gv.as_u64()).unwrap_or(1);
+                baud_proto::Predicate {
+                    probe: probe.to_string(),
+                    value: baud_proto::Value::U64(goal_val),
+                }
+            });
             return StrategySpec {
-                maximize: v.get("maximize")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                    .unwrap_or_else(|| vec!["depth".to_string()]),
+                maximize,
                 buckets: Vec::new(),
-                reservoir_keep: 32,
-                reservoir_p_backoff: 0.1,
-                goal_probe: v.get("goal_probe").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                goal_value: v.get("goal_value").and_then(|v| v.as_f64()),
+                reservoir: Some(baud_proto::Reservoir { keep: 32, p_backoff: 0.1 }),
+                goal,
             };
         }
     }
@@ -461,10 +472,11 @@ fn build_strategy(strategy_json: Option<&str>) -> StrategySpec {
     StrategySpec {
         maximize: vec!["depth".to_string()],
         buckets: Vec::new(),
-        reservoir_keep: 32,
-        reservoir_p_backoff: 0.1,
-        goal_probe: Some("crashed".to_string()),
-        goal_value: Some(1.0),
+        reservoir: Some(baud_proto::Reservoir { keep: 32, p_backoff: 0.1 }),
+        goal: Some(baud_proto::Predicate {
+            probe: "crashed".to_string(),
+            value: baud_proto::Value::U64(1),
+        }),
     }
 }
 

@@ -102,6 +102,11 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             if v.get("error").is_some() {
                 std::process::exit(1);
             }
+            // Exit code 2 when the run found a bug / goal (baud-cli.md §4 exit codes)
+            let status_str = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            if matches!(status_str, "crashed" | "goal" | "violation_found") {
+                std::process::exit(2);
+            }
         }
         RunAction::Abort { run: id } => {
             let v = c.post(&format!("/runs/{id}/abort"), &json!({})).await?;

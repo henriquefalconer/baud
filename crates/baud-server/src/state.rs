@@ -3,8 +3,10 @@
 
 use anyhow::Result;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
+
+use crate::routes::server::LogEntry;
 
 /// Shared application state, cloned into every request handler.
 #[derive(Clone)]
@@ -14,6 +16,8 @@ pub struct AppState {
     pub started_at: u64,
     /// Accumulated sandbox-minutes consumed this session
     pub budget_minutes_used: Arc<Mutex<u64>>,
+    /// In-process ring buffer of server log entries (max 4096)
+    pub log_buffer: Arc<RwLock<Vec<LogEntry>>>,
 }
 
 impl AppState {
@@ -28,6 +32,7 @@ impl AppState {
             db: pool,
             started_at: unix_now(),
             budget_minutes_used: Arc::new(Mutex::new(0)),
+            log_buffer: Arc::new(RwLock::new(Vec::new())),
         })
     }
 }

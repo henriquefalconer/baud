@@ -46,6 +46,12 @@ impl Tape {
     pub fn is_empty(&self) -> bool {
         self.choices.is_empty()
     }
+
+    /// Concatenate all choice bytes into a single flat byte vector.
+    /// Used for tape identity comparison in `same_seed_same_replies_same_tape`.
+    pub fn tape_bytes(&self) -> Vec<u8> {
+        self.choices.iter().flat_map(|c| c.iter().copied()).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -65,28 +71,34 @@ pub enum DrawKind {
 // Driver state
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategySpec {
-    /// Probe names to maximize (lexicographic priority)
-    pub maximize: Vec<String>,
-    pub buckets: Vec<String>,
-    pub reservoir_keep: u32,
-    pub reservoir_p_backoff: f64,
-    /// Optional goal probe name and value (as f64)
-    pub goal_probe: Option<String>,
-    pub goal_value: Option<f64>,
+/// Canonical StrategySpec — re-exported from baud-proto.
+/// baud-driver and baud-tape-agent both use this type; the definition lives in baud-proto.
+pub use baud_proto::StrategySpec;
+
+/// Extension trait to provide reservoir and goal access on the canonical StrategySpec.
+trait StrategySpecExt {
+    fn reservoir_keep(&self) -> u32;
+    fn reservoir_p_backoff(&self) -> f64;
+    fn goal_probe(&self) -> Option<&str>;
+    fn goal_value_f64(&self) -> Option<f64>;
 }
 
-impl Default for StrategySpec {
-    fn default() -> Self {
-        StrategySpec {
-            maximize: Vec::new(),
-            buckets: Vec::new(),
-            reservoir_keep: 32,
-            reservoir_p_backoff: 0.1,
-            goal_probe: None,
-            goal_value: None,
-        }
+impl StrategySpecExt for StrategySpec {
+    fn reservoir_keep(&self) -> u32 {
+        self.reservoir.as_ref().map(|r| r.keep).unwrap_or(32)
+    }
+    fn reservoir_p_backoff(&self) -> f64 {
+        self.reservoir.as_ref().map(|r| r.p_backoff).unwrap_or(0.1)
+    }
+    fn goal_probe(&self) -> Option<&str> {
+        self.goal.as_ref().map(|g| g.probe.as_str())
+    }
+    fn goal_value_f64(&self) -> Option<f64> {
+        self.goal.as_ref().and_then(|g| match &g.value {
+            baud_proto::Value::U64(v) => Some(*v as f64),
+            baud_proto::Value::I64(v) => Some(*v as f64),
+            _ => None,
+        })
     }
 }
 
@@ -100,10 +112,46 @@ impl Score {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TacticsSpec — tactics for the draw strategies
+// ---------------------------------------------------------------------------
+
+/// Built-in input tactics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTactic {
+    /// White-noise: each draw is independent
+    Random,
+    /// Stateful mask: previous byte remembered, bits flipped with p_flip
+    StatefulMask { p_flip: f64 },
+    /// Geometric hold: draw a hold count with given geometric mean
+    Hold { geom_mean: f64 },
+}
+
+/// Built-in weather tactics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeatherTactic {
+    /// Markov partition: stateful, transitions with p_start/p_stop
+    MarkovPartition { p_start: f64, p_stop: f64 },
+    /// Burst delay: bursts of delay with given regimes
+    BurstDelay { regimes: Vec<(u64, u64)> },
+    /// Crash/restart: each tick crashes with probability p, min_up_ticks before next crash
+    CrashRestart { p: f64, min_up_ticks: u64 },
+}
+
+/// Complete tactics specification.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TacticsSpec {
+    pub input: Vec<InputTactic>,
+    pub weather: Vec<WeatherTactic>,
+}
+
 /// The main driver struct.
 pub struct Driver {
     seed: u64,
     strategy: StrategySpec,
+    tactics: TacticsSpec,
     /// The current best tape (extends from this)
     best: Tape,
     /// Best score seen so far
@@ -122,15 +170,19 @@ pub struct Driver {
     live_tape: Tape,
     /// Generation counter
     generation: u64,
+    /// Stateful weather partition state (for Markov draw_weather)
+    partition_state: bool,
 }
 
 impl Driver {
-    /// Create a new driver with the given seed, strategy, and initial state.
-    pub fn new(seed: u64, strategy: StrategySpec) -> Self {
+    /// Create a new driver with the given seed, strategy, and tactics.
+    /// Spec: `Driver::new(seed: u64, strategy: StrategySpec, tactics: TacticsSpec) -> Self`
+    pub fn new(seed: u64, strategy: StrategySpec, tactics: TacticsSpec) -> Self {
         let rng = ChaCha20Rng::seed_from_u64(seed);
         Driver {
             seed,
             strategy,
+            tactics,
             best: Tape::new(seed),
             best_score: Score::zero(),
             reservoir: Vec::new(),
@@ -140,7 +192,13 @@ impl Driver {
             replay_tape: Tape::new(seed),
             live_tape: Tape::new(seed),
             generation: 0,
+            partition_state: false,
         }
+    }
+
+    /// Create a new driver with default tactics (backward-compatible helper).
+    pub fn new_simple(seed: u64, strategy: StrategySpec) -> Self {
+        Self::new(seed, strategy, TacticsSpec::default())
     }
 
     /// Start a new run. Returns the tape to be replayed (empty = fresh run with live draws).
@@ -198,9 +256,9 @@ impl Driver {
             self.best_score = score;
         }
         // Add to reservoir with probability
-        if self.reservoir.len() < self.strategy.reservoir_keep as usize {
+        if self.reservoir.len() < self.strategy.reservoir_keep() as usize {
             self.reservoir.push(self.live_tape.clone());
-        } else if self.draw_raw_f64() < self.strategy.reservoir_p_backoff {
+        } else if self.draw_raw_f64() < self.strategy.reservoir_p_backoff() {
             // Replace a random entry
             let idx = (self.draw_raw_u64() as usize) % self.reservoir.len();
             self.reservoir[idx] = self.live_tape.clone();
@@ -209,7 +267,7 @@ impl Driver {
 
     /// Check if goal is reached based on observations.
     pub fn is_goal_reached(&self, observations: &[(String, f64)]) -> bool {
-        if let (Some(probe), Some(goal_val)) = (&self.strategy.goal_probe, self.strategy.goal_value) {
+        if let (Some(probe), Some(goal_val)) = (self.strategy.goal_probe(), self.strategy.goal_value_f64()) {
             for (name, val) in observations {
                 if name == probe && (*val - goal_val).abs() < 1e-9 {
                     return true;
@@ -233,9 +291,21 @@ impl Driver {
     // Draw API
     // -----------------------------------------------------------------------
 
-    /// Draw `n` bits (up to 64). Returns n-bit value as raw bytes (little-endian u64).
-    pub fn draw_bits(&mut self, n: u32) -> u64 {
+    /// Draw `n` bits (up to 64). Returns the n-bit value as a Vec<u8> (little-endian, ceil(n/8) bytes).
+    /// Spec: `fn draw_bits(&mut self, n: u32) -> Vec<u8>`
+    pub fn draw_bits(&mut self, n: u32) -> Vec<u8> {
         assert!(n <= 64, "draw_bits: n must be <= 64");
+        let raw = self.draw_u64();
+        let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+        let value = raw & mask;
+        let byte_count = ((n + 7) / 8) as usize;
+        // Little-endian encoding
+        value.to_le_bytes()[..byte_count].to_vec()
+    }
+
+    /// Draw `n` bits as a raw u64 (legacy internal helper — use draw_bits for the spec API).
+    fn draw_bits_u64(&mut self, n: u32) -> u64 {
+        assert!(n <= 64, "draw_bits_u64: n must be <= 64");
         let raw = self.draw_u64();
         let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
         raw & mask
@@ -280,13 +350,33 @@ impl Driver {
         k
     }
 
-    /// Draw a Markov weather state (partition on/off). Returns 1 if partition active, 0 otherwise.
+    /// Draw a Markov weather state (partition on/off).
+    ///
+    /// Stateful: `partition_state` is remembered across calls.
+    /// - When OFF: transition to ON with probability `p_start`.
+    /// - When ON: transition to OFF with probability `p_stop`.
+    /// Returns 1 if partition is active after this draw, 0 otherwise.
+    ///
+    /// The transition draw is recorded on the tape, making weather reproducible via replay.
     pub fn draw_weather(&mut self, p_start: f64, p_stop: f64) -> u8 {
         let u = self.draw_f64();
-        // Simple: use p_start as probability of partition being active at this step
-        // (stateless approximation; stateful Markov is done by the supervisor calling repeatedly)
-        let _ = p_stop; // used in stateful version
-        if u < p_start { 1 } else { 0 }
+        if self.partition_state {
+            // Currently ON: transition to OFF with p_stop
+            if u < p_stop {
+                self.partition_state = false;
+            }
+        } else {
+            // Currently OFF: transition to ON with p_start
+            if u < p_start {
+                self.partition_state = true;
+            }
+        }
+        if self.partition_state { 1 } else { 0 }
+    }
+
+    /// Reset the weather partition state (call at the start of a new run).
+    pub fn reset_weather(&mut self) {
+        self.partition_state = false;
     }
 
     // -----------------------------------------------------------------------
@@ -409,6 +499,10 @@ impl Driver {
         }
         Score(scores)
     }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -470,21 +564,38 @@ impl ReplayEngine {
 mod tests {
     use super::*;
 
+    fn make_driver(seed: u64) -> Driver {
+        Driver::new(seed, StrategySpec::default(), TacticsSpec::default())
+    }
+
     #[test]
     fn draw_bits_range() {
-        let mut d = Driver::new(42, StrategySpec::default());
+        let mut d = make_driver(42);
         d.begin_run();
         for n in [1u32, 8, 16, 32, 64] {
             let v = d.draw_bits(n);
-            if n < 64 {
-                assert!(v < (1u64 << n), "draw_bits({n}) = {v} out of range");
-            }
+            assert_eq!(v.len(), ((n + 7) / 8) as usize, "draw_bits({n}) should return ceil({n}/8) bytes");
         }
     }
 
     #[test]
+    fn draw_bits_returns_vec_u8() {
+        // Spec: draw_bits returns Vec<u8> not u64
+        let mut d = make_driver(123);
+        d.begin_run();
+        let v8 = d.draw_bits(8);
+        assert_eq!(v8.len(), 1, "draw_bits(8) must return 1 byte");
+        let v16 = d.draw_bits(16);
+        assert_eq!(v16.len(), 2, "draw_bits(16) must return 2 bytes");
+        let v32 = d.draw_bits(32);
+        assert_eq!(v32.len(), 4, "draw_bits(32) must return 4 bytes");
+        let v64 = d.draw_bits(64);
+        assert_eq!(v64.len(), 8, "draw_bits(64) must return 8 bytes");
+    }
+
+    #[test]
     fn draw_int_bounds() {
-        let mut d = Driver::new(7, StrategySpec::default());
+        let mut d = make_driver(7);
         d.begin_run();
         for _ in 0..100 {
             let v = d.draw_int(3, 10);
@@ -494,13 +605,48 @@ mod tests {
 
     #[test]
     fn draw_choice_valid_index() {
-        let mut d = Driver::new(99, StrategySpec::default());
+        let mut d = make_driver(99);
         d.begin_run();
         let weights = vec![1u32, 2, 3, 4];
         for _ in 0..50 {
             let idx = d.draw_choice(&weights);
             assert!(idx < weights.len(), "draw_choice index {idx} out of range");
         }
+    }
+
+    /// Spec §5 API: run_driver(seed, script) helper for testing.
+    /// Runs the driver with the given seed, making N draws and feeding back
+    /// the supplied observation script. Returns the recorded tape.
+    fn run_driver(seed: u64, script: &[(&str, f64)]) -> Tape {
+        let mut d = Driver::new(seed, StrategySpec::default(), TacticsSpec::default());
+        d.begin_run();
+        // Make one draw per observation in the script
+        let n = script.len().max(10);
+        for _ in 0..n {
+            d.draw_bits(64);
+        }
+        // Report observations back to driver
+        let obs: Vec<(String, f64)> = script.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        d.end_run(&obs);
+        d.live_tape().clone()
+    }
+
+    /// Spec §5 mandated test: same seed + same observation replies → byte-identical tape.
+    /// Two independent Driver runs with the same seed and same observation script must
+    /// produce identical tape bytes.
+    #[test]
+    fn same_seed_same_replies_same_tape() {
+        let seed = 42u64;
+        let script = &[("depth", 3.0), ("crashed", 0.0)];
+
+        let tape_a = run_driver(seed, script);
+        let tape_b = run_driver(seed, script);
+
+        assert_eq!(
+            tape_a.tape_bytes(),
+            tape_b.tape_bytes(),
+            "same seed + same replies must produce byte-identical tape"
+        );
     }
 
     #[test]
@@ -510,14 +656,14 @@ mod tests {
         let seed = 12345u64;
 
         // Run driver A
-        let mut a = Driver::new(seed, StrategySpec::default());
+        let mut a = make_driver(seed);
         a.begin_run();
-        let draws_a: Vec<u64> = (0..20).map(|_| a.draw_bits(64)).collect();
+        let draws_a: Vec<Vec<u8>> = (0..20).map(|_| a.draw_bits(64)).collect();
         let tape_a = a.live_tape().clone();
 
         // Replay with driver B using the recorded tape
         let mut engine = ReplayEngine::from_tape(tape_a.clone());
-        let draws_b: Vec<u64> = (0..20).map(|_| engine.draw_u64()).collect();
+        let draws_b: Vec<Vec<u8>> = (0..20).map(|_| engine.draw_u64().to_le_bytes().to_vec()).collect();
 
         assert_eq!(draws_a, draws_b, "determinism: same seed + same tape → same draws");
     }
@@ -525,14 +671,14 @@ mod tests {
     #[test]
     fn replay_tape_produces_identical_sequence() {
         let seed = 999u64;
-        let mut d = Driver::new(seed, StrategySpec::default());
+        let mut d = make_driver(seed);
         d.begin_run();
-        let draws1: Vec<u64> = (0..10).map(|_| d.draw_bits(64)).collect();
+        let draws1: Vec<Vec<u8>> = (0..10).map(|_| d.draw_bits(64)).collect();
         let tape = d.live_tape().clone();
 
         // Replay the tape
         let mut engine = ReplayEngine::from_tape(tape);
-        let draws2: Vec<u64> = (0..10).map(|_| engine.draw_u64()).collect();
+        let draws2: Vec<Vec<u8>> = (0..10).map(|_| engine.draw_u64().to_le_bytes().to_vec()).collect();
 
         assert_eq!(draws1, draws2, "replay tape: should produce identical draw sequence");
     }
@@ -542,7 +688,7 @@ mod tests {
         let mut d = Driver::new(1, StrategySpec {
             maximize: vec!["depth".into()],
             ..Default::default()
-        });
+        }, TacticsSpec::default());
         d.begin_run();
         let _ = d.draw_bits(8);
         let _ = d.draw_bits(8);
@@ -553,7 +699,7 @@ mod tests {
 
     #[test]
     fn shrink_reduces_tape() {
-        let mut d = Driver::new(42, StrategySpec::default());
+        let mut d = make_driver(42);
         d.begin_run();
         // Record 20 draws
         for _ in 0..20 { d.draw_bits(8); }
@@ -568,23 +714,58 @@ mod tests {
     #[test]
     fn goal_detection() {
         let strategy = StrategySpec {
-            goal_probe: Some("x".into()),
-            goal_value: Some(1.0),
+            goal: Some(baud_proto::Predicate {
+                probe: "x".into(),
+                value: baud_proto::Value::U64(1),
+            }),
             ..Default::default()
         };
-        let d = Driver::new(1, strategy);
+        let d = Driver::new(1, strategy, TacticsSpec::default());
         assert!(d.is_goal_reached(&[("x".into(), 1.0)]));
         assert!(!d.is_goal_reached(&[("x".into(), 0.0)]));
     }
 
     #[test]
     fn draw_hold_reasonable() {
-        let mut d = Driver::new(5, StrategySpec::default());
+        let mut d = make_driver(5);
         d.begin_run();
         // Draw 20 hold values with mean=5, all should be reasonable
         for _ in 0..20 {
             let v = d.draw_hold(5);
             assert!(v < 10000, "hold value {v} seems too large");
         }
+    }
+
+    /// draw_weather_is_markov: draw_weather must be stateful (Markov), not independent per call.
+    #[test]
+    fn draw_weather_is_markov() {
+        let mut d = make_driver(777);
+        d.begin_run();
+
+        // With p_start=1.0 and p_stop=0.0: once ON, stays ON forever
+        let first = d.draw_weather(1.0, 0.0); // always transitions to ON
+        assert_eq!(first, 1, "p_start=1.0 must turn partition ON immediately");
+        for _ in 0..10 {
+            let v = d.draw_weather(1.0, 0.0); // p_stop=0.0: never transitions OFF
+            assert_eq!(v, 1, "p_stop=0.0: partition must remain ON");
+        }
+
+        // Reset and test: with p_start=0.0, stays OFF forever
+        d.reset_weather();
+        assert_eq!(d.draw_weather(0.0, 0.0), 0, "p_start=0.0 must stay OFF");
+        for _ in 0..10 {
+            assert_eq!(d.draw_weather(0.0, 0.0), 0, "p_start=0.0: partition must remain OFF");
+        }
+    }
+
+    /// driver_new_accepts_tactics: Driver::new must accept TacticsSpec parameter.
+    #[test]
+    fn driver_new_accepts_tactics() {
+        let tactics = TacticsSpec {
+            input: vec![InputTactic::StatefulMask { p_flip: 0.05 }],
+            weather: vec![WeatherTactic::MarkovPartition { p_start: 0.1, p_stop: 0.3 }],
+        };
+        let d = Driver::new(42, StrategySpec::default(), tactics);
+        assert_eq!(d.seed(), 42);
     }
 }

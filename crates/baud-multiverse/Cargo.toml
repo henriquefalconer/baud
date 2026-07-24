@@ -1,10 +1,9 @@
 [package]
-name = "baud-tracing"
-description = "baud observation plane 2: kernel-side ground truth (eBPF/fallback)"
+name = "baud-multiverse"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
 license.workspace = true
+description = "Deterministic supervisor for baud guest processes"
 
 [dependencies]
 baud-proto = { path = "../baud-proto" }
@@ -12,9 +11,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 blake3 = { workspace = true }
-uuid = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
-# none needed
+tempfile = { workspace = true }

@@ -118,6 +118,20 @@ impl RootKey {
         self.mint(sub, Some(node))
     }
 
+    /// Mint a JWT with explicit issued-at and expiry timestamps.
+    /// For testing only — production code always uses `mint_tape_token`/`mint_node_token`.
+    #[doc(hidden)]
+    pub fn mint_with_timestamps(
+        &self,
+        sub: String,
+        iat: u64,
+        exp: u64,
+        node: Option<u16>,
+    ) -> Result<SecretString, IdentityError> {
+        let claims = Claims { sub, iat, exp, node };
+        self.mint_claims(claims)
+    }
+
     fn mint(&self, sub: String, node: Option<u16>) -> Result<SecretString, IdentityError> {
         let now = unix_now()?;
         let claims = Claims {
@@ -127,6 +141,10 @@ impl RootKey {
             node,
         };
 
+        self.mint_claims(claims)
+    }
+
+    fn mint_claims(&self, claims: Claims) -> Result<SecretString, IdentityError> {
         // Reconstruct signing key from stored bytes
         let bytes = decode_b64(self.signing_key_bytes.expose())
             .map_err(|e| IdentityError::InvalidSigningKey(e))?;
@@ -215,18 +233,6 @@ fn der_from_ed25519_pkcs8(seed: &[u8; 32], _pk: &[u8; 32]) -> Vec<u8> {
     der_tlv(0x30, &body)
 }
 
-/// Build a SubjectPublicKeyInfo DER for an ed25519 public key (32 bytes).
-fn der_from_ed25519_spki(pk: &[u8; 32]) -> Vec<u8> {
-    // algorithmIdentifier: SEQUENCE { OID }
-    let alg_id = der_tlv(0x30, ED25519_OID_TLV);
-    // BIT STRING: unused-bits byte (0x00) + pk
-    let mut bit_str_body = vec![0x00u8];
-    bit_str_body.extend_from_slice(pk);
-    let bit_str = der_tlv(0x03, &bit_str_body);
-    // outer SEQUENCE
-    let body: Vec<u8> = [alg_id.as_slice(), bit_str.as_slice()].concat();
-    der_tlv(0x30, &body)
-}
 
 /// Build a DER TLV (tag, length, value).
 fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
@@ -399,6 +405,35 @@ mod tests {
             node: None,
         };
         assert!(should_renew(&claims));
+    }
+
+    /// expired_token_is_refused: a token minted 11 minutes ago must be rejected by verify().
+    #[test]
+    fn expired_token_is_refused() {
+        let (root, _) = RootKey::generate().expect("generate");
+        // Mint a token with iat=0, exp=660 (11 minutes from epoch — expired since 2026)
+        let iat = 0u64;
+        let exp = 660u64; // 11 minutes in seconds, which is in 1970 — definitely expired
+        let token = root.mint_with_timestamps(
+            "baud://tape/sb-1/run/r-1".into(),
+            iat,
+            exp,
+            None,
+        ).expect("mint");
+        let result = root.verify(token.expose());
+        assert!(result.is_err(), "expired_token_is_refused: verify must return Err for expired token");
+    }
+
+    /// wrong_root_key_is_refused: a token minted by one root key must be rejected by a
+    /// different root's verify().
+    #[test]
+    fn wrong_root_key_is_refused() {
+        let (root_a, _) = RootKey::generate().expect("generate root_a");
+        let (root_b, _) = RootKey::generate().expect("generate root_b");
+        // Mint with root_a, verify with root_b
+        let token = root_a.mint_tape_token("sb-1", "run-1").expect("mint");
+        let result = root_b.verify(token.expose());
+        assert!(result.is_err(), "wrong_root_key_is_refused: root_b must reject token minted by root_a");
     }
 
     #[test]

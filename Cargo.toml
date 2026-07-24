@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/baud-multiverse",
     "crates/baud-proto",
     "crates/baud-secret",
     "crates/baud-keys",
@@ -16,6 +17,7 @@ members = [
     "crates/baud-stream",
     "crates/baud-raftlet",
     "crates/baud-tracing",
+    "crates/baud-tape-agent",
 ]
 
 [workspace.package]

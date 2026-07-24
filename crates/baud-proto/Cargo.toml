@@ -8,4 +8,6 @@ description = "Wire and domain types for baud"
 [dependencies]
 serde = { workspace = true }
 ciborium = { workspace = true }
-thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

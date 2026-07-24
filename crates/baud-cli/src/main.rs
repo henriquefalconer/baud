@@ -35,7 +35,9 @@ pub enum Commands {
     Server(cmds::server::ServerCmd),
     /// Environment checks
     Doctor,
-    /// Secrets management
+    /// Secrets management (alias: keys)
+    Secrets(cmds::keys::KeysCmd),
+    /// Secrets management (deprecated alias for 'secrets')
     Keys(cmds::keys::KeysCmd),
     /// Spec management
     Spec(cmds::spec::SpecCmd),
@@ -66,7 +68,7 @@ pub enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_env("BAUD_LOG")
@@ -75,24 +77,37 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let json = cli.json;
     let c = client::Client::new(&cli.server);
 
-    match cli.command {
-        Commands::Server(cmd) => cmds::server::run(cmd, &c, cli.json).await,
-        Commands::Doctor => cmds::doctor::run(&c, cli.json).await,
-        Commands::Keys(cmd) => cmds::keys::run(cmd, &c, cli.json).await,
-        Commands::Spec(cmd) => cmds::spec::run(cmd, &c, cli.json).await,
-        Commands::Tape(cmd) => cmds::tape::run(cmd, &c, cli.json).await,
-        Commands::Run(cmd) => cmds::run::run(cmd, &c, cli.json).await,
-        Commands::Obs(cmd) => cmds::obs::run(cmd, &c, cli.json).await,
-        Commands::Syscalls(cmd) => cmds::syscalls::run(cmd, &c, cli.json).await,
-        Commands::Tracing(cmd) => cmds::tracing::run(cmd, &c, cli.json).await,
-        Commands::Net(cmd) => cmds::net::run(cmd, &c, cli.json).await,
-        Commands::Stream(cmd) => cmds::stream::run(cmd, &c, cli.json).await,
-        Commands::Verify(cmd) => cmds::verify::run(cmd, &c, cli.json).await,
-        Commands::Shrink(args) => cmds::shrink::run(args, &c, cli.json).await,
-        Commands::Replay(args) => cmds::replay::run(args, &c, cli.json).await,
-        Commands::Fuzz(cmd) => cmds::fuzz::run(cmd, &c, cli.json).await,
-        Commands::Budget => cmds::budget::run(&c, cli.json).await,
+    let result: Result<()> = match cli.command {
+        Commands::Server(cmd) => cmds::server::run(cmd, &c, json).await,
+        Commands::Doctor => cmds::doctor::run(&c, json).await,
+        Commands::Secrets(cmd) => cmds::keys::run(cmd, &c, json).await,
+        Commands::Keys(cmd) => cmds::keys::run(cmd, &c, json).await,
+        Commands::Spec(cmd) => cmds::spec::run(cmd, &c, json).await,
+        Commands::Tape(cmd) => cmds::tape::run(cmd, &c, json).await,
+        Commands::Run(cmd) => cmds::run::run(cmd, &c, json).await,
+        Commands::Obs(cmd) => cmds::obs::run(cmd, &c, json).await,
+        Commands::Syscalls(cmd) => cmds::syscalls::run(cmd, &c, json).await,
+        Commands::Tracing(cmd) => cmds::tracing::run(cmd, &c, json).await,
+        Commands::Net(cmd) => cmds::net::run(cmd, &c, json).await,
+        Commands::Stream(cmd) => cmds::stream::run(cmd, &c, json).await,
+        Commands::Verify(cmd) => cmds::verify::run(cmd, &c, json).await,
+        Commands::Shrink(args) => cmds::shrink::run(args, &c, json).await,
+        Commands::Replay(args) => cmds::replay::run(args, &c, json).await,
+        Commands::Fuzz(cmd) => cmds::fuzz::run(cmd, &c, json).await,
+        Commands::Budget => cmds::budget::run(&c, json).await,
+    };
+
+    if let Err(e) = result {
+        if json {
+            // Machine-readable error output on stderr (baud-cli.md §4)
+            let msg = format!("{e:#}");
+            eprintln!("{}", serde_json::json!({ "ok": false, "error": msg }));
+        } else {
+            eprintln!("error: {e:#}");
+        }
+        std::process::exit(1);
     }
 }

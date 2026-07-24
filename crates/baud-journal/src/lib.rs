@@ -94,11 +94,29 @@ pub struct Journal {
     run_id: String,
     index: Vec<IndexEntry>,
     stream_hasher: blake3::Hasher,
+    /// Age recipient public key for encryption-at-rest.
+    /// When Some, every chunk body is age-encrypted before writing to disk.
+    /// Content addressing (blake3) is always over the plaintext.
+    age_recipient: Option<String>,
 }
 
 impl Journal {
     /// Open or create a journal for the given run.
+    ///
+    /// If `age_recipient` is provided, all chunk bodies are age-encrypted before writing.
+    /// Content addressing (blake3) is always over the plaintext.
     pub fn open(base: &Path, run_id: &str) -> Result<Self, JournalError> {
+        Self::open_with_encryption(base, run_id, None)
+    }
+
+    /// Open or create a journal with age encryption enabled.
+    ///
+    /// `age_recipient` is the age public key (e.g. `age1...`) to encrypt to.
+    pub fn open_encrypted(base: &Path, run_id: &str, age_recipient: &str) -> Result<Self, JournalError> {
+        Self::open_with_encryption(base, run_id, Some(age_recipient.to_owned()))
+    }
+
+    fn open_with_encryption(base: &Path, run_id: &str, age_recipient: Option<String>) -> Result<Self, JournalError> {
         let run_dir = base.join(run_id);
         fs::create_dir_all(run_dir.join("chunks"))
             .map_err(|e| JournalError::Io(format!("create_dir_all: {e}")))?;
@@ -119,30 +137,41 @@ impl Journal {
             run_id: run_id.to_owned(),
             index,
             stream_hasher: blake3::Hasher::new(),
+            age_recipient,
         })
     }
 
     /// Append a chunk to the journal.
+    ///
+    /// If encryption is enabled (`age_recipient` set at open time), the chunk body
+    /// is age-encrypted before writing. The blake3 address is always over the plaintext.
     pub fn append(&mut self, chunk: JournalChunk) -> Result<String, JournalError> {
         let step = chunk.step();
 
-        // Encode chunk to CBOR
+        // Encode chunk to CBOR (plaintext)
         let mut cbor_bytes = Vec::new();
         ciborium::into_writer(&chunk, &mut cbor_bytes)
             .map_err(|e| JournalError::Cbor(e.to_string()))?;
 
-        // Content address = blake3 over plaintext
+        // Content address = blake3 over PLAINTEXT (spec requirement)
         let addr = blake3::hash(&cbor_bytes);
         let addr_hex = hex_encode(addr.as_bytes());
 
         // Write chunk file (idempotent: same content → same path)
         let chunk_path = self.chunk_path(&addr_hex);
         if !chunk_path.exists() {
-            fs::write(&chunk_path, &cbor_bytes)
+            // Encrypt if recipient is configured; otherwise write plaintext.
+            let bytes_to_write = if let Some(recipient) = &self.age_recipient {
+                age_encrypt(&cbor_bytes, recipient)
+                    .map_err(|e| JournalError::Io(format!("age encrypt: {e}")))?
+            } else {
+                cbor_bytes.clone()
+            };
+            fs::write(&chunk_path, &bytes_to_write)
                 .map_err(|e| JournalError::Io(format!("write chunk: {e}")))?;
         }
 
-        // Update stream hash
+        // Update stream hash (over plaintext, so encryption does not perturb verification)
         self.stream_hasher.update(&cbor_bytes);
 
         // Record in index
@@ -189,11 +218,20 @@ impl Journal {
     /// Read a chunk by its address.
     fn read_chunk(&self, addr: &str) -> Result<JournalChunk, JournalError> {
         let path = self.chunk_path(addr);
-        let bytes = fs::read(&path)
+        let stored_bytes = fs::read(&path)
             .map_err(|e| JournalError::Io(format!("read chunk {addr}: {e}")))?;
 
-        // Verify content integrity
-        let computed = blake3::hash(&bytes);
+        // Decrypt if encryption is enabled
+        let plaintext = if self.age_recipient.is_some() {
+            // Decrypt using the age identity from baud-keys
+            age_decrypt(&stored_bytes)
+                .map_err(|e| JournalError::Io(format!("age decrypt {addr}: {e}")))?
+        } else {
+            stored_bytes
+        };
+
+        // Verify content integrity (blake3 over plaintext)
+        let computed = blake3::hash(&plaintext);
         let computed_hex = hex_encode(computed.as_bytes());
         if computed_hex != addr {
             return Err(JournalError::Integrity {
@@ -202,7 +240,7 @@ impl Journal {
             });
         }
 
-        ciborium::from_reader(bytes.as_slice())
+        ciborium::from_reader(plaintext.as_slice())
             .map_err(|e| JournalError::Cbor(e.to_string()))
     }
 
@@ -254,6 +292,78 @@ pub enum JournalError {
 }
 
 // ---------------------------------------------------------------------------
+// Age encryption helpers
+// ---------------------------------------------------------------------------
+
+/// Encrypt `plaintext` to the given age `recipient` public key using the `age` binary.
+/// Returns ciphertext (ASCII-armored age format starting with `age-encryption.org/v1`).
+///
+/// Shells out to `age --encrypt --recipient <pub_key> --armor` piped from stdin.
+fn age_encrypt(plaintext: &[u8], recipient: &str) -> std::io::Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    use std::io::Write;
+
+    let mut child = Command::new("age")
+        .args(["--encrypt", "--recipient", recipient, "--armor"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        stdin.write_all(plaintext)?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("age encrypt failed: {stderr}"),
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// Decrypt `ciphertext` using the age identity resolved from baud-keys.
+/// Shells out to `age --decrypt` with `SOPS_AGE_KEY_FILE` set if available.
+fn age_decrypt(ciphertext: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    use std::io::Write;
+
+    let mut cmd = Command::new("age");
+    cmd.arg("--decrypt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Set age identity file if available
+    if let Some(key_path) = baud_keys::age_key_path() {
+        cmd.env("SOPS_AGE_KEY_FILE", &key_path)
+           .arg("--identity")
+           .arg(&key_path);
+    }
+
+    let mut child = cmd.spawn()?;
+
+    if let Some(stdin) = child.stdin.take() {
+        let mut stdin = stdin;
+        stdin.write_all(ciphertext)?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("age decrypt failed: {stderr}"),
+        ));
+    }
+    Ok(output.stdout)
+}
+
+// ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
 
@@ -268,7 +378,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baud_proto::{Value, Hash};
+    use baud_proto::Value;
     use tempfile::TempDir;
 
     fn obs(probe: &str, step: u64) -> Observation {
@@ -296,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn content_addressing_deduplication() {
+    fn dedup_by_plaintext_hash() {
         let dir = TempDir::new().unwrap();
         let mut j = Journal::open(dir.path(), "run-002").unwrap();
 
@@ -395,5 +505,105 @@ mod tests {
         let obs_list = j.observations().unwrap();
         assert_eq!(obs_list.len(), 3);
         assert_eq!(obs_list[1].probe, "b");
+    }
+
+    /// Verify that when `open_encrypted()` is used, chunk files on disk are age
+    /// ciphertext (start with the age ASCII-armor header), not raw CBOR.
+    ///
+    /// Requires the `age` and `age-keygen` binaries on PATH. If they are not
+    /// present the test is skipped without failure.
+    #[test]
+    fn chunk_bodies_are_ciphertext() {
+        // Skip if age-keygen is not available
+        let keygen = std::process::Command::new("age-keygen").arg("--version").output();
+        if keygen.is_err() {
+            eprintln!("chunk_bodies_are_ciphertext: age-keygen not found, skipping");
+            return;
+        }
+
+        // Generate a fresh test key pair
+        // age-keygen writes to stdout: "Public key: age1...\n# created: ...\n# public key: age1...\nAGE-SECRET-KEY-1..."
+        let keygen_out = std::process::Command::new("age-keygen")
+            .output()
+            .expect("age-keygen should succeed");
+        let keygen_stdout = String::from_utf8(keygen_out.stdout).unwrap();
+
+        // Extract the recipient (public key) — age-keygen writes "# public key: age1..."
+        // in the key file (stdout), and "Public key: age1..." to stderr as a warning.
+        // We parse the comment line from stdout.
+        let recipient = keygen_stdout
+            .lines()
+            .find(|l| l.starts_with("# public key:"))
+            .and_then(|l| l.splitn(2, ": ").nth(1))
+            .expect("age-keygen stdout should contain '# public key: age1...' comment line")
+            .trim()
+            .to_string();
+
+        // Write the full output (which includes the secret key) to a temp file
+        // so age --decrypt can use it as an identity file.
+        let key_dir = TempDir::new().unwrap();
+        let key_path = key_dir.path().join("key.txt");
+        fs::write(&key_path, &keygen_stdout).unwrap();
+        // Set the env var that age_decrypt looks for via baud_keys::age_key_path()
+        // We temporarily point to our test key via BAUD_AGE_KEY_FILE.
+        // (age_decrypt shells out; env is inherited by child process.)
+        // Since we cannot trivially override baud_keys::age_key_path() in tests,
+        // we call the helper directly with our key path set as an env var override.
+        // Instead, we exercise encrypt → disk bytes → decrypt round-trip manually.
+
+        // 1. Encrypt some plaintext
+        let plaintext = b"hello from baud-journal";
+        let ciphertext = age_encrypt(plaintext, &recipient)
+            .expect("age_encrypt should succeed with valid recipient");
+
+        // 2. The ciphertext must start with the age ASCII armor header
+        let armor_magic = b"-----BEGIN AGE ENCRYPTED FILE-----";
+        assert!(
+            ciphertext.starts_with(armor_magic),
+            "age ciphertext should start with ASCII armor header, got: {:?}",
+            &ciphertext[..ciphertext.len().min(60)]
+        );
+
+        // 3. Verify chunk files on disk are ciphertext when open_encrypted() is used.
+        //    We open the journal with the public key and append an observation.
+        let data_dir = TempDir::new().unwrap();
+        let mut j = Journal::open_encrypted(data_dir.path(), "enc-run-001", &recipient)
+            .expect("open_encrypted should succeed");
+        let addr = j.append_observation(obs("probe", 1))
+            .expect("append_observation should succeed");
+
+        // 4. Read the raw file on disk
+        let chunk_path = data_dir.path().join("enc-run-001").join("chunks").join(&addr);
+        let on_disk = fs::read(&chunk_path).expect("chunk file should exist");
+
+        // Must start with age armor magic
+        assert!(
+            on_disk.starts_with(armor_magic),
+            "chunk on disk should be age ciphertext, got: {:?}",
+            &on_disk[..on_disk.len().min(60)]
+        );
+
+        // 5. Decrypt + read back using age binary directly (bypassing baud_keys)
+        let decrypt_out = std::process::Command::new("age")
+            .args(["--decrypt", "--identity"])
+            .arg(&key_path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(&on_disk).ok();
+                child.wait_with_output()
+            })
+            .expect("age --decrypt should succeed");
+
+        assert!(
+            decrypt_out.status.success(),
+            "age --decrypt should succeed: {}",
+            String::from_utf8_lossy(&decrypt_out.stderr)
+        );
+        // The decrypted bytes should be valid CBOR (non-empty)
+        assert!(!decrypt_out.stdout.is_empty(), "decrypted chunk should be non-empty CBOR");
     }
 }

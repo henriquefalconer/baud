@@ -82,16 +82,68 @@ pub enum BpfAvailability {
 
 impl BpfAvailability {
     /// Probe the current environment. On macOS or when BPF is denied, returns Fallback.
+    ///
+    /// On Linux, attempts a BPF_PROG_LOAD syscall with a minimal valid program.
+    /// Returns `Native` if the syscall is not denied (EPERM / ENOSYS → `Fallback`).
     pub fn probe() -> Self {
-        // On macOS, BPF is not available for Linux eBPF.
-        // In sandbox containers that deny BPF, also fallback.
-        // We detect by checking the target OS.
-        if cfg!(target_os = "linux") {
-            // Could try bpf(BPF_PROG_LOAD, ...) and check EPERM/ENOSYS.
-            // For safety, return Fallback here too — real BPF loading is done by
-            // the prebuilt CO-RE agent binary (baud-tape-agent), not this crate.
-            BpfAvailability::Fallback
-        } else {
+        #[cfg(target_os = "linux")]
+        {
+            // Probe BPF availability by attempting BPF_PROG_LOAD with a minimal BPF program
+            // (a single BPF_EXIT instruction). If the kernel returns EPERM or ENOSYS the
+            // BPF subsystem is unavailable; any other error (including EINVAL from the
+            // bad-but-valid minimal program) means BPF is accessible.
+            //
+            // BPF syscall number on x86-64 is 321.
+            // bpf_attr layout for BPF_PROG_LOAD (cmd=5):
+            //   u32 prog_type (BPF_PROG_TYPE_SOCKET_FILTER = 1)
+            //   u32 insn_cnt
+            //   u64 insns ptr
+            //   u64 license ptr
+            //   ... (we leave the rest zeroed)
+            //
+            // A BPF EXIT instruction is: code=0x95 (BPF_JMP|BPF_EXIT), dst/src/off=0, imm=0.
+            const BPF_SYSCALL_NR: i64 = 321;
+            const BPF_PROG_LOAD: u64 = 5;
+            const BPF_PROG_TYPE_SOCKET_FILTER: u32 = 1;
+
+            // Minimal BPF program: just BPF_EXIT (8 bytes)
+            let prog: [u64; 1] = [0x0000000000000095]; // BPF_EXIT
+            let license = b"GPL\0";
+
+            // bpf_attr for BPF_PROG_LOAD (96 bytes, zero-initialized)
+            let mut attr = [0u8; 96];
+            // prog_type (u32 at offset 0)
+            attr[0..4].copy_from_slice(&BPF_PROG_TYPE_SOCKET_FILTER.to_ne_bytes());
+            // insn_cnt (u32 at offset 4)
+            attr[4..8].copy_from_slice(&1u32.to_ne_bytes());
+            // insns (u64 at offset 8) — pointer to prog
+            let insns_ptr = prog.as_ptr() as u64;
+            attr[8..16].copy_from_slice(&insns_ptr.to_ne_bytes());
+            // license (u64 at offset 16) — pointer to license string
+            let license_ptr = license.as_ptr() as u64;
+            attr[16..24].copy_from_slice(&license_ptr.to_ne_bytes());
+
+            let ret = unsafe {
+                libc::syscall(BPF_SYSCALL_NR, BPF_PROG_LOAD, attr.as_ptr(), attr.len())
+            };
+
+            if ret >= 0 {
+                // BPF prog loaded successfully — close the fd and return Native
+                unsafe { libc::close(ret as libc::c_int) };
+                return BpfAvailability::Native;
+            }
+
+            let errno = unsafe { *libc::__errno_location() };
+            if errno == libc::EPERM || errno == libc::ENOSYS {
+                // Explicitly denied or not supported
+                return BpfAvailability::Fallback;
+            }
+            // Any other error (EINVAL from bad prog, etc.) means BPF is accessible
+            BpfAvailability::Native
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // macOS and other platforms: eBPF is not available
             BpfAvailability::Fallback
         }
     }
@@ -258,7 +310,7 @@ pub struct TracingSummary {
 pub struct CrossCheckResult {
     pub run_id: String,
     pub passed: bool,
-    /// If failed, the first node where counts diverged.
+    /// If failed, the first node where counts or sequences diverged.
     pub divergent_node: Option<u16>,
     /// Per-node counts from plane 1 (supervisor syscall log).
     pub plane1_counts: HashMap<u16, u64>,
@@ -266,6 +318,8 @@ pub struct CrossCheckResult {
     pub plane2_counts: HashMap<u16, u64>,
     /// Source of plane 2 data.
     pub plane2_source: Source,
+    /// If sequence diverged, the node and step at which first difference was found.
+    pub divergent_sequence_step: Option<(u16, usize)>,
     pub message: String,
 }
 
@@ -273,7 +327,7 @@ pub struct CrossCheckResult {
 ///
 /// Both planes must agree on:
 ///  - Per-guest syscall counts (within tolerance of 0 — exact match required)
-///  - Per-guest syscall sequence (order by vtime must agree)
+///  - Per-guest syscall sequence (ordered by vtime must agree)
 ///
 /// A failed cross-check indicates a supervisor bug or an escaped guest.
 pub fn cross_check(
@@ -281,20 +335,39 @@ pub fn cross_check(
     syscall_records: &[SyscallRecord],  // plane 1: from supervisor
     ebpf_session: &TracingSession,       // plane 2: from eBPF/fallback
 ) -> CrossCheckResult {
-    // Compute per-node syscall counts from plane 1
+    // Compute per-node syscall counts and ordered sequences from plane 1
     let mut plane1_counts: HashMap<u16, u64> = HashMap::new();
+    let mut plane1_sequences: HashMap<u16, Vec<u32>> = HashMap::new(); // node → ordered sysno by vtime
+    // plane 1 records are assumed ordered by vtime; preserve order
     for r in syscall_records {
         *plane1_counts.entry(r.node).or_insert(0) += 1;
+        plane1_sequences.entry(r.node).or_default().push(r.sysno);
     }
 
     let plane2_counts = ebpf_session.syscall_counts().clone();
 
-    // Find first divergence by node
+    // Build plane 2 ordered sequences from eBPF records
+    // Filter to only syscall events, sort by vtime, extract sysno
+    let mut plane2_sequences: HashMap<u16, Vec<u32>> = HashMap::new();
+    let mut syscall_recs: Vec<&baud_proto::EbpfRecord> = ebpf_session.records.iter()
+        .filter(|r| r.event.starts_with("syscall:"))
+        .collect();
+    syscall_recs.sort_by_key(|r| r.vtime);
+    for rec in syscall_recs {
+        if let Some(sysno_str) = rec.event.strip_prefix("syscall:") {
+            if let Ok(sysno) = sysno_str.parse::<u32>() {
+                plane2_sequences.entry(rec.node).or_default().push(sysno);
+            }
+        }
+    }
+
+    // Find first divergence by node (counts first, then sequences)
     let mut all_nodes: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     all_nodes.extend(plane1_counts.keys());
     all_nodes.extend(plane2_counts.keys());
 
     let mut divergent_node = None;
+    let mut divergent_sequence_step: Option<(u16, usize)> = None;
     let mut passed = true;
 
     for node in all_nodes {
@@ -305,14 +378,36 @@ pub fn cross_check(
             if divergent_node.is_none() {
                 divergent_node = Some(node);
             }
+        } else {
+            // Counts agree: also compare ordered sequence
+            let seq1 = plane1_sequences.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
+            let seq2 = plane2_sequences.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
+            for (step, (s1, s2)) in seq1.iter().zip(seq2.iter()).enumerate() {
+                if s1 != s2 {
+                    passed = false;
+                    if divergent_sequence_step.is_none() {
+                        divergent_sequence_step = Some((node, step));
+                    }
+                    if divergent_node.is_none() {
+                        divergent_node = Some(node);
+                    }
+                    break;
+                }
+            }
         }
     }
 
     let message = if passed {
-        "observation cross-check PASSED: plane 1 (supervisor) and plane 2 (eBPF) agree".into()
+        "observation cross-check PASSED: plane 1 (supervisor) and plane 2 (eBPF) agree on counts and ordered sequences".into()
+    } else if divergent_sequence_step.is_some() {
+        format!(
+            "observation cross-check FAILED: sequence divergence at node={:?} step={:?}; \
+             this indicates a supervisor bug or escaped guest",
+            divergent_node, divergent_sequence_step
+        )
     } else {
         format!(
-            "observation cross-check FAILED: first divergent node={:?}; \
+            "observation cross-check FAILED: count divergence at node={:?}; \
              this indicates a supervisor bug or escaped guest",
             divergent_node
         )
@@ -325,6 +420,7 @@ pub fn cross_check(
         plane1_counts,
         plane2_counts,
         plane2_source: ebpf_session.source.clone(),
+        divergent_sequence_step,
         message,
     }
 }
@@ -376,10 +472,16 @@ mod tests {
     }
 
     #[test]
-    fn test_bpf_availability_fallback() {
-        // On macOS and unverified Linux, we get Fallback
+    fn test_bpf_availability_probe_does_not_panic() {
+        // probe() must not panic regardless of platform.
+        // On macOS it always returns Fallback; on Linux it may return Native or Fallback
+        // depending on kernel BPF support and container policy.
         let avail = BpfAvailability::probe();
-        assert_eq!(avail, BpfAvailability::Fallback);
+        // Both variants are valid; just verify no panic.
+        let _ = avail.source(); // also exercises the source() method
+
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(avail, BpfAvailability::Fallback, "non-Linux must always be Fallback");
     }
 
     #[test]
@@ -485,5 +587,93 @@ mod tests {
         assert_eq!("sched".parse::<EventKind>().unwrap(), EventKind::SchedSwitch);
         assert_eq!("exec".parse::<EventKind>().unwrap(), EventKind::Exec);
         assert!("bogus".parse::<EventKind>().is_err());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Spec-mandated test names (specs/baud-tracing.md §6)
+    // ---------------------------------------------------------------------------
+
+    /// cross_check_detects_sequence_divergence: same counts but different syscall order
+    /// must be detected as divergent.
+    #[test]
+    fn cross_check_detects_sequence_divergence() {
+        // Plane 1: node 0 makes syscall 1 then syscall 2
+        let syscalls_p1 = vec![
+            make_syscall(0, 1, 10),
+            make_syscall(0, 2, 20),
+        ];
+        // Plane 2: same count but reversed order (2 then 1) — simulates supervisor bug
+        let syscalls_p2 = vec![
+            make_syscall(0, 2, 10), // different sysno at same step
+            make_syscall(0, 1, 20),
+        ];
+        let session = synthetic_from_syscalls("seq-test", &syscalls_p2);
+        let result = cross_check("seq-test", &syscalls_p1, &session);
+        // Counts agree (2 each) but sequences differ — must fail
+        assert!(!result.passed, "cross_check_detects_sequence_divergence: must fail on sequence mismatch");
+        assert!(result.divergent_sequence_step.is_some(), "divergent_sequence_step must be set");
+        assert_eq!(result.divergent_sequence_step.unwrap().0, 0, "divergence on node 0");
+    }
+
+    /// planes_agree_on_healthy_run: plane 1 (supervisor syscall log) and plane 2
+    /// (eBPF / fallback) must agree on per-guest syscall counts and ordered sequences
+    /// for a well-behaved run.
+    #[test]
+    fn planes_agree_on_healthy_run() {
+        // Build a known syscall log (plane 1)
+        let syscalls = vec![
+            make_syscall(0, 1, 10),   // node 0, sysno 1, vtime 10
+            make_syscall(0, 2, 20),   // node 0, sysno 2, vtime 20
+            make_syscall(0, 60, 30),  // node 0, exit (sysno 60), vtime 30
+            make_syscall(1, 1, 15),   // node 1, sysno 1, vtime 15
+            make_syscall(1, 60, 35),  // node 1, exit, vtime 35
+        ];
+
+        // Derive plane 2 from the same syscall log (as a fallback eBPF session)
+        let plane2 = synthetic_from_syscalls("healthy-run", &syscalls);
+
+        // Cross-check must pass
+        let result = cross_check("healthy-run", &syscalls, &plane2);
+        assert!(
+            result.passed,
+            "planes_agree_on_healthy_run: cross-check must PASS for healthy run. {}",
+            result.message
+        );
+        assert_eq!(result.divergent_node, None, "no divergent node in healthy run");
+
+        // Node 0 has 3 syscalls, node 1 has 2
+        assert_eq!(result.plane1_counts.get(&0), Some(&3));
+        assert_eq!(result.plane1_counts.get(&1), Some(&2));
+    }
+
+    /// fallback_emits_same_schema: when BPF is unavailable, the fallback
+    /// (/proc-sampling + strace-shim) must emit `EbpfRecord`s with the same
+    /// schema as the native BPF path, flagged `source=fallback`.
+    #[test]
+    fn fallback_emits_same_schema() {
+        // Build a synthetic fallback session from syscall records
+        let syscalls = vec![
+            make_syscall(0, 1, 10),
+            make_syscall(0, 2, 20),
+        ];
+        let session = synthetic_from_syscalls("fallback-run", &syscalls);
+
+        // All records must carry the fallback source flag
+        for rec in &session.records {
+            assert_eq!(
+                rec.source,
+                Source::Fallback,
+                "fallback session record must have source=Fallback (BpfAvailability::probe() returns Fallback on this platform)"
+            );
+        }
+
+        // Records must have the same shape as native BPF records
+        assert_eq!(session.records.len(), 2, "fallback session must emit one record per syscall");
+        assert_eq!(session.records[0].node, 0);
+        assert!(session.records[0].event.starts_with("syscall:"), "event must be prefixed 'syscall:'");
+
+        // Cross-check must succeed even with fallback source
+        let result = cross_check("fallback-run", &syscalls, &session);
+        assert!(result.passed, "fallback source must still pass cross-check: {}", result.message);
     }
 }

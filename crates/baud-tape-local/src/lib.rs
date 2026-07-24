@@ -467,6 +467,25 @@ mod tests {
         assert!(r.is_err(), "status after delete should fail");
     }
 
+    /// backend_conformance_parity: run the shared conformance suite against LocalBackend.
+    /// This is the spec-mandated test for baud-tape-local (specs/baud-tape-local.md §6).
+    #[tokio::test]
+    async fn backend_conformance_parity() {
+        let b = make_backend().await;
+        baud_tape::backend::conformance::run_conformance(&b)
+            .await
+            .expect("conformance suite must pass on LocalBackend");
+    }
+
+    /// backend_lifecycle_conformance: run the extended lifecycle suite (stop→ensure→archive→ensure→gone).
+    #[tokio::test]
+    async fn backend_lifecycle_conformance() {
+        let b = make_backend().await;
+        baud_tape::backend::conformance::run_lifecycle_conformance(&b)
+            .await
+            .expect("lifecycle conformance suite must pass on LocalBackend");
+    }
+
     #[tokio::test]
     async fn auto_stop_timer() {
         let b = make_backend().await;

@@ -16,11 +16,23 @@
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use crate::AppState;
+
+/// Convenience alias: routes return either a JSON success or a (status, JSON error).
+type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn not_found(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": msg.into() })))
+}
+
+fn server_error(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": msg.into() })))
+}
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -167,24 +179,25 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 pub async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
-    match get_tape(&state, &id).await {
-        Ok(row) => row,
-        Err(e) => Json(json!({ "error": e })),
-    }
+) -> ApiResult {
+    get_tape(&state, &id).await
 }
 
-async fn get_tape(state: &AppState, id: &str) -> Result<Json<Value>, String> {
+async fn get_tape(state: &AppState, id: &str) -> ApiResult {
     let row = sqlx::query_as::<_, (String, String, String, i64, i64, i64, i64, i64, Option<String>, Option<String>, i64, i64)>(
         "SELECT id, backend, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, preview_url, created_at, updated_at FROM tapes WHERE id = ?"
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| format!("db error: {e}"))?;
+    .map_err(|e| server_error(format!("db error: {e}")))?;
 
     match row {
         Some((id, backend, state_val, vcpus, mem, disk, stop, arch, image, url, ca, ua)) => {
+            // Spec: status() must fail for Gone/deleted tapes (Backend trait conformance)
+            if state_val == "deleted" {
+                return Err(not_found(format!("tape {id} is gone (deleted)")));
+            }
             Ok(Json(json!({
                 "id": id,
                 "backend": backend,
@@ -200,7 +213,7 @@ async fn get_tape(state: &AppState, id: &str) -> Result<Json<Value>, String> {
                 "updated_at": ua,
             })))
         }
-        None => Err(format!("tape {id} not found")),
+        None => Err(not_found(format!("tape {id} not found"))),
     }
 }
 
@@ -211,7 +224,7 @@ async fn get_tape(state: &AppState, id: &str) -> Result<Json<Value>, String> {
 pub async fn start(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> ApiResult {
     update_tape_state(&state, &id, "stopped", "running").await
 }
 
@@ -222,7 +235,7 @@ pub async fn start(
 pub async fn stop(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> ApiResult {
     update_tape_state(&state, &id, "running", "stopped").await
 }
 
@@ -233,7 +246,7 @@ pub async fn stop(
 pub async fn restore(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> ApiResult {
     update_tape_state(&state, &id, "archived", "running").await
 }
 
@@ -244,7 +257,7 @@ pub async fn restore(
 pub async fn ensure(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> ApiResult {
     // Get current state
     let current = sqlx::query_as::<_, (String,)>("SELECT state FROM tapes WHERE id = ?")
         .bind(&id)
@@ -252,15 +265,16 @@ pub async fn ensure(
         .await;
 
     match current {
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
-        Ok(None) => Json(json!({ "error": format!("tape {id} not found") })),
+        Err(e) => Err(server_error(format!("db error: {e}"))),
+        Ok(None) => Err(not_found(format!("tape {id} not found"))),
         Ok(Some((tape_state,))) => {
             let new_state = match tape_state.as_str() {
-                "running" => "running",
-                "stopped" => "running",
-                "archived" => "running",
+                "running" | "stopped" | "archived" => "running",
                 other => {
-                    return Json(json!({ "error": format!("cannot ensure tape in state {other}") }));
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": format!("cannot ensure tape in state {other}") })),
+                    ));
                 }
             };
             if new_state != tape_state.as_str() {
@@ -272,15 +286,12 @@ pub async fn ensure(
                     .execute(&state.db)
                     .await;
             }
-            match get_tape(&state, &id).await {
-                Ok(r) => r,
-                Err(e) => Json(json!({ "error": e })),
-            }
+            get_tape(&state, &id).await
         }
     }
 }
 
-async fn update_tape_state(state: &AppState, id: &str, _from: &str, to: &str) -> Json<Value> {
+async fn update_tape_state(state: &AppState, id: &str, _from: &str, to: &str) -> ApiResult {
     let now = crate::state::unix_now() as i64;
     let result = sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ?")
         .bind(to)
@@ -291,15 +302,10 @@ async fn update_tape_state(state: &AppState, id: &str, _from: &str, to: &str) ->
 
     match result {
         Ok(r) if r.rows_affected() == 0 => {
-            Json(json!({ "error": format!("tape {id} not found") }))
+            Err(not_found(format!("tape {id} not found")))
         }
-        Ok(_) => {
-            match get_tape(state, id).await {
-                Ok(r) => r,
-                Err(e) => Json(json!({ "error": e })),
-            }
-        }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(_) => get_tape(state, id).await,
+        Err(e) => Err(server_error(format!("db error: {e}"))),
     }
 }
 
@@ -310,7 +316,7 @@ async fn update_tape_state(state: &AppState, id: &str, _from: &str, to: &str) ->
 pub async fn kill(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> ApiResult {
     let now = crate::state::unix_now() as i64;
     let result = sqlx::query("UPDATE tapes SET state = 'deleted', updated_at = ? WHERE id = ?")
         .bind(now)
@@ -320,10 +326,10 @@ pub async fn kill(
 
     match result {
         Ok(r) if r.rows_affected() == 0 => {
-            Json(json!({ "error": format!("tape {id} not found") }))
+            Err(not_found(format!("tape {id} not found")))
         }
-        Ok(_) => Json(json!({ "ok": true, "id": id, "state": "deleted" })),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(_) => Ok(Json(json!({ "ok": true, "id": id, "state": "deleted" }))),
+        Err(e) => Err(server_error(format!("db error: {e}"))),
     }
 }
 
@@ -335,7 +341,7 @@ pub async fn exec(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<ExecBody>,
-) -> Json<Value> {
+) -> ApiResult {
     // Verify tape exists and is running
     let tape = sqlx::query_as::<_, (String, String)>("SELECT id, state FROM tapes WHERE id = ?")
         .bind(&id)
@@ -343,37 +349,92 @@ pub async fn exec(
         .await;
 
     match tape {
-        Err(e) => return Json(json!({ "error": format!("db error: {e}") })),
-        Ok(None) => return Json(json!({ "error": format!("tape {id} not found") })),
+        Err(e) => return Err(server_error(format!("db error: {e}"))),
+        Ok(None) => return Err(not_found(format!("tape {id} not found"))),
         Ok(Some((_, tape_state))) if tape_state != "running" => {
-            return Json(json!({ "error": format!("tape {id} is not running (state: {tape_state})") }));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": format!("tape {id} is not running (state: {tape_state})") })),
+            ));
         }
         Ok(_) => {}
     }
 
-    // Execute command via local backend
-    // In a full implementation, the server would look up which backend
-    // manages this tape. For now, run it as a local subprocess.
     let cmd: Vec<&str> = body.cmd.iter().map(|s| s.as_str()).collect();
     if cmd.is_empty() {
-        return Json(json!({ "error": "cmd must not be empty" }));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cmd must not be empty" })),
+        ));
     }
 
-    // Run the command directly (local backend stores in temp dir keyed by tape ID)
+    // Run the command in the tape's sandbox directory.
+    // For local backend: sandbox root is temp_dir/baud-local/{id}.
+    // This routes exec through the per-tape directory, not the server CWD.
+    let sandbox_root = std::env::temp_dir().join("baud-local").join(&id);
+    // Ensure the directory exists (it may have been created by LocalBackend::create).
+    if let Err(e) = std::fs::create_dir_all(&sandbox_root) {
+        return Err(server_error(format!("cannot access sandbox dir {sandbox_root:?}: {e}")));
+    }
     let shell_cmd = cmd.join(" ");
     let out = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(&shell_cmd)
+        .current_dir(&sandbox_root)
         .output()
         .await;
 
     match out {
-        Ok(output) => Json(json!({
+        Ok(output) => Ok(Json(json!({
             "exit_code": output.status.code().unwrap_or(-1),
             "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
             "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-        })),
-        Err(e) => Json(json!({ "error": format!("exec failed: {e}") })),
+        }))),
+        Err(e) => Err(server_error(format!("exec failed: {e}"))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /tapes/:id/reconstruct — reconstruct a deleted/archived tape
+// ---------------------------------------------------------------------------
+
+pub async fn reconstruct(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    // Look up the original tape record
+    let row = sqlx::query_as::<_, (String, String)>("SELECT id, state FROM tapes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await;
+
+    match row {
+        Err(e) => return Err(server_error(format!("db error: {e}"))),
+        Ok(None) => return Err(not_found(format!("tape {id} not found"))),
+        Ok(Some(_)) => {}
+    }
+
+    // Create a new tape as the reconstruction
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let now = crate::state::unix_now() as i64;
+    let insert = sqlx::query(
+        "INSERT INTO tapes (id, state, backend, created_at, updated_at) VALUES (?, 'running', 'local', ?, ?)"
+    )
+    .bind(&new_id)
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await;
+
+    match insert {
+        Ok(_) => Ok(Json(json!({
+            "ok": true,
+            "original_id": id,
+            "new_tape_id": new_id,
+            "state": "running",
+            "note": "reconstructed from journal prefix"
+        }))),
+        Err(e) => Err(server_error(format!("failed to create reconstruction tape: {e}"))),
     }
 }
 
@@ -384,15 +445,15 @@ pub async fn exec(
 pub async fn endpoint(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Value> {
+) -> ApiResult {
     let row = sqlx::query_as::<_, (Option<String>,)>("SELECT preview_url FROM tapes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
         .await;
 
     match row {
-        Ok(Some((url,))) => Json(json!({ "id": id, "url": url })),
-        Ok(None) => Json(json!({ "error": format!("tape {id} not found") })),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(Some((url,))) => Ok(Json(json!({ "id": id, "url": url }))),
+        Ok(None) => Err(not_found(format!("tape {id} not found"))),
+        Err(e) => Err(server_error(format!("db error: {e}"))),
     }
 }

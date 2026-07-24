@@ -41,6 +41,10 @@ pub struct SpecDoc {
     pub env: HashMap<String, String>,
     /// Workload topology: list of nodes
     pub nodes: Vec<NodeSpec>,
+    /// Top-level adapter declarations (apply to all nodes unless overridden per-node).
+    /// Parsed and validated; not silently discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapters: Option<Adapter>,
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +101,17 @@ pub fn lint_value(v: serde_yaml::Value) -> Result<SpecDoc> {
                 .and_then(|c| c.as_str())
                 .ok_or_else(|| anyhow::anyhow!("each file entry must have 'content'"))?
                 .to_string();
+            // Security: reject absolute paths and path traversal (spec §8 Fixture path escape)
+            if path.starts_with('/') {
+                return Err(anyhow::anyhow!(
+                    "file path '{}' must be relative (no absolute paths allowed)", path
+                ));
+            }
+            if path.split('/').any(|c| c == "..") {
+                return Err(anyhow::anyhow!(
+                    "file path '{}' contains '..' traversal components (not allowed)", path
+                ));
+            }
             files.push(FilesEntry { path, content });
         }
         files
@@ -141,10 +156,14 @@ pub fn lint_value(v: serde_yaml::Value) -> Result<SpecDoc> {
         Vec::new()
     };
 
-    // 'adapters' at the top level is reserved for future use but recognized
-    // (currently only valid inside nodes). We just accept it as valid.
+    // Parse top-level 'adapters' (optional — applies to all nodes unless overridden per-node)
+    let adapters = if let Some(ad_val) = m.get("adapters") {
+        Some(parse_adapters(ad_val)?)
+    } else {
+        None
+    };
 
-    Ok(SpecDoc { nix, files, env, nodes })
+    Ok(SpecDoc { nix, files, env, nodes, adapters })
 }
 
 fn parse_node(v: &serde_yaml::Value) -> Result<NodeSpec> {

@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 baud-proto = { path = "../baud-proto" }
+baud-keys = { path = "../baud-keys" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -159,12 +159,12 @@ env:
         let yaml = r#"
 nix: "./flake.nix#hello"
 files:
-  - path: /run/config.json
+  - path: run/config.json
     content: "{\"key\":\"value\"}"
 "#;
         let doc = lint(yaml).expect("files directive must lint ok");
         assert_eq!(doc.files.len(), 1);
-        assert_eq!(doc.files[0].path, "/run/config.json");
+        assert_eq!(doc.files[0].path, "run/config.json");
     }
 
     #[test]
@@ -197,5 +197,72 @@ nodes:
           transport: fifo
 "#;
         assert!(lint(yaml).is_err(), "invalid frame format must be an error");
+    }
+
+    #[test]
+    fn top_level_adapters_round_trip() {
+        // VR1-m6: top-level adapters directive must be parsed (not silently discarded)
+        use crate::adapter::ProbeAdapter;
+        let yaml = r#"
+nix: "./flake.nix#hello"
+adapters:
+  probes:
+    - stdout-kv
+nodes:
+  - name: n0
+    argv: ["hello"]
+"#;
+        let doc = lint(yaml).expect("top-level adapters directive must lint ok");
+        let top = doc.adapters.expect("top-level adapters must be Some(...)");
+        assert_eq!(top.probes.len(), 1, "top-level probes must have exactly one entry");
+        assert!(
+            matches!(top.probes[0], ProbeAdapter::StdoutKv { .. }),
+            "top-level probe 'stdout-kv' must be parsed as StdoutKv"
+        );
+    }
+
+    #[test]
+    fn top_level_adapters_unknown_probe_is_error() {
+        // VR1-m6: top-level adapters must be validated, not silently accepted
+        let yaml = r#"
+nix: "./flake.nix#hello"
+adapters:
+  probes:
+    - not-a-real-probe
+"#;
+        assert!(
+            lint(yaml).is_err(),
+            "invalid probe in top-level adapters must be a hard error"
+        );
+    }
+
+    #[test]
+    fn absolute_file_path_is_rejected() {
+        // Spec §8 Security: fixture paths must not escape the sandbox workdir
+        let yaml = r#"
+nix: "./flake.nix#hello"
+files:
+  - path: "/etc/passwd"
+    content: "evil"
+"#;
+        assert!(
+            lint(yaml).is_err(),
+            "absolute file path must be rejected by lint"
+        );
+    }
+
+    #[test]
+    fn dotdot_file_path_is_rejected() {
+        // Spec §8 Security: '..' components must be rejected
+        let yaml = r#"
+nix: "./flake.nix#hello"
+files:
+  - path: "../../etc/passwd"
+    content: "evil"
+"#;
+        assert!(
+            lint(yaml).is_err(),
+            "path traversal with '..' must be rejected by lint"
+        );
     }
 }

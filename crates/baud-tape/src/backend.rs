@@ -73,10 +73,12 @@ pub trait Backend: Send + Sync + 'static {
 // Conformance test suite (runs against both backends)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+/// Conformance test helpers — public so that baud-tape-local and other backends
+/// can invoke the shared suite from their own test modules.
 pub mod conformance {
     use super::*;
-    use crate::types::{SandboxSpec, TapeState};
+    pub use crate::types::TapeState;
+    use crate::types::SandboxSpec;
 
     /// Run the conformance suite against a backend.
     /// Backends must have a 1-minute auto-stop timer so we can test that.
@@ -115,6 +117,42 @@ pub mod conformance {
         println!("conformance: delete ok");
 
         println!("conformance: PASSED");
+        Ok(())
+    }
+
+    /// Extended conformance: covers the stop→ensure→archive→ensure→gone lifecycle.
+    pub async fn run_lifecycle_conformance(backend: &dyn Backend) -> Result<()> {
+        let spec = SandboxSpec::default();
+
+        // Create
+        let id = backend.create(&spec).await?;
+        let s = backend.status(&id).await?;
+        assert_eq!(s.state, TapeState::Running, "lifecycle: created sandbox must be Running");
+        println!("lifecycle: created {id}");
+
+        // Stop → ensure → Running
+        backend.stop(&id).await?;
+        let s = backend.status(&id).await?;
+        assert_eq!(s.state, TapeState::Stopped, "lifecycle: sandbox must be Stopped after stop");
+        let s = backend.ensure(&id).await?;
+        assert_eq!(s.state, TapeState::Running, "lifecycle: ensure must revive from Stopped");
+        println!("lifecycle: stop → ensure → Running ok");
+
+        // Stop again, then simulate archive by calling restore directly after stop
+        // (we can't wait 5 minutes in a test, so we test the interface directly)
+        backend.stop(&id).await?;
+        backend.restore(&id).await?;
+        let s = backend.status(&id).await?;
+        assert_eq!(s.state, TapeState::Running, "lifecycle: restore from Stopped must yield Running");
+        println!("lifecycle: restore from Stopped ok");
+
+        // Delete → gone: any subsequent call must fail
+        backend.delete(&id).await?;
+        let result = backend.status(&id).await;
+        assert!(result.is_err(), "lifecycle: status after delete must fail (sandbox gone)");
+        println!("lifecycle: delete → gone ok");
+
+        println!("lifecycle conformance: PASSED");
         Ok(())
     }
 }

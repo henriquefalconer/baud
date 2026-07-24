@@ -180,9 +180,29 @@ pass "tape ls after kill: $TAPE_ID not in listing"
 # M1.8 — workload-noun CI grep (same as M0)
 # ---------------------------------------------------------------------------
 log "--- M1.8: workload-noun CI grep ---"
-# Use word boundaries (\b) to avoid matching substrings (e.g. "nes" in "lines()")
-if grep -rn --include="*.rs" -E "\b(mario|raftlet|emulator|joypad)\b|\bnes\b" crates/baud-*/src/ 2>/dev/null | grep -v "^$"; then
-    fail "workload noun found in crates/baud-*/src/ — CI grep FAILED"
+# Workload nouns (mario/nes/emulator/joypad) must not appear in any baud-* crate src.
+# 'raftlet' must not appear in infra crates (baud-raftlet itself is allowed to reference its own name).
+NOUN_HITS=$(grep -rn --include="*.rs" -E "\b(mario|emulator|joypad)\b|\bnes\b" \
+    crates/baud-*/src/ 2>/dev/null || true)
+RAFTLET_HITS=$(grep -rn --include="*.rs" -E "\braftlet\b" \
+    crates/baud-proto/src/ \
+    crates/baud-driver/src/ \
+    crates/baud-server/src/ \
+    crates/baud-journal/src/ \
+    crates/baud-stream/src/ \
+    crates/baud-init/src/ \
+    crates/baud-packages/src/ \
+    crates/baud-identity/src/ \
+    crates/baud-tape/src/ \
+    crates/baud-tape-local/src/ \
+    crates/baud-secret/src/ \
+    crates/baud-keys/src/ \
+    crates/baud-tracing/src/ \
+    2>/dev/null || true)
+if [[ -n "$NOUN_HITS" || -n "$RAFTLET_HITS" ]]; then
+    echo "$NOUN_HITS" >&2
+    echo "$RAFTLET_HITS" >&2
+    fail "workload noun found in infra crates/baud-*/src/ — CI grep FAILED"
 fi
 pass "workload-noun grep: CLEAN"
 

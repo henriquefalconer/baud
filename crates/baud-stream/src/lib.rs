@@ -16,7 +16,7 @@ pub use frame::{FrameProcessor, FrameError, ProcessedFrame};
 pub use qoi::encode_qoi;
 pub use y4m::Y4mWriter;
 
-use baud_proto::{FrameRecord, PixFmt};
+use baud_proto::{FrameRecord, Outcome, PixFmt};
 
 /// Validate and fingerprint a raw frame buffer.
 ///
@@ -76,6 +76,31 @@ pub fn to_rgba(buf: &[u8], format: &PixFmt) -> Vec<u8> {
         PixFmt::Rgb565   => rgb565_to_rgba(buf),
         PixFmt::Indexed8 => indexed8_to_rgba(buf),
     }
+}
+
+/// Ingest and validate a raw frame buffer, returning an Outcome.
+///
+/// On geometry mismatch, returns `Outcome::Crash{detail: "frame-format", node, step}`.
+/// On success, returns `Outcome::GoalReached{metric: "frame_ok"}` — callers should use
+/// the returned hash via the FrameRecord path in normal operation; the `Outcome` return
+/// is primarily for the error case so that the supervisor can propagate the crash upward.
+pub fn ingest(
+    node: u16,
+    step: u64,
+    width: u32,
+    height: u32,
+    format: &PixFmt,
+    buf: &[u8],
+) -> Result<baud_proto::Hash, Outcome> {
+    fingerprint(buf, width, height, format).map_err(|_| Outcome::Crash {
+        node: Some(node),
+        invariant: None,
+        signal: None,
+        detail: format!("frame-format: expected {}x{}x{:?} ({} bytes), got {} bytes",
+            width, height, format,
+            expected_size(width, height, format),
+            buf.len()),
+    })
 }
 
 /// Build a FrameRecord from raw pixel data.
@@ -174,5 +199,64 @@ mod tests {
         let buf = vec![77u8; 16];
         let rec = make_frame_record(0, 2, 4, 4, PixFmt::Indexed8, &buf, false).unwrap();
         assert_eq!(rec.bytes.as_ref().unwrap(), &buf);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Spec-mandated test names (specs/baud-stream.md §7)
+    // ---------------------------------------------------------------------------
+
+    /// frame_hashes_double_run_identical: two runs with the same pixel data must
+    /// produce the same frame hashes (blake3 is deterministic).
+    #[test]
+    fn frame_hashes_double_run_identical() {
+        let buf = vec![42u8; 64]; // 8x8 indexed8
+        let h1 = fingerprint(&buf, 8, 8, &PixFmt::Indexed8).unwrap();
+        let h2 = fingerprint(&buf, 8, 8, &PixFmt::Indexed8).unwrap();
+        assert_eq!(h1, h2, "frame_hashes_double_run_identical: same pixel data must hash identically");
+
+        // Also verify via FrameProcessor (accumulating path)
+        let mut p1 = FrameProcessor::new(0, 8, 8, PixFmt::Indexed8);
+        let mut p2 = FrameProcessor::new(0, 8, 8, PixFmt::Indexed8);
+        p1.ingest(0, &buf, true).unwrap();
+        p2.ingest(0, &buf, true).unwrap();
+        let hashes1 = p1.frame_hashes();
+        let hashes2 = p2.frame_hashes();
+        assert_eq!(hashes1, hashes2, "frame_hashes_double_run_identical: FrameProcessor must agree");
+    }
+
+    /// render_is_byte_identical: rendering (to_rgba) of the same frame buffer must
+    /// be byte-identical across calls (deterministic pixel conversion).
+    #[test]
+    fn render_is_byte_identical() {
+        let buf = vec![0xABu8; 8]; // 2x2 rgb565
+        let rgba1 = to_rgba(&buf, &PixFmt::Rgb565);
+        let rgba2 = to_rgba(&buf, &PixFmt::Rgb565);
+        assert_eq!(rgba1, rgba2, "render_is_byte_identical: pixel conversion must be deterministic");
+
+        // Also check indexed8
+        let ibuf = vec![128u8; 16]; // 4x4 indexed8
+        let r1 = to_rgba(&ibuf, &PixFmt::Indexed8);
+        let r2 = to_rgba(&ibuf, &PixFmt::Indexed8);
+        assert_eq!(r1, r2, "render_is_byte_identical: indexed8 conversion must be deterministic");
+    }
+
+    /// bad_geometry_is_a_crash: ingesting a buffer shorter than the declared geometry
+    /// must produce Outcome::Crash with detail containing "frame-format".
+    #[test]
+    fn bad_geometry_is_a_crash() {
+        // 1x1 RGBA8888 requires 4 bytes; provide only 3
+        let short_buf = vec![0u8; 3];
+        let result = ingest(0, 1, 1, 1, &PixFmt::Rgba8888, &short_buf);
+        assert!(result.is_err(), "bad_geometry_is_a_crash: wrong-size buffer must return Err");
+        match result.unwrap_err() {
+            Outcome::Crash { detail, node, .. } => {
+                assert!(
+                    detail.contains("frame-format"),
+                    "bad_geometry_is_a_crash: Crash detail must contain 'frame-format', got: {detail}"
+                );
+                assert_eq!(node, Some(0), "bad_geometry_is_a_crash: Crash must carry node id");
+            }
+            other => panic!("bad_geometry_is_a_crash: expected Outcome::Crash, got {other:?}"),
+        }
     }
 }

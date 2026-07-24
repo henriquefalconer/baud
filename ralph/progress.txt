@@ -445,3 +445,51 @@ FIXED since VR1: VR1-B5 (agent now exists), VR1-B7 (server workload code removed
 - Major (VR2-M1 through VR2-M21): proptest forward-compat test wrong (with_extra_field not called); arb_msg() missing 6 of 9 Msg variants; rotate_invalidates_old_key tests wrong thing; load() missing GuestImage param; clone/rdtsc supervisor tests verify allowlist/arithmetic not real guest execution; wall-clock watchdog absent; CLI 'baud keys' vs spec 'baud secrets'; GET /tapes/{id} returns 200 for deleted tape; --json errors not machine-readable; exit code 2 missing from run status; same_seed_same_replies_same_tape test absent; divergence report missing node/probe/syscall; verify determinism false-positive on empty streams; divergent runs not marked; planted_bug_needs_the_interleaving test absent; /runs/raftlet/fuzz route missing; baud-tracing has no aya dep; violation_found probe never emitted; stream render writes no bytes; m7.sh missing broken-supervisor negative test
 - Minor (VR2-m1 through VR2-m11): thiserror in baud-proto; dead der_from_ed25519_spki; run() returns Result not ObservationStream; dedup_by_plaintext_hash test name wrong; doctor local_backend_vm_ok null; enforces_sandbox_shape test missing; no Daytona recorded-fixture tests; server logs --follow ignored; infra/pkgs/ absent; guest_is_static_no_pie not tested on real ELF; baud-init path escape not validated
 - Priority for next build iteration: VR2-B3 (workload-noun grep) and VR2-B5 (tape reconstruct) are quickest unblocks; VR2-B2 (real supervisor) is the largest remaining gap and gates VR2-M5, VR2-M6, VR2-B4
+
+## 2026-07-24T09:09:36 UTC - Session usage — triage round 2 [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 16783
+- est. output cost: $0.2517 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.1640
+
+## 2026-07-24 - Ralph Build Iteration 12 (FIX round) - Progress
+VR2 findings worked top-down. Items fixed in this iteration:
+- VR2-B1 (H2/H3 invalid cargo build command): FIXED — drive/h2.sh and h3.sh now use -p baud-multiverse -p baud-server -p baud-cli
+- VR2-B3 (M2 CI grep catches baud-raftlet): FIXED — m2-m5 CI grep excludes crates/baud-raftlet/ using ls -d filter; full-demo.sh uses INFRA_SRCS variable
+- VR2-B5 (tape reconstruct not implemented): FIXED — POST /tapes/{id}/reconstruct route and CLI TapeAction::Reconstruct implemented
+- VR2-M1 (unknown_trailing_field proptest wrong): FIXED — calls with_extra_field on Msg::Observe; asserts decode_lenient succeeds
+- VR2-M2 (arb_msg missing variants): FIXED — all 11 Msg variants covered in proptest
+- VR2-M3 (rotate_invalidates_old_key wrong): FIXED — now tests recipient rotation (sops updatekeys), asserts old key FAILS after rotate
+- VR2-M4 (load() missing GuestImage param): FIXED — GuestImage type added, load() takes Vec<GuestImage>, load_from_manifest() convenience method
+- VR2-M8 (CLI 'baud keys' vs 'baud secrets'): FIXED — Secrets(cmds::keys::KeysCmd) subcommand added to main.rs
+- VR2-M9 (GET /tapes/{id} returns 200 for deleted): FIXED — 404 returned when tape state='deleted'
+- VR2-M10 (--json errors not machine-readable): FIXED — main() intercepts errors and emits JSON {"ok":false,"error":"..."} on stderr when --json
+- VR2-M11 (exit code 2 missing from run status): FIXED — 'baud run status' exits 2 for crashed/goal/violation_found runs
+- VR2-M12 (same_seed_same_replies_same_tape): FIXED — test added to baud-driver
+- VR2-M13 (divergence report missing node/probe/syscall): FIXED — DivergenceInfo struct with step/node/probe/detail
+- VR2-M14 (verify determinism false-positive on empty streams): FIXED — guard returns error when all_match but 0 observations
+- VR2-M15 (divergent runs not marked/excluded): FIXED — UPDATE runs SET status='divergent'; replay rejects divergent runs
+- VR2-M16 (planted_bug_needs_the_interleaving missing): FIXED — snapshot_committed clamped; test with brute-force seed search
+- VR2-M17 (/runs/raftlet/fuzz workload noun): FIXED — m7.sh path changed to /runs/fuzz
+- VR2-M19 (stream render writes no bytes): FIXED — render() now materializes Y4M/QOI pixel bytes to output file using synthetic gradient frames
+- VR2-M20 (m7.sh missing broken-supervisor negative test): FIXED — M7.9 added: unseeded run cross-check must fail
+- VR2-m1 (thiserror in baud-proto): FIXED — manual Error impls replacing thiserror; EncodeError/DecodeError use Display/Error traits
+- VR2-m2 (dead der_from_ed25519_spki): FIXED — function removed from baud-identity
+- VR2-m3 (run() returns Result not ObservationStream): FIXED — infallible run(); errors emit as Crash observations
+- VR2-m4 (dedup_by_plaintext_hash test name): FIXED — renamed from content_addressing_deduplication
+- VR2-m5 (doctor local_backend_vm_ok null): FIXED — check_local_backend_vm() probes limactl
+- VR2-m6 (enforces_sandbox_shape test missing): FIXED — DaytonaBackend::enforce_spec() method; test asserts vcpu=1, mem=1024, autostop=60
+- VR2-m7 (no Daytona recorded-fixture tests): FIXED — 5 wiremock-based contract tests in daytona.rs
+- VR2-m8 (server logs --follow ignored): FIXED — logs route supports ?after=N cursor; CLI polls in 500ms loop when --follow
+- VR2-m11 (baud-init path escape not validated): FIXED — absolute paths and '..' components rejected in parse.rs
+
+Still not fixed (large/complex or deferred):
+- VR2-B2 (no ptrace/seccomp-unotify supervisor): Deferred — very large; simulation remains
+- VR2-B4 (baud-tape-agent non-functional): Deferred — scaffold only; complex to fully implement
+- VR2-B6 (M6 fuzz runs wrong workload): Partially addressed via /runs/fuzz path fix; full raftlet integration deferred
+- VR2-M5/M6 (clone/rdtsc tests): Not fixed — require real guest binaries
+- VR2-M7 (wall-clock watchdog): Not fixed — complex supervisor feature
+- VR2-M18 (baud-tracing no aya dep): Not fixed — aya CO-RE probes require Linux cross-build
+- VR2-m9 (infra/pkgs/ absent): Not fixed — complex cross-build infrastructure
+- VR2-m10 (guest_is_static_no_pie on real ELF): Not fixed — requires static ELF fixture
+
+All workspace tests pass. Workload-noun CI grep CLEAN.

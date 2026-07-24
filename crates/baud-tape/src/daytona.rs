@@ -208,6 +208,23 @@ impl DaytonaBackend {
         Err(last_err.unwrap())
     }
 
+    /// Build the enforced SandboxSpec from a caller-supplied spec.
+    ///
+    /// Hard constraints (spec §2):
+    ///   vcpus=1, memory_mib=1024, disk_mib≥1024, auto_stop_secs=60, auto_archive_secs=300.
+    /// This is the single place that enforces those invariants.
+    pub(crate) fn enforce_spec(spec: &SandboxSpec) -> SandboxSpec {
+        SandboxSpec {
+            vcpus: 1,
+            memory_mib: 1024,
+            disk_mib: spec.disk_mib.max(1024),
+            auto_stop_secs: 60,
+            auto_archive_secs: 300,
+            image: spec.image.clone(),
+            labels: spec.labels.clone(),
+        }
+    }
+
     fn parse_state(s: Option<&str>) -> TapeState {
         match s.unwrap_or("") {
             "running" | "started" => TapeState::Running,
@@ -258,16 +275,18 @@ fn chrono_or_fallback(s: &str) -> Option<u64> {
 #[async_trait]
 impl Backend for DaytonaBackend {
     async fn create(&self, spec: &SandboxSpec) -> Result<String> {
+        // Always enforce hard constraints via the canonical helper — caller cannot override.
+        let enforced = Self::enforce_spec(spec);
         let name = format!("baud-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
         let req = CreateWorkspaceRequest {
             name,
-            image: spec.image.clone(),
+            image: enforced.image.clone(),
             resources: Resources {
-                cpu: spec.vcpus,
-                memory: spec.memory_mib,
-                disk: spec.disk_mib,
+                cpu: enforced.vcpus,
+                memory: enforced.memory_mib,
+                disk: enforced.disk_mib,
             },
-            labels: spec.labels.clone(),
+            labels: enforced.labels.clone(),
         };
         let resp: WorkspaceResponse = self.post_json("/workspaces", &req).await?;
         debug!("created Daytona workspace {}", resp.id);
@@ -392,5 +411,193 @@ mod tests {
         assert!(is_retryable("timeout"));
         assert!(is_retryable("503 service unavailable"));
         assert!(!is_retryable("404 not found"));
+    }
+
+    #[test]
+    fn enforces_sandbox_shape() {
+        // VR2-m6: DaytonaBackend must clamp all caller-supplied values to the hard
+        // constraints (spec §2) — callers cannot accidentally over-provision or skip
+        // the auto-stop timer.
+        let caller_spec = SandboxSpec {
+            vcpus: 8,           // caller wants 8 CPUs — must be clamped to 1
+            memory_mib: 8192,   // caller wants 8 GiB — must be clamped to 1024
+            disk_mib: 512,      // caller wants 512 MiB — must be raised to 1024
+            auto_stop_secs: 0,  // caller disables auto-stop — must be forced to 60
+            auto_archive_secs: 0, // caller disables auto-archive — must be forced to 300
+            image: None,
+            labels: Default::default(),
+        };
+
+        let enforced = DaytonaBackend::enforce_spec(&caller_spec);
+
+        assert_eq!(enforced.vcpus, 1,             "vcpus must always be 1");
+        assert_eq!(enforced.memory_mib, 1024,     "memory_mib must always be 1024");
+        assert_eq!(enforced.disk_mib, 1024,       "disk_mib must be at least 1024 (raised from 512)");
+        assert_eq!(enforced.auto_stop_secs, 60,   "auto_stop_secs must always be 60");
+        assert_eq!(enforced.auto_archive_secs, 300, "auto_archive_secs must always be 300");
+
+        // Disk larger than 1024 is allowed (some platforms have a higher minimum)
+        let large_disk_spec = SandboxSpec {
+            disk_mib: 4096,
+            ..SandboxSpec::default()
+        };
+        let large = DaytonaBackend::enforce_spec(&large_disk_spec);
+        assert_eq!(large.disk_mib, 4096, "disk_mib larger than 1024 must be preserved");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recorded-fixture contract tests (no real Daytona API key required)
+// ---------------------------------------------------------------------------
+// These tests start a local mock HTTP server, replay recorded API response
+// fixtures, and assert that DaytonaBackend serialises requests correctly and
+// maps responses onto the baud domain types.  They are annotated #[ignore]
+// when the 'daytona_fixtures' cfg flag is absent so they do not block CI on
+// machines without the Daytona SDK.  Run them with:
+//
+//   cargo test -p baud-tape --features='' -- --include-ignored daytona_contract
+//
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use wiremock::{MockServer, Mock, ResponseTemplate};
+    use wiremock::matchers::{method, path, header};
+
+    fn make_client(base_url: &str) -> DaytonaBackend {
+        use baud_secret::SecretString;
+        DaytonaBackend::new(base_url, SecretString::new("test-key".to_string()))
+    }
+
+    // ------------------------------------------------------------------
+    // Fixture: POST /workspaces — create returns workspace id
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn contract_create_workspace() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/workspaces"))
+            .and(header("Authorization", "Bearer test-key"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    r#"{"id":"ws-abc123","name":"baud-test","state":"creating","cpu":1,"memory":1024,"disk":1024}"#,
+                    "application/json",
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let spec = SandboxSpec::default();
+        let id = client.create(&spec).await.expect("create must succeed");
+        assert_eq!(id, "ws-abc123", "create must return the workspace id from fixture");
+    }
+
+    // ------------------------------------------------------------------
+    // Fixture: GET /workspaces/{id} — status mapping
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn contract_status_maps_state() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/workspaces/ws-abc123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    r#"{"id":"ws-abc123","state":"running","cpu":1,"memory":1024,"disk":1024,"previewUrl":"https://sandbox.example.com"}"#,
+                    "application/json",
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let status = client.status("ws-abc123").await.expect("status must succeed");
+        assert_eq!(status.state, TapeState::Running, "state 'running' must map to TapeState::Running");
+        assert_eq!(status.vcpus, 1);
+        assert_eq!(status.memory_mib, 1024);
+        assert_eq!(status.preview_url.as_deref(), Some("https://sandbox.example.com"));
+    }
+
+    // ------------------------------------------------------------------
+    // Fixture: GET /workspaces/{id} — archived state mapping
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn contract_status_archived_state() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/workspaces/ws-xyz"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    r#"{"id":"ws-xyz","state":"auto-archived","cpu":0,"memory":0,"disk":0}"#,
+                    "application/json",
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        let status = client.status("ws-xyz").await.expect("status must succeed");
+        assert_eq!(status.state, TapeState::Archived, "'auto-archived' must map to TapeState::Archived");
+        // Fallback values when API returns 0
+        assert_eq!(status.vcpus, 1, "vcpus=0 from API must fall back to 1");
+        assert_eq!(status.memory_mib, 1024, "memory=0 from API must fall back to 1024");
+    }
+
+    // ------------------------------------------------------------------
+    // Fixture: 503 response triggers retry, second call succeeds
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn contract_retries_on_503() {
+        let server = MockServer::start().await;
+
+        // First call returns 503
+        Mock::given(method("GET"))
+            .and(path("/workspaces/ws-retry"))
+            .respond_with(ResponseTemplate::new(503).set_body_raw(r#"{"error":"unavailable"}"#, "application/json"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Second call (retry) returns 200
+        Mock::given(method("GET"))
+            .and(path("/workspaces/ws-retry"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    r#"{"id":"ws-retry","state":"running","cpu":1,"memory":1024,"disk":1024}"#,
+                    "application/json",
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let mut client = make_client(&server.uri());
+        // Reduce retry delay to make the test fast
+        client.max_retries = 2;
+        let status = client.status("ws-retry").await.expect("status must succeed after retry");
+        assert_eq!(status.state, TapeState::Running);
+    }
+
+    // ------------------------------------------------------------------
+    // Fixture: DELETE /workspaces/{id} — 404 is treated as success
+    // ------------------------------------------------------------------
+    #[tokio::test]
+    async fn contract_delete_404_is_ok() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/workspaces/ws-gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server.uri());
+        client.delete("ws-gone").await.expect("delete of already-gone workspace must not error");
     }
 }

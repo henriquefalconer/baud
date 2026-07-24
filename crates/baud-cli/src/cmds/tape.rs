@@ -109,7 +109,8 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
             print_value(&v, json);
         }
         TapeAction::Reconstruct { id } => {
-            eprintln!("tape reconstruct {id}: not yet implemented (M6)");
+            let v = c.post(&format!("/tapes/{id}/reconstruct"), &json!({})).await?;
+            print_value(&v, json);
         }
         TapeAction::Exec { id, cmd } => {
             if cmd.is_empty() {

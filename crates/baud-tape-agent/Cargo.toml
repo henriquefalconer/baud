@@ -1,0 +1,32 @@
+[package]
+name = "baud-tape-agent"
+description = "baud tape agent — runs inside the sandbox, launches baud-multiverse, mediates draws, streams observations"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Static musl x86_64-linux binary built via infra/pkgs/baud-agent.nix
+# Size budget ≤ 10 MiB; no shell-outs except nix build; supervises children with fork/exec + pidfd.
+
+[[bin]]
+name = "baud-agent"
+path = "src/main.rs"
+
+[dependencies]
+baud-proto  = { path = "../baud-proto" }
+baud-init   = { path = "../baud-init" }
+baud-identity = { path = "../baud-identity" }
+baud-tracing  = { path = "../baud-tracing" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+uuid         = { workspace = true }
+blake3       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# none needed — functional tests run the agent binary via drive scripts

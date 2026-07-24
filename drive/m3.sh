@@ -200,8 +200,9 @@ pass "verify observation: ok=true (M7 stub)"
 # M3.8 — workload-noun CI grep
 # ---------------------------------------------------------------------------
 log "--- M3.8: workload-noun CI grep ---"
-if grep -rn --include="*.rs" -E "\b(mario|raftlet|emulator|joypad)\b|\bnes\b" crates/baud-*/src/ 2>/dev/null | grep -v "^$"; then
-    fail "workload noun found in crates/baud-*/src/ — CI grep FAILED"
+if grep -rn --include="*.rs" -E "\b(mario|raftlet|emulator|joypad)\b|\bnes\b" \
+    $(ls -d crates/baud-*/src/ 2>/dev/null | grep -v "crates/baud-raftlet/") 2>/dev/null | grep -v "^$"; then
+    fail "workload noun found in infra crates — CI grep FAILED"
 fi
 pass "workload-noun grep: CLEAN"
 
