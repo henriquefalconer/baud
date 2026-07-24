@@ -7,3 +7,4 @@ pub mod health;
 pub mod keys;
 pub mod runs;
 pub mod server;
+pub mod tapes;

@@ -18,3 +18,22 @@
 - git commit 948667a: M0 milestone complete
 - drive/m0.sh passes: server start, status, logs, keys show, doctor, run ls, budget
 - NEXT iteration should implement M1 (Backend trait, local backend, Daytona client, identity)
+
+## 2026-07-24T05:15:50 UTC - Session usage — iteration 1 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 28916
+- est. output cost: $0.4337 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.0544
+
+## 2026-07-24T05:30:00 UTC - Ralph Build Iteration 2 Start
+- Resuming from M0 (committed at 948667a)
+- Implementing M1: Backend trait, local backend, Daytona client, identity
+- Plan: baud-identity → baud-tape → baud-tape-local → server tape routes → CLI tape cmds → drive/m1.sh
+
+## 2026-07-24T05:35:00 UTC - M1 complete
+- baud-identity: RootKey, JWT minting/verification via ed25519 PKCS8 DER + jsonwebtoken; 5 tests pass
+- baud-tape: Backend trait (create/start/stop/restore/delete/status/exec/put/get/endpoint/ensure) + DaytonaBackend + conformance test suite
+- baud-tape-local: LocalBackend (temp dir, sh exec, auto-stop/auto-archive timers); 8 tests pass
+- baud-server: /tapes CRUD routes (create/list/status/start/stop/restore/ensure/delete/exec/endpoint); 0002_tapes.sql migration
+- baud-cli: tape subcommands fully implemented (create/ls/status/ensure/kill/exec)
+- drive/m1.sh: ALL CHECKS PASSED (15 checks)
+- Total tests: 30 pass, 0 fail across all crates

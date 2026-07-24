@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
 }
 
 fn build_router(state: AppState) -> Router {
+    use axum::routing::{delete, post};
     Router::new()
         // Health / status
         .route("/health", get(routes::health::health))
@@ -48,8 +49,19 @@ fn build_router(state: AppState) -> Router {
         // Doctor
         .route("/doctor", get(routes::doctor::doctor))
         // Keys
-        .route("/keys/init", axum::routing::post(routes::keys::init))
+        .route("/keys/init", post(routes::keys::init))
         .route("/keys/show", get(routes::keys::show))
+        // Tapes (M1)
+        .route("/tapes", post(routes::tapes::create))
+        .route("/tapes", get(routes::tapes::list))
+        .route("/tapes/{id}", get(routes::tapes::status))
+        .route("/tapes/{id}/start", post(routes::tapes::start))
+        .route("/tapes/{id}/stop", post(routes::tapes::stop))
+        .route("/tapes/{id}/restore", post(routes::tapes::restore))
+        .route("/tapes/{id}/ensure", post(routes::tapes::ensure))
+        .route("/tapes/{id}", delete(routes::tapes::kill))
+        .route("/tapes/{id}/exec", post(routes::tapes::exec))
+        .route("/tapes/{id}/endpoint", get(routes::tapes::endpoint))
         // Runs (stub)
         .route("/runs", get(routes::runs::list))
         // Budget

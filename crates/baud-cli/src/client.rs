@@ -31,6 +31,19 @@ impl Client {
         Ok(body)
     }
 
+    pub async fn delete(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{}", self.base, path);
+        let resp = self.http.delete(&url).send().await
+            .with_context(|| format!("DELETE {url}: could not connect to baud-server"))?;
+        let status = resp.status();
+        let body: Value = resp.json().await
+            .with_context(|| format!("DELETE {url}: invalid JSON response"))?;
+        if !status.is_success() {
+            anyhow::bail!("DELETE {url} returned {status}: {body}");
+        }
+        Ok(body)
+    }
+
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let resp = self.http.post(&url).json(body).send().await

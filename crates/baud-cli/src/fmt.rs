@@ -4,6 +4,11 @@
 use serde_json::Value;
 
 /// Print a JSON value, either raw (--json) or as a human-readable table/summary.
+pub fn print_value(v: &Value, json: bool) {
+    print(v, json)
+}
+
+/// Print a JSON value, either raw (--json) or as a human-readable table/summary.
 pub fn print(v: &Value, json: bool) {
     if json {
         println!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
