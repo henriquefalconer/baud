@@ -68,3 +68,26 @@
 ## 2026-07-24T06:16:00 UTC - Session usage — iteration 3 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T05:42:51 UTC - Session usage — iteration 3 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 42175
+- est. output cost: $0.6326 (sonnet output rate)
+- exact accounting unavailable this entry
+
+## 2026-07-24T07:00:00 UTC - Ralph Build Iteration 4 Start
+- Resuming from M2 (committed at ce32406)
+- Plan: M3 — baud-driver (ChaCha PRNG, draw API, property test) + baud-journal (CBOR chunks, blake3) + full obs routes + verify determinism + replay + drive/m3.sh
+
+## 2026-07-24T07:15:00 UTC - M3 complete (c0e722d)
+- baud-driver: ChaCha20 PRNG, draw API (bits/int/choice/hold/weather), corpus (extend-best/mutate/splice), shrinker (chunk-delete/zero/dedup); 9 tests pass incl. determinism property test
+- baud-journal: CBOR chunks, blake3 content addressing, deduplication, streaming reader, integrity check on read; 7 tests pass
+- baud-server: full SQLite obs routes (list/tail/append); /verify/determinism (identical stream hashes); /verify/determinism/poisoned (divergence detection); /replay/:id (replay from stored tape, --to-step supported)
+- baud-cli: baud verify determinism --spec --seed --times; baud replay <run> [--to-step]
+- drive/m3.sh: ALL 9 CHECKS PASSED
+- Total tests: 63 pass, 0 fail across all crates
+- workload-noun CI grep CLEAN
+- NEXT iteration should implement M4 (fuzz loop through the server, strategy/tactics/corpus/goal detection on examples/parser)
+
+## 2026-07-24T07:16:00 UTC - Session usage — iteration 4 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD
