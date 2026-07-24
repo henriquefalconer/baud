@@ -54,6 +54,7 @@ plus one formatter.
 ```
 baud server   start|stop|status|logs [--follow]
 baud doctor
+baud host     probe          # H0 capability spike; specs/baud-host.md — exit 1 if regime=rejected
 baud secrets  init|edit|show --redacted|rotate
 baud spec     new|lint|show <spec.toml>
 baud tape     create|ls|status|ensure|kill|reconstruct|exec|probe-caps <id>

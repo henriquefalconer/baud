@@ -1,12 +1,42 @@
 # Determinism in baud
 
-## Overview
+> **2026-07-24 pivot notice.** baud moved from a userspace ptrace/seccomp supervisor of a single
+> guest process to a KVM/VT-x deterministic VMM (`baud-multiverse`) that owns a whole guest
+> machine — see `todo.md` and `specs/baud-multiverse.md` v2.0. The sections below this notice
+> (H0 results, the nondeterminism catalogue, CPUID path selection) describe the **superseded**
+> ptrace/seccomp mechanism and are retained for history until rewritten; they no longer describe
+> what the code does. The current H0 capability-spike result is recorded immediately below.
 
-baud's central claim is that a cluster of communicating processes can be made
-into a **pure function from an input byte stream (the tape) to observable
-state**.  This document explains how that claim is achieved, what limits it,
-and what the engineering cost is — drawing on published prior art (Antithesis),
-H0 capability probes in real Daytona sandboxes, and baud's own design decisions.
+## H0 (KVM/VT-x) — capability spike, current pivot
+
+Probed via `baud host probe --json` (`specs/baud-host.md` §3, `crates/baud-host`), run from
+`drive/h0.sh` on the machine this iteration's work was done on:
+
+| Field | This dev machine (Windows 11, no WSL2 distro installed) |
+|---|---|
+| `kvm` | `false` — `/dev/kvm` does not exist on Windows |
+| `vmx` / `cpuid` / `tsc_stable` / `msr_filter` / `singlestep` / `rcb_deterministic` / `nested` | `false` — all gated behind `/dev/kvm`; never assumed true |
+| `vendor` | `other` (no `/proc/cpuinfo` to read) |
+| `regime` | `rejected` |
+| `reason` | `"/dev/kvm unavailable: expose /dev/kvm to this host (bare-metal, or a nested-virt host with kvm_intel nested=1)"` |
+
+This is the **honest, expected** result on this exact machine, not a bug: per `specs/baud-host.md`
+§2/§9's "developer machine" guidance, a Linux host with real `/dev/kvm` is required — either
+bare-metal Linux, a nested-virtualization-enabled Linux VM, or (on this Windows box) a WSL2
+distro with `nestedVirtualization=true` in `.wslconfig`, none of which are installed here yet
+(`wsl --status` shows the WSL2 feature is enabled but **no distro is installed**). `baud host
+probe` and the CLI both refuse to overclaim: `regime` downgrades to `rejected` and names the
+failing check rather than reporting a false pass (`baud host probe` exits `1`).
+
+`crates/baud-host`'s own capability-decision logic (§4 of the spec: the required-vs-cooperative
+gate, the Intel/AMD split, the sibling-safe fleet placement) is hardware-independent and is
+covered by `cargo test -p baud-host` via an injectable `CapabilityChecks` seam — those tests do
+not need real KVM and pass on any OS. The Linux ioctl/`/proc`/`/sys` implementation
+(`crates/baud-host/src/linux.rs`) type-checks against the real `kvm-ioctls`/`kvm-bindings`/
+`perf-event` crate sources (`cargo check --target x86_64-unknown-linux-gnu -p baud-host`) but has
+**not yet been exercised against real KVM hardware** — that validation is blocked on getting a
+Linux/KVM host (e.g. install a WSL2 distro with nested virt, or bare-metal Linux) and is the
+next H0 milestone action, tracked in `todo.md`.
 
 ---
 

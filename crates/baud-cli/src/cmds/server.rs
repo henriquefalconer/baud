@@ -13,6 +13,39 @@ fn pid_file() -> std::path::PathBuf {
     dir.join("server.pid")
 }
 
+/// Is a process with this pid still alive? Unix: `kill(pid, 0)` (signal 0 probes without
+/// sending). Windows has no such libc call — shell out to `tasklist`, which is present on every
+/// Windows install (no extra dependency needed for a rarely-hot-path check).
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
+/// Terminate a process by pid. Unix: `SIGTERM`. Windows: `taskkill /F` (no graceful-shutdown
+/// signal equivalent to SIGTERM is available without WinAPI, so this is a hard kill).
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) == 0 }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> bool {
+    std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Manage the baud-server process
 #[derive(Parser)]
 pub struct ServerCmd {
@@ -48,8 +81,7 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
                 if let Ok(s) = std::fs::read_to_string(&pid_path) {
                     if let Ok(pid) = s.trim().parse::<u32>() {
                         // Check if the process is still alive
-                        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
-                        if alive {
+                        if process_is_alive(pid) {
                             if json {
                                 println!("{}", serde_json::json!({ "status": "already_running", "pid": pid }));
                             } else {
@@ -109,9 +141,8 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
             let s = std::fs::read_to_string(&pid_path)?;
             let pid: u32 = s.trim().parse().map_err(|_| anyhow::anyhow!("invalid pid in {:?}", pid_path))?;
 
-            // Send SIGTERM
-            let ret = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-            if ret == 0 {
+            // Terminate the process (SIGTERM on Unix, taskkill /F on Windows).
+            if terminate_process(pid) {
                 std::fs::remove_file(&pid_path).ok();
                 if json {
                     println!("{}", serde_json::json!({ "status": "stopped", "pid": pid }));

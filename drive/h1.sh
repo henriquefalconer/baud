@@ -15,7 +15,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$HOME/mingw64-tools/mingw64/bin:$PATH"
 
 log()  { echo "[h1] $*" >&2; }
 pass() { echo "  [PASS] $*"; }

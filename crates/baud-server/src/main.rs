@@ -48,6 +48,8 @@ fn build_router(state: AppState) -> Router {
         .route("/server/logs", get(routes::server::logs))
         // Doctor
         .route("/doctor", get(routes::doctor::doctor))
+        // Host (H0 capability spike, specs/baud-host.md)
+        .route("/host/probe", get(routes::host::probe))
         // Keys
         .route("/keys/init", post(routes::keys::init))
         .route("/keys/show", get(routes::keys::show))

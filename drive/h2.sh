@@ -15,19 +15,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$HOME/mingw64-tools/mingw64/bin:$PATH"
 
 REPO_ROOT="$(pwd)"
 BAUD="$REPO_ROOT/target/debug/baud"
 BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
 SERVER_PID=""
 DB_FILE="$(mktemp -t baud-h2-XXXXXX.sqlite)"
+# Windows/git-bash: sqlite:// URIs need a native Windows path (posix /tmp/... is not
+# understood by a plain win32 binary); cygpath -m gives a forward-slash Windows path.
+DB_FILE="$(cygpath -m "$DB_FILE" 2>/dev/null || echo "$DB_FILE")"
 
 cleanup() {
     if [[ -n "${SERVER_PID:-}" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
     fi
-    rm -f "$DB_FILE"
+    sleep 0.2
+    rm -f "$DB_FILE" 2>/dev/null || true
 }
 trap cleanup EXIT
 

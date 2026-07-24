@@ -35,6 +35,8 @@ pub enum Commands {
     Server(cmds::server::ServerCmd),
     /// Environment checks
     Doctor,
+    /// KVM host capability probe + regime decision (H0)
+    Host(cmds::host::HostCmd),
     /// Secrets management (alias: keys)
     Secrets(cmds::keys::KeysCmd),
     /// Secrets management (deprecated alias for 'secrets')
@@ -83,6 +85,7 @@ async fn main() {
     let result: Result<()> = match cli.command {
         Commands::Server(cmd) => cmds::server::run(cmd, &c, json).await,
         Commands::Doctor => cmds::doctor::run(&c, json).await,
+        Commands::Host(cmd) => cmds::host::run(cmd, &c, json).await,
         Commands::Secrets(cmd) => cmds::keys::run(cmd, &c, json).await,
         Commands::Keys(cmd) => cmds::keys::run(cmd, &c, json).await,
         Commands::Spec(cmd) => cmds::spec::run(cmd, &c, json).await,

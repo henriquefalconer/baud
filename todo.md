@@ -408,3 +408,50 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 - **Targets**: in-tree simulations → **guest images** under `examples/`.
 - The round-1/2/3 verification triage and the §15 userspace-port directive are superseded by this plan; only
   the driver, tape, and observation concepts carry forward, reshaped into snapshot-branch.
+
+## 14. Build status (updated as milestones land — not a duplicate of ralph/progress.txt)
+
+- **H0 (capability spike) — in progress.** `crates/baud-host` implements `Host::probe()` /
+  `Probe` / `Regime` / `Vendor` / fleet `Placement` per `specs/baud-host.md` §3-§5, wired to
+  `GET /host/probe` (`baud-server`) and `baud host probe --json` (`baud-cli`). The
+  regime-decision logic (`compute_probe`, capacity/placement, sibling-safety) is
+  hardware-independent and unit-tested via an injectable `CapabilityChecks` seam
+  (`cargo test -p baud-host` — `capacity_refuses_sibling_split`, `doctor_checks_kvm`,
+  `rejected_host_names_the_failing_check`, plus vendor/gate edge cases). The real Linux
+  implementation (`crates/baud-host/src/linux.rs`: `/dev/kvm`, `/proc/cpuinfo`,
+  `kvm-ioctls`/`kvm-bindings` CPUID/TSC/MSR-filter/single-step round-trips, a
+  `perf-event`-based branch-counter determinism smoke test, `/sys` topology parsing) type-checks
+  against the real crate sources (`cargo check --target x86_64-unknown-linux-gnu -p baud-host`)
+  but is **not yet validated on real KVM hardware** — this dev machine has no Linux/KVM host
+  (see `docs/determinism.md`'s H0 section and `CLAUDE.md`). `drive/h0.sh` runs the probe
+  end-to-end and asserts the JSON shape + honest-rejection behavior on whatever host it runs on.
+  **Next H0 action**: get this validated on a real Linux/KVM host (bare-metal, or a WSL2 distro
+  with nested virt) and record the result in `docs/determinism.md`, replacing the "not yet
+  exercised" caveat.
+- **`docs/determinism.md`** still describes the superseded ptrace/seccomp mechanism below its
+  2026-07-24 pivot notice; a full rewrite for the KVM/VT-x model is still open (tracked here, not
+  yet started beyond the H0 addendum).
+- **Not yet started**: H1-H6 and the M-series (everything past H0 in §10) — `baud-vcpu`,
+  `baud-tape-device`, `baud-snapshot`, `baud-snapshot-store` crates do not exist yet; the old
+  ptrace-based `baud-multiverse` (crates/baud-multiverse/src/lib.rs) has not been rewritten to
+  the KVM/VT-x model in `specs/baud-multiverse.md` v2.0 — it still reflects the pre-pivot plan
+  and is the next big-ticket item once a real KVM host is available to validate against.
+- **Fixed while validating H0 on this Windows dev machine** (pre-existing, not specific to
+  baud-host): every `drive/*.sh` that spawns `baud-server` with a temp SQLite file passed a
+  POSIX `mktemp -t ...` path (e.g. `/tmp/baud-h0-XXXX.sqlite`) straight into `BAUD_DB`; a plain
+  win32 binary doesn't understand that path and sqlx failed with "unable to open database file"
+  — every drive script that starts a server was silently broken here. Fixed by translating the
+  path through `cygpath -m` (falls back to the original path where `cygpath` doesn't exist, i.e.
+  real Linux/macOS hosts) right after each `mktemp` call, and made the temp-file cleanup in each
+  `trap ... EXIT` tolerant of Windows briefly holding the file handle after the server process is
+  killed (`sleep 0.2; rm -f ... || true` — an unguarded failing `rm` in an `EXIT` trap was
+  clobbering an otherwise-passing script's exit code under `set -e`). Verified via `drive/h0.sh`
+  and `drive/m0.sh` (both now exit 0 end-to-end on this machine).
+- **Known gap found while spot-checking `drive/m1.sh` on this machine** (not fixed this
+  iteration — unrelated to H0/baud-host, and out of scope for this increment): `drive/m1.sh` (and
+  likely other M-series scripts) shells out to `python3` to parse CLI JSON output; this dev
+  machine has no `python3` installed, so M1's JSON-field assertions fail even though the
+  underlying `baud tape create` call itself succeeds (valid JSON with an `id` field came back).
+  Needs either installing `python3` on this dev machine or rewriting those parses in
+  `jq`/shell — whichever a future iteration picks, audit all of `drive/m*.sh` and
+  `drive/full-demo.sh` for the same pattern.

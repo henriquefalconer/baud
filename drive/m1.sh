@@ -20,12 +20,16 @@ JSON_FLAG="${1:-}"
 BAUD="cargo run -q --bin baud --"
 SERVER_PID=""
 DB_FILE="$(mktemp -t baud-m1-XXXXXX.sqlite)"
+# Windows/git-bash: sqlite:// URIs need a native Windows path (posix /tmp/... is not
+# understood by a plain win32 binary); cygpath -m gives a forward-slash Windows path.
+DB_FILE="$(cygpath -m "$DB_FILE" 2>/dev/null || echo "$DB_FILE")"
 
 cleanup() {
     if [[ -n "$SERVER_PID" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
     fi
-    rm -f "$DB_FILE"
+    sleep 0.2
+    rm -f "$DB_FILE" 2>/dev/null || true
 }
 trap cleanup EXIT
 

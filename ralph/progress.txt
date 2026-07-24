@@ -869,3 +869,70 @@ Remaining deferred items (require Linux ptrace/seccomp or CO-RE BPF infrastructu
 ## 2026-07-24T11:58:18 UTC - Session usage — triage round 3 [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 18042
 - est. output cost: $0.2706 (sonnet output rate)
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address: studying todo.md deterministic-hypervisor pivot plan, specs/*, and current crate state to pick the first concrete implementation step...
+
+Environment check: no Rust toolchain and no MSVC/MinGW linker were installed on this fresh Windows dev machine. Installed rustup + stable-msvc toolchain; now installing VS Build Tools (C++ workload) in background so cargo build/test can actually link. Meanwhile studying specs/baud-host.md, specs/baud-multiverse.md, and current crate layout to scope H0 (capability spike) as this iteration's item.
+
+Chose H0 (capability spike) — building crates/baud-host per specs/baud-host.md, since it's the first missing piece the pivot's own README/crate-map names and gates every later milestone. It's the K of Z: H0 is milestone 1 of 6 H-milestones plus the M-series in todo.md §10, and baud-host is the crate that decides whether cooperative/enforced/rejected applies to any given host.
+
+Wrote crates/baud-host (Probe/Regime/Vendor/Host/Topology/Placement, an injectable CapabilityChecks seam for hardware-independent tests, a real Linux implementation using kvm-ioctls/kvm-bindings/perf-event type-checked against real crate sources via 'cargo check --target x86_64-unknown-linux-gnu', and a non-Linux fallback that honestly reports Rejected). Wired GET /host/probe into baud-server and 'baud host probe --json' into baud-cli. cargo test -p baud-host: 7/7 pass, clippy clean on both native and linux targets.
+
+Environment blocker resolved along the way: this Windows dev machine had no Rust toolchain and no linker at session start. Installed rustup (stable-x86_64-pc-windows-gnu, since the msvc toolchain needs an interactive UAC prompt for VS Build Tools that this automated session can't answer) plus a portable MinGW-w64 GCC (no admin rights needed), persisted both to the user PATH for future sessions, and added the x86_64-unknown-linux-gnu target so Linux-only KVM code can be type-checked without a Linux host. Documented in CLAUDE.md.
+
+First full 'cargo build --workspace' surfaced a pre-existing, unrelated compile error on this platform: crates/baud-cli/src/cmds/server.rs called libc::kill/SIGTERM, which do not exist on the windows-gnu target (the crate was only ever built on macOS/Linux before). Fixed with a small cfg(unix)/cfg(windows) split (tasklist/taskkill on Windows) per the 'resolve unrelated failures as part of the increment' rule. Rebuilding the full workspace now to confirm green before running the full test suite and drive/h0.sh.
+
+## 2026-07-24T14:04:04 UTC - Changes committed.
+- What was implemented: crates/baud-host (H0 capability-spike crate, specs/baud-host.md), wired
+  into baud-server (GET /host/probe) and baud-cli (`baud host probe --json`); plus the Rust
+  toolchain/linker bootstrap this fresh Windows machine needed to build/test anything at all, and
+  a cross-platform fix to every drive/*.sh script's temp-sqlite handling.
+- Files changed:
+  - crates/baud-host/{Cargo.toml,src/lib.rs,src/checks.rs,src/placement.rs,src/linux.rs,src/unsupported.rs} (new)
+  - crates/baud-server/src/routes/host.rs (new), routes/mod.rs, main.rs, Cargo.toml
+  - crates/baud-cli/src/cmds/host.rs (new), cmds/mod.rs, main.rs, cmds/server.rs
+  - drive/h0.sh (full rewrite for the KVM/host-probe model), drive/{full-demo,h1,h2,h3,m0-m8}.sh
+    (cygpath DB-path fix + tolerant cleanup)
+  - specs/baud-host.md (added missing `cpuid` field to the Probe struct — spec/JSON-example
+    inconsistency), specs/baud-cli.md (documented `baud host probe`)
+  - docs/determinism.md (H0 pivot notice + this machine's actual probe result)
+  - todo.md (§14 build-status section), CLAUDE.md (new — toolchain/PATH operational notes)
+  - Cargo.toml / Cargo.lock (baud-host added to workspace)
+- **Brief description of changes:**
+  - `crates/baud-host` implements `Probe`/`Regime`/`Vendor`/`Host`/`Topology`/`Placement` per
+    specs/baud-host.md §3-§5: the regime-decision gate (required-vs-cooperative-vs-enforced),
+    sibling-safe one-core-per-VM fleet placement, and an injectable `CapabilityChecks` trait so
+    the decision logic is unit-tested without real KVM hardware (7 tests, all passing:
+    capacity_refuses_sibling_split, doctor_checks_kvm, rejected_host_names_the_failing_check,
+    amd_host_is_cooperative_only, missing_msr_filter_rejects_even_with_kvm_present,
+    probe_report_json_shape_matches_spec, unsupported_os_is_rejected_and_names_kvm)
+  - The real Linux implementation (src/linux.rs) uses kvm-ioctls/kvm-bindings for CPUID/TSC/MSR-
+    filter/single-step round-trips, a perf-event-based branch-counter determinism smoke test, and
+    /sys topology parsing; type-checked against the real crate sources via
+    `cargo check --target x86_64-unknown-linux-gnu -p baud-host` (clean) since this dev machine
+    has no Linux/KVM host to run it on directly — documented as not-yet-hardware-validated in
+    docs/determinism.md and todo.md
+  - This machine had zero Rust toolchain and no linker at session start: installed rustup
+    (stable-x86_64-pc-windows-gnu — the msvc toolchain's VS Build Tools install needs an
+    interactive UAC prompt this automated session can't answer) and a portable MinGW-w64 GCC,
+    persisted both to the user PATH, added the x86_64-unknown-linux-gnu target for cross-checking
+    Linux-only code without a Linux host
+  - Fixed a pre-existing, workspace-wide bug surfaced while validating H0 here: every drive
+    script's `BAUD_DB=sqlite://$(mktemp -t ...)` passed a POSIX path a plain win32 binary can't
+    open ("unable to open database file"); translated through `cygpath -m` and made the temp-file
+    cleanup trap tolerant of Windows' brief post-kill file lock
+  - Fixed crates/baud-cli/src/cmds/server.rs: `libc::kill`/`SIGTERM` don't exist on
+    windows-gnu — split into cfg(unix) (libc::kill) / cfg(windows) (tasklist/taskkill) paths
+  - Fixed a real spec inconsistency: specs/baud-host.md's `Probe` struct pseudocode was missing
+    the `cpuid` field its own JSON example includes
+- Verification: `cargo build --workspace`, `cargo test --workspace` (all green, 0 failures),
+  `cargo clippy --workspace --all-targets` (0 warnings in any file this increment touched; all
+  remaining warnings are pre-existing in unrelated crates), `drive/h0.sh` and `drive/m0.sh` both
+  exit 0 end-to-end on this machine (regime correctly reports `rejected` with a named reason,
+  since this Windows box has no /dev/kvm — the honest, expected H0 result here)
+---

@@ -1,0 +1,20 @@
+[package]
+name = "baud-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KVM-capable host manager: capability probe, regime decision, one-core-per-VM fleet placement"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.25"
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+libc = "0.2"
+perf-event = "0.4"
+
+[dev-dependencies]
+proptest = "1"

@@ -24,6 +24,7 @@ baud-tracing = { path = "../baud-tracing" }
 baud-stream = { path = "../baud-stream" }
 baud-multiverse = { path = "../baud-multiverse" }
 baud-raftlet = { path = "../baud-raftlet" }
+baud-host = { path = "../baud-host" }
 serde_yaml = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

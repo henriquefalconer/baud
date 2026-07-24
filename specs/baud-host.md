@@ -55,7 +55,7 @@ pub enum Vendor { Intel, Amd, Other }
 pub enum Regime { Enforced, Cooperative, Rejected }
 
 pub struct Probe {
-    pub kvm: bool, pub vmx: bool, pub tsc_stable: bool, pub msr_filter: bool,
+    pub kvm: bool, pub vmx: bool, pub cpuid: bool, pub tsc_stable: bool, pub msr_filter: bool,
     pub singlestep: bool, pub rcb_deterministic: bool, pub nested: bool,
     pub vendor: Vendor, pub regime: Regime, pub reason: Option<String>,
 }
