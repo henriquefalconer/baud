@@ -97,11 +97,11 @@
 - est. output cost: $0.5276 (sonnet output rate)
 - exact accounting unavailable this entry
 
-## 2026-07-24T06:05:00 UTC - Ralph Build Iteration 5 Start
+## 2026-07-24T06:06:00 UTC - Ralph Build Iteration 5 Start
 - Resuming from M3 (committed at c0e722d)
 - Plan: M4 — examples/parser workload spec + fuzz loop endpoint (random + stateful-mask) + baud fuzz CLI + drive/m4.sh
 
-## 2026-07-24T06:10:00 UTC - M4 complete
+## 2026-07-24T06:10:00 UTC - M4 complete (caf07b2)
 - examples/parser/spec.yaml: "fuzzers hate it" parser workload spec with planted crash
 - crates/baud-server/src/routes/fuzz.rs: POST /runs/fuzz fuzz loop; parser simulation with XOR-layer crash; random/stateful-mask tactics; plateau detection; 0004_fuzz.sql migration
 - crates/baud-cli/src/cmds/fuzz.rs: baud fuzz start --spec --tactics --seed --max-iterations; exit 2 on goal/crash
