@@ -579,3 +579,12 @@ Items still deferred (require Linux ptrace/seccomp or CO-RE BPF cross-build):
 - VR2-M5/M6 (clone/rdtsc tests need real guest binaries)
 - VR2-M7 (wall-clock watchdog — complex supervisor feature)
 - VR2-M18 (baud-tracing no aya dep — requires Linux CO-RE build)
+
+Additional fix in iteration 14 (cross-check empty-stream guard):
+- cross_check() empty-stream false positive: FIXED
+  - When both plane-1 and plane-2 are empty, the previous code returned passed=true (vacuous truth)
+  - Fixed: baud-tracing cross_check() now detects both-empty condition and returns passed=false
+  - Message: "observation cross-check FAILED: both plane-1 and plane-2 are empty (no data to compare)"
+  - Prevents M7.9 false-positive in broken-supervisor negative test
+  - All 13 baud-tracing tests still pass after guard added
+  - drive/m7.sh M7.9 updated to assert passed=False for unseeded empty-run

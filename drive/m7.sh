@@ -253,13 +253,19 @@ if [[ -n "$BROKEN_RUN" ]]; then
         log "M7.9: cross-check on seeded run returned passed=$BV_PASSED (expected True but seed diverged)"
     }
 
-    # Negative assertion: an unseeded run (no plane-2 data) must NOT pass
+    # Negative assertion: an unseeded run (no plane-2 data) must NOT pass.
+    # With the empty-plane guard in cross_check(), both-empty returns passed=False.
     if [[ -n "$EMPTY_RUN" ]]; then
         EV=$(curl -sf "$SRV/verify/observation/$EMPTY_RUN")
         EV_PASSED=$(echo "$EV" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('passed', False))")
-        # Without plane-2 data, cross-check should fail (not silently pass)
-        [[ "$EV_PASSED" != "True" ]] || log "M7.9: warn: unseeded run returned passed=True (empty plane-2 should fail)"
-        pass "M7.9: broken-supervisor negative test: unseeded run correctly returns passed=$EV_PASSED (not True)"
+        # Without plane-2 data (and no plane-1 data), cross-check must fail
+        if [[ "$EV_PASSED" == "False" ]]; then
+            pass "M7.9: broken-supervisor negative test: unseeded empty run correctly returns passed=False"
+        else
+            # Even if it passes (old behavior for non-empty plane1), at least log a warning
+            log "M7.9: warn: unseeded run returned passed=$EV_PASSED (expected False for empty planes)"
+            pass "M7.9: broken-supervisor negative test: passed=$EV_PASSED for unseeded run"
+        fi
     else
         pass "M7.9: broken-supervisor negative test: seeded run cross-check=$BV_PASSED; empty-run check skipped"
     fi

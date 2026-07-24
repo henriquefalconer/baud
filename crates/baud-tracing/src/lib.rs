@@ -361,6 +361,21 @@ pub fn cross_check(
         }
     }
 
+    // Guard: if both planes are empty, the cross-check is vacuously trivial and
+    // provides no evidence of determinism. Treat as a failure to avoid false positives.
+    if plane1_counts.is_empty() && plane2_counts.is_empty() {
+        return CrossCheckResult {
+            run_id: run_id.into(),
+            passed: false,
+            divergent_node: None,
+            divergent_sequence_step: None,
+            plane1_counts,
+            plane2_counts,
+            plane2_source: ebpf_session.source.clone(),
+            message: "observation cross-check FAILED: both plane-1 and plane-2 are empty (no data to compare — run the supervisor and seed eBPF records first)".into(),
+        };
+    }
+
     // Find first divergence by node (counts first, then sequences)
     let mut all_nodes: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     all_nodes.extend(plane1_counts.keys());
