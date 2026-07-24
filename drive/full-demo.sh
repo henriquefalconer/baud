@@ -317,9 +317,10 @@ RAFT_OUT=$(curl -sf -X POST "$SRV/runs/fuzz" \
     -H "Content-Type: application/json" \
     -d "{
         \"spec\": $RAFTLET_SPEC,
-        \"tactics\": \"random\",
+        \"tactics\": \"markov-crash-restart\",
         \"seed\": 1234,
-        \"max_iterations\": 30
+        \"max_iterations\": 30,
+        \"planted_bug\": true
     }" 2>&1)
 RAFT_RUN_ID=$(echo "$RAFT_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('run_id',''))" 2>/dev/null || true)
 RAFT_OK=$(echo "$RAFT_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok',False))")

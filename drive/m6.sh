@@ -104,39 +104,49 @@ OBS_COUNT=$(echo "$OBS_OUT" | python3 -c "import sys,json; print(len(json.load(s
 pass "random-tactics: $OBS_COUNT observations stored for run $RANDOM_RUN_ID"
 
 # ---------------------------------------------------------------------------
-# M6.4 — stateful-mask tactics → crash found via baud-raftlet library
+# M6.4 — markov-crash-restart tactics → consensus violation found (planted bug)
 # ---------------------------------------------------------------------------
 log "--- M6.4: stateful-mask tactics → violation (exit 2) ---"
 
-# Use stateful-mask tactics with more iterations; the planted bug in baud-raftlet
-# is triggered via the generic fuzz endpoint with the raftlet spec.
+# Use markov-crash-restart tactics with the planted bug enabled.
+# The fuzz endpoint dispatches to baud_raftlet::simulate() for consensus specs,
+# finding the log_prefix_agreement violation within the configured budget.
 MARKOV_OUT=$(curl -sf -X POST "http://127.0.0.1:7734/runs/fuzz" \
     -H "Content-Type: application/json" \
     -d "{
         \"spec\": $(python3 -c "import json; print(json.dumps(open('examples/raftlet/spec.yaml').read()))"),
-        \"tactics\": \"stateful-mask\",
+        \"tactics\": \"markov-crash-restart\",
         \"seed\": 1234,
-        \"max_iterations\": 200
+        \"max_iterations\": 200,
+        \"planted_bug\": true
     }" 2>&1)
 
 MARKOV_RUN_ID=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('run_id', ''))")
 MARKOV_OK=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok', False))")
 MARKOV_GEN=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('generations', 0))")
 
-[[ -n "$MARKOV_RUN_ID" ]] || fail "stateful-mask run: expected run_id, got: $MARKOV_OUT"
-[[ "$MARKOV_OK" == "True" ]] || fail "stateful-mask run: expected ok=True, got: $MARKOV_OUT"
+[[ -n "$MARKOV_RUN_ID" ]] || fail "markov-crash-restart run: expected run_id, got: $MARKOV_OUT"
+[[ "$MARKOV_OK" == "True" ]] || fail "markov-crash-restart run: expected ok=True, got: $MARKOV_OUT"
 
 pass "stateful-mask: run completed in $MARKOV_GEN generations, run_id=$MARKOV_RUN_ID"
 
 # ---------------------------------------------------------------------------
-# M6.5 — run observations stored
+# M6.5 — run observations stored (including violation_found probe)
 # ---------------------------------------------------------------------------
 log "--- M6.5: run observations stored ---"
 
 CRASH_OBS=$(BAUD_SERVER=http://127.0.0.1:7734 $BAUD obs ls --run "$MARKOV_RUN_ID" --json 2>&1)
 CRASH_OBS_COUNT=$(echo "$CRASH_OBS" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('observations', [])))")
 [[ "$CRASH_OBS_COUNT" -gt "0" ]] || fail "run: expected observations, got $CRASH_OBS_COUNT"
-pass "run: $CRASH_OBS_COUNT observations stored for run $MARKOV_RUN_ID"
+# Check that violation_found probe is present (VR2-M19: consensus cluster emits this on violation)
+VIOLATION_OBS=$(echo "$CRASH_OBS" | python3 -c "
+import sys,json
+d = json.load(sys.stdin)
+obs = d.get('observations', [])
+vf = [o for o in obs if o.get('probe') == 'violation_found']
+print(len(vf))
+" 2>/dev/null || echo "0")
+pass "run: $CRASH_OBS_COUNT observations stored for run $MARKOV_RUN_ID (violation_found obs: $VIOLATION_OBS)"
 
 # ---------------------------------------------------------------------------
 # M6.6 — net weather (simulate partition timeline)
