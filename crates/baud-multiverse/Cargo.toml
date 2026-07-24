@@ -16,8 +16,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
 libc = "0.2"
+# The console device (`console.rs`, specs/baud-multiverse.md §2's pinned skeleton dep) is pure
+# Rust with no non-dev dependencies of its own (checked against vm-superio's own Cargo.toml), so
+# unlike the other KVM-boot skeleton deps below it is a plain (non-linux-gated) dependency —
+# `console.rs` and its tests run on this Windows dev machine with no KVM at all.
+vm-superio = "0.8"
 
-# specs/baud-multiverse.md §2's pinned skeleton deps. Real KVM/guest-boot code (Kvm::new →
+# specs/baud-multiverse.md §2's remaining pinned skeleton deps. Real KVM/guest-boot code (Kvm::new →
 # create_vm → register RAM → create_vcpu → CPUID/TSC/MSR → linux-loader boot, crates/
 # baud-multiverse/src/linux/) is cfg(target_os = "linux")-gated, same pattern as baud-host and
 # baud-vcpu: type-checked via `cargo check --target x86_64-unknown-linux-gnu -p baud-multiverse`
@@ -28,7 +33,9 @@ kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
 vm-memory = { version = "0.18", features = ["backend-mmap", "rawfd"] }
 linux-loader = { version = "0.14", features = ["bzimage", "elf"] }
 vmm-sys-util = "0.15"
-vm-superio = "0.8"
+# The work-clock's real branch-counter source (`linux::LinuxBranchCounter`, specs/baud-multiverse.md
+# §4's "Work-clock" row) — same crate/version baud-vcpu's `LinuxPmuStepper` already pins.
+perf-event = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }

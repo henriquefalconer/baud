@@ -16,26 +16,31 @@
 pub mod bootparams;
 pub mod pagetables;
 
+use crate::console::DeviceBus;
 use crate::cpuid::{self, CpuidEntry};
 use crate::layout;
+use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX};
+use baud_vcpu::DeterminismHole;
 use kvm_bindings::{
     kvm_cpuid_entry2, kvm_enable_cap, kvm_userspace_memory_region, KVM_MAX_CPUID_ENTRIES,
 };
 use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd, VmFd};
+use perf_event::events::Hardware;
+use perf_event::{Builder, Counter};
+use std::io;
 use std::path::Path;
-use vm_memory::{Address, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 /// The guest-RAM backend type this boot flow uses throughout — a single anonymous-mmap region, no
 /// dirty-page tracking here (that is `baud-snapshot`'s `KVM_CAP_DIRTY_LOG_RING` job, §5).
 pub type GuestMemory = GuestMemoryMmap<()>;
 
-/// The MSRs the cooperative regime's virtual TSC serves (specs/baud-multiverse.md §4's "MSR
-/// filter" row): `IA32_TSC` (0x10), `IA32_TSC_DEADLINE` (0x6E0), `IA32_TSC_AUX` (0xC0000103,
-/// AMD/Intel-shared RDTSCP auxiliary MSR). Deleted entirely: HPET/PIT/PM-timer/RTC have no MSR or
-/// PIO footprint on this minimal machine to begin with (specs/baud-multiverse.md §3.6).
-const MSR_IA32_TSC: u32 = 0x0000_0010;
-const MSR_IA32_TSC_DEADLINE: u32 = 0x0000_06E0;
-const MSR_IA32_TSC_AUX: u32 = 0xC000_0103;
+// The MSRs the cooperative regime's virtual TSC serves (specs/baud-multiverse.md §4's "MSR
+// filter" row): `IA32_TSC` (0x10), `IA32_TSC_DEADLINE` (0x6E0), `IA32_TSC_AUX` (0xC0000103,
+// AMD/Intel-shared RDTSCP auxiliary MSR) — the constants (`MSR_IA32_TSC` etc., imported above)
+// live in `timesource` since that is what actually serves reads/writes once the MSR-filter exit
+// routes to `dispatch_exit`. Deleted entirely: HPET/PIT/PM-timer/RTC have no MSR or PIO footprint
+// on this minimal machine to begin with (specs/baud-multiverse.md §3.6).
 
 /// The fixed virtual-TSC frequency every cooperative-regime run pins (todo.md §3.3: "cooperative =
 /// `KVM_SET_TSC_KHZ` pins a fixed frequency"). 1 GHz — a round, host-independent number; the point
@@ -55,6 +60,8 @@ pub enum BootError {
     PageTables(vm_memory::guest_memory::Error),
     #[error(transparent)]
     BootParams(#[from] bootparams::BootParamsError),
+    #[error("failed to create the work-clock's perf_event branch counter: {0}")]
+    BranchCounter(#[from] io::Error),
 }
 
 /// A fully booted-but-not-yet-run guest: KVM handles, guest memory, and the vCPU, all configured
@@ -203,6 +210,117 @@ fn configure_msr_filter(vm: &VmFd) -> Result<(), kvm_ioctls::Error> {
         })
         .collect();
     vm.set_msr_filter(MsrFilterDefaultAction::ALLOW, &ranges)
+}
+
+/// The work-clock's real RCB source: a free-running `perf_event_open` counter over
+/// `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`, read (never armed/overflow-driven — that is
+/// `baud_vcpu::linux::pmu::LinuxPmuStepper`'s separate concern for interrupt injection,
+/// specs/baud-vcpu.md §5) on every `IA32_TSC` access (specs/baud-multiverse.md §4's work-clock
+/// row). This is a distinct perf-event fd from `LinuxPmuStepper`'s armed counter; reconciling the
+/// two into a single counter source is deferred until `baud-multiverse`'s thread model actually
+/// exists and can be exercised on real perf/KVM hardware (see `crates/baud-vcpu/src/linux/pmu.rs`'s
+/// module doc for the sibling scope note on this same "not yet exercised" boundary).
+pub struct LinuxBranchCounter {
+    counter: Counter,
+    /// The last successfully read value — served on a transient read failure instead of `0`, so a
+    /// hiccup never makes the work-clock appear to run backwards (specs/baud-multiverse.md §3's
+    /// nondeterminism table requires monotone time; mirrors `LinuxPmuStepper::current_point`'s same
+    /// fallback-to-last-known-value rationale).
+    last: u64,
+}
+
+impl LinuxBranchCounter {
+    pub fn new() -> io::Result<Self> {
+        let mut counter = Builder::new().kind(Hardware::BRANCH_INSTRUCTIONS).build()?;
+        counter.enable()?;
+        Ok(LinuxBranchCounter { counter, last: 0 })
+    }
+}
+
+impl BranchCounter for LinuxBranchCounter {
+    fn read(&mut self) -> u64 {
+        match self.counter.read() {
+            Ok(v) => {
+                self.last = v;
+                v
+            }
+            Err(_) => self.last,
+        }
+    }
+}
+
+/// The wiring point specs/baud-multiverse.md §6's API targets for H1 ("boot a guest, print to the
+/// serial console, clean Hlt/Shutdown"). `snapshot`/`restore` are not implemented here yet — they
+/// depend on `baud-snapshot` (todo.md §14: "H1-H6 ... baud-snapshot ... crates do not exist yet"),
+/// and the tape-device-driven `run(tape: impl TapeSource)` signature depends on `baud-tape-device`,
+/// also not yet built (H2/§3.5). What exists here is exactly what H1 needs and no more: [`boot`]
+/// runs the full [`boot_guest`] boot flow plus the work-clock/console device wiring, and
+/// [`run_to_first_halt`] drives it to the guest's first `Hlt`/`Shutdown` and returns the console
+/// output plus a blake3 hash of guest RAM — `boot(...).ram_hash_at_first_hlt()` from specs/
+/// baud-multiverse.md §8's `double_boot_memory_identical` pseudocode, on the real boot flow instead
+/// of that pseudocode's placeholder.
+///
+/// [`boot`]: Multiverse::boot
+/// [`run_to_first_halt`]: Multiverse::run_to_first_halt
+pub struct Multiverse {
+    guest: BootedGuest,
+    bus: DeviceBus,
+    time: WorkClock<LinuxBranchCounter>,
+}
+
+/// What running a booted guest to its first halt observed (specs/baud-multiverse.md §8's
+/// `ram_hash_at_first_hlt`).
+pub struct HaltOutcome {
+    /// Every byte the guest wrote to the console (COM1 data register), in order.
+    pub console_output: Vec<u8>,
+    /// `blake3:<hex>` of the whole guest-RAM region, computed right after the halt.
+    pub ram_hash: String,
+}
+
+impl Multiverse {
+    /// Run [`boot_guest`] and wire up the work-clock (`base + k * rcb`, specs/baud-multiverse.md
+    /// §4) and console device the run loop needs. `base` is normally `0` (a guest booting at
+    /// virtual time zero); `k` scales RCB into a plausible Hz range for the guest's own clock
+    /// arithmetic to work with sane-looking values.
+    pub fn boot(kernel_path: &Path, cmdline: &str, base: u64, k: u64) -> Result<Self, BootError> {
+        let guest = boot_guest(kernel_path, cmdline)?;
+        let counter = LinuxBranchCounter::new()?;
+        Ok(Multiverse { guest, bus: DeviceBus::default(), time: WorkClock::new(base, k, counter) })
+    }
+
+    /// Drive the run loop to the guest's first `Hlt`/`Shutdown` (specs/baud-multiverse.md §8's
+    /// `double_boot_memory_identical`: "boot the hello image twice ... assert equal blake3 of guest
+    /// RAM at first `Hlt`"). Every VM exit along the way is resolved by `dispatch_exit` through
+    /// this `Multiverse`'s console `Bus` and work-clock `TimeSource` — any exit kind neither knows
+    /// how to serve is `Err(DeterminismHole)`, never a silent continue (specs/baud-vcpu.md §3).
+    pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, DeterminismHole> {
+        baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
+        Ok(HaltOutcome { console_output: self.bus.console.output().to_vec(), ram_hash: self.ram_hash() })
+    }
+
+    /// blake3 of every byte of guest RAM, read in fixed-size chunks so this never needs to
+    /// allocate the whole [`layout::GUEST_RAM_SIZE`] region at once.
+    fn ram_hash(&self) -> String {
+        const CHUNK: usize = 1 << 20; // 1 MiB
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; CHUNK];
+        let mut offset = 0usize;
+        while offset < layout::GUEST_RAM_SIZE {
+            let take = CHUNK.min(layout::GUEST_RAM_SIZE - offset);
+            let dst = &mut buf[..take];
+            // Guest RAM was registered as exactly one region starting at GUEST_RAM_START
+            // (`allocate_and_register_guest_ram`), so every offset in [0, GUEST_RAM_SIZE) is
+            // valid to read here — a failure would mean the boot flow itself is broken, not
+            // something this hash computation can meaningfully recover from.
+            self.guest
+                .guest_mem
+                .read_slice(dst, GuestAddress(layout::GUEST_RAM_START + offset as u64))
+                .expect("guest RAM region covers the whole fixed layout by construction");
+            hasher.update(dst);
+            offset += take;
+        }
+        format!("blake3:{}", hasher.finalize().to_hex())
+    }
 }
 
 #[cfg(test)]

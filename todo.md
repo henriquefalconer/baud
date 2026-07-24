@@ -488,17 +488,77 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     baud-multiverse`, including the `linux`-only tests) but **not yet exercised on real KVM
     hardware** — same caveat as `baud-host`/`baud-vcpu` (no Linux/KVM host on this dev machine,
     CLAUDE.md).
-  - **Not yet done**: no MSR-serving `TimeSource`/`Bus` impl wired to `baud_vcpu::dispatch_exit`
-    yet (the RDTSC/RDMSR work-clock math itself, §3.3), no console/tape-device `Bus`, and nothing
-    calls `boot_guest` end-to-end — `baud-multiverse`'s public `Multiverse::load`/`run` API (§6 of
-    specs/baud-multiverse.md) does not exist yet, only the boot-flow building blocks it will use.
-    **Next build action**: build the work-clock `TimeSource` (§3.3's `virtual_tsc = base + k ×
-    rcb`, fed by `baud-vcpu`'s `LinuxPmuStepper` branch counter) and a minimal console `Bus`, wire
-    `boot_guest` + `run_until_halted` into a `Multiverse` struct implementing specs/
-    baud-multiverse.md §6's API, and get an actual Linux/KVM host (bare-metal or WSL2 nested virt)
-    to validate the whole boot flow against — everything above is still type-check-only.
+  - **Work-clock `TimeSource` + console `Bus` + a `Multiverse` boot/run struct — built, wired
+    together, still type-check-only pending real hardware.** Closes most of the previous "Next
+    build action" below:
+    - `crates/baud-multiverse/src/timesource.rs` (hardware-independent, no `cfg` at all) — `WorkClock<C:
+      BranchCounter>` implementing `baud_vcpu::TimeSource`: `virtual_tsc = base + k * rcb`
+      (todo.md §3.3), served for `IA32_TSC`/`IA32_TSC_DEADLINE`/`IA32_TSC_AUX` (the MSR constants
+      formerly duplicated in `linux/mod.rs` now live here and are imported by it); a guest `wrmsr`
+      to `IA32_TSC` rebases `base` so the next read reflects the written value exactly. Generic
+      over a `BranchCounter` trait, so the formula's monotonicity/reproducibility
+      (`work_clock_is_monotone_and_reproducible`) is unit-tested on this Windows machine with a
+      scripted mock counter — no perf/KVM hardware needed for this half. 5 tests.
+    - `crates/baud-multiverse/src/console.rs` (hardware-independent — `vm_superio` has zero non-dev
+      dependencies of its own, confirmed against its Cargo.toml, so it moved out of the
+      `cfg(target_os = "linux")` dependency block to a plain one) — `Console`, a COM1 (0x3f8-0x3ff)
+      16550 UART built on `vm_superio::Serial` with an in-memory `Vec<u8>` writer and a
+      recording-not-delivering `NoIrqTrigger` (no interrupt controller wired yet — that lands with
+      the tape device); `DeviceBus` composes `Console` with `baud_vcpu::OpenBusFallback` for every
+      other address. 5 tests, including that the LSR always reports "ready to transmit" (a real
+      guest UART driver would spin forever otherwise).
+    - `crates/baud-multiverse/src/linux/mod.rs` — `LinuxBranchCounter` (a free-running
+      `perf_event_open(PERF_COUNT_HW_BRANCH_INSTRUCTIONS)` counter, distinct from
+      `baud_vcpu::linux::pmu::LinuxPmuStepper`'s own armed/overflow counter — reconciling the two
+      into one perf fd is deferred to when this can actually be exercised on real perf/KVM
+      hardware, documented in-line same as `pmu.rs`'s existing scope note) implementing
+      `timesource::BranchCounter`; and `linux::Multiverse` — `boot(kernel_path, cmdline, base, k)`
+      runs `boot_guest` plus this wiring, `run_to_first_halt()` drives
+      `baud_vcpu::linux::run_until_halted` to the guest's first `Hlt`/`Shutdown` through the new
+      `DeviceBus`/`WorkClock` and returns a `HaltOutcome { console_output, ram_hash }` — the real
+      boot flow behind specs/baud-multiverse.md §8's `boot(...).ram_hash_at_first_hlt()`
+      pseudocode. This is H1's target ("boot a guest, print to the serial console, clean
+      `Hlt`/`Shutdown`"), not yet the full §6 API — `snapshot`/`restore` still need `baud-snapshot`
+      (doesn't exist yet) and the tape-device-driven `run(tape: impl TapeSource)` signature still
+      needs `baud-tape-device` (doesn't exist yet either), so neither is stubbed here.
+    - **Verification**: `cargo test -p baud-multiverse` — 28/28 pass natively on this Windows
+      machine (9 new: 5 `console` + 4 `timesource`, the rest pre-existing and unaffected); `cargo
+      check`/`clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean for
+      every new/touched file (0 new warnings; `console.rs`/`timesource.rs`/`linux/mod.rs` each
+      contribute zero clippy warnings on both the native and Linux targets — the only warnings
+      clippy reports are the same ~10 pre-existing ones in the untouched pre-pivot `lib.rs`
+      simulation code, already tracked, not this increment's); `cargo build`/`test --workspace`
+      green (all crates, no regressions); `drive/h0.sh` still exits 0 (re-verified post-change).
+    - **Not yet done**: no tape-device `Bus` (still needs `baud-tape-device`, H2/§3.5); nothing
+      calls `Multiverse::boot`/`run_to_first_halt` end-to-end on real hardware yet — no Linux/KVM
+      host exists on this dev machine (same caveat as every other `linux/` module, CLAUDE.md).
+      **Next build action**: get an actual Linux/KVM host (bare-metal or a WSL2 distro with nested
+      virt enabled — `wsl -l -v` currently lists no installed distro on this machine, so that is
+      itself the first step) and drive `linux::Multiverse::boot` against a real minimal kernel
+      image end-to-end, replacing every "type-check-only" caveat above with an actual boot; H0's
+      own "not yet validated on real KVM hardware" caveat blocks the same way and should be closed
+      at the same time (same missing host). Once that lands: `drive/h1.sh` per §10 ("boot the hello
+      image, assert expected console output; `double_boot_memory_identical` passes").
 - H1-H6 and the rest of the M-series remain **not yet started**: `baud-tape-device`,
   `baud-snapshot`, `baud-snapshot-store` crates do not exist yet.
+- **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
+  bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a
+  drive script's `trap cleanup EXIT` → `kill "$SERVER_PID"` does not reliably terminate the
+  backgrounded native `baud-server.exe` — git-bash's `kill` against a Win32 child spawned with `&`
+  can be a no-op instead of an actual termination. A leftover `baud-server.exe` keeps holding port
+  7734, so the *next* drive script's freshly spawned server fails to bind and every subsequent
+  client call gets "connection actively refused" — which looks exactly like the unrelated, also-
+  present `sleep 1`-before-probe race (the fixed 1-second wait before the first CLI call is too
+  short whenever the machine is under load, e.g. from a concurrent `cargo test`/`clippy` in another
+  shell). Both were hit back-to-back while re-verifying this iteration's change and were not this
+  increment's fault: `Get-Process baud-server` + `Stop-Process -Force` (PowerShell) between runs,
+  then a clean re-run, confirmed both `drive/h0.sh` and `drive/m0.sh` pass end-to-end with an
+  unoccupied port and an unloaded machine. A future iteration should either make the cleanup trap
+  use `taskkill //F //PID "$SERVER_PID" //T` (or `wait`-then-verify the port is actually free)
+  instead of a bare `kill`, and/or replace the fixed `sleep 1` with a poll-until-`/server/status`-
+  responds loop, in whichever drive script is touched next — this was not the current increment's
+  scope (`baud-multiverse`'s work-clock/console/`Multiverse` wiring) and neither script's own logic
+  needed a change to pass.
 - **Fixed while validating H0 on this Windows dev machine** (pre-existing, not specific to
   baud-host): every `drive/*.sh` that spawns `baud-server` with a temp SQLite file passed a
   POSIX `mktemp -t ...` path (e.g. `/tmp/baud-h0-XXXX.sqlite`) straight into `BAUD_DB`; a plain

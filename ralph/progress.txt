@@ -1087,3 +1087,36 @@ cargo build/test/clippy --workspace all green natively (0 new warnings; the ~20 
   `drive/h0.sh` and `drive/m0.sh` both still exit 0 end-to-end on this machine (confirms the new
   code is additive, not a regression on the working M-series path).
 ---
+
+## 2026-07-24T14:50:02 UTC - Session usage — iteration 3 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 92535
+- est. output cost: $1.3880 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and specs first.
+
+Studied todo.md §14's build status and specs/baud-multiverse.md §4/§6. Chose to build the work-clock TimeSource + console Bus + a linux-gated Multiverse boot/run struct — todo.md's own "Next build action" for baud-multiverse, it's the critical path item between the already-built boot flow (cpuid/layout/linux boot) and H1 ("boot a guest, print to console, clean Hlt").
+
+Read baud-vcpu's TimeSource/Bus traits, boundary.rs's PmuStepper, and pmu.rs's LinuxPmuStepper to match the established hardware-independent/linux-gated split pattern. Confirmed vm-superio 0.8.1 (cached in the local registry) has zero non-dev dependencies, so its Serial device can be a portable (non-linux-gated) console, unlike the rest of the KVM boot-flow deps.
+
+Implemented crates/baud-multiverse/src/timesource.rs (WorkClock<BranchCounter>: virtual_tsc = base + k*rcb, serves IA32_TSC/TSC_DEADLINE/TSC_AUX) and src/console.rs (Console: a COM1 16550 UART on vm_superio::Serial, DeviceBus composing it with OpenBusFallback) — both hardware-independent with real cargo test coverage on this Windows machine. Wired LinuxBranchCounter (perf_event_open) and a linux::Multiverse{boot, run_to_first_halt} into linux/mod.rs using the existing boot_guest/run_until_halted building blocks.
+
+Fixed 3 clippy findings in my own new code (manual_range_contains, byte_char_slices x2, an erasing_op in a test assertion) before re-verifying. cargo test -p baud-multiverse: 28/28 pass (9 new). cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets: clean, 0 new warnings. cargo build/test --workspace: all green, no regressions.
+
+Re-ran drive/h0.sh and drive/m0.sh to verify end-to-end. First attempts raced/failed (server not yet listening when the CLI probed) because a prior drive/h0.sh run's baud-server.exe was never actually killed by its cleanup trap (git-bash kill against a backgrounded Win32 child can no-op) and sat on port 7734, compounded by CPU contention from my own concurrent cargo test/clippy runs. Killed the stale server via PowerShell Stop-Process and re-ran both scripts cleanly: both pass end-to-end (H0 correctly reports regime=rejected with a named reason on this KVM-less machine; M0 PASS). Documented this environmental flakiness (not a code bug, not this increment's scope) in todo.md for the next iteration. Updating todo.md's build status and finishing up.
+
+## 2026-07-24T15:09:01 UTC - Changes committed.
+- Implemented the work-clock TimeSource, a console Bus, and a linux-gated Multiverse boot/run struct for baud-multiverse (todo.md §3.3/§6, specs/baud-multiverse.md §4/§6)
+- Files changed: crates/baud-multiverse/src/{timesource.rs (new),console.rs (new),lib.rs,linux/mod.rs,Cargo.toml}, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - timesource.rs: WorkClock<BranchCounter> implementing baud_vcpu::TimeSource — virtual_tsc = base + k*rcb, serves IA32_TSC/IA32_TSC_DEADLINE/IA32_TSC_AUX, a wrmsr to IA32_TSC rebases base so the next read matches exactly. Hardware-independent (generic BranchCounter trait), 5 unit tests including work_clock_is_monotone_and_reproducible.
+  - console.rs: Console — a COM1 (0x3f8-0x3ff) 16550 UART built on vm_superio::Serial with an in-memory Vec<u8> writer and a recording NoIrqTrigger; DeviceBus composes it with baud_vcpu::OpenBusFallback. Hardware-independent (vm-superio has zero non-dev deps, moved out of the linux-gated dependency block), 5 unit tests.
+  - linux/mod.rs: LinuxBranchCounter (perf_event_open branch counter) implementing timesource::BranchCounter; linux::Multiverse{boot, run_to_first_halt} wires boot_guest + baud_vcpu::linux::run_until_halted through the new DeviceBus/WorkClock and returns a HaltOutcome{console_output, ram_hash} — the real boot flow behind specs/baud-multiverse.md §8's ram_hash_at_first_hlt pseudocode (H1's target). snapshot/restore and the tape-device-driven run() intentionally not stubbed — they depend on baud-snapshot/baud-tape-device, which do not exist yet.
+  - Verification: cargo test -p baud-multiverse 28/28 pass (9 new); cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets clean, 0 new warnings; cargo build/test --workspace green, no regressions; drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (an unrelated environmental drive-script flakiness — a stale server left on port 7734 by a non-terminating cleanup trap — was hit and documented in todo.md, not fixed, out of this increment's scope).
+---

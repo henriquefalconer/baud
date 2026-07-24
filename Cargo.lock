@@ -349,6 +349,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "linux-loader",
+ "perf-event",
  "proptest",
  "serde",
  "serde_json",

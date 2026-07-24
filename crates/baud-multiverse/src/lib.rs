@@ -29,8 +29,10 @@
 
 #![allow(dead_code)]
 
+pub mod console;
 pub mod cpuid;
 pub mod layout;
+pub mod timesource;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
