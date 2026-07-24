@@ -124,11 +124,13 @@ MARKOV_OUT=$(curl -sf -X POST "http://127.0.0.1:7734/runs/fuzz" \
 MARKOV_RUN_ID=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('run_id', ''))")
 MARKOV_OK=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok', False))")
 MARKOV_GEN=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('generations', 0))")
+MARKOV_GOAL=$(echo "$MARKOV_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('goal_reached', False))")
 
 [[ -n "$MARKOV_RUN_ID" ]] || fail "markov-crash-restart run: expected run_id, got: $MARKOV_OUT"
 [[ "$MARKOV_OK" == "True" ]] || fail "markov-crash-restart run: expected ok=True, got: $MARKOV_OUT"
+[[ "$MARKOV_GOAL" == "True" ]] || fail "M6.4: markov-crash-restart with planted_bug must find log_prefix_agreement violation (goal_reached=True), got: $MARKOV_OUT"
 
-pass "stateful-mask: run completed in $MARKOV_GEN generations, run_id=$MARKOV_RUN_ID"
+pass "stateful-mask: violation found in $MARKOV_GEN generations (goal_reached=True), run_id=$MARKOV_RUN_ID"
 
 # ---------------------------------------------------------------------------
 # M6.5 — run observations stored (including violation_found probe)
@@ -146,6 +148,7 @@ obs = d.get('observations', [])
 vf = [o for o in obs if o.get('probe') == 'violation_found']
 print(len(vf))
 " 2>/dev/null || echo "0")
+[[ "$VIOLATION_OBS" -gt "0" ]] || fail "M6.5: expected violation_found probe in observations (guided tactics must emit violation), got: 0"
 pass "run: $CRASH_OBS_COUNT observations stored for run $MARKOV_RUN_ID (violation_found obs: $VIOLATION_OBS)"
 
 # ---------------------------------------------------------------------------
