@@ -1459,3 +1459,36 @@ Post-push verification: git push initially failed ('could not read Username for 
 - **Brief description of changes:**
   - CLAUDE.md: brief note on bridging WSL2's git to gh.exe's credential helper for push
 ---
+
+## 2026-07-24T18:46:00 UTC - Session usage — iteration 1 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 145242
+- est. output cost: $2.1786 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address, starting by studying specs/* and todo.md build status (H0+H1 now validated for real on WSL2/KVM hardware per iteration 1) and checking whether an Agent/Task-spawn subagent tool is available this session...
+
+Chose H2 (todo.md §10/§14): exercise all_input_is_tape_derived for real against actual KVM hardware -- the tape device is currently only unit-tested at the device-model level (baud-tape-device::tests::all_input_is_tape_derived, pure) and wired into baud-multiverse's DeviceBus/Multiverse::boot type-check-only; no real guest has ever actually read a tape byte and produced observable output driven by it on real hardware. This closes test-matrix row 21 ('fake determinism') for real, the same way H1's hello-guest fixture closed row 11/12. drive/h2.sh is also fully stale (tests the pre-pivot 'tape integration workload fuzzing' H2, not this plan's current H2: deterministic double-run/CPUID/work-clock/tape-derived-input/no-unmodeled-exit) -- rewriting it to match the current spec's H2, mirroring h1.sh's rewrite pattern.
+
+Built crates/baud-multiverse/tests/fixtures/tape-echo-guest/ (hand-assembled 20-byte payload: reads 4 bytes from the tape device's DATA port 0x0500 via real IN instructions, echoes each to COM1 via OUT, then hlts) and added linux::tests::all_input_is_tape_derived to baud-multiverse -- PASSED for real against /dev/kvm on the first try: 3 boots (same tape twice -> byte-identical console output; a tape with one changed byte -> different output), closing test-matrix row 21 ('fake determinism') for real, the same way H1's hello-guest closed rows 11/12. cargo test -p baud-multiverse: 51/51 pass (was 50/50). Rewrote drive/h2.sh end to end to match this plan's actual H2 definition (todo.md S10) -- deterministic double-run: host-probe regime check, cpuid_leaves_are_fixed, work_clock_is_monotone_and_reproducible, double_boot_memory_identical, the new all_input_is_tape_derived, and baud-vcpu's no_unmodeled_exit_is_silent proptest -- replacing the stale pre-pivot 'tape-integration workload fuzzing' version (which depended on python3, examples/parser, and the /runs/fuzz endpoint, none of which are part of the current KVM-era plan). Ran the new drive/h2.sh end-to-end against real /dev/kvm: ALL 6 CHECKS PASSED (regime=cooperative). Re-verifying drive/h0.sh and drive/h1.sh plus full workspace build/test/clippy before committing...
+
+## 2026-07-24T18:57:00 UTC - Changes committed.
+- Exercised H2's `all_input_is_tape_derived` for real against actual `/dev/kvm` for the first time, and rewrote `drive/h2.sh` to match the current KVM-era H2 spec (todo.md §10), replacing the fully stale pre-pivot version.
+- Files changed:
+  - crates/baud-multiverse/tests/fixtures/tape-echo-guest/{payload.s,build.py,bzImage,BUILD.md} (new)
+  - crates/baud-multiverse/src/linux/mod.rs (new `all_input_is_tape_derived` test)
+  - drive/h2.sh (full rewrite)
+  - todo.md (build-status update)
+  - ralph/progress.txt
+- **Brief description of changes:**
+  - New fixture `tests/fixtures/tape-echo-guest/`: a 20-byte hand-assembled x86-64 payload (same build mechanics as H1's `hello-guest`) that reads exactly 4 bytes from the tape device's real PIO `DATA` port (`0x0500`, one real `IN` instruction per byte, through `tape_bus::TapeBus`) and echoes each straight to COM1 (`OUT`), then halts
+  - New `linux::tests::all_input_is_tape_derived` in `baud-multiverse`: boots the fixture three times against real `/dev/kvm` — same tape twice produces byte-identical console output; a tape with one changed byte produces different output — closing test-matrix row 21 ("input not actually flowing from the tape / fake determinism") for real, the same way H1's `hello-guest` closed rows 11/12. Passed on the first real run. `cargo test -p baud-multiverse`: 51/51 (was 50/50)
+  - Rewrote `drive/h2.sh` end to end to match this plan's actual H2 definition — host-probe regime check, `cpuid_leaves_are_fixed`, `work_clock_is_monotone_and_reproducible`, `double_boot_memory_identical`, the new `all_input_is_tape_derived`, and `baud-vcpu`'s `no_unmodeled_exit_is_silent` — replacing the stale pre-pivot version (which depended on `python3`, `examples/parser`, and the `/runs/fuzz` endpoint, none part of the current plan)
+  - todo.md: recorded H2's real-hardware status, flagged `drive/h3.sh` as the next stale script to rewrite, and noted `python3` is now genuinely present in this WSL2 environment (resolving part of an older "known gap" note, though `drive/m1.sh` itself was spot-checked and still fails for a different, undiagnosed reason — out of scope for this iteration)
+  - Also picked up an already-modified `.claude/workflows/ralph-build.js` (orchestration-infra documentation of the same "no Agent-spawn tool available" finding this and prior iterations independently hit) that was sitting uncommitted in the working tree — included per "commit absolutely everything"
+- Verification: `cargo test -p baud-multiverse all_input_is_tape_derived` and the full `cargo test -p baud-multiverse` (51/51) both pass against real `/dev/kvm`; `cargo build/test/clippy --workspace` all green (0 regressions, 0 new clippy warnings — confirmed no warnings in any file this iteration touched); `drive/h2.sh` re-run end-to-end: ALL 6 CHECKS PASSED (regime=cooperative); `drive/h0.sh` and `drive/h1.sh` both re-verified passing end-to-end (no regressions)
+---

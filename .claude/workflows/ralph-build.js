@@ -20,6 +20,33 @@
 //   Agents inherit the session's permission mode and reach the claude-in-chrome
 //   MCP tools via ToolSearch for browser + computer use.
 //
+//   The --chrome half is REAL and load-bearing: measured 2026-07-24 from a
+//   session started as plain `claude --dangerously-skip-permissions`, both a
+//   general-purpose and a default workflow subagent got "No matching deferred
+//   tools found" for every mcp__claude-in-chrome__* name, i.e. NO browser and NO
+//   computer-use tool anywhere. That is a launch-flag gap, not a workflow
+//   restriction — subagents only ever inherit MCP servers the parent session
+//   actually connected. Without --chrome the Verify/Ship phases silently
+//   degrade to CLI + HTTP checks (fine for this repo, whose surface is a CLI and
+//   an HTTP server, but it is NOT the Chrome E2E the phase names promise).
+//
+// TOOLING: every agent here is spawned as the `general-purpose` subagent type
+// (tool grant `*`) — the maximum grant a workflow can request. Spawn everything
+// through `spawn()` below, never `agent()` directly.
+//
+//   Known limit, measured 2026-07-24, not fixable from this file: workflow
+//   subagents do NOT get the Agent (subagent-spawn) tool, under ANY agentType.
+//   A probe run comparing `general-purpose` against the workflow default
+//   returned byte-identical toolsets, neither containing Agent — `*` is
+//   intersected with a harness allowlist that withholds it (same rule as
+//   "workflow() nesting is one level only"). So ralph/prompt-build.md steps 0a
+//   and 1 ("study specs with multiple Sonnet subagents", "search with Sonnet
+//   subagents", "Opus subagents for complex reasoning") are UNEXECUTABLE inside
+//   this workflow; iterations do that work serially in one context and say so
+//   in ralph/progress.txt ("No Agent/Task-spawn tool is present..."). The real
+//   fan-out lever here is the orchestrator itself — parallel()/pipeline() in
+//   this script — not nested subagents inside a build session.
+//
 // Invoke:  Workflow {name: "ralph-build"}   or ask: "run the ralph-build workflow"
 // Args (all optional):
 //   { maxIterations: 0,     // 0 = unlimited, like ./ralph with no count
@@ -41,6 +68,18 @@ export const meta = {
 
 const MAX_ITER = (args && args.maxIterations) || 0            // 0 = unlimited
 const VERIFY_ROUNDS = (args && args.verifyRounds) ?? 10       // 0 = until clean
+
+// The subagent type every agent in this workflow runs as. `general-purpose` is
+// declared with `Tools: *`, i.e. the broadest grant requestable: Bash, Read,
+// Write, Edit, Skill, Artifact, and ToolSearch — and through ToolSearch every
+// deferred and MCP tool (claude-in-chrome browser + computer use, WebFetch,
+// WebSearch, Monitor, the Task* family). Agent is the one exclusion and it is
+// imposed above this file — see the TOOLING note in the header. Overridable
+// per-call via opts.agentType.
+const AGENT_TYPE = 'general-purpose'
+
+// Single spawn point: applies AGENT_TYPE to every agent unless a call opts out.
+const spawn = (prompt, opts = {}) => agent(prompt, { agentType: AGENT_TYPE, ...opts })
 
 // $/MTok — from the claude-api skill (cached 2026-06). Cache write = 5m TTL rate.
 const PRICING = {
@@ -87,9 +126,9 @@ const OK_RESULT = {
 const ENV_NOTE = `
 ## Environment
 - Repo: the current working directory. Stack per the specs and CLAUDE.md.
-- You run with full permissions (--dangerously-skip-permissions) and Chrome attached (--chrome).
-- Browser/computer use: when verifying user-facing or HTTP behavior, load the browser tools in ONE ToolSearch call ("select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__tabs_create_mcp") and drive the app in a real tab; use the computer tool for screenshots/clicks as needed. Create new tabs; never reuse old tab IDs.
-- Use subagents (Agent tool) as your prompt instructs: parallel Sonnet subagents for study/searches, a single Sonnet subagent for build/tests (backpressure), Opus subagents for complex reasoning.
+- You run with full permissions (--dangerously-skip-permissions). Chrome may or may not be attached — see the next bullet, do not assume.
+- Browser/computer use, IF the session has it: try ONE ToolSearch call ("select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__tabs_create_mcp"). If it resolves, drive the app in a real tab and use the computer tool for screenshots/clicks; create new tabs, never reuse old tab IDs. If it returns "No matching deferred tools found", the claude-in-chrome MCP server is NOT connected to this session (it requires launching claude with --chrome) — do not search again under other names, and do not treat it as a blocker: verify the same behavior through the CLI and through real HTTP calls against a locally-spawned server (curl + --json output, the drive/*.sh pattern), which is the primary surface of this project anyway. Note in ralph/progress.txt which route you used.
+- Full tool grant: Bash, Read, Write, Edit, Skill, and ToolSearch — which loads every deferred and MCP tool on demand (browser/computer use, WebFetch, WebSearch, Monitor, Task*). Use whatever the step needs; nothing is off-limits.
 `
 
 // The build prompt is NOT paraphrased here — it is the real prompt file,
@@ -129,7 +168,7 @@ async function logUsage(phase, label, model) {
   lastSpent = now
   const price = PRICING[model] || PRICING.sonnet
   const outCost = (delta / 1_000_000) * price.output
-  await agent(
+  await spawn(
     `You are the usage-ledger scribe for an autonomous build run. Append ONE session-usage entry to ralph/progress.txt in the repo root (current working directory). Use bash.
 
 Entry to append (run date yourself; keep this exact shape):
@@ -164,7 +203,7 @@ async function buildLoop(phase, extraContext) {
 
     // Lazy spawn: exactly one clean-context build agent; the next one is only
     // created after this one's final message has been parsed.
-    const finalText = await agent(buildPrompt(iterCounter, extraContext), {
+    const finalText = await spawn(buildPrompt(iterCounter, extraContext), {
       model: 'sonnet', phase, label: `build:${iterCounter}`,
     })
     await logUsage(phase, `iteration ${iterCounter} (${phase} build session)`, 'sonnet')
@@ -215,7 +254,7 @@ const DOMAINS_RESULT = {
   },
 }
 
-const domainsResult = await agent(`Partition the product surface into verification domains for end-to-end testing.
+const domainsResult = await spawn(`Partition the product surface into verification domains for end-to-end testing.
 
 Read todo.md in full (pending AND completed items — completed items describe what was built) and locate the project's spec documents (todo.md and ralph/prompt-build.md reference where they live). Group the work into 3-8 coherent verification domains, each sized so a single verification agent can exercise it end-to-end in one session. For each domain return:
 - key: a short kebab-case identifier (e.g. "core-platform")
@@ -243,10 +282,10 @@ for (let round = 1; !verifyClean; round++) {
   // Barrier is intentional: we need ALL domain findings together to dedupe/triage
   // and to early-exit when the round is clean.
   const results = await parallel(DOMAINS.map((d) => () =>
-    agent(`You are a product-verification agent for domain "${d.key}" (round ${round}). Scope: ${d.scope}.
+    spawn(`You are a product-verification agent for domain "${d.key}" (round ${round}). Scope: ${d.scope}.
 
 Goal: prove the implemented product actually behaves per the specs — not just that tests pass.
-1. Read the domain's specs and the relevant source code (parallel Sonnet subagents for breadth).
+1. Read the domain's specs and the relevant source code (breadth-first yourself — see the no-subagent note below).
 2. Run the real thing: the repo's verification protocol first (as defined in todo.md and CLAUDE.md — build + tests); then if the domain has a user-facing surface (app UI, server, CLI), START/LAUNCH IT and exercise the domain's flows end-to-end — use Chrome tools (load via ToolSearch; navigate/read_page/computer for screenshots and clicks) for anything browser-reachable, and computer use for native app UI. If there is no user-facing surface for this domain, exercise the relevant layer directly with small scripts or targeted tests. Honor any testing constraints CLAUDE.md defines (e.g., dedicated test fixtures or throwaway repos).
 3. Check the invariants each spec defines for this domain, exactly as written (edge cases, lifecycle rules, error paths included).
 4. Report ONLY real, reproducible gaps vs the specs with citations. Do not modify any file. Narrate progress to ralph/progress.txt per the house style (printf '\\n%s\\n' "..." >> ralph/progress.txt), prefixed "[verify:${d.key}]".
@@ -269,7 +308,7 @@ Emit findings via StructuredOutput; empty findings array means the domain is cle
   if (deduped.length === 0) { verifyClean = true; break }
 
   // Triage: fold findings into todo.md as prioritized pending items, commit.
-  await agent(`Triage these verification findings into todo.md as new pending items (prioritized: blockers first, then major, then minor; each scoped to ~one build iteration, with spec citations and repro notes — follow the todo format rules in @ralph/prompt-plan.md section 3). Do not implement fixes. Then append a short progress note to ralph/progress.txt, git add -A, commit ("triage: verification round ${round} findings"), git push.
+  await spawn(`Triage these verification findings into todo.md as new pending items (prioritized: blockers first, then major, then minor; each scoped to ~one build iteration, with spec citations and repro notes — follow the todo format rules in @ralph/prompt-plan.md section 3). Do not implement fixes. Then append a short progress note to ralph/progress.txt, git add -A, commit ("triage: verification round ${round} findings"), git push.
 
 Findings (JSON):
 ${JSON.stringify(deduped, null, 2)}
@@ -286,7 +325,7 @@ Emit {ok: true} via StructuredOutput when done.`,
 // ─── Phase 4: Ship ───────────────────────────────────────────────────────────
 
 phase('Ship')
-const shipText = await agent(`@ralph/prompt-build.md
+const shipText = await spawn(`@ralph/prompt-build.md
 
 The instructions injected above define the house protocol (progress logging, commit discipline, promise tags). This is Ralph iteration ${iterCounter} — treat "[ralph-iteration]" as ${iterCounter}. Your one step for this session is SHIPPING rather than a todo item:
 
@@ -305,7 +344,7 @@ await logUsage('Ship', 'ship session', 'sonnet')
 
 // Final ledger entry: run totals.
 const totalOut = budget.spent()
-await agent(`Append a final run-total entry to ralph/progress.txt via bash:
+await spawn(`Append a final run-total entry to ralph/progress.txt via bash:
 printf '\\n%s\\n' "## \$(date -u +%Y-%m-%dT%H:%M:%S) UTC - RUN TOTALS (ralph-build workflow)" >> ralph/progress.txt
 printf '%s\\n' "- total output tokens this run (all sessions): ${totalOut}" >> ralph/progress.txt
 printf '%s\\n' "- iterations run: ${iterCounter - 1}; per-session entries above carry the breakdown" >> ralph/progress.txt

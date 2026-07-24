@@ -628,4 +628,58 @@ mod tests {
             "guest RAM at first Hlt must be byte-identical across two boots (boot nondeterminism is a bug)"
         );
     }
+
+    /// `tests/fixtures/tape-echo-guest/`'s payload: reads exactly 4 bytes from the tape device's
+    /// `DATA` port (`tape_bus::TAPE_DEVICE_BASE + baud_tape_device::reg::DATA` = `0x0500`, one
+    /// real single-byte `IN` per byte) and echoes each one straight to COM1 (`out dx, al`, port
+    /// `0x3f8`), then halts — see that directory's `BUILD.md` for exact provenance.
+    fn tape_echo_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tape-echo-guest/bzImage")
+    }
+
+    /// specs/baud-tape-device.md §5 / todo.md test-matrix row 21's `all_input_is_tape_derived`,
+    /// exercised for the first time against real KVM hardware (todo.md §14's H2 gap: the tape
+    /// device was previously only unit-tested at the pure device-model level — a real guest
+    /// executing real `IN`/`OUT` instructions against the real PIO exit path had never actually
+    /// consumed a tape byte and produced observable output driven by it). Two runs on the same
+    /// tape must produce byte-identical console output ("the tape device as the sole input
+    /// channel" is deterministic); changing one tape byte must change the output (input is
+    /// genuinely flowing from the tape, not a synthetic stand-in for it — the exact "fake
+    /// determinism" risk test-matrix row 21 exists to rule out).
+    #[test]
+    fn all_input_is_tape_derived() {
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let tape_a = vec![0x11, 0x22, 0x33, 0x44];
+        let tape_b = vec![0x11, 0x22, 0x33, 0x99]; // differs in the last byte only
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone())
+            .expect("first boot (tape A) failed");
+        let first_outcome = first.run_to_first_halt().expect("first run (tape A) failed");
+        assert_eq!(
+            first_outcome.console_output, tape_a,
+            "guest must echo exactly the 4 tape bytes it read, byte for byte"
+        );
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone())
+            .expect("second boot (tape A) failed");
+        let second_outcome = second.run_to_first_halt().expect("second run (tape A) failed");
+        assert_eq!(
+            second_outcome.console_output, first_outcome.console_output,
+            "same tape twice must produce byte-identical guest output"
+        );
+
+        let mut third = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b.clone())
+            .expect("third boot (tape B) failed");
+        let third_outcome = third.run_to_first_halt().expect("third run (tape B) failed");
+        assert_eq!(
+            third_outcome.console_output, tape_b,
+            "guest must echo exactly tape B's bytes, not a stale/synthetic copy of tape A's"
+        );
+        assert_ne!(
+            third_outcome.console_output, first_outcome.console_output,
+            "changing one tape byte must change the guest's observable output — otherwise the \
+             guest is not actually reading its input from the tape"
+        );
+    }
 }

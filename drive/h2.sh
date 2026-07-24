@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Henrique Falconer. All rights reserved.
-# drive/h2.sh — H2 drive script: tape integration
+# drive/h2.sh — H2 drive script: deterministic double-run (todo.md §10's H2 definition)
 #
-# Validates tape integration with device models:
-#   H2.1  seeded-PRNG hello workload: tape produces deterministic observations
-#   H2.2  random tactics plateau on a depth probe
-#   H2.3  stateful-mask penetrates past the plateau (parser workload)
-#   H2.4  crash found by stateful-mask in the parser workload
-#   H2.5  crashing tape replays to the same crash
-#   H2.6  TapeDrawSource exhaustion is handled gracefully
-#   H2.7  workload-noun CI grep CLEAN
+# H2's spec: "Same image + tape twice ⇒ byte-identical observation stream (console + probes +
+# final memory hash), CPUID masked, virtual TSC pinned." This validates that for real against
+# actual /dev/kvm — this is NOT the pre-pivot "tape-integration workload fuzzing" H2 a prior
+# version of this script tested (todo.md §14 flagged h2.sh/h3.sh as stale, still validating an old
+# ptrace-era milestone definition; this rewrite replaces it, mirroring h1.sh's own rewrite once
+# real KVM hardware existed to make the current H2 meaningful).
+#
+#   H2.1  baud host probe still reports a non-rejected regime (cheap, early sanity check)
+#   H2.2  cpuid_leaves_are_fixed (`masked_bits_are_always_fixed_regardless_of_host_input`):
+#         RDRAND/RDSEED/TSX/x2APIC bits are always 0 regardless of host CPUID input
+#   H2.3  work_clock_is_monotone_and_reproducible: the work-clock is non-decreasing and the full
+#         sequence is identical across a same-(base,k) double-run
+#   H2.4  double_boot_memory_identical (H1's own test, re-verified here as part of H2's "same
+#         image+tape twice" guarantee): boots hello-guest twice against real /dev/kvm, asserts
+#         console output and guest-RAM blake3 hash are byte-identical across both boots
+#   H2.5  all_input_is_tape_derived: boots tape-echo-guest (reads 4 bytes from the tape device,
+#         echoes them to console) three times against real /dev/kvm — same tape twice produces
+#         byte-identical output; changing one tape byte changes the output (input is genuinely
+#         tape-derived, not a synthetic stand-in — test-matrix row 21's "fake determinism" risk)
+#   H2.6  no_unmodeled_exit_is_silent: a fuzz smoke proptest over random `Exit::Unmodeled` values
+#         asserts the run loop's dispatch never returns anything but `Err(DeterminismHole)` for
+#         them — no wildcard arm, no silent continue
 
 set -euo pipefail
 
@@ -17,161 +31,100 @@ cd "$(dirname "$0")/.."
 
 export PATH="$HOME/.cargo/bin:$HOME/mingw64-tools/mingw64/bin:$PATH"
 
+log()  { echo "[h2] $*" >&2; }
+pass() { echo "  [PASS] $*"; }
+fail() { echo "  [FAIL] $*" >&2; exit 1; }
+
+echo ""
+echo "=== H2: Deterministic double-run ==="
+echo ""
+
+# ---------------------------------------------------------------------------
+# H2.1 (checked first — cheap, and everything below is meaningless without it) — real KVM present.
+# Same pattern as drive/h0.sh and drive/h1.sh.
+# ---------------------------------------------------------------------------
+log "Building baud-host/baud-server/baud-cli..."
+cargo build -q -p baud-host -p baud-server -p baud-cli 2>&1
+
 REPO_ROOT="$(pwd)"
 BAUD="$REPO_ROOT/target/debug/baud"
 BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
-SERVER_PID=""
 DB_FILE="$(mktemp -t baud-h2-XXXXXX.sqlite)"
-# Windows/git-bash: sqlite:// URIs need a native Windows path (posix /tmp/... is not
-# understood by a plain win32 binary); cygpath -m gives a forward-slash Windows path.
 DB_FILE="$(cygpath -m "$DB_FILE" 2>/dev/null || echo "$DB_FILE")"
 
 cleanup() {
     if [[ -n "${SERVER_PID:-}" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
     fi
     sleep 0.2
     rm -f "$DB_FILE" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-log()  { echo "[h2] $*" >&2; }
-pass() { echo "  [PASS] $*"; }
-fail() { echo "  [FAIL] $*" >&2; exit 1; }
-info() { echo "  [INFO] $*"; }
-
-echo ""
-echo "=== H2: Tape Integration ==="
-echo ""
-
-# ---------------------------------------------------------------------------
-# Build
-# ---------------------------------------------------------------------------
-log "Building workspace..."
-cargo build -q -p baud-multiverse -p baud-server -p baud-cli 2>&1
-pass "H2.0: workspace builds"
-
-# ---------------------------------------------------------------------------
-# H2.1 — seeded-PRNG hello workload: deterministic observations
-# ---------------------------------------------------------------------------
-log "--- H2.1: baud-multiverse determinism with seeded tape ---"
-
-cargo test -q -p baud-multiverse 2>&1 | tail -5
-MULTIVERSE_TESTS=$(cargo test -p baud-multiverse 2>&1 | grep "test result")
-# Check for FAILED lines OR all lines having 0 passed (no real tests ran)
-PASSED_COUNT=$(echo "$MULTIVERSE_TESTS" | grep -oE "[0-9]+ passed" | awk '{sum+=$1} END{print sum+0}')
-if echo "$MULTIVERSE_TESTS" | grep -q "FAILED"; then
-    fail "H2.1: baud-multiverse tests FAILED: $MULTIVERSE_TESTS"
-fi
-if [[ "$PASSED_COUNT" -eq 0 ]]; then
-    fail "H2.1: baud-multiverse: no tests ran (0 passed total): $MULTIVERSE_TESTS"
-fi
-pass "H2.1: baud-multiverse seeded tape produces deterministic observations"
-
-# ---------------------------------------------------------------------------
-# Start server for drive steps that need it
-# ---------------------------------------------------------------------------
-log "Starting baud-server (DB: $DB_FILE)..."
+log "Starting baud-server..."
 pkill -f "baud-server" 2>/dev/null || true; sleep 0.2
-BAUD_DB="sqlite://${DB_FILE}?mode=rwc" BAUD_LOG=warn \
-    "$BAUD_SERVER_BIN" &
+BAUD_DB="sqlite://${DB_FILE}?mode=rwc" "$BAUD_SERVER_BIN" &
 SERVER_PID=$!
+sleep 1
 
-for i in $(seq 1 30); do
-    if curl -sf http://127.0.0.1:7734/health > /dev/null 2>&1; then
-        break
-    fi
-    sleep 0.2
-done
-curl -sf http://127.0.0.1:7734/health > /dev/null || fail "baud-server did not start"
-
-PARSER_SPEC=$(python3 -c "import json; print(json.dumps(open('examples/parser/spec.yaml').read()))")
-
-# ---------------------------------------------------------------------------
-# H2.2 — random tactics plateau on depth probe
-# ---------------------------------------------------------------------------
-log "--- H2.2: random tactics plateau on parser depth ---"
-
-RANDOM_OUT=$(curl -sf -X POST "http://127.0.0.1:7734/runs/fuzz" \
-    -H "Content-Type: application/json" \
-    -d "{\"spec\": $PARSER_SPEC, \"tactics\": \"random\", \"seed\": 42, \"max_iterations\": 50}" 2>&1)
-
-RANDOM_DEPTH=$(echo "$RANDOM_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('best_depth',0))")
-RANDOM_PLATEAU=$(echo "$RANDOM_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('plateau_detected', False))")
-RANDOM_CRASH=$(echo "$RANDOM_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('goal_reached', False))")
-
-info "random tactics: best_depth=$RANDOM_DEPTH plateau=$RANDOM_PLATEAU crash=$RANDOM_CRASH"
-
-# random tactics should NOT find the crash (depth stays <= 3 usually)
-if [[ "$RANDOM_CRASH" == "True" ]]; then
-    info "H2.2: random tactics found crash (unusual but valid — seed 42 may be lucky)"
-else
-    pass "H2.2: random tactics plateau detected — depth stuck at $RANDOM_DEPTH"
+log "baud host probe --json"
+PROBE_JSON="$("$BAUD" host probe --json)" || fail "H2.1: 'baud host probe --json' FAILED to run"
+echo "$PROBE_JSON"
+REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
+if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
+    fail "H2.1: host probe regime is '$REGIME' — no real /dev/kvm, H2 cannot mean anything here."
 fi
+pass "H2.1: host probe regime='$REGIME' (real KVM present)"
 
 # ---------------------------------------------------------------------------
-# H2.3 + H2.4 — stateful-mask penetrates and finds crash
+# H2.2 — cpuid_leaves_are_fixed
 # ---------------------------------------------------------------------------
-log "--- H2.3/H2.4: stateful-mask tactics finds parser crash ---"
+log "Building baud-multiverse..."
+cargo build -q -p baud-multiverse 2>&1 || fail "H2.2: baud-multiverse build FAILED"
 
-MASK_OUT=$(curl -sf -X POST "http://127.0.0.1:7734/runs/fuzz" \
-    -H "Content-Type: application/json" \
-    -d "{\"spec\": $PARSER_SPEC, \"tactics\": \"stateful-mask\", \"seed\": 42, \"max_iterations\": 200}" 2>&1)
-
-MASK_CRASH=$(echo "$MASK_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('goal_reached', False))")
-MASK_DEPTH=$(echo "$MASK_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('best_depth',0))")
-MASK_GENS=$(echo "$MASK_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('generations',0))")
-MASK_RUN_ID=$(echo "$MASK_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('run_id',''))")
-MASK_INPUT=$(echo "$MASK_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('winning_input','') or '')")
-
-[[ "$MASK_CRASH" == "True" ]] || fail "H2.3: stateful-mask did not find crash in 200 iterations (depth=$MASK_DEPTH)"
-pass "H2.3: stateful-mask penetrated to depth=$MASK_DEPTH"
-pass "H2.4: crash found in $MASK_GENS generations (run_id=$MASK_RUN_ID)"
+log "Running masked_bits_are_always_fixed_regardless_of_host_input (cpuid_leaves_are_fixed)..."
+CPUID_OUT=$(cargo test -q -p baud-multiverse masked_bits_are_always_fixed_regardless_of_host_input 2>&1)
+echo "$CPUID_OUT"
+echo "$CPUID_OUT" | grep -q "test result: ok" || fail "H2.2: cpuid_leaves_are_fixed FAILED"
+pass "H2.2: cpuid_leaves_are_fixed — RDRAND/RDSEED/TSX/x2APIC always masked to 0"
 
 # ---------------------------------------------------------------------------
-# H2.5 — crashing tape replays to same crash
+# H2.3 — work_clock_is_monotone_and_reproducible
 # ---------------------------------------------------------------------------
-log "--- H2.5: replay crashing tape ---"
-
-if [[ -n "$MASK_RUN_ID" ]]; then
-    REPLAY_OUT=$(BAUD_SERVER=http://127.0.0.1:7734 "$BAUD" replay "$MASK_RUN_ID" --json 2>&1)
-    REPLAY_OK=$(echo "$REPLAY_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print('error' not in d)")
-    [[ "$REPLAY_OK" == "True" ]] || fail "H2.5: replay failed: $REPLAY_OUT"
-    pass "H2.5: crashing tape replayed successfully (same crash reproduced)"
-else
-    pass "H2.5: replay skipped (no run_id)"
-fi
+log "Running work_clock_is_monotone_and_reproducible..."
+CLOCK_OUT=$(cargo test -q -p baud-multiverse work_clock_is_monotone_and_reproducible 2>&1)
+echo "$CLOCK_OUT"
+echo "$CLOCK_OUT" | grep -q "test result: ok" || fail "H2.3: work_clock_is_monotone_and_reproducible FAILED"
+pass "H2.3: work_clock_is_monotone_and_reproducible — non-decreasing and reproducible"
 
 # ---------------------------------------------------------------------------
-# H2.6 — TapeDrawSource exhaustion
+# H2.4 — double_boot_memory_identical (H1's test, re-verified as part of H2)
 # ---------------------------------------------------------------------------
-log "--- H2.6: tape exhaustion handled gracefully ---"
-
-# A very short tape (1 byte) should not crash the multiverse
-SHORT_OUT=$(curl -sf -X POST "http://127.0.0.1:7734/runs/fuzz" \
-    -H "Content-Type: application/json" \
-    -d "{\"spec\": $PARSER_SPEC, \"tactics\": \"random\", \"seed\": 99, \"max_iterations\": 1}" 2>&1)
-SHORT_OK=$(echo "$SHORT_OUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok', False))")
-[[ "$SHORT_OK" == "True" ]] || fail "H2.6: short-tape run failed: $SHORT_OUT"
-pass "H2.6: tape exhaustion handled gracefully (1-iteration run completes)"
+log "Running double_boot_memory_identical against real /dev/kvm..."
+BOOT_OUT=$(cargo test -q -p baud-multiverse double_boot_memory_identical -- --test-threads=1 2>&1)
+echo "$BOOT_OUT"
+echo "$BOOT_OUT" | grep -q "test result: ok" || fail "H2.4: double_boot_memory_identical FAILED"
+pass "H2.4: double_boot_memory_identical — console + RAM hash byte-identical across two real boots"
 
 # ---------------------------------------------------------------------------
-# H2.7 — workload-noun CI grep
+# H2.5 — all_input_is_tape_derived (real hardware, new this milestone)
 # ---------------------------------------------------------------------------
-log "--- H2.7: workload-noun CI grep ---"
-NOUN_HITS=$(grep -rn --include="*.rs" -E "\b(mario|emulator|joypad)\b|\bnes\b" \
-    crates/baud-*/src/ 2>/dev/null || true)
-RAFTLET_HITS=$(grep -rn --include="*.rs" -E "\braftlet\b" \
-    crates/baud-proto/src/ crates/baud-driver/src/ crates/baud-server/src/ \
-    crates/baud-journal/src/ crates/baud-stream/src/ crates/baud-init/src/ \
-    crates/baud-packages/src/ crates/baud-identity/src/ crates/baud-tape/src/ \
-    crates/baud-tape-local/src/ crates/baud-secret/src/ crates/baud-keys/src/ \
-    crates/baud-tracing/src/ crates/baud-multiverse/src/ \
-    2>/dev/null || true)
-if [[ -n "$NOUN_HITS" || -n "$RAFTLET_HITS" ]]; then
-    fail "H2.7: workload noun found in infra crates"
-fi
-pass "H2.7: workload-noun CI grep CLEAN"
+log "Running all_input_is_tape_derived against real /dev/kvm (tape-echo-guest)..."
+TAPE_OUT=$(cargo test -q -p baud-multiverse all_input_is_tape_derived -- --test-threads=1 2>&1)
+echo "$TAPE_OUT"
+echo "$TAPE_OUT" | grep -q "test result: ok" || fail "H2.5: all_input_is_tape_derived FAILED"
+pass "H2.5: all_input_is_tape_derived — same tape twice identical; one changed byte changes output"
+
+# ---------------------------------------------------------------------------
+# H2.6 — no_unmodeled_exit_is_silent
+# ---------------------------------------------------------------------------
+log "Running no_unmodeled_exit_is_silent (baud-vcpu)..."
+cargo build -q -p baud-vcpu 2>&1 || fail "H2.6: baud-vcpu build FAILED"
+UNMODELED_OUT=$(cargo test -q -p baud-vcpu no_unmodeled_exit_is_silent 2>&1)
+echo "$UNMODELED_OUT"
+echo "$UNMODELED_OUT" | grep -q "test result: ok" || fail "H2.6: no_unmodeled_exit_is_silent FAILED"
+pass "H2.6: no_unmodeled_exit_is_silent — every unmodeled exit fails loud, never a silent continue"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -179,11 +132,12 @@ pass "H2.7: workload-noun CI grep CLEAN"
 echo ""
 echo "=== H2 milestone: ALL CHECKS PASSED ==="
 echo ""
-echo "Demonstrated:"
-echo "  baud-multiverse: seeded tape → deterministic observation stream"
-echo "  random tactics: plateau on parser depth probe"
-echo "  stateful-mask tactics: crash found (parser workload planted crash)"
-echo "  crashing tape: replays to same crash"
-echo "  tape exhaustion: handled gracefully"
+echo "Demonstrated on real /dev/kvm (regime=$REGIME):"
+echo "  - CPUID leaves are fixed (RDRAND/RDSEED/TSX/x2APIC masked, reproducible across reads)"
+echo "  - The work-clock is monotone and reproducible for a fixed (base, k)"
+echo "  - Same guest image + tape boots to byte-identical console + RAM state twice in a row"
+echo "  - The tape device is the guest's genuine input channel: same tape -> same output,"
+echo "    one changed tape byte -> changed output (tests/fixtures/tape-echo-guest/)"
+echo "  - No VM exit is ever silently unhandled — the catch-all always fails loud"
 echo ""
 echo "Run H3 next: ./drive/h3.sh"

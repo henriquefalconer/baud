@@ -614,15 +614,42 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     driver/shim binary itself (the code `CONFIG_BAUD_TAPE_DEVICE=y` would compile), remain open —
     both need a real kernel-build toolchain (Nix + a Linux kernel source tree), not available on
     this dev machine, and are the natural next `baud-packages` increment.
-- **`drive/h1.sh` rewritten this iteration to match the current KVM-era H1** (the prior version
-  tested the pre-pivot ptrace-era "supervisor MVP" — see the H1 boot-flow entry above): now runs
-  `baud host probe` (asserts a non-rejected regime) then `cargo test -p baud-multiverse
-  double_boot_memory_identical`, both against real `/dev/kvm`. **`drive/h2.sh`/`h3.sh` remain
-  stale** (still validate the old ptrace-era `rdtsc_is_trapped_and_served_virtual_time`/etc.
-  definitions, not this document's §10 H2/H3) — the natural next drive-script increment, same
-  rewrite pattern `h1.sh` now demonstrates, needs H2's actual double-run/CPUID-fixed-leaves
-  behavior exercised for real first.
-- H2-H6 and the rest of the M-series remain **not yet started** beyond the above.
+- **`drive/h1.sh` rewritten to match the current KVM-era H1** (the prior version tested the
+  pre-pivot ptrace-era "supervisor MVP" — see the H1 boot-flow entry above): runs `baud host probe`
+  (asserts a non-rejected regime) then `cargo test -p baud-multiverse double_boot_memory_identical`,
+  both against real `/dev/kvm`. Still passing on the real WSL2/KVM host.
+- **H2 (deterministic double-run, todo.md §10) — real-hardware core done; `drive/h2.sh` rewritten
+  to match.** The one genuinely new piece: `crates/baud-multiverse/tests/fixtures/tape-echo-guest/`
+  (a second hand-assembled fixture, same build mechanics as `hello-guest` — see its own `BUILD.md`)
+  is a 20-byte payload that reads 4 bytes from the tape device's real PIO `DATA` port (`0x0500`,
+  one real `IN` per byte, through `tape_bus::TapeBus`/`DeviceBus`) and echoes each to COM1, then
+  halts. Backs a new `linux::tests::all_input_is_tape_derived` in `baud-multiverse`, run for real
+  against `/dev/kvm` for the first time: same tape twice → byte-identical console output; a tape
+  with one changed byte → different output — closing test-matrix row 21 ("fake determinism") for
+  real, the same way `hello-guest` closed rows 11/12 at H1. `cargo test -p baud-multiverse`: 51/51
+  (was 50/50). The rest of H2's guarantees (`cpuid_leaves_are_fixed`, `work_clock_is_monotone_and_
+  reproducible`, `no_unmodeled_exit_is_silent`) were already unit-tested hardware-independent from
+  earlier iterations — `drive/h2.sh` now runs all of them plus `double_boot_memory_identical` and
+  the new tape test together, end-to-end, against real `/dev/kvm` (ALL 6 CHECKS PASSED,
+  regime=cooperative), replacing the fully stale pre-pivot version (which depended on `python3`,
+  `examples/parser`, and the `/runs/fuzz` endpoint — none part of the current plan).
+  **Not yet done**: `cpuid_leaves_are_fixed`'s "read every served leaf twice across two real boots"
+  half is still only unit-tested against a synthetic `kvm_cpuid_entry2`, not read back from a live
+  vCPU via `KVM_GET_CPUID2` across two real boots — a real-hardware readback test would close this
+  more fully but was judged lower-value than the tape-derived-input gap this iteration closed
+  (the *masking*/`KVM_SET_CPUID2` half is already exercised for real by every boot since H1).
+- **`drive/h3.sh` remains stale** (still validates the old ptrace-era "multi-guest cluster + net
+  device" H3, not this document's §10 H3: randomness/time control, `rdrand_guest_is_flagged` +
+  `regime_is_recorded_and_not_overclaimed`) — the natural next drive-script increment, same rewrite
+  pattern `h1.sh`/`h2.sh` now both demonstrate.
+- H3-H6 and the rest of the M-series remain **not yet started** beyond the above.
+- **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
+  git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
+  `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and
+  still does not pass here, but for a different, not-yet-diagnosed reason (the server did not come
+  up within the script's health-check loop; not investigated further as it is unrelated to this
+  iteration's H2 work) — the `python3`-missing gap specifically is resolved by the new environment,
+  but M1 itself needs a fresh look, not assumed fixed.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a
   drive script's `trap cleanup EXIT` → `kill "$SERVER_PID"` does not reliably terminate the
