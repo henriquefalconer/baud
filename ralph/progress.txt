@@ -1120,3 +1120,16 @@ Re-ran drive/h0.sh and drive/m0.sh to verify end-to-end. First attempts raced/fa
   - linux/mod.rs: LinuxBranchCounter (perf_event_open branch counter) implementing timesource::BranchCounter; linux::Multiverse{boot, run_to_first_halt} wires boot_guest + baud_vcpu::linux::run_until_halted through the new DeviceBus/WorkClock and returns a HaltOutcome{console_output, ram_hash} — the real boot flow behind specs/baud-multiverse.md §8's ram_hash_at_first_hlt pseudocode (H1's target). snapshot/restore and the tape-device-driven run() intentionally not stubbed — they depend on baud-snapshot/baud-tape-device, which do not exist yet.
   - Verification: cargo test -p baud-multiverse 28/28 pass (9 new); cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets clean, 0 new warnings; cargo build/test --workspace green, no regressions; drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (an unrelated environmental drive-script flakiness — a stale server left on port 7734 by a non-terminating cleanup trap — was hit and documented in todo.md, not fixed, out of this increment's scope).
 ---
+
+## 2026-07-24T15:10:21 UTC - Session usage — iteration 4 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 79764
+- est. output cost: $1.1965 (sonnet output rate)
+- exact (from transcript): in=20 out=7066 cache_read=338116 cache_write=76524 → $0.4944
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address: studying todo.md build-status (§14), specs/*, and recent commits to decide between (a) attempting to unblock real KVM validation via a WSL2 Ubuntu distro with nested virt (flagged as the 'Next build action' across iterations 3-4), or (b) continuing additive baud-multiverse/baud-vcpu build work (tape device, snapshot crate)...
+
+Decided against attempting a WSL2/nested-KVM install this iteration: systeminfo shows this Windows box already runs inside a hypervisor ('A hypervisor has been detected' — Hyper-V requirements check skipped), so a WSL2 guest's own nested-KVM would depend on nested-virt being exposed by the *outer* host to this VM, which is outside this session's control and unverifiable without first burning the iteration on an install that may still report /dev/kvm absent — matches CLAUDE.md's existing documented constraint. Picked a concrete, testable, additive forward step instead: build the baud-tape-device crate (specs/baud-tape-device.md) — the last major crate needed to complete H2's tape story (todo.md §3.5/§3.6, 'down to a console plus the tape device') and the sole nondeterministic-input channel per the spec matrix (#21 all_input_is_tape_derived). It's the P of Q: hardware-independent (deps={baud-proto} only per the spec), unit-testable on this Windows machine with no KVM at all, and follows the same proven pattern as cpuid.rs/layout.rs/console.rs from the last two iterations.
