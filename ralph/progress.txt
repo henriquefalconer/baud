@@ -1393,3 +1393,5 @@ drive/h0.sh and drive/m0.sh both PASS end-to-end (after clearing a stray baud-se
 
 Post-push verification: git fetch will confirm origin/main == local HEAD after push. No CI/post-push protocol defined in todo.md for this repo (no .github/workflows). drive/h0.sh and drive/m0.sh already re-verified passing end-to-end above; cargo build/test/clippy --workspace already green before pushing. todo.md still has substantial pending work (Snapshot::branch's userfaultfd blocker, wiring baud-snapshot-store into baud-server/baud-driver, the in-guest tape-device driver + real Nix guest-image build pipeline, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
 ---
+
+Post-push verification: git fetch confirms origin/main == local HEAD (67710019f4cb00bc8e8df339edaf276468ff0e4e). Iteration 11 complete -- ending with NEXT (todo.md still has pending items: Snapshot::branch userfaultfd blocker, baud-snapshot-store wiring, in-guest tape driver, H1-H6 real-hardware validation, M-series).
