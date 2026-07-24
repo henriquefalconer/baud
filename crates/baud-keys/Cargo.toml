@@ -11,6 +11,12 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Pure-Rust age encryption (specs/baud-snapshot-store.md §4: "encryption delegated to age via
+# baud-keys"). Used directly (not shelled out like sops) because baud-snapshot-store needs to
+# encrypt/decrypt small in-memory byte blobs (universe/page bodies) many times per run, not
+# whole files on disk — no libclang/bindgen dependency (pure Rust), so it type-checks and runs
+# on this Windows dev machine same as every other hardware-independent crate.
+age = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

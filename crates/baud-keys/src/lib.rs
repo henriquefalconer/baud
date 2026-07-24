@@ -11,11 +11,13 @@
 //   2. ~/Library/Application Support/sops/age/keys.txt  (macOS)
 //   3. ~/.config/sops/age/keys.txt                      (Linux)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use baud_secret::SecretString;
 
 pub use baud_secret;
+pub use age;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -35,6 +37,14 @@ pub enum KeysError {
     MissingKey { key: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("no age public key found (no '# public key:' comment line in {0})")]
+    AgePublicKeyNotFound(PathBuf),
+    #[error("failed to parse age recipient/identity: {0}")]
+    AgeParseFailed(String),
+    #[error("age encrypt failed: {0}")]
+    AgeEncryptFailed(String),
+    #[error("age decrypt failed: {0}")]
+    AgeDecryptFailed(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +90,57 @@ fn dirs_macos_library() -> Option<PathBuf> {
 /// Looks for the file relative to the current working directory.
 pub fn secrets_file() -> PathBuf {
     PathBuf::from("infra/secrets/baud.enc.yaml")
+}
+
+// ---------------------------------------------------------------------------
+// Direct age encryption (specs/baud-snapshot-store.md §4)
+// ---------------------------------------------------------------------------
+//
+// Distinct from `decrypt_secrets`/`edit_secrets` above, which shell out to `sops` for the
+// whole-file secrets workflow: this half encrypts/decrypts arbitrary byte blobs (a
+// `baud-snapshot-store` universe or page body) directly against an `age` recipient/identity,
+// using the pure-Rust `age` crate in-process — no subprocess per call, no libclang/bindgen
+// dependency (confirmed against the real crate: `age::encrypt`/`age::decrypt`'s "streamlined
+// API" takes a concrete recipient/identity and a byte slice, returns
+// `EncryptError`/`DecryptError` which both implement `std::error::Error + Display`).
+
+/// Extract the age public key (`age1...`) from an `age-keygen`-formatted identity file — the
+/// `# public key: age1...` comment line `age-keygen` writes above the secret key line (the same
+/// line [`check_is_recipient`] already parses to check sops-recipient membership). Returns
+/// `None` if [`age_key_path`] itself resolves to nothing, or the file has no such comment line.
+pub fn age_public_key() -> Option<String> {
+    let path = age_key_path()?;
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents
+        .lines()
+        .find(|l| l.starts_with("# public key:"))
+        .and_then(|l| l.strip_prefix("# public key:"))
+        .map(|s| s.trim().to_owned())
+}
+
+/// Encrypt `plaintext` to a single age recipient (e.g. from [`age_public_key`]). One-shot,
+/// in-memory — appropriate for the universe/page-body-sized blobs `baud-snapshot-store` handles,
+/// not a streaming multi-GB use case.
+pub fn age_encrypt(recipient: &str, plaintext: &[u8]) -> Result<Vec<u8>, KeysError> {
+    let recipient = age::x25519::Recipient::from_str(recipient)
+        .map_err(|e| KeysError::AgeParseFailed(e.to_string()))?;
+    age::encrypt(&recipient, plaintext).map_err(|e| KeysError::AgeEncryptFailed(e.to_string()))
+}
+
+/// Decrypt `ciphertext` produced by [`age_encrypt`], using the identity file at `identity_path`
+/// (the `AGE-SECRET-KEY-1...` line `age-keygen` writes — the same file [`age_key_path`]
+/// resolves). Returns [`KeysError::AgeKeyNotFound`] if the file has no such line,
+/// [`KeysError::AgeParseFailed`] if the line is malformed, or
+/// [`KeysError::AgeDecryptFailed`] if decryption itself fails (wrong key, corrupt ciphertext).
+pub fn age_decrypt(identity_path: &Path, ciphertext: &[u8]) -> Result<Vec<u8>, KeysError> {
+    let contents = std::fs::read_to_string(identity_path)?;
+    let secret_line = contents
+        .lines()
+        .find(|l| l.starts_with("AGE-SECRET-KEY-1"))
+        .ok_or_else(|| KeysError::AgeKeyNotFound(identity_path.to_owned()))?;
+    let identity = age::x25519::Identity::from_str(secret_line)
+        .map_err(|e| KeysError::AgeParseFailed(e.to_string()))?;
+    age::decrypt(&identity, ciphertext).map_err(|e| KeysError::AgeDecryptFailed(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +427,72 @@ pub fn rotate_secrets(secrets_path: &std::path::Path) -> Result<(), KeysError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed, throwaway age-x25519 keypair (generated once via `age::x25519::Identity::generate()`
+    /// for these tests only — never used for anything real). Hardcoding it avoids pulling in the
+    /// `secrecy` crate just to serialize a freshly generated `Identity` back to its
+    /// `AGE-SECRET-KEY-1...` string form in test setup (`Identity::to_string()` returns a
+    /// `secrecy::SecretString`, which `age_decrypt`'s production path never needs — it only ever
+    /// reads an already-string identity line straight out of a file).
+    const TEST_IDENTITY: &str =
+        "AGE-SECRET-KEY-1VPR7E992FFDWZU0JAACA83A3VDG6JLF9HVHEWWWYLN5YLXNJFYGSNXYJ9R";
+    const TEST_RECIPIENT: &str = "age1u3p0u0p7w4tmwaplpw3vafrj0xmturnml200636wdgamemh69ytql87pg4";
+
+    #[test]
+    fn age_encrypt_decrypt_roundtrips() {
+        let plaintext = b"universe body bytes, could contain a guest secret";
+        let ciphertext = age_encrypt(TEST_RECIPIENT, plaintext).expect("encrypt");
+        assert_ne!(ciphertext, plaintext, "ciphertext must not equal plaintext");
+
+        let tmp = tempfile::NamedTempFile::new().expect("tmp identity file");
+        std::fs::write(tmp.path(), format!("# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"))
+            .expect("write identity file");
+        let decrypted = age_decrypt(tmp.path(), &ciphertext).expect("decrypt");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn age_encrypt_rejects_malformed_recipient() {
+        let err = age_encrypt("not-a-recipient", b"data").unwrap_err();
+        assert!(matches!(err, KeysError::AgeParseFailed(_)));
+    }
+
+    #[test]
+    fn age_decrypt_rejects_ciphertext_when_identity_file_is_malformed() {
+        // The realistic "wrong/unusable key" failure this crate must surface as Err, not a
+        // panic or silently-wrong plaintext: an identity file whose secret-key line is not a
+        // valid age key at all (corrupt file, wrong format, truncated during a crash, etc).
+        let ciphertext = age_encrypt(TEST_RECIPIENT, b"secret payload").expect("encrypt");
+        let tmp = tempfile::NamedTempFile::new().expect("tmp identity file");
+        std::fs::write(
+            tmp.path(),
+            "# public key: age1notreal\nAGE-SECRET-KEY-1NOTAVALIDKEYATALLXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n",
+        )
+        .expect("write identity file");
+        let err = age_decrypt(tmp.path(), &ciphertext).unwrap_err();
+        assert!(matches!(err, KeysError::AgeParseFailed(_)), "expected a parse error, got {err:?}");
+    }
+
+    #[test]
+    fn age_decrypt_missing_secret_key_line_is_an_error_not_a_panic() {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp identity file");
+        std::fs::write(tmp.path(), "# no secret key here\n").expect("write identity file");
+        let err = age_decrypt(tmp.path(), b"whatever").unwrap_err();
+        assert!(matches!(err, KeysError::AgeKeyNotFound(_)));
+    }
+
+    #[test]
+    fn age_public_key_parses_the_keygen_comment_line() {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp identity file");
+        std::fs::write(tmp.path(), format!("# created: 2026-07-24T00:00:00Z\n# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"))
+            .expect("write identity file");
+        // age_public_key() reads via age_key_path(), which checks $SOPS_AGE_KEY_FILE first —
+        // point it at our temp file for the duration of this test.
+        std::env::set_var("SOPS_AGE_KEY_FILE", tmp.path());
+        let pk = age_public_key();
+        std::env::remove_var("SOPS_AGE_KEY_FILE");
+        assert_eq!(pk.as_deref(), Some(TEST_RECIPIENT));
+    }
 
     #[test]
     fn age_key_path_returns_none_when_absent() {

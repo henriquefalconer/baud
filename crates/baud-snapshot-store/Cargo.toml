@@ -1,0 +1,24 @@
+[package]
+name = "baud-snapshot-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Durable, content-addressed, age-encrypted-at-rest record of a run: universe tree + tape + manifest"
+
+# specs/baud-snapshot-store.md §2's pinned skeleton: "Deps = {blake3, baud-keys, baud-proto}" plus
+# the small serialization/error utilities every other crate in this workspace already uses for the
+# same job (serde_json for the human-auditable plaintext index, thiserror for error enums) — no
+# database, no KVM/perf/hardware dependency of any kind (this crate never touches a guest or a
+# vCPU, specs/baud-snapshot-store.md §1's own Non-Goal: "Capturing/restoring VM state (that is
+# baud-snapshot)"), so it is fully buildable and testable on this Windows dev machine.
+[dependencies]
+baud-keys = { path = "../baud-keys" }
+baud-proto = { path = "../baud-proto" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = "1"

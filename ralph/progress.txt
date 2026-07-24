@@ -1235,3 +1235,55 @@ Implemented TapeDevice::restore_cursor, Console::with_output + DeviceBus::restor
 ---
 
 Post-push verification: git fetch confirms origin/main == local HEAD (7fa7ec1). No CI/post-push protocol defined in todo.md for this repo (no .github/workflows). Re-ran drive/h0.sh against the pushed tip: exit 0, all H0.1-H0.3 assertions PASS. Already had cargo build/test/clippy --workspace green (0 regressions) and drive/h0.sh + drive/m0.sh both green before pushing. todo.md still has substantial pending work (baud-snapshot's userfaultfd branch()/reset(), baud-snapshot-store, in-guest tape-device driver/shim in baud-packages, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
+
+## 2026-07-24T16:07:43 UTC - Session usage — iteration 7 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 68225
+- est. output cost: $1.0234 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 8
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md build status (§14), specs/*, and recent progress.txt history to pick the next increment.
+
+Built and unit-tested the new crate end-to-end: cargo build/test -p baud-keys -p baud-snapshot-store all green (28 new tests: 9 baud-keys age_encrypt/decrypt/public-key, 19 baud-snapshot-store covering the spec's 3 named tests plus mark_branch/tape/records/error-path coverage). cargo build/test --workspace green, 0 regressions. cargo clippy -p baud-keys -p baud-snapshot-store --all-targets: 0 new warnings (pre-existing warnings live only in baud-secret/baud-proto/baud-driver/etc, untouched by this increment). Now re-verifying drive/h0.sh and drive/m0.sh before committing.
+
+drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (h0: regime=rejected as expected on this KVM-less machine, all H0.1-H0.3 assertions PASS; m0: PASS). Updated specs/baud-snapshot-store.md with a new §9 Implementation Notes section documenting the three departures from the spec's literal pseudocode, and todo.md §14 with the full build-status entry. Finalizing and committing now.
+
+## 2026-07-24T16:26:43 UTC - Changes committed.
+- What was implemented: the `baud-snapshot-store` crate (specs/baud-snapshot-store.md) — the
+  durable, content-addressed, age-encrypted-at-rest record of a run (universe tree + tape +
+  manifest) — plus real in-process `age` encryption in `baud-keys` to back it.
+- Files changed:
+  - crates/baud-snapshot-store/{Cargo.toml,src/lib.rs,src/types.rs,src/store.rs,src/error.rs,src/tests.rs} (new crate)
+  - crates/baud-keys/{Cargo.toml,src/lib.rs} (age_public_key/age_encrypt/age_decrypt + new KeysError variants + 9 new tests)
+  - Cargo.toml, Cargo.lock (new workspace member + `age` workspace dependency)
+  - specs/baud-snapshot-store.md (new §9 Implementation Notes)
+  - todo.md (§14 build-status entry)
+- **Brief description of changes:**
+  - baud-keys: age_encrypt/age_decrypt use the pure-Rust `age` crate 0.12 in-process (no
+    libclang/bindgen, no external sops/age binary needed) against the same identity file
+    age_key_path() already resolves; age_public_key() parses the "# public key:" comment line
+    age-keygen writes. 9 new tests including a roundtrip against a hardcoded throwaway test
+    keypair and negative paths (malformed recipient, malformed/missing identity).
+  - baud-snapshot-store: SnapshotStore — put_manifest/get_manifest, put_tape/get_tape,
+    put_page/get_page (dedup by plaintext hash), put_universe/get_universe, mark_branch (records
+    a branch-point-only node with no captured universe — this crate's extension beyond the spec's
+    literal pseudocode, needed to make nearest/reconstruct's "fork from nearest ancestor"
+    guarantee non-trivial), nearest/reconstruct, put_records/get_records (persists the guest's
+    tape-device baud_proto::Msg records per node, CBOR-encoded via baud_proto::encode/decode).
+    Bodies (universe/page/tape/records) are age-encrypted; the (run,node) index (manifest.json,
+    nodes/*.json) is plain JSON, per spec §4. NodeId is content-addressed from
+    (parent, at_step, tape_range) so identical branch points collapse onto the same node.
+  - Three documented departures from the spec's literal Rust pseudocode (Node.universe:
+    Option<Hash>, RunManifest.regime: String, content-addressed NodeId) are explained inline and
+    mirrored into a new specs/baud-snapshot-store.md §9.
+  - 19 new tests including the spec's own three named tests verbatim
+    (snapshot_store_bodies_are_ciphertext, pages_dedup_by_plaintext_hash,
+    reconstruct_forks_from_nearest_node) plus a 40-case proptest fuzz on node-identity
+    content-addressing, run-id path-escape sanitization, and missing-key error-path coverage.
+- Verification: cargo test -p baud-keys -p baud-snapshot-store (28/28 pass, 28 new tests); cargo
+  build/test/clippy --workspace all green, 0 regressions, 0 new clippy warnings in either touched
+  crate; drive/h0.sh and drive/m0.sh both re-verified passing end-to-end.
+---

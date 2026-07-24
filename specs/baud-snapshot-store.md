@@ -140,3 +140,54 @@ impl SnapshotStore {
 | Garbage collection | Drop nodes no branch references |
 | Per-run recipients | A distinct age recipient per run |
 | Remote store       | Push/pull universes across hosts for shared exploration |
+
+---
+
+## 9. Implementation Notes (2026-07-24)
+
+The real `crates/baud-snapshot-store` implementation follows this spec with three deliberate,
+documented departures from §3's literal Rust pseudocode:
+
+- **`Node.universe` is `Option<Hash>`, not `Hash`.** Not every branch point in the tree has a
+  captured universe — capturing full VM state is comparatively expensive, so a guest emitting
+  `MARK_BRANCH` (specs/baud-tape-device.md §4) far more often than the driver chooses to snapshot
+  is the normal case. `SnapshotStore::mark_branch` records a branch-point-only node (`universe:
+  None`); `SnapshotStore::put_universe` attaches a capture. `nearest`/`reconstruct` walk past
+  `None` nodes to find the nearest ancestor that actually has one — this is what makes §5's "fork
+  from nearest, not root" guarantee non-trivial to test (`reconstruct_forks_from_nearest_node`).
+- **`RunManifest.regime` is a `String`, not `baud_host::Regime`.** This crate's declared
+  dependency set (§2) deliberately excludes `baud-host`; regime is archived as an opaque tag
+  (§1's own Non-Goal: "Interpreting workload semantics"). `baud_host::Regime` remains the single
+  source of truth for the enum; a caller that depends on both crates (`baud-server`) converts via
+  `to_string()`/parse at the boundary.
+- **`NodeId` is content-addressed from `(parent, at_step, tape_range)`**, not an opaque counter —
+  `Sha::of_node_identity`. Two `put_universe`/`mark_branch` calls describing the same branch point
+  (e.g. replaying an identical deterministic prefix) collapse onto the same node, consistent with
+  the rest of this spec's content-addressing philosophy.
+
+Two additive API methods beyond §3's pseudocode, both exercising the declared `baud-proto`
+dependency (otherwise unused by the spec's literal model) and both encrypted at rest for the same
+reason universe/page bodies are (§4 — a leaked store must not reproduce guest execution or
+secrets):
+
+- **`put_tape`/`get_tape`** — the run's whole tape, named in §1's Goals ("the durable record of a
+  run: the tree of universes, **the tape**, and the run manifest") but absent from §3's `SnapshotStore`
+  API. One encrypted blob per run.
+- **`put_records`/`get_records`** — the guest's tape-device write-channel messages
+  (`baud_proto::Msg::MarkBranch`/`Log`/`Observe`/`Outcome`/...) observed up to a node, CBOR-encoded
+  via `baud_proto::encode` (reusing the wire format rather than inventing a second one) and
+  encrypted per node.
+
+**Encryption**: §4 calls for "age recipient (public) + identity (path) from `baud-keys`". Rather
+than shelling out to the `age` CLI binary per call (as `baud-keys`' existing `sops`-based
+functions do, and as the superseded `baud-journal` crate's own age wrapper did), `baud-keys`
+gained `age_encrypt`/`age_decrypt`/`age_public_key` using the pure-Rust `age` crate in-process —
+no subprocess per call, no `libclang`/`bindgen` dependency (confirmed against the real crate),
+so both `baud-keys` and `baud-snapshot-store` build and test fully on this Windows dev machine
+with no external `sops`/`age` binaries installed at all. `age_key_path()`'s existing resolution
+order ($SOPS_AGE_KEY_FILE → macOS → Linux `~/.config/sops/age/keys.txt`) is reused unchanged —
+one identity file guards both the sops-encrypted `infra/secrets` and this store, per §4's "the key
+that guards `infra/secrets` guards the store."
+
+Not yet built: garbage collection, per-run recipients, and the remote store (§8, all listed there
+as future work already).

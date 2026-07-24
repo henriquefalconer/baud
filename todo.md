@@ -698,6 +698,65 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     tape-cursor/console reconstruction) but not yet as one end-to-end real-hardware test, which
     needs H1 (booting a real guest) to land first since there is no real halted guest to snapshot
     from yet.
+- **`baud-snapshot-store` (specs/baud-snapshot-store.md) — built and unit-tested, fully
+  hardware-independent.** New crate (`crates/baud-snapshot-store`, deps = `{blake3, baud-keys,
+  baud-proto}` per the spec's §2 pinned skeleton, plus `serde`/`serde_json`/`thiserror`): the
+  durable, content-addressed, age-encrypted-at-rest record of a run (universe tree + tape + run
+  manifest, §1) that supersedes `baud-journal`'s replay-from-zero design. Unlike every other
+  post-pivot crate so far, this one has **no `cfg(target_os = "linux")` half at all** — it never
+  touches a guest/vCPU (§1's own Non-Goal: "Capturing/restoring VM state (that is
+  `baud-snapshot`)"), so every test here runs and proves the real behavior on this Windows dev
+  machine with no "not yet exercised on real KVM hardware" caveat.
+  - `crates/baud-snapshot-store/src/types.rs` — `Sha` (blake3 content hash, hex-roundtrippable),
+    `RunId`, `NodeId` (= `Sha`), `Node`, `RunManifest`, `PageRef`. Three documented departures
+    from specs/baud-snapshot-store.md §3's literal Rust pseudocode (each with an inline doc
+    comment explaining why, and mirrored into the spec's new §9 "Implementation Notes"): (1)
+    `Node.universe: Option<Hash>` — not every branch point has a captured universe (capturing is
+    comparatively expensive; `MARK_BRANCH` events are far more frequent than actual snapshots);
+    (2) `RunManifest.regime: String` — this crate's declared deps deliberately exclude
+    `baud-host`, so the regime enum (`baud_host::Regime` remains its single source of truth) is
+    archived as an opaque tag, not interpreted; (3) `NodeId` is content-addressed from
+    `(parent, at_step, tape_range)` via `Sha::of_node_identity`, not an opaque counter — two
+    `put_universe`/`mark_branch` calls describing the same branch point collapse onto the same
+    node.
+  - `crates/baud-snapshot-store/src/store.rs` — `SnapshotStore`: `open`/`open_with_keys`,
+    `put_manifest`/`get_manifest`, `put_tape`/`get_tape`, `put_page`/`get_page`,
+    `put_universe`/`get_universe`, `mark_branch` (this crate's extension — records a
+    branch-point-only node with `universe: None`, idempotent via content-addressing),
+    `nearest`/`reconstruct` (walk parent links past `None`-universe nodes to the nearest captured
+    ancestor, §5's "fork from nearest, not root"), `put_records`/`get_records` (this crate's other
+    extension — persists the guest's tape-device `baud_proto::Msg` write-channel records per node,
+    CBOR-encoded via `baud_proto::encode`/`decode`, reusing the existing wire format rather than
+    inventing a second one). Every body (`universe`/page/tape/records) is age-encrypted via new
+    `baud-keys` functions; every index file (`manifest.json`, `nodes/*.json`) is plain JSON, per
+    §4's "In clear: only the (run, node) index + addresses."
+  - **`baud-keys` gained real `age` encryption** (`age_public_key`/`age_encrypt`/`age_decrypt`,
+    `crates/baud-keys/src/lib.rs`): uses the pure-Rust `age` crate 0.12 in-process (streamlined
+    `age::encrypt(&Recipient, &[u8])`/`age::decrypt(&Identity, &[u8])` API, confirmed against the
+    real crate docs) rather than shelling out to an `age`/`sops` binary per call — no
+    `libclang`/`bindgen` dependency (unlike the `userfaultfd` crate blocking `baud-snapshot`'s
+    branch/reset, §14's H5 entry below), so it builds and its tests run fully on this Windows dev
+    machine with no external `sops`/`age` binaries installed at all (confirmed: neither is on
+    PATH here). `age_key_path()`'s existing $SOPS_AGE_KEY_FILE → macOS → Linux resolution order is
+    reused unchanged, so one identity file guards both `infra/secrets` and this new store.
+  - **Verification**: `cargo test -p baud-keys -p baud-snapshot-store` — 28/28 pass (9 new
+    `baud-keys` age tests incl. a roundtrip against a hardcoded throwaway test keypair and
+    negative paths for malformed recipients/identities; 19 new `baud-snapshot-store` tests incl.
+    the spec's own three named tests verbatim —
+    `snapshot_store_bodies_are_ciphertext`/`pages_dedup_by_plaintext_hash`/
+    `reconstruct_forks_from_nearest_node` — plus a 40-case proptest fuzz on node-identity
+    content-addressing and coverage for run-id path-escape sanitization, missing-key error paths,
+    and manifest/node-index plaintext-readability); `cargo build/test/clippy --workspace` all
+    green (0 regressions, 0 new clippy warnings in either touched crate — the only warnings
+    reported anywhere in the workspace are pre-existing ones in unrelated crates, same as every
+    prior iteration); `drive/h0.sh` and `drive/m0.sh` both re-verified passing end-to-end.
+  - **Not yet done**: no garbage collection / per-run recipients / remote store (§8, already
+    tracked there as future work); nothing in `baud-server`/`baud-driver` calls into this crate
+    yet (it exists standalone, same "built, not yet wired up" stage `baud-snapshot` itself passed
+    through for two iterations before `baud-multiverse` wired it in) — wiring
+    `baud-snapshot::Universe` capture bytes through `SnapshotStore::put_universe`'s `body: &[u8]`
+    parameter, and `baud-driver`'s branch-point choices through `mark_branch`, is the natural next
+    step once there is a real exploration loop to drive it.
 - H2-H6 and the rest of the M-series remain **not yet started** beyond the above.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a
