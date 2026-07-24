@@ -120,3 +120,26 @@
 ## 2026-07-24T06:10:30 UTC - Session usage — iteration 5 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T06:06:30 UTC - Session usage — iteration 5 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 42401
+- est. output cost: $0.6360 (sonnet output rate)
+- exact (from transcript): in=2 out=222 cache_read=25184 cache_write=750 → $0.1138
+
+## 2026-07-24T06:15:00 UTC - Ralph Build Iteration 6 Start
+- Resuming from M4 (committed at caf07b2)
+- Plan: M5 — baud-stream crate + examples/framedemo + stream/net server routes + CLI + drive/m5.sh
+
+## 2026-07-24T06:20:00 UTC - M5 complete (eec9d34)
+- baud-stream: QOI encoder (~130 LOC), Y4M writer (~130 LOC), frame fingerprinting, frame processor; 22 tests pass
+- Server: POST/GET /runs/:id/frames, GET /runs/:id/stream/tail, POST /runs/:id/stream/render, GET/POST /runs/:id/net/weather, POST /runs/:id/net/simulate
+- CLI: baud stream frames/tail/render and baud net weather fully implemented (replaced stubs)
+- Migration 0005_stream.sql: frame_records + net_events tables
+- examples/framedemo/: 32x32 indexed8 moving gradient spec (spec.yaml, spec.toml, framedemo.c)
+- drive/m5.sh: ALL 10 CHECKS PASSED (spec lint, run start, 50 frame records, stream frames/tail/render, re-render hash equality, weather timeline, determinism)
+- Total tests: 83 pass, 0 fail; workload-noun CI grep CLEAN
+- NEXT iteration should implement M6 (baud-raftlet + planted modal bug + drive/m6.sh)
+
+## 2026-07-24T06:20:30 UTC - Session usage — iteration 6 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD
