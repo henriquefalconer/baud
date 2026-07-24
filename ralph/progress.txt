@@ -493,3 +493,36 @@ Still not fixed (large/complex or deferred):
 - VR2-m10 (guest_is_static_no_pie on real ELF): Not fixed — requires static ELF fixture
 
 All workspace tests pass. Workload-noun CI grep CLEAN.
+
+## 2026-07-24T09:37:20 UTC - Session usage — iteration 12 (Fix build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 76242
+- est. output cost: $1.1436 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.1632
+
+## 2026-07-24 - Ralph Build Iteration 13 (FIX round, continued from 12) — Progress
+VR2 items continued top-down. All items from iteration 12 were carried forward; new items fixed:
+
+- VR2-m9 (infra/pkgs/ absent): FIXED — infra/pkgs/ created with 4 Nix files:
+  - default.nix: fenix overlay exposing baud-agent, baud-multiverse, baud-guests, baud-sandbox-image
+  - baud-agent.nix: static musl x86_64 baud-tape-agent cross-build; enforces ≤10 MiB binary size budget
+  - baud-multiverse.nix: static musl x86_64 deterministic supervisor cross-build
+  - baud-guests.nix: static musl x86_64 example guest binaries (parser, raftlet); verifies static linkage
+  - baud-sandbox-image.nix: OCI container image (agent + supervisor, ports 9090/tcp)
+- VR2-M11 (exit_code field in run status): COMPLETED — server now returns exit_code field (0=ok, 1=error, 2=goal/violation)
+- VR2-M10 (--json errors to stdout): FIXED — JSON errors now emitted to stdout (not stderr) per spec baud-cli.md §4
+- VR2-M19 (violation_found probe never emitted): FIXED — baud-raftlet::simulate() now inserts violation_found=1.0 on invariant failure, violation_found=0.0 on clean exit
+- VR2-m10 (guest_is_static_no_pie not tested on real ELF): PARTIALLY FIXED — guest_is_static_no_pie() test added to baud-packages; stub path passes trivially; #[ignore] integration test added for real ELF via BAUD_TEST_ELF env var
+
+Items still not fixed after iteration 13 (require future iterations):
+- VR2-B2 (no ptrace/seccomp-unotify): Supervisor simulation remains; real implementation requires Linux
+- VR2-B4 (baud-tape-agent non-functional): Scaffold only; full agent implementation deferred
+- VR2-B6 (fuzz wrong workload): Parser simulation used regardless of spec; raftlet dispatch not wired
+- VR2-M5/M6 (clone/rdtsc require real guest binaries): Depend on VR2-B2
+- VR2-M7 (wall-clock watchdog): Complex supervisor feature; deferred
+- VR2-M18 (baud-tracing no aya dep): Requires Linux CO-RE cross-build; deferred
+
+All workspace tests pass. Workload-noun CI grep CLEAN.
+
+## 2026-07-24 - Session usage — iteration 13 (Fix build session) [sonnet]
+- est. output tokens: ~4000
+- est. output cost: ~$0.06

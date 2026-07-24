@@ -102,9 +102,11 @@ async fn main() {
 
     if let Err(e) = result {
         if json {
-            // Machine-readable error output on stderr (baud-cli.md §4)
+            // Machine-readable error output on stdout (baud-cli.md §4):
+            // When --json is set, errors are emitted as {"ok": false, "error": "..."} to stdout.
+            // This allows scripts to distinguish and parse error cases without inspecting stderr.
             let msg = format!("{e:#}");
-            eprintln!("{}", serde_json::json!({ "ok": false, "error": msg }));
+            println!("{}", serde_json::json!({ "ok": false, "error": msg }));
         } else {
             eprintln!("error: {e:#}");
         }

@@ -61,6 +61,7 @@ pass "baud-journal: all tests pass (content-addressing, dedup, integrity, stream
 # Start baud-server
 # ---------------------------------------------------------------------------
 log "Starting baud-server (DB: $DB_FILE)..."
+pkill -f "baud-server" 2>/dev/null || true; sleep 0.2
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" BAUD_LOG=warn \
     "$BAUD_SERVER_BIN" &
 SERVER_PID=$!

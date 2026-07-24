@@ -54,8 +54,13 @@ log "--- H2.1: baud-multiverse determinism with seeded tape ---"
 
 cargo test -q -p baud-multiverse 2>&1 | tail -5
 MULTIVERSE_TESTS=$(cargo test -p baud-multiverse 2>&1 | grep "test result")
-if echo "$MULTIVERSE_TESTS" | grep -q "FAILED\|0 passed"; then
+# Check for FAILED lines OR all lines having 0 passed (no real tests ran)
+PASSED_COUNT=$(echo "$MULTIVERSE_TESTS" | grep -oE "[0-9]+ passed" | awk '{sum+=$1} END{print sum+0}')
+if echo "$MULTIVERSE_TESTS" | grep -q "FAILED"; then
     fail "H2.1: baud-multiverse tests FAILED: $MULTIVERSE_TESTS"
+fi
+if [[ "$PASSED_COUNT" -eq 0 ]]; then
+    fail "H2.1: baud-multiverse: no tests ran (0 passed total): $MULTIVERSE_TESTS"
 fi
 pass "H2.1: baud-multiverse seeded tape produces deterministic observations"
 
@@ -63,6 +68,7 @@ pass "H2.1: baud-multiverse seeded tape produces deterministic observations"
 # Start server for drive steps that need it
 # ---------------------------------------------------------------------------
 log "Starting baud-server (DB: $DB_FILE)..."
+pkill -f "baud-server" 2>/dev/null || true; sleep 0.2
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" BAUD_LOG=warn \
     "$BAUD_SERVER_BIN" &
 SERVER_PID=$!

@@ -680,12 +680,17 @@ pub fn simulate(
         let _ = cluster.step_from_bytes(slice);
 
         if let Err(violation) = cluster.check_invariants() {
-            let probes = cluster.probes();
+            let mut probes = cluster.probes();
+            // Emit violation_found=1.0 when the invariant is violated (spec baud-raftlet.md §5 VR2-M19)
+            probes.insert("violation_found".to_string(), 1.0);
             return (probes, Some(violation));
         }
     }
 
-    (cluster.probes(), None)
+    let mut probes = cluster.probes();
+    // violation_found=0.0 when run completes without violation
+    probes.insert("violation_found".to_string(), 0.0);
+    (probes, None)
 }
 
 // ---------------------------------------------------------------------------

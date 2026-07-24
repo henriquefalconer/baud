@@ -192,6 +192,12 @@ pub async fn status(
 
     match row {
         Ok(Some((id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, _b2, status, ca, ua))) => {
+            // exit_code: 0=completed, 1=error/aborted, 2=goal/violation (spec baud-cli.md §4)
+            let exit_code: u8 = match status.as_str() {
+                "crashed" | "goal" | "violation_found" => 2,
+                "aborted" | "failed" => 1,
+                _ => 0,
+            };
             Json(json!({
                 "id": id,
                 "spec_hash": spec_hash,
@@ -201,6 +207,7 @@ pub async fn status(
                 "seed": seed,
                 "budget_minutes": budget_minutes,
                 "status": status,
+                "exit_code": exit_code,
                 "created_at": ca,
                 "updated_at": ua,
             }))

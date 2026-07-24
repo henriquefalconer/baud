@@ -31,6 +31,7 @@ trap cleanup EXIT
 
 # Start the server
 echo "==> Starting baud-server..."
+pkill -f "baud-server" 2>/dev/null || true; sleep 0.2
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" "$BAUD_SERVER_BIN" &
 SERVER_PID=$!
 sleep 1  # Give it a moment to start

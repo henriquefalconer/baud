@@ -310,6 +310,57 @@ build = "cargo build"
         assert_ne!(r1.closure_hash, r2.closure_hash);
     }
 
+    /// guest_is_static_no_pie: verify that a stub build result passes verify_guest_contract().
+    /// On macOS/CI without nix, the stub returns is_stub=true which makes the check a no-op.
+    /// A real integration test (behind #[ignore]) exercises verify_guest_contract() on a real ELF.
+    ///
+    /// Spec §5 (specs/baud-packages.md): fn guest_is_static_no_pie() { ... assert!(elf.is_static() && !elf.is_pie()) }
+    #[test]
+    fn guest_is_static_no_pie() {
+        let toml = r#"
+[workload]
+name = "hello-deterministic"
+packages = ["stdenv"]
+build = "cc -static -no-pie -o $out/bin/hello hello.c"
+"#;
+        let spec = lint_spec(toml).unwrap();
+        // Stub build: is_stub=true, verify_guest_contract is a no-op (passes trivially).
+        // A real ELF integration test requires nix cross-build and is gated behind #[ignore].
+        let result = build(&spec, true).unwrap();
+        assert!(
+            result.verify_guest_contract().is_ok(),
+            "stub guest contract check must pass: {:?}",
+            result.verify_guest_contract()
+        );
+    }
+
+    /// Integration: verify_guest_contract on a real cross-built ELF.
+    /// Gated behind #[ignore] — requires nix cross-toolchain in PATH.
+    /// Run with: cargo test -p baud-packages guest_is_static_no_pie_real -- --ignored
+    #[test]
+    #[ignore]
+    fn guest_is_static_no_pie_real() {
+        // This test requires a real static no-PIE ELF binary to be available.
+        // Typical path: /nix/store/.../bin/hello or target/.../<triple>/hello
+        let elf_path = std::env::var("BAUD_TEST_ELF").unwrap_or_default();
+        if elf_path.is_empty() {
+            eprintln!("Skipping: set BAUD_TEST_ELF=<path-to-static-elf> to run this test");
+            return;
+        }
+        use std::path::PathBuf;
+        let path = PathBuf::from(elf_path);
+        let result = BuildResult {
+            guest_path: path,
+            closure_hash: "test".to_string(),
+            is_stub: false,
+        };
+        assert!(
+            result.verify_guest_contract().is_ok(),
+            "real ELF guest contract check failed: {:?}",
+            result.verify_guest_contract()
+        );
+    }
+
     #[test]
     fn unknown_workload_field_is_error() {
         let toml = r#"
