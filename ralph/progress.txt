@@ -785,3 +785,83 @@ Remaining deferred items (require Linux ptrace/seccomp or CO-RE BPF infrastructu
 - VR2-M5 (clone_syscall_is_killed: real guest execution with ptrace)
 - VR2-M6 (rdtsc_is_trapped: real PR_SET_TSC trap via ptrace)
 - VR2-M18: aya dep added in iter 16; prebuilt .bpf.o probe objects require Linux cross-build
+
+## 2026-07-24T11:33:27 UTC - Session usage — iteration 17 (Fix build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 28951
+- est. output cost: $0.4343 (sonnet output rate)
+- exact accounting unavailable this entry
+
+[verify:deterministic-supervisor] Round 3 verification started. Running H-series drive scripts and inspecting baud-multiverse source.
+[verify:deterministic-supervisor] H1 drive: ALL CHECKS PASSED (6/6). H2 drive: ALL CHECKS PASSED (8/8). H3 drive: ALL CHECKS PASSED.
+[verify:deterministic-supervisor] KEY FINDING: baud-multiverse implements simulation mode only (no real ptrace/seccomp/guest process). All tests pass but via synthetic loop, not real OS mediation.
+[verify:deterministic-supervisor] FINDING 1 (major): Spec §3/§5 require real seccomp user-notify + ptrace; implementation is pure simulation (Rust loop, no OS calls). H1 exit criterion 'static hello guest under full mediation' is not met.
+[verify:deterministic-supervisor] FINDING 2 (major): clone_syscall_is_killed test checks crash_detail.contains('56') || contains('non-permitted') but spec §8 mandates detail.contains('clone'). Test passes via weakened assertion.
+[verify:deterministic-supervisor] FINDING 3 (major): quantum_overrun test explicitly admits the watchdog never fires in simulation (each step always yields). Test only checks non-panic. Spec §6 watchdog cannot be verified without real spin-loop guest.
+[verify:deterministic-supervisor] FINDING 4 (major): H3 markov-partition weather check is synthetic DB injection (simulate_weather inserts hardcoded rows), not tape draws through NetDevice. NetDevice has no weather/drop/delay draw methods.
+[verify:deterministic-supervisor] verify/determinism server endpoint now correctly wires Multiverse::run (not DefaultHasher formula), but still simulation mode — no real guest execution.
+[verify:deterministic-supervisor] Verification complete. 4 findings reported.
+
+[verify:core-protocol] Starting verification round 3. Reading specs (baud-proto, baud-secret, baud-identity, baud-keys) and source code.
+
+[verify:core-protocol] All 35 tests pass (10+13+7+4 plus ignored golden vector print). No compilation errors beyond warnings.
+
+[verify:core-protocol] Findings: (1) baud-proto spec says 'exactly three outcome messages' but Outcome enum has only 2 variants. (2) baud-keys spec defines per-env files dev.yaml/ci.yaml with --env flag; impl hardcodes baud.enc.yaml. (3) baud-keys init_secrets() does not scaffold .sops.yaml (spec: 'scaffold the encrypted file + .sops.yaml'). (4) baud-proto cbor_roundtrips proptest checks byte-level stability via re-encode, not structural PartialEq as spec requires. Bytes-cap test at MAX_BYTES_LEN is not exercised (only constant value is asserted).
+
+[verify:core-protocol] Verification complete. Findings documented via StructuredOutput.
+
+[verify:provisioning-agent] Round 3 verification complete. Scope: baud-tape-agent, baud-init, baud-packages, M2 drive script. All three crates compile and tests pass (13+7+5). M2 drive script passes all 11 checks. Key gaps found: (1) WebSocket relay in run_with_relay injects synthetic DrawResult bytes instead of forwarding actual DrawResults from ws_in_rx — the ws_in_rx channel is dropped (_ws_in_rx) and never wired to result_tx, so WS-mode runs receive all-zero draws regardless of server response. (2) Identity token is held as plain String (BAUD_TOKEN env var), not SecretString as the spec requires. (3) baud-packages::build() is not called from baud-tape-agent or baud-server — server uses a simple hash placeholder instead of a real nix closure hash. (4) The spec test for §5 Testing (unmodified_agent_runs_a_new_workload) exists but only lints the spec; it does not actually run the agent binary against a real workload as the spec pseudocode implies.
+
+[verify:server-cli-lifecycle] Round 3 verification started. Reading specs (baud-server, baud-cli, baud-tape, baud-tape-local) and examining implementation.
+
+[verify:server-cli-lifecycle] Build passes. All tests pass (153 total). M0 and M1 drive scripts pass all checks.
+
+[verify:server-cli-lifecycle] FINDING 1 (major): baud-server.md §4 spec: 'ensure restarts stopped, restores archived, reconstructs deleted tapes'. POST /tapes/{id}/ensure returns 400 Bad Request for deleted/gone tapes instead of triggering reconstruction.
+
+[verify:server-cli-lifecycle] FINDING 2 (minor): baud-cli.md §4: '--json available on every command'. baud shrink --json on error emits plain text to stderr, not JSON to stdout. All other error paths correctly emit {"ok":false,"error":"..."} to stdout.
+
+[verify:server-cli-lifecycle] FINDING 3 (minor): baud-tape.md §6 lifecycle conformance suite docstring says 'stop→ensure→archive→ensure→gone' but the shared run_lifecycle_conformance function does NOT test ensure from Archived state (only tests restore). Spec requires 'Archived → ensure' transition to be in the shared suite.
+
+[verify:server-cli-lifecycle] FINDING 4 (major): baud-server.md §6 defines a normative test 'journal_first_survives_sandbox_kill' with exact assertions. This test does not exist anywhere in the codebase (grep confirms zero hits).
+
+[verify:server-cli-lifecycle] baud-multiverse is present (VR1-B1 fixed) but runs in simulation mode. Verified exec runs in sandbox CWD (VR1-B8 fixed). BAUD_SERVER env works. enforces_sandbox_shape test exists and passes. Verification complete.
+
+[verify:journal-replay-determinism] round 3 verification started. Specs read: baud-journal.md + baud-driver.md. Source examined: baud-journal/src/lib.rs, baud-driver/src/lib.rs, baud-multiverse/src/lib.rs, baud-server/src/routes/verify.rs + replay.rs. Tests ran: cargo test -p baud-driver -p baud-journal (21 tests: all pass). drive/m3.sh: ALL CHECKS PASSED. Key findings: (1) verify/determinism now uses baud-multiverse but in simulation mode only - real guest binaries not executed; (2) non-poisoned verify endpoint find_first_divergence returns run index not step+node+probe; (3) baud-server does not use baud-journal for on-disk storage (all in SQLite); (4) baud-keys has no age_recipient() public-key resolver.
+
+[verify:journal-replay-determinism] Findings summary: 1) baud-journal library (age-encrypted chunks) works correctly (all 8 tests pass) but baud-server does NOT use baud-journal for actual observation storage — all goes to SQLite. The spec says 'storage = SQLite (metadata) + flat content-addressed files (journal)' — the flat files are absent from server flow. 2) verify/determinism uses baud-multiverse in simulation mode (no real guest binary execution). Observations are synthetic (derived from tape draws, ignoring binary semantics). The spec says 'execution is a pure function of (binary, manifest, tape)' but the binary is not executed. 3) Non-poisoned verify endpoint: find_first_divergence returns a run index (1-based), not a step number. Spec requires first_divergent_step + node/probe/syscall. Only the poisoned endpoint correctly implements this. 4) baud replay --to-step K: when K is less than the smallest observation step, orig_obs_count=0 triggers a fallback that returns verified=True even when replay_stream_hash != original_stream_hash. 5) baud-keys has no age_recipient() function — no way to get the public key from baud-keys programmatically. The spec says baud-journal obtains the recipient from baud-keys. 6) Driver begin_run() does not reset partition_state (weather Markov state). When reused across runs, weather draws accumulate state across runs.
+
+[verify:fuzzing-and-distributed-bugs] Starting verification round 3
+  - Read specs/baud-raftlet.md and todo.md
+  - Ran cargo test --package baud-raftlet: 8 tests pass
+  - Ran cargo test --package baud-driver: 13 tests pass
+  - Ran drive/m4.sh: ALL CHECKS PASSED
+  - Ran drive/m6.sh: ALL CHECKS PASSED
+  Findings:
+    F1: planted_bug_needs_the_interleaving uses planted_bug=false for negative control
+       Spec requires: random_drops + planted_bug=true → no violation
+    F2: baud-server directly imports/calls baud_raftlet::simulate() violating workload-isolation constraint
+    F3: M6 drive uses curl/planted_bug:true workaround, not baud run start as spec requires
+    F4: baud-raftlet simulate() returns Option<String> not Outcome::Crash per baud-proto/spec
+
+[verify:observation-planes] 2026-07-24: Domain scan complete. Ran cargo test -p baud-tracing -p baud-stream (38 tests, all pass), drive/m5.sh (ALL CHECKS PASSED), drive/m7.sh (ALL CHECKS PASSED). Key findings: (1) baud-stream render path generates synthetic pixels from stored hash, NOT real tape replay — violates spec §5 which requires replay under supervisor. (2) M7 broken-supervisor negative test uses empty-plane guard (both-empty=false) rather than a deliberately broken supervisor build fixture as spec §6 requires. (3) baud-tracing test for fallback passes only because synthetic_from_syscalls inherits source from BpfAvailability::probe() result which is always Fallback on macOS — the test does not verify the /proc+strace shim path. (4) render operation admitted in source comment 'In a full implementation this would replay the tape under baud-multiverse.' Both specs have Planned status — no real eBPF probes, no real tape replay, no real multiverse execution.
+
+[verify:fuzzing-and-distributed-bugs] Findings summary:
+  F1 (major): planted_bug_needs_the_interleaving uses planted_bug=false for negative control
+  F2 (major): baud-server directly imports baud_raftlet::simulate() (workload in infra)
+  F3 (major): simulate() returns Option<String> not Outcome::Crash per spec §4
+  F4 (minor): driver.shrink() missing hold-shorten pass
+  F5 (minor): M6 drive uses baud fuzz/curl (not baud run start as spec docs)
+  F6 (minor): grid bucketing not implemented (buckets always [])
+  F7 (minor): shrink in M6.8b is stub (percentage simulation, not real oracle)
+
+## 2026-07-24T11:52:24 UTC - Session usage — verification round 3 (7 domain sessions) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 91519
+- est. output cost: $1.3728 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.1632
+
+## 2026-07-24 - Triage: verification round 3 findings
+- 30 raw findings from 7 domain verification sessions triaged into todo.md §14
+- After deduplication and prioritization: 3 blockers, 15 major, 12 minor items
+- Blockers (VR3-B1 through VR3-B3): WebSocket relay injects synthetic draws (ws_in_rx dropped, never wired to result_tx); baud-server does not use baud-journal for chunk storage (all observations in plaintext SQLite); verify/determinism uses simulation mode so verification is vacuous with respect to real binaries
+- Major (VR3-M1 through VR3-M15): baud-multiverse simulation-only (no ptrace/seccomp/guest); per-env secrets files absent (--env flag missing); rotate_secrets uses --rotate not updatekeys; quantum-overrun watchdog test admits it never fires; H3 weather is synthetic DB injection not tape-driven NetDevice; ensure on deleted tape returns 400 not reconstruct; journal_first_survives_sandbox_kill absent; non-poisoned divergence endpoint reports run index not step+node+probe; replay --to-step K false-positive on empty prefix; baud-keys no age_recipient() function; identity token plain String not SecretString; baud-packages::build() not called; planted_bug_needs_the_interleaving uses planted_bug=false; baud-server directly imports baud_raftlet (workload isolation violated); simulate() returns Option<String> not Outcome::Crash
+- Minor (VR3-m1 through VR3-m12): spec says "three outcome messages" but enum has two; init_secrets() does not scaffold .sops.yaml; AgeKeyNotFound error omits searched locations; cbor_roundtrips uses byte re-encode not structural eq; shrink() missing hold-shorten pass; M6 drive uses curl not baud run start; grid bucketing not implemented; unmodified_agent test only lints spec; stream render uses synthetic pixels not tape replay; M7 broken-supervisor test uses empty-plane guard; fallback test only mirrors plane-1 not /proc+strace; render path does not enforce content-addressed dedup
+- Priority for next build iteration: VR3-B1 (relay wiring) is a one-file fix; VR3-M3 (rotate via updatekeys) and VR3-m2 (.sops.yaml scaffold) are coupled and should land together; VR3-M1 (real supervisor) and VR3-B3 (vacuous verify) are large but gate the H1 exit criterion and all downstream milestones
