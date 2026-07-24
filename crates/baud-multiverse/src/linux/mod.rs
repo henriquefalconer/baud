@@ -1008,4 +1008,63 @@ mod tests {
              surface here as a RAM divergence introduced by the restored continuation"
         );
     }
+
+    /// H5's `restore_refuses_mismatched_cpu` (specs/baud-snapshot.md §6 point 4/§8, todo.md §10),
+    /// exercised for the first time against real KVM hardware (todo.md §14 tracked this exact gap:
+    /// the CPU-model-mismatch refusal was previously only unit-tested at the pure
+    /// `universe::model_matches` comparator level, never against the real `linux::restore` ioctl
+    /// path and a real `Universe` captured off a live vCPU).
+    ///
+    /// This dev machine has exactly one CPU model, so a *naturally occurring* mismatch (a universe
+    /// captured on host A restored on host B) cannot be produced here. The honest substitute: take
+    /// a genuinely captured [`Universe`] — `cpu_signature` is opaque data the restore path never
+    /// interprets, only compares (`baud_snapshot::linux::restore`'s doc) — and flip one bit of it,
+    /// which is indistinguishable, from `restore`'s point of view, from a universe that really was
+    /// captured on a different model; the exact same real `cpuid_leaf1_eax(kvm)` read and
+    /// `model_matches` comparison this host would run against a genuine cross-model restore still
+    /// executes. No production code changes: this closes the gap purely by exercising the refusal
+    /// path (already wired since H5's first slice) that nothing had called with a mismatched
+    /// signature yet.
+    #[test]
+    fn restore_refuses_mismatched_cpu() {
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("boot failed");
+        let mut page_store = PageStore::new();
+        let mut universe = boot.snapshot(&mut page_store).expect("snapshot failed");
+        let real_signature = universe.cpu_signature;
+
+        // Positive control: restoring the real, unmodified universe onto this exact host succeeds
+        // — proves the refusal below is about the forged signature, not some unrelated restore
+        // failure.
+        Multiverse::restore(&universe, vec![], 1, false)
+            .expect("restoring a universe captured on this exact host must succeed");
+
+        // Forge a mismatched CPU signature (flip the low bit — guaranteed to differ from the real
+        // one `cpuid_leaf1_eax` reads back on this host).
+        universe.cpu_signature = real_signature ^ 1;
+
+        match Multiverse::restore(&universe, vec![], 1, false) {
+            Err(RestoreError::Snapshot(baud_snapshot::linux::RestoreError::CpuMismatch {
+                captured,
+                current,
+            })) => {
+                assert_eq!(captured, real_signature ^ 1, "error must report the forged captured signature");
+                assert_eq!(current, real_signature, "error must report this host's real signature");
+            }
+            Ok(_) => panic!(
+                "restoring a universe with a mismatched cpu_signature and no active CPUID \
+                 template must refuse, but it succeeded"
+            ),
+            Err(other) => panic!(
+                "restoring a universe with a mismatched cpu_signature and no active CPUID \
+                 template must refuse with RestoreError::Snapshot(CpuMismatch), got {other:?}"
+            ),
+        }
+
+        // An active CPUID template normalizes the mismatch and the restore proceeds.
+        Multiverse::restore(&universe, vec![], 1, true)
+            .expect("an active CPUID template must let a mismatched-signature restore proceed");
+    }
 }

@@ -1643,3 +1643,45 @@ drive/h5.sh written and passes end-to-end (H5.1 host probe, H5.2 snapshot_roundt
   - Documented (spec + code + todo.md) a real-hardware precision finding: fresh-perf_event-counter creation overhead adds a real but guest-invisible few-hundred-branch internal rcb discrepancy across a restore boundary -- rip/console/RAM stay bit-identical, so the test asserts those, not rcb, mirroring H4's own precision-vs-determinism framing
   - Added drive/h5.sh mirroring h1.sh-h4.sh's pattern; updated todo.md's H5 status and specs/baud-snapshot.md §3/§6/§10
 ---
+
+Pushed b1c9ce6 to origin/main. Running post-push verification: full drive/h0.sh-h5.sh chain plus cargo build/test/clippy --workspace against the pushed tip.
+
+Post-push verification GREEN: drive/h0.sh through h5.sh all pass end-to-end on real /dev/kvm at pushed tip b1c9ce6; cargo test/clippy --workspace clean. todo.md still has pending items (H5's remaining sub-guarantees: userfaultfd branching, dirty-ring reset on real hardware, shell-into, real-hardware CPU-mismatch refusal; plus H6 and the M-series) so this iteration ends with NEXT.
+
+## 2026-07-24T21:39:03 UTC - Session usage — build-3 [sonnet]
+- cost (exact, from claude -p): $8.217299799999997 over 82 turn(s)
+- transcript: ralph/.run/004-build-3.json
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by reading todo.md and specs/*...
+
+Chose real-hardware coverage of restore_refuses_mismatched_cpu (test-matrix row 8): scaffolding already exists (universe::model_matches, linux::restore's CpuMismatch check, Multiverse::restore/restore_guest plumbing) but no test exercises it against real /dev/kvm — only the pure comparator is unit-tested. Dirty-ring-reset real-hardware test and shell-into-a-live-shell were the other two open H5 items; shell-into needs architecture-level work (new Console/EventFd/PTY wiring), dirty-ring-reset is comparable in scope to this one but this one needs zero new production code. Writing the test now.
+
+Wrote restore_refuses_mismatched_cpu in crates/baud-multiverse/src/linux/mod.rs (hello-guest fixture: capture, positive-control restore, forged-signature refusal, template-active bypass). Building and running against real /dev/kvm now...
+
+restore_refuses_mismatched_cpu passes against real /dev/kvm on the first run (forged-signature refusal + template-active bypass both exercised for real). Running full workspace build/test/clippy for regressions...
+
+cargo build/test/clippy --workspace all green: baud-multiverse 57/57 (was 56/56 — 1 new test), zero new clippy warnings (all reported warnings pre-existing in unrelated files: fuzz.rs/replay.rs/tracing.rs/transport.rs/lib.rs). Re-running drive/h0.sh through h5.sh for regressions before committing...
+
+drive/h0.sh through h5.sh all re-verified passing end-to-end on real /dev/kvm with zero regressions; drive/h5.sh gained a new H5.3 check wiring in restore_refuses_mismatched_cpu. Updating todo.md's H5 build-status entry now...
+
+todo.md updated: H5 build-status entry documents restore_refuses_mismatched_cpu closed on real hardware (57/57), remaining H5 gaps re-described with more precision (dirty-ring-reset is a test-writing task since plumbing exists; shell-into needs real new architecture). Running final full verification before commit...
+
+
+## 2026-07-24T21:52:23 UTC - Changes committed.
+- What was implemented: real-hardware coverage of restore_refuses_mismatched_cpu (test-matrix row 8) — H5's last small real-hardware gap that needed zero new production code
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, drive/h5.sh, todo.md
+- **Brief description of changes:**
+  - New test linux::tests::restore_refuses_mismatched_cpu: boots hello-guest, captures a Universe, confirms a positive-control restore onto this exact host succeeds, forges cpu_signature (bit-flip) and asserts Multiverse::restore refuses with RestoreError::Snapshot(CpuMismatch{captured,current}), then confirms template_active=true bypasses the refusal
+  - No production code changed: universe::model_matches, linux::restore's CpuMismatch check, and Multiverse::restore's template_active plumbing were already fully wired since H5's first slice — only the real-KVM exercise was missing
+  - drive/h5.sh gained a new H5.3 step running this test end-to-end; banner text updated to drop this item from the remaining-work list
+  - todo.md's H5 build-status entry updated to document the closure and re-describe the two remaining H5 gaps (dirty-ring-reset real-hardware test, shell-into) with more precision on scope
+  - cargo test -p baud-multiverse: 57/57 (was 56/56); cargo build/test/clippy --workspace all green, zero new warnings; drive/h0.sh-h5.sh all re-verified passing end-to-end on real /dev/kvm
+---

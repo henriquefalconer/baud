@@ -15,12 +15,14 @@
 #         halt — the restored run's landed instruction (rip) and its whole observation stream
 #         (console output + RAM hash) must match a straight run that delivered both ticks without
 #         ever snapshotting.
+#   H5.3  restore_refuses_mismatched_cpu: a Universe with a forged (bit-flipped) cpu_signature is
+#         refused by Multiverse::restore against this real host's real signature unless a CPUID
+#         template is active — exercised against the real cpuid_leaf1_eax(kvm) read and the real
+#         RestoreError::CpuMismatch path, not just the pure universe::model_matches comparator.
 #
 # Not yet covered here (tracked in todo.md, later H5 slices): userfaultfd-based branching
 # (Snapshot::branch, blocked on a guest-RAM backing change — see baud-snapshot/src/linux.rs's
-# module doc), dirty-ring-based reset_cost_scales_with_write_set, shell_into_universe_resumes,
-# restore_refuses_mismatched_cpu on real hardware (currently only unit-tested at the pure
-# universe::model_matches level).
+# module doc), dirty-ring-based reset_cost_scales_with_write_set, shell_into_universe_resumes.
 
 set -euo pipefail
 
@@ -85,6 +87,15 @@ echo "$SNAP_OUT" | grep -q "test result: ok" || fail "H5.2: snapshot_roundtrip_i
 pass "H5.2: snapshot_roundtrip_is_bit_identical — a captured-then-restored universe continues identically to a straight run"
 
 # ---------------------------------------------------------------------------
+# H5.3 — restore_refuses_mismatched_cpu
+# ---------------------------------------------------------------------------
+log "Running restore_refuses_mismatched_cpu against real /dev/kvm (hello-guest fixture)..."
+CPU_OUT=$(cargo test -q -p baud-multiverse restore_refuses_mismatched_cpu -- --test-threads=1 2>&1)
+echo "$CPU_OUT"
+echo "$CPU_OUT" | grep -q "test result: ok" || fail "H5.3: restore_refuses_mismatched_cpu FAILED"
+pass "H5.3: restore_refuses_mismatched_cpu — a forged cpu_signature is refused, and template_active=true bypasses the refusal"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -99,8 +110,10 @@ echo "  - A second timer tick delivered on the restored guest lands on the bit-i
 echo "    instruction (rip) a straight, never-snapshotted run would have reached"
 echo "  - The restored run's whole observation stream (console output, RAM hash) through the"
 echo "    final halt is byte-identical to the straight run's"
+echo "  - A universe with a forged cpu_signature is refused by restore on this real host unless"
+echo "    a CPUID template is active"
 echo ""
-echo "H-series H0-H4 complete; H5's core capture/restore round trip is now proven on real hardware."
-echo "Remaining H5 work (userfaultfd branching, dirty-ring reset, shell-into, real-hardware CPU-"
-echo "mismatch refusal): see todo.md."
+echo "H-series H0-H4 complete; H5's core capture/restore round trip and CPU-mismatch refusal are"
+echo "now proven on real hardware. Remaining H5 work (userfaultfd branching, dirty-ring reset,"
+echo "shell-into): see todo.md."
 echo ""

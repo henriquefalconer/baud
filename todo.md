@@ -828,7 +828,8 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 - H4 is done, including `drive/h4.sh` (`timer_tick_lands_at_identical_instruction` passing
   repeatably on real KVM hardware, see immediately above).
 - **H5 (snapshot/branch/restore, todo.md §10) — first slice done: `snapshot_roundtrip_is_bit_
-  identical` passes on real KVM hardware; `drive/h5.sh` exists and passes end-to-end.** Prior
+  identical` and `restore_refuses_mismatched_cpu` both pass on real KVM hardware; `drive/h5.sh`
+  exists and passes end-to-end (H5.1-H5.3).** Prior
   iterations had built `Multiverse::snapshot`/`Multiverse::restore` and the underlying
   `baud-snapshot::linux::capture`/`restore` but never called either against a real, running guest
   (blocked on H1 existing at all). This iteration ran them for the first time
@@ -867,15 +868,34 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     identical` therefore does not assert `rcb` equality across the restore boundary at all (only
     `rip` + the console/RAM observation stream, matching the spec's own pseudocode), with a doc
     comment explaining why — a documented design decision, not a gap.
-  - **Not yet done** (§10's remaining H5 guarantees, unchanged from prior iterations): `Snapshot::
-    branch` (userfaultfd CoW branching) is still blocked on a real architecture gap — guest RAM is
-    a private anonymous mapping today, but `UFFDIO_CONTINUE` needs a shared (memfd/hugetlbfs)
-    backing; `thousand_branches_are_independent_and_deterministic`, `reset_cost_scales_with_
-    write_set` (the dirty-ring machinery exists and is wired into `Multiverse` but no test calls
-    `enable_dirty_ring`/`reset_dirty_pages` on real hardware yet), `shell_into_universe_resumes`,
-    and `restore_refuses_mismatched_cpu` on real hardware (currently only unit-tested at the pure
-    `universe::model_matches` level) are all still open. H6 and the rest of the M-series remain
-    **not yet started**.
+  - **`restore_refuses_mismatched_cpu` now closed on real hardware.** New test
+    `linux::tests::restore_refuses_mismatched_cpu` (`crates/baud-multiverse/src/linux/mod.rs`):
+    boots `hello-guest`, captures a `Universe`, confirms restoring the real unmodified universe
+    onto this exact host succeeds (positive control), then forges `universe.cpu_signature` (flips
+    its low bit — indistinguishable from `restore`'s point of view from a genuine cross-model
+    capture, since the field is opaque data the restore path only compares, never interprets) and
+    asserts `Multiverse::restore` refuses with `RestoreError::Snapshot(CpuMismatch{captured,
+    current})` reporting both the forged and this host's real signature, then that
+    `template_active=true` lets the same mismatched restore proceed. No production code changed —
+    `universe::model_matches`/`linux::restore`'s `CpuMismatch` check/`Multiverse::restore`'s
+    `template_active` plumbing were already fully wired since H5's first slice; only the real-KVM
+    exercise was missing. `cargo test -p baud-multiverse`: 57/57 (was 56/56). `drive/h5.sh` gained
+    a new H5.3 step running this test; H5.1/H5.2 and `drive/h0.sh`-`h4.sh` re-verified with zero
+    regressions. `cargo build/test/clippy --workspace` all green, zero new warnings in any touched
+    file.
+  - **Not yet done** (§10's remaining H5 guarantees): `Snapshot::branch` (userfaultfd CoW
+    branching) is still blocked on a real architecture gap — guest RAM is a private anonymous
+    mapping today, but `UFFDIO_CONTINUE` needs a shared (memfd/hugetlbfs) backing;
+    `thousand_branches_are_independent_and_deterministic`, `reset_cost_scales_with_write_set` (the
+    dirty-ring machinery exists and is wired into `Multiverse` but no test calls
+    `enable_dirty_ring`/`reset_dirty_pages` on real hardware yet — `Multiverse::snapshot`'s
+    returned `Universe::ram` is already the exact `base_ram: &[PageRef]` shape `reset_dirty_pages`
+    needs, so this is a test-writing task, not new plumbing), and `shell_into_universe_resumes`
+    (materially larger: `Console` today wraps a fixed, non-generic `Serial<NoIrqTrigger, NoEvents,
+    Vec<u8>>` with no PTY/EventFd path at all and no CLI/server verb exists — needs a `Console`
+    API change, a new PTY dependency, real interrupt delivery into a live terminal reader, and a
+    new CLI/server surface, not incremental wiring) are all still open. H6 and the rest of the
+    M-series remain **not yet started**.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and
