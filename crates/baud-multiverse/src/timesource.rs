@@ -21,9 +21,12 @@
 
 use baud_vcpu::TimeSource;
 
-pub const MSR_IA32_TSC: u32 = 0x0000_0010;
-pub const MSR_IA32_TSC_DEADLINE: u32 = 0x0000_06E0;
-pub const MSR_IA32_TSC_AUX: u32 = 0xC000_0103;
+// Single source of truth: `baud-snapshot::msr` (this crate depends on `baud-snapshot`, not the
+// reverse, per specs/baud-snapshot.md §2's architecture diagram) — `baud-snapshot`'s restore-order
+// logic needs these same three MSR numbers to sequence `IA32_TSC` before `IA32_TSC_DEADLINE` on
+// restore (specs/baud-snapshot.md §6), so they are defined once there and re-exported here rather
+// than duplicated.
+pub use baud_snapshot::msr::{MSR_IA32_TSC, MSR_IA32_TSC_AUX, MSR_IA32_TSC_DEADLINE};
 
 /// Source of the retired-conditional-branch count the work-clock is a function of. The real
 /// implementation (`linux::LinuxBranchCounter`) wraps a free-running `perf_event_open` counter;

@@ -343,6 +343,7 @@ dependencies = [
  "anyhow",
  "baud-host",
  "baud-proto",
+ "baud-snapshot",
  "baud-tape-device",
  "baud-vcpu",
  "blake3",
@@ -438,6 +439,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "baud-snapshot"
+version = "0.1.0"
+dependencies = [
+ "baud-proto",
+ "blake3",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "proptest",
+ "thiserror 2.0.19",
+ "vm-memory",
+ "vmm-sys-util",
 ]
 
 [[package]]

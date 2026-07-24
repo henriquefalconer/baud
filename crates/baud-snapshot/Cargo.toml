@@ -1,0 +1,28 @@
+[package]
+name = "baud-snapshot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Universe capture/restore, content-addressed CoW branching, the snapshot tree"
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+
+# specs/baud-snapshot.md §2's pinned skeleton deps ("Deps = {kvm-ioctls, vm-memory, userfaultfd,
+# baud-proto}"). Real KVM state-capture code (`src/linux.rs`) is cfg(target_os = "linux")-gated,
+# same pattern as baud-host/baud-vcpu/baud-multiverse: type-checked via `cargo check --target
+# x86_64-unknown-linux-gnu -p baud-snapshot` on this Windows dev machine, not yet exercised
+# against real /dev/kvm (todo.md §14). userfaultfd is NOT pinned here yet — the `userfaultfd`
+# crate's sys bindings need `bindgen`, which needs libclang, which this dev machine does not have
+# even for `cargo check` (its build script runs on the *host*, unlike the crate's own target-gated
+# code) — see `src/linux.rs`'s module doc for the userfaultfd-via-raw-ioctl plan this blocks on.
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.25"
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+vm-memory = { version = "0.18", features = ["backend-mmap", "rawfd"] }
+vmm-sys-util = "0.15"
+
+[dev-dependencies]
+proptest = "1"

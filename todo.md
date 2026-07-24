@@ -583,8 +583,79 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   exists — that is `baud-packages`' job per specs/baud-tape-device.md §2's "guest-side driver
   contract", not started); `TapeBus`/`DeviceBus` wiring is type-check-only on this dev machine,
   same "not yet exercised on real KVM hardware" caveat as the rest of `linux/`.
-- H1-H6 and the rest of the M-series remain **not yet started** beyond the above: `baud-snapshot`,
-  `baud-snapshot-store` crates do not exist yet; no in-guest tape-device driver/shim exists in
+- **`baud-snapshot` (specs/baud-snapshot.md) — hardware-independent core built and unit-tested,
+  plus a real Linux capture/restore backend; branch/reset (userfaultfd/dirty-ring) not yet
+  built.** New crate (`crates/baud-snapshot`, deps = `{baud-proto, kvm-ioctls, kvm-bindings,
+  vm-memory}` — `userfaultfd` deliberately not pinned yet, see below):
+  - `page_store.rs` — `PageStore`/`PageRef`/`PageHash`: content-addressed guest-RAM pages
+    (blake3-hashed, same hash `baud-multiverse::linux::Multiverse::ram_hash` already uses),
+    deduplicated across every universe interned through one store (specs/baud-snapshot.md §4's
+    "per-branch memory ∝ write set" — proven at this layer by `Arc::ptr_eq` identity, not just
+    content equality). Hardware-independent, no KVM at all: 4 tests including a 1,000-universe
+    dedup proof (`a_thousand_mostly_identical_universes_share_the_common_pages`).
+  - `universe.rs` — the enumerated capture set (`Universe`/`VcpuState`/`ClockState`/`DeviceState`,
+    specs/baud-snapshot.md §3), `order_msrs_tsc_first` (§6: "restore `IA32_TSC` before
+    `IA32_TSC_DEADLINE`" — a stable 3-way-rank sort, order-of-input-independent), `restore_plan`
+    (§6's ordered restore sequence: TSC frequency first, RAM before any vCPU-state write, VM clock
+    only after every vCPU-state field, device state last), `model_matches`
+    (`restore_refuses_mismatched_cpu`'s CPU-signature guard), and `dirty_pages` (the *planning*
+    half of §5's "reset cost scales with write-set, not total RAM" — real
+    `KVM_CAP_DIRTY_LOG_RING` bookkeeping is not built yet, but the guarantee that a reset only
+    touches what actually changed is proven here independent of it). 7 tests.
+  - `tree.rs` — `Tree`/`NodeId`: in-memory branch-point bookkeeping (parent/child links,
+    `nearest_ancestor_at_or_before`) so exploration/shrinking can fork from the nearest snapshot
+    instead of the root (§5's `shrink_reproduces_from_nearest_snapshot`, todo.md problem #22). 4
+    tests.
+  - `msr.rs` — `MSR_IA32_TSC`/`_DEADLINE`/`_AUX` moved here as the single source of truth (this
+    crate sits below `baud-multiverse` in the dependency graph per specs/baud-snapshot.md §2's
+    diagram); `baud-multiverse::timesource` now `pub use`s them instead of duplicating the values,
+    and `baud-multiverse`'s `Cargo.toml` gained a `baud-snapshot` path dependency — the first real
+    edge from `baud-multiverse` to this crate, though `capture`/`restore` are not called from
+    `baud-multiverse` yet (that wiring — `Multiverse::snapshot`/`restore`, specs/baud-multiverse.md
+    §6 — is still open).
+  - `linux.rs` (`cfg(target_os = "linux")`) — real `capture`/`restore` functions walking every
+    `KVM_GET_*`/`KVM_SET_*` specs/baud-snapshot.md §3 enumerates (regs/sregs/msrs via
+    `KVM_GET_MSR_INDEX_LIST` + `KVM_GET_MSRS`/`KVM_SET_MSRS`/lapic/xsave (`KVM_GET_XSAVE`, not
+    `KVM_GET_XSAVE2` — see note below/xcrs/vcpu_events/mp_state/`KVM_GET_CLOCK`/`KVM_GET_TSC_KHZ`),
+    plus RAM paged through `page_store`; `restore` walks `universe::restore_plan` literally,
+    step-by-step, and refuses a CPU-model mismatch via `model_matches` before touching anything.
+    Type-checks and clippy-clean against the real crate sources (`cargo check`/`clippy --target
+    x86_64-unknown-linux-gnu -p baud-snapshot`) but **not yet exercised on real KVM hardware** —
+    same caveat as every other `linux/` module (no Linux/KVM host on this dev machine, CLAUDE.md).
+    Uses `KVM_GET_XSAVE`/`KVM_SET_XSAVE` (the fixed 4096-byte struct) rather than the spec's named
+    `KVM_GET_XSAVE2` — sufficient for the minimal single-guest-kernel images baud targets through
+    H5 (no dynamically-enabled AVX-512/AMX XSTATE features in play); switching to XSAVE2 for a
+    guest that needs it is a bounded follow-up, not a redesign (`Xsave`'s FAM-sized allocation is
+    the only new piece).
+  - **Deliberately not built this iteration** (tracked as the next action, not a stub — nothing
+    here pretends to work): userfaultfd-based CoW branching (`Snapshot::branch`) and
+    `KVM_CAP_DIRTY_LOG_RING`-based cheap reset (`Snapshot::reset`), specs/baud-snapshot.md §4-§5.
+    Root cause, discovered this iteration and worth recording so nobody re-derives it: the
+    `userfaultfd` crate's sys bindings (`userfaultfd-sys`) generate their FFI layer with `bindgen`
+    at build time, which needs `libclang` — and a build script always runs on the *host*
+    regardless of `--target`, so even `cargo check --target x86_64-unknown-linux-gnu` for a crate
+    depending on `userfaultfd` fails right here on this Windows box with "Unable to find libclang"
+    (confirmed by fetching the crate into a scratch project and running exactly that check — see
+    `crates/baud-snapshot/src/linux.rs`'s module doc for the two ways forward: install
+    LLVM/libclang here, or hand-roll the handful of needed `UFFDIO_*` ioctls against
+    `libc::syscall(SYS_userfaultfd, ..)` the same way `baud-vcpu::linux::pmu` already hand-rolls
+    `F_SETSIG` instead of pulling in a heavier dependency).
+  - **Verification**: `cargo test -p baud-snapshot` — 15/15 pass natively on this Windows machine
+    (0 KVM/perf needed for any of it); `cargo check`/`clippy --target x86_64-unknown-linux-gnu -p
+    baud-snapshot -p baud-multiverse --all-targets` clean for every new/touched file (0 new
+    warnings — one unused-import warning surfaced mid-iteration and was fixed before this checkpoint,
+    not left in; the only warnings clippy reports across the whole workspace are the same
+    pre-existing ones in `baud-multiverse`'s untouched pre-pivot
+    `lib.rs` and a handful of unrelated crates, already tracked, not this increment's); `cargo
+    build/test --workspace` green (all crates, no regressions, 15 new tests total: `baud-snapshot`
+    didn't exist before this iteration); `drive/h0.sh` and `drive/m0.sh` re-verified passing
+    end-to-end (killing any leftover `baud-server.exe` via PowerShell first, per the established
+    note below).
+- H1-H6 and the rest of the M-series remain **not yet started** beyond the above: `baud-snapshot`
+  is not yet wired into `baud-multiverse`'s boot/run flow (`Multiverse::snapshot`/`restore`, no
+  `PageStore`/tape-device-cursor/console-bytes plumbing exists in `baud-multiverse` yet);
+  `baud-snapshot`'s own branch/reset (userfaultfd/dirty-ring) is open (see above); the
+  `baud-snapshot-store` crate does not exist yet; no in-guest tape-device driver/shim exists in
   `baud-packages` yet.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a

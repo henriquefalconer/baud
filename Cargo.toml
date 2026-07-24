@@ -4,6 +4,7 @@ members = [
     "crates/baud-multiverse",
     "crates/baud-host",
     "crates/baud-vcpu",
+    "crates/baud-snapshot",
     "crates/baud-proto",
     "crates/baud-tape-device",
     "crates/baud-secret",
