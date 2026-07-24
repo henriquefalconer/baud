@@ -1499,3 +1499,7 @@ Post-push verification: git fetch confirms origin/main == local HEAD (51f1db1). 
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 68864
 - est. output cost: $1.0330 (sonnet output rate)
 - exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s

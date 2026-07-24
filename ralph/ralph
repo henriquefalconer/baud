@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
-# ralph — the Ralph Wiggum build loop as a plain shell orchestrator.
+# ralph — the Ralph Wiggum build loop: a dumb orchestrator that spends one clean
+# `claude -p` session per forward step and keeps every scrap of continuity on disk
+# (todo.md, ralph/progress.txt, git history), so a session starts fresh and reads
+# state rather than inheriting it.
 #
-# Same phases as .claude/workflows/ralph-build.js (Build -> Verify -> Fix -> Ship),
-# but every iteration is a real top-level `claude -p` session instead of a workflow
-# subagent. That difference is the whole point: workflow subagents are denied the
-# Agent tool, so ralph/prompt-build.md's "study with multiple Sonnet subagents /
-# use Opus subagents for complex reasoning" steps silently degrade to serial work
-# in one context. A `claude -p` session is top-level and carries the full toolset.
+# Phases:
+#   Build   one session per todo.md item, looping while sessions answer
+#           <promise>NEXT</promise>, until one answers <promise>COMPLETE</promise>
+#   Verify  one session per product domain, exercising the built product for real
+#   Fix     the build loop again, over the findings triaged back into todo.md
+#   Ship    from-scratch setup, README, full verification, end-to-end smoke pass
+#
+# ralph/prompt-build.md is the single tuning surface — it is piped in verbatim with
+# [ralph-iteration] substituted, so editing it steers the very next iteration.
 #
 # TOOL SET — validated 2026-07-24 by asking a live `claude -p ... --chrome` session
-# to enumerate its own tools. The default grant is already complete:
-#   Agent, Workflow, Bash, Read, Edit, Write, Skill, ToolSearch, ScheduleWakeup,
-#   ReportFindings, Cron*, Task*, Monitor, WebFetch, WebSearch, SendMessage,
-#   EnterWorktree/ExitWorktree, NotebookEdit, RemoteTrigger, DesignSync, and all 23
-#   mcp__claude-in-chrome__* tools (computer, navigate, read_page, tabs_*, find,
-#   javascript_tool, read_console_messages, read_network_requests, gif_creator, ...).
-# Nothing was missing, so this script passes NO --tools/--allowedTools filter: any
-# such flag would only ever shrink that set. Do not add one.
-#
-# Continuity lives on disk exactly as in ralph/ralph proper — todo.md,
-# ralph/progress.txt, git history — so each session starts clean and reads state.
+# to enumerate its own tools. The default grant is already complete: Agent, Bash,
+# Read, Edit, Write, Skill, ToolSearch, Task*, Monitor, WebFetch, WebSearch and all
+# 23 mcp__claude-in-chrome__* tools (computer, navigate, read_page, tabs_*, find,
+# javascript_tool, read_console_messages, ...). Nothing was missing, so this script
+# passes NO --tools/--allowedTools filter: any such flag could only ever shrink that
+# set. Do not add one.
 #
 # Usage:  ralph/ralph [options]
 #   -n, --iterations N      max build iterations (0 = unlimited, default 0)
@@ -29,7 +30,6 @@
 #                           (default 2700 = the 45 min prompt-build.md promises; 0 disables)
 #   -b, --budget USD        per-session --max-budget-usd cap
 #   -B, --budget-total USD  stop the whole run once less than $2 of this remains
-#                           (the workflow's budget.remaining() guard, in dollars)
 #       --build-only        stop after the build loop reports COMPLETE
 #   -h, --help
 set -uo pipefail
@@ -103,11 +103,11 @@ promise_of() {
 
 SESSION_N=0
 LAST_JSON=""
-# run_session hands its result back through a FILE, never stdout: callers used to
-# wrap it in $( ), which runs it in a subshell and threw away every variable it
-# set — session numbering reset to 001 each call (colliding transcripts) and the
-# cost ledger always totalled $0. Costs additionally accumulate in a file so the
-# total survives no matter how a caller invokes it.
+# run_session hands its result back through a FILE, never stdout: wrapping it in
+# $( ) would run it in a subshell and discard every variable it sets — session
+# numbering would reset each call and collide transcripts, and the cost ledger
+# would total $0. Costs also accumulate in a file, so the total survives however
+# a caller invokes it.
 RESULT_FILE="$RUNDIR/last-result.txt"
 COST_FILE="$RUNDIR/costs.txt"
 : > "$COST_FILE"
@@ -117,9 +117,8 @@ spent_usd() { # total cost so far, summed from the ledger file
 print(f\"{sum(float(l) for l in open('$COST_FILE') if l.strip()):.6f}\")" 2>/dev/null || echo 0
 }
 
-# The workflow stopped the loop when the run's token target was nearly exhausted
-# (budget.remaining() < 30_000). The shell analogue is dollars: --budget-total.
-# Returns 0 when there is not enough headroom left to start another session.
+# Returns 0 when --budget-total leaves too little headroom to start another
+# session, so the loop can stop cleanly instead of dying mid-iteration.
 budget_exhausted() {
   [[ -z "$BUDGET_TOTAL_USD" ]] && return 1
   python3 -c "
@@ -179,12 +178,10 @@ run_session() {
 }
 
 # ── prompt assembly ──────────────────────────────────────────────────────────
-# prompt-build.md is piped in verbatim (with [ralph-iteration] substituted), the
-# way ghuntley's ralph does it — it stays the single tuning surface.
 
-# Verbatim from the workflow's ENV_NOTE (9fa504a). The exact select: list matters —
-# it is ONE ToolSearch call, not a search. The subagent bullet's "single Sonnet
-# subagent for build/tests" is deliberate backpressure, not a stylistic choice.
+# The exact select: list matters — it is ONE ToolSearch call, not a search. And
+# "a single Sonnet subagent for build/tests" is deliberate backpressure on builds,
+# not a stylistic choice.
 env_note() {
   cat <<'ENVNOTE'
 
@@ -197,7 +194,11 @@ ENVNOTE
 }
 
 build_prompt_file() { # <iter> <extra-context> -> prints path
-  local iter="$1" extra="$2" f="$RUNDIR/prompt-build-$iter.txt"
+  # Split, not one `local`: bash expands every word of a `local` line before the
+  # builtin assigns any of them, so a later word referring to an earlier one is
+  # unbound under `set -u`.
+  local iter="$1" extra="$2" f
+  f="$RUNDIR/prompt-build-$iter.txt"
   sed "s/\[ralph-iteration\]/$iter/g" ralph/prompt-build.md > "$f"
   {
     printf '\n\n## Orchestrator notes (these refine, never override, the instructions above)\n'
@@ -321,8 +322,8 @@ PROMPT
 Triage the verification findings in $FIND_DIR/*.md into todo.md as new pending items — blockers
 first, then major, then minor; each scoped to about one build iteration, each keeping its spec
 citation and repro notes. Follow the todo format rules in ralph/prompt-plan.md section 3.
-Deduplicate findings that different domains reported about the same defect (the workflow edition
-did this in code, keyed on spec-citation + title; here it is your job).
+Deduplicate findings that different domains reported about the same defect, keyed on
+spec-citation plus title.
 Do NOT implement any fix. Then append a short progress note to $PROGRESS, run git add -A, commit
 with message "triage: verification round $round findings", and git push.
 PROMPT
@@ -377,8 +378,7 @@ TOTAL_COST="$(spent_usd)"
 } >> "$PROGRESS"
 say "run totals: $SESSION_N session(s), \$$TOTAL_COST"
 
-# The workflow committed and pushed its run-totals entry; do the same so the
-# ledger is never left sitting uncommitted in the working tree.
+# Commit the ledger so it is never left sitting uncommitted in the working tree.
 git add -A && git commit -q -m "ralph: run totals" && git push -q \
   && say "run totals committed and pushed" \
   || say "run totals written to $PROGRESS but not committed (nothing to commit, or push failed)"
