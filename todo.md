@@ -539,8 +539,53 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
       own "not yet validated on real KVM hardware" caveat blocks the same way and should be closed
       at the same time (same missing host). Once that lands: `drive/h1.sh` per §10 ("boot the hello
       image, assert expected console output; `double_boot_memory_identical` passes").
-- H1-H6 and the rest of the M-series remain **not yet started**: `baud-tape-device`,
-  `baud-snapshot`, `baud-snapshot-store` crates do not exist yet.
+- **`baud-tape-device` (specs/baud-tape-device.md) — built and wired into `baud-multiverse`'s
+  device bus.** New crate (`crates/baud-tape-device`, deps = `{baud-proto}` only, matching the
+  spec's §2 rationale): `TapeDevice` — a pure function of the tape bytes and the guest's own
+  register writes (`pio_read(off)`/`pio_write(off,b)` at `reg::DATA`/`CONTROL`/`STATUS` per §3),
+  `ControlOp` (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`, §4), and `drain_records() ->
+  Vec<Msg>`. Hardware-independent, no KVM/perf needed: 18 unit/property tests on this Windows
+  machine, including the spec's own named tests (`all_input_is_tape_derived`,
+  `read_past_end_is_fixed`) translated onto this crate's pure device model, plus a 128-op proptest
+  fuzz (`arbitrary_register_traffic_never_panics`) asserting arbitrary guest register traffic never
+  panics the device (may legitimately report `OpcodeResult::MalformedPayload`/`UnknownOpcode`).
+  Extended `baud-proto`'s `Msg` enum with two new variants the tape device's control opcodes need
+  and no existing message fit (`MarkBranch { step }` for `MARK_BRANCH`, `Log { bytes, step }` for
+  `LOG`) — additive, not a breaking wire change (existing golden vectors unaffected; new
+  roundtrip/proptest coverage added), and mirrored into `specs/baud-proto.md` §5 so the wire
+  schema doc stays the single source of truth. `PROBE`'s outbound-buffer wire format (key-length
+  byte + key bytes + opaque value bytes) is this crate's own implementation choice — the spec
+  names the opcode's meaning but not a byte layout, documented inline in `parse_probe`'s doc
+  comment. **Wired into `baud-multiverse`** (`crates/baud-multiverse/src/tape_bus.rs`, new,
+  hardware-independent — same split as `console.rs`): `TapeBus` adapts `TapeDevice`'s per-byte API
+  onto `baud_vcpu::Bus`'s slice-based PIO interface at a fixed port window (`TAPE_DEVICE_BASE =
+  0x0500`, chosen to avoid `console::COM1_BASE`'s 0x3f8-0x3ff range); `console::DeviceBus` gained a
+  `tape: TapeBus` field routed ahead of the `OpenBusFallback` catch-all (todo.md §3.6's subtractive
+  rule: "down to a console plus the tape device" — now both are actually on the bus). `linux::
+  Multiverse::boot` now takes the run's `tape: Vec<u8>` directly and seeds `DeviceBus::with_tape`
+  with it (`DeviceBus::with_tape` added because `DeviceBus`'s `fallback` field is private to
+  `console.rs` — struct-update syntax from `linux/mod.rs` couldn't construct it directly); a new
+  `Multiverse::drain_tape_records()` exposes what the guest emitted after a run. This closes the
+  "tape-device-driven `run(tape: impl TapeSource)` signature still needs `baud-tape-device`" gap
+  called out in iteration 4's notes below (the shape differs slightly from the spec's — `boot`
+  takes the tape directly since there is exactly one run per `Multiverse` today; re-running the
+  same booted guest against a different tape is `baud-driver`'s eventual job, not built yet).
+  **Verification**: `cargo test -p baud-proto -p baud-tape-device -p baud-multiverse` — 12+18+33 =
+  63 tests pass (18 new in `baud-tape-device`, 5 new `tape_bus` tests + 2 new/extended `console`
+  tests in `baud-multiverse`, 2 new roundtrip tests in `baud-proto`); `cargo check`/`clippy
+  --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean for the `tape_bus`
+  module and the updated `linux/mod.rs` (0 new warnings — the pre-existing warnings are all in
+  `lib.rs`'s untouched pre-pivot simulation code, same as every prior iteration); `cargo
+  build/test/clippy --workspace` all green, 0 regressions; `drive/h0.sh` and `drive/m0.sh` both
+  re-verified passing end-to-end (stale-server port-7734 environmental issue avoided this time by
+  killing any leftover `baud-server.exe` via PowerShell before each run, per the note below).
+  **Not yet done**: no real guest ever writes to this port range yet (no in-guest driver/shim
+  exists — that is `baud-packages`' job per specs/baud-tape-device.md §2's "guest-side driver
+  contract", not started); `TapeBus`/`DeviceBus` wiring is type-check-only on this dev machine,
+  same "not yet exercised on real KVM hardware" caveat as the rest of `linux/`.
+- H1-H6 and the rest of the M-series remain **not yet started** beyond the above: `baud-snapshot`,
+  `baud-snapshot-store` crates do not exist yet; no in-guest tape-device driver/shim exists in
+  `baud-packages` yet.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a
   drive script's `trap cleanup EXIT` → `kill "$SERVER_PID"` does not reliably terminate the

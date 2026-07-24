@@ -1133,3 +1133,40 @@ Re-ran drive/h0.sh and drive/m0.sh to verify end-to-end. First attempts raced/fa
 Finding most important item to address: studying todo.md build-status (§14), specs/*, and recent commits to decide between (a) attempting to unblock real KVM validation via a WSL2 Ubuntu distro with nested virt (flagged as the 'Next build action' across iterations 3-4), or (b) continuing additive baud-multiverse/baud-vcpu build work (tape device, snapshot crate)...
 
 Decided against attempting a WSL2/nested-KVM install this iteration: systeminfo shows this Windows box already runs inside a hypervisor ('A hypervisor has been detected' — Hyper-V requirements check skipped), so a WSL2 guest's own nested-KVM would depend on nested-virt being exposed by the *outer* host to this VM, which is outside this session's control and unverifiable without first burning the iteration on an install that may still report /dev/kvm absent — matches CLAUDE.md's existing documented constraint. Picked a concrete, testable, additive forward step instead: build the baud-tape-device crate (specs/baud-tape-device.md) — the last major crate needed to complete H2's tape story (todo.md §3.5/§3.6, 'down to a console plus the tape device') and the sole nondeterministic-input channel per the spec matrix (#21 all_input_is_tape_derived). It's the P of Q: hardware-independent (deps={baud-proto} only per the spec), unit-testable on this Windows machine with no KVM at all, and follows the same proven pattern as cpuid.rs/layout.rs/console.rs from the last two iterations.
+
+Verified end-to-end: cargo test -p baud-proto -p baud-tape-device -p baud-multiverse (63 tests, 0 failures); cargo build/test/clippy --workspace (all green, 0 new warnings); cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets (clean, 0 new warnings, caught a real private-field access bug — DeviceBus::with_tape added to fix it); drive/h0.sh and drive/m0.sh both re-verified passing end-to-end after killing a leftover baud-server.exe from a prior run. Updated todo.md §14 and specs/baud-proto.md (the two new Msg variants). Committing and pushing now.
+
+## 2026-07-24T15:25:00 UTC - Changes committed.
+- What was implemented: the `baud-tape-device` crate (specs/baud-tape-device.md) — the guest's
+  sole nondeterministic-input channel — built and wired onto `baud-multiverse`'s device bus.
+- Files changed:
+  - crates/baud-tape-device/{Cargo.toml,src/lib.rs,src/tests.rs} (new crate)
+  - crates/baud-multiverse/src/tape_bus.rs (new — Bus adapter)
+  - crates/baud-multiverse/src/{console.rs,lib.rs,linux/mod.rs,Cargo.toml} (DeviceBus gains a
+    tape field + DeviceBus::with_tape; Multiverse::boot takes the run's tape; drain_tape_records)
+  - crates/baud-proto/src/lib.rs (Msg::MarkBranch, Msg::Log — new wire variants)
+  - specs/baud-proto.md (mirrors the two new Msg variants)
+  - Cargo.toml, Cargo.lock (new workspace member)
+  - todo.md (§14 build-status entry for this increment)
+- **Brief description of changes:**
+  - `baud-tape-device`: `TapeDevice` implements specs/baud-tape-device.md §3's exact register API
+    (`pio_read(off)`/`pio_write(off,b)` at DATA/CONTROL/STATUS) and §4's five control opcodes
+    (PROBE/MARK_BRANCH/GOAL/VIOLATION/LOG), each finalizing the outbound buffer into a
+    `baud_proto::Msg` via `drain_records()`. Reads past end-of-tape return a fixed sentinel
+    (0xFF), never host memory. Hardware-independent (deps = {baud-proto} only) — 18 tests
+    including the spec's own named tests (`all_input_is_tape_derived`, `read_past_end_is_fixed`)
+    and a proptest fuzz asserting arbitrary register traffic never panics.
+  - `baud-proto`: added `Msg::MarkBranch { step }` and `Msg::Log { bytes, step }` — additive wire
+    variants the tape device's MARK_BRANCH/LOG opcodes needed and no existing variant fit;
+    existing golden vectors unaffected, new roundtrip + proptest-generator coverage added.
+  - `baud-multiverse`: `tape_bus::TapeBus` adapts `TapeDevice` onto `baud_vcpu::Bus` at a fixed
+    port window (0x0500, outside COM1's 0x3f8-0x3ff); `console::DeviceBus` now composes
+    console + tape + open-bus fallback (todo.md §3.6: "down to a console plus the tape device");
+    `linux::Multiverse::boot` takes the run's tape directly and `drain_tape_records()` exposes
+    what the guest emitted. The Linux cross-target check caught a real bug (private-field access
+    across modules), fixed with `DeviceBus::with_tape`.
+- Verification: `cargo test -p baud-proto -p baud-tape-device -p baud-multiverse` (63 tests,
+  0 failures, 24 new); `cargo build/test/clippy --workspace` all green, 0 new warnings; `cargo
+  check`/`clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean for
+  every touched/new file; `drive/h0.sh` and `drive/m0.sh` both re-verified passing end-to-end.
+---

@@ -9,6 +9,7 @@ description = "Deterministic supervisor for baud guest processes"
 baud-proto = { path = "../baud-proto" }
 baud-vcpu = { path = "../baud-vcpu" }
 baud-host = { path = "../baud-host" }
+baud-tape-device = { path = "../baud-tape-device" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

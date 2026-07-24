@@ -5,6 +5,7 @@ members = [
     "crates/baud-host",
     "crates/baud-vcpu",
     "crates/baud-proto",
+    "crates/baud-tape-device",
     "crates/baud-secret",
     "crates/baud-keys",
     "crates/baud-server",

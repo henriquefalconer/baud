@@ -390,6 +390,21 @@ pub enum Msg {
         step: u64,
     },
     Outcome(Outcome),
+    /// A guest-requested branch point (specs/baud-tape-device.md §4's `MARK_BRANCH` opcode): the
+    /// VMM forwards this so `baud-snapshot`'s tree can capture a universe here. `step` is the
+    /// tape cursor at the moment of the request, not a wall-clock or virtual-TSC value (baud-proto
+    /// rule: time = u64 virtual steps).
+    MarkBranch {
+        step: u64,
+    },
+    /// A guest log line (specs/baud-tape-device.md §4's `LOG` opcode) — opaque bytes, not
+    /// necessarily UTF-8, carried out through the tape device's write channel alongside probes and
+    /// outcomes.
+    Log {
+        #[serde(deserialize_with = "bounded::bytes")]
+        bytes: Vec<u8>,
+        step: u64,
+    },
     Eof,
 }
 
@@ -618,6 +633,12 @@ mod tests {
                 (arb_hash(), 0u64..).prop_map(|(stream_hash, step)| {
                     Msg::Checkpoint { stream_hash, step }
                 }),
+                // MarkBranch
+                (0u64..).prop_map(|step| Msg::MarkBranch { step }),
+                // Log
+                (prop::collection::vec(0u8.., 0..64), 0u64..).prop_map(|(bytes, step)| {
+                    Msg::Log { bytes, step }
+                }),
             ]
         }
 
@@ -760,6 +781,16 @@ mod tests {
     #[test]
     fn eof_roundtrip() {
         roundtrip(Msg::Eof);
+    }
+
+    #[test]
+    fn mark_branch_roundtrip() {
+        roundtrip(Msg::MarkBranch { step: 42 });
+    }
+
+    #[test]
+    fn log_roundtrip() {
+        roundtrip(Msg::Log { bytes: b"guest log line".to_vec(), step: 7 });
     }
 
     #[test]

@@ -343,6 +343,7 @@ dependencies = [
  "anyhow",
  "baud-host",
  "baud-proto",
+ "baud-tape-device",
  "baud-vcpu",
  "blake3",
  "kvm-bindings",
@@ -489,6 +490,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "baud-tape-device"
+version = "0.1.0"
+dependencies = [
+ "baud-proto",
+ "proptest",
 ]
 
 [[package]]

@@ -125,6 +125,8 @@ enum Msg {
     Frame(FrameRecord),
     Checkpoint { stream_hash: Hash, step: u64 },
     Outcome(Outcome),
+    MarkBranch { step: u64 },       // guest-requested branch point (baud-tape-device MARK_BRANCH)
+    Log { bytes: Vec<u8>, step: u64 }, // guest log line (baud-tape-device LOG)
     Eof,
 }
 ```

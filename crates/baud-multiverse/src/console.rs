@@ -15,6 +15,7 @@
 // hardware-independent and runs on this Windows dev machine with no KVM/perf, the same pattern
 // `cpuid.rs`/`layout.rs`/`baud-vcpu`'s `boundary.rs` use.
 
+use crate::tape_bus::TapeBus;
 use baud_vcpu::{Bus, OpenBusFallback, OPEN_BUS_BYTE};
 use std::cell::Cell;
 use std::convert::Infallible;
@@ -121,18 +122,33 @@ impl Bus for Console {
     fn mmio_write(&mut self, _addr: u64, _data: &[u8]) {}
 }
 
-/// Composes [`Console`] (COM1) with [`OpenBusFallback`] for every other address — the device bus
-/// the boot flow's run loop dispatches every exit through (`linux::Multiverse`).
+/// Composes [`Console`] (COM1) and [`TapeBus`] (the tape device, specs/baud-tape-device.md) with
+/// [`OpenBusFallback`] for every other address — the device bus the boot flow's run loop
+/// dispatches every exit through (`linux::Multiverse`). Matches todo.md §3.6's subtractive rule:
+/// "down to a console plus the tape device."
 #[derive(Default)]
 pub struct DeviceBus {
     pub console: Console,
+    pub tape: TapeBus,
     fallback: OpenBusFallback,
+}
+
+impl DeviceBus {
+    /// A [`DeviceBus`] whose tape device is seeded with `tape` — the constructor
+    /// `linux::Multiverse::boot` uses, since [`DeviceBus`]'s `fallback` field is private to this
+    /// module (struct-update syntax like `DeviceBus { tape, ..Default::default() }` cannot be used
+    /// from outside `console.rs`).
+    pub fn with_tape(tape: Vec<u8>) -> Self {
+        DeviceBus { tape: TapeBus::new(tape), ..Default::default() }
+    }
 }
 
 impl Bus for DeviceBus {
     fn pio_read(&mut self, port: u16, data: &mut [u8]) {
         if Console::in_range(port).is_some() {
             self.console.pio_read(port, data);
+        } else if TapeBus::in_range(port).is_some() {
+            self.tape.pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -141,6 +157,8 @@ impl Bus for DeviceBus {
     fn pio_write(&mut self, port: u16, data: &[u8]) {
         if Console::in_range(port).is_some() {
             self.console.pio_write(port, data);
+        } else if TapeBus::in_range(port).is_some() {
+            self.tape.pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }
@@ -196,8 +214,22 @@ mod tests {
         assert_eq!(mmio_data, [OPEN_BUS_BYTE; 4]);
 
         let mut other_port = [0u8; 1];
-        bus.pio_read(0x80, &mut other_port); // POST diagnostic port, not COM1
+        bus.pio_read(0x80, &mut other_port); // POST diagnostic port, not COM1 or the tape device
         assert_eq!(other_port, [OPEN_BUS_BYTE]);
+    }
+
+    #[test]
+    fn device_bus_routes_the_tape_device_window_to_the_tape_bus_not_open_bus() {
+        use crate::tape_bus::{TapeBus, TAPE_DEVICE_BASE};
+        use baud_tape_device::{reg, ControlOp};
+
+        let mut bus = DeviceBus { tape: TapeBus::new(vec![0x42]), ..Default::default() };
+        let mut data = [0u8; 1];
+        bus.pio_read(TAPE_DEVICE_BASE + reg::DATA, &mut data);
+        assert_eq!(data, [0x42], "tape device window must not fall through to open-bus");
+
+        bus.pio_write(TAPE_DEVICE_BASE + reg::CONTROL, &[ControlOp::MarkBranch as u8]);
+        assert_eq!(bus.tape.device_mut().drain_records().len(), 1);
     }
 
     #[test]

@@ -251,14 +251,16 @@ impl BranchCounter for LinuxBranchCounter {
 
 /// The wiring point specs/baud-multiverse.md §6's API targets for H1 ("boot a guest, print to the
 /// serial console, clean Hlt/Shutdown"). `snapshot`/`restore` are not implemented here yet — they
-/// depend on `baud-snapshot` (todo.md §14: "H1-H6 ... baud-snapshot ... crates do not exist yet"),
-/// and the tape-device-driven `run(tape: impl TapeSource)` signature depends on `baud-tape-device`,
-/// also not yet built (H2/§3.5). What exists here is exactly what H1 needs and no more: [`boot`]
-/// runs the full [`boot_guest`] boot flow plus the work-clock/console device wiring, and
-/// [`run_to_first_halt`] drives it to the guest's first `Hlt`/`Shutdown` and returns the console
-/// output plus a blake3 hash of guest RAM — `boot(...).ram_hash_at_first_hlt()` from specs/
-/// baud-multiverse.md §8's `double_boot_memory_identical` pseudocode, on the real boot flow instead
-/// of that pseudocode's placeholder.
+/// depend on `baud-snapshot` (todo.md §14: "H1-H6 ... baud-snapshot ... crates do not exist yet").
+/// The tape device (`baud-tape-device`, H2/§3.5) IS wired in now (`DeviceBus::tape`,
+/// `crate::tape_bus::TapeBus`) — [`boot`] takes the run's tape bytes directly rather than the
+/// spec's `run(tape: impl TapeSource)` shape, since there is exactly one run per `Multiverse`
+/// here (no re-run-with-a-different-tape use case yet; that is `baud-driver`'s job once it exists).
+/// [`boot`] runs the full [`boot_guest`] boot flow plus the work-clock/console/tape device wiring,
+/// and [`run_to_first_halt`] drives it to the guest's first `Hlt`/`Shutdown` and returns the
+/// console output plus a blake3 hash of guest RAM — `boot(...).ram_hash_at_first_hlt()` from
+/// specs/baud-multiverse.md §8's `double_boot_memory_identical` pseudocode, on the real boot flow
+/// instead of that pseudocode's placeholder.
 ///
 /// [`boot`]: Multiverse::boot
 /// [`run_to_first_halt`]: Multiverse::run_to_first_halt
@@ -279,13 +281,22 @@ pub struct HaltOutcome {
 
 impl Multiverse {
     /// Run [`boot_guest`] and wire up the work-clock (`base + k * rcb`, specs/baud-multiverse.md
-    /// §4) and console device the run loop needs. `base` is normally `0` (a guest booting at
-    /// virtual time zero); `k` scales RCB into a plausible Hz range for the guest's own clock
-    /// arithmetic to work with sane-looking values.
-    pub fn boot(kernel_path: &Path, cmdline: &str, base: u64, k: u64) -> Result<Self, BootError> {
+    /// §4), console, and tape (specs/baud-tape-device.md) devices the run loop needs. `base` is
+    /// normally `0` (a guest booting at virtual time zero); `k` scales RCB into a plausible Hz
+    /// range for the guest's own clock arithmetic to work with sane-looking values. `tape` is the
+    /// run's entire nondeterministic-input budget — the sole source the tape device serves
+    /// (specs/baud-tape-device.md §5), fixed for this `Multiverse`'s whole lifetime.
+    pub fn boot(
+        kernel_path: &Path,
+        cmdline: &str,
+        base: u64,
+        k: u64,
+        tape: Vec<u8>,
+    ) -> Result<Self, BootError> {
         let guest = boot_guest(kernel_path, cmdline)?;
         let counter = LinuxBranchCounter::new()?;
-        Ok(Multiverse { guest, bus: DeviceBus::default(), time: WorkClock::new(base, k, counter) })
+        let bus = DeviceBus::with_tape(tape);
+        Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter) })
     }
 
     /// Drive the run loop to the guest's first `Hlt`/`Shutdown` (specs/baud-multiverse.md §8's
@@ -296,6 +307,14 @@ impl Multiverse {
     pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, DeterminismHole> {
         baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
         Ok(HaltOutcome { console_output: self.bus.console.output().to_vec(), ram_hash: self.ram_hash() })
+    }
+
+    /// Every tape-device record (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`,
+    /// specs/baud-tape-device.md §4) the guest has emitted and not yet drained. Callers typically
+    /// call this after [`run_to_first_halt`](Self::run_to_first_halt) to collect what the guest
+    /// reported before it halted.
+    pub fn drain_tape_records(&mut self) -> Vec<baud_proto::Msg> {
+        self.bus.tape.device_mut().drain_records()
     }
 
     /// blake3 of every byte of guest RAM, read in fixed-size chunks so this never needs to

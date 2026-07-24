@@ -1,0 +1,12 @@
+[package]
+name = "baud-tape-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The paravirtual tape device: the guest's sole nondeterministic-input channel (specs/baud-tape-device.md)"
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+
+[dev-dependencies]
+proptest = "1"

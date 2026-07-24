@@ -32,6 +32,7 @@
 pub mod console;
 pub mod cpuid;
 pub mod layout;
+pub mod tape_bus;
 pub mod timesource;
 
 #[cfg(target_os = "linux")]
