@@ -45,3 +45,6 @@ keys.txt
 .idea/
 .vscode/
 .zed/
+
+# ralph shell-loop run artifacts (session JSON, assembled prompts, findings)
+ralph/.run/

@@ -19,33 +19,17 @@
 //   Launch the interactive session with:  claude --dangerously-skip-permissions --chrome
 //   Agents inherit the session's permission mode and reach the claude-in-chrome
 //   MCP tools via ToolSearch for browser + computer use.
-//
-//   The --chrome half is REAL and load-bearing: measured 2026-07-24 from a
-//   session started as plain `claude --dangerously-skip-permissions`, both a
-//   general-purpose and a default workflow subagent got "No matching deferred
-//   tools found" for every mcp__claude-in-chrome__* name, i.e. NO browser and NO
-//   computer-use tool anywhere. That is a launch-flag gap, not a workflow
-//   restriction — subagents only ever inherit MCP servers the parent session
-//   actually connected. Without --chrome the Verify/Ship phases silently
-//   degrade to CLI + HTTP checks (fine for this repo, whose surface is a CLI and
-//   an HTTP server, but it is NOT the Chrome E2E the phase names promise).
+//   Subagents only inherit MCP servers the parent session connected, so without
+//   --chrome the Verify/Ship phases fall back to CLI + HTTP checks.
 //
 // TOOLING: every agent here is spawned as the `general-purpose` subagent type
 // (tool grant `*`) — the maximum grant a workflow can request. Spawn everything
 // through `spawn()` below, never `agent()` directly.
 //
-//   Known limit, measured 2026-07-24, not fixable from this file: workflow
-//   subagents do NOT get the Agent (subagent-spawn) tool, under ANY agentType.
-//   A probe run comparing `general-purpose` against the workflow default
-//   returned byte-identical toolsets, neither containing Agent — `*` is
-//   intersected with a harness allowlist that withholds it (same rule as
-//   "workflow() nesting is one level only"). So ralph/prompt-build.md steps 0a
-//   and 1 ("study specs with multiple Sonnet subagents", "search with Sonnet
-//   subagents", "Opus subagents for complex reasoning") are UNEXECUTABLE inside
-//   this workflow; iterations do that work serially in one context and say so
-//   in ralph/progress.txt ("No Agent/Task-spawn tool is present..."). The real
-//   fan-out lever here is the orchestrator itself — parallel()/pipeline() in
-//   this script — not nested subagents inside a build session.
+//   Workflow subagents cannot spawn their own subagents, so prompt-build.md's
+//   Sonnet/Opus subagent steps do not fan out here — iterations run them serially
+//   in one context. For a run where they must actually fan out, use `ralph/ralph`
+//   (the shell loop): its `claude -p` sessions are top-level and carry Agent.
 //
 // Invoke:  Workflow {name: "ralph-build"}   or ask: "run the ralph-build workflow"
 // Args (all optional):

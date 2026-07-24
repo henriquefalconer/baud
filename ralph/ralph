@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# ralph — the Ralph Wiggum build loop as a plain shell orchestrator.
+#
+# Same phases as .claude/workflows/ralph-build.js (Build -> Verify -> Fix -> Ship),
+# but every iteration is a real top-level `claude -p` session instead of a workflow
+# subagent. That difference is the whole point: workflow subagents are denied the
+# Agent tool, so ralph/prompt-build.md's "study with multiple Sonnet subagents /
+# use Opus subagents for complex reasoning" steps silently degrade to serial work
+# in one context. A `claude -p` session is top-level and carries the full toolset.
+#
+# TOOL SET — validated 2026-07-24 by asking a live `claude -p ... --chrome` session
+# to enumerate its own tools. The default grant is already complete:
+#   Agent, Workflow, Bash, Read, Edit, Write, Skill, ToolSearch, ScheduleWakeup,
+#   ReportFindings, Cron*, Task*, Monitor, WebFetch, WebSearch, SendMessage,
+#   EnterWorktree/ExitWorktree, NotebookEdit, RemoteTrigger, DesignSync, and all 23
+#   mcp__claude-in-chrome__* tools (computer, navigate, read_page, tabs_*, find,
+#   javascript_tool, read_console_messages, read_network_requests, gif_creator, ...).
+# Nothing was missing, so this script passes NO --tools/--allowedTools filter: any
+# such flag would only ever shrink that set. Do not add one.
+#
+# Continuity lives on disk exactly as in ralph/ralph proper — todo.md,
+# ralph/progress.txt, git history — so each session starts clean and reads state.
+#
+# Usage:  ralph/ralph [options]
+#   -n, --iterations N      max build iterations (0 = unlimited, default 0)
+#   -r, --verify-rounds N   max verify->fix rounds (0 = until clean, default 10)
+#   -m, --model M           model alias for every session (default sonnet)
+#   -w, --watchdog SECS     kill a session after SECS with no progress.txt append
+#                           (default 2700 = the 45 min prompt-build.md promises; 0 disables)
+#   -b, --budget USD        per-session --max-budget-usd cap
+#   -B, --budget-total USD  stop the whole run once less than $2 of this remains
+#                           (the workflow's budget.remaining() guard, in dollars)
+#       --build-only        stop after the build loop reports COMPLETE
+#   -h, --help
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT" || exit 1
+
+PROGRESS="ralph/progress.txt"
+RUNDIR="ralph/.run"
+MODEL="${RALPH_MODEL:-sonnet}"
+MAX_ITER="${RALPH_MAX_ITER:-0}"
+VERIFY_ROUNDS="${RALPH_VERIFY_ROUNDS:-10}"
+WATCHDOG="${RALPH_WATCHDOG_SECS:-2700}"
+BUDGET_USD="${RALPH_MAX_BUDGET_USD:-}"
+BUDGET_TOTAL_USD="${RALPH_BUDGET_TOTAL_USD:-}"
+BUDGET_RESERVE_USD="${RALPH_BUDGET_RESERVE_USD:-2.00}"
+BUILD_ONLY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--iterations)     MAX_ITER="$2"; shift 2 ;;
+    -r|--verify-rounds)  VERIFY_ROUNDS="$2"; shift 2 ;;
+    -m|--model)          MODEL="$2"; shift 2 ;;
+    -w|--watchdog)       WATCHDOG="$2"; shift 2 ;;
+    -b|--budget)         BUDGET_USD="$2"; shift 2 ;;
+    -B|--budget-total)   BUDGET_TOTAL_USD="$2"; shift 2 ;;
+    --build-only)        BUILD_ONLY=1; shift ;;
+    -h|--help)           sed -n '2,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "ralph: unknown option $1 (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+command -v claude  >/dev/null || { echo "ralph: claude CLI not on PATH" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "ralph: python3 required (no jq on this box)" >&2; exit 1; }
+[[ -f ralph/prompt-build.md ]] || { echo "ralph: ralph/prompt-build.md missing" >&2; exit 1; }
+mkdir -p "$RUNDIR"
+touch "$PROGRESS"
+git rev-parse --abbrev-ref HEAD > ralph/.last-branch 2>/dev/null || true
+
+CLAUDE_ARGS=( -p --dangerously-skip-permissions --chrome --model "$MODEL" --output-format json )
+[[ -n "$BUDGET_USD" ]] && CLAUDE_ARGS+=( --max-budget-usd "$BUDGET_USD" )
+
+# ── small helpers ────────────────────────────────────────────────────────────
+
+say()  { printf '[ralph %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+note() { printf '\n%s\n' "$*" >> "$PROGRESS"; }
+
+# jsonfield <file> <dotted.path> — python3 stands in for jq, which is absent here.
+jsonfield() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+for k in sys.argv[2].split('.'):
+    if isinstance(d, dict) and k in d:
+        d = d[k]
+    else:
+        sys.exit(1)
+print(d if not isinstance(d, (dict, list)) else json.dumps(d))
+PY
+}
+
+promise_of() {
+  grep -oE '<promise>(NEXT|COMPLETE)</promise>' <<<"${1:-}" | tail -1 |
+    sed -E 's#</?promise>##g'
+}
+
+# ── session runner: one `claude -p`, watchdogged on progress.txt liveness ────
+
+SESSION_N=0
+LAST_JSON=""
+# run_session hands its result back through a FILE, never stdout: callers used to
+# wrap it in $( ), which runs it in a subshell and threw away every variable it
+# set — session numbering reset to 001 each call (colliding transcripts) and the
+# cost ledger always totalled $0. Costs additionally accumulate in a file so the
+# total survives no matter how a caller invokes it.
+RESULT_FILE="$RUNDIR/last-result.txt"
+COST_FILE="$RUNDIR/costs.txt"
+: > "$COST_FILE"
+
+spent_usd() { # total cost so far, summed from the ledger file
+  python3 -c "
+print(f\"{sum(float(l) for l in open('$COST_FILE') if l.strip()):.6f}\")" 2>/dev/null || echo 0
+}
+
+# The workflow stopped the loop when the run's token target was nearly exhausted
+# (budget.remaining() < 30_000). The shell analogue is dollars: --budget-total.
+# Returns 0 when there is not enough headroom left to start another session.
+budget_exhausted() {
+  [[ -z "$BUDGET_TOTAL_USD" ]] && return 1
+  python3 -c "
+import sys
+spent = sum(float(l) for l in open('$COST_FILE') if l.strip())
+sys.exit(0 if (float('$BUDGET_TOTAL_USD') - spent) < float('$BUDGET_RESERVE_USD') else 1)"
+}
+
+watchdog() { # <pid> <label>
+  local pid="$1" label="$2" start last now idle
+  start=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 30
+    kill -0 "$pid" 2>/dev/null || return 0
+    [[ "$WATCHDOG" -le 0 ]] && continue
+    last=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo "$start")
+    (( last < start )) && last=$start
+    now=$(date +%s); idle=$(( now - last ))
+    if (( idle > WATCHDOG )); then
+      say "watchdog: no $PROGRESS append in ${idle}s — terminating [$label]"
+      note "[ralph watchdog] no progress append in ${idle}s — session [$label] SIGTERMed mid-work."
+      kill -TERM "$pid" 2>/dev/null; sleep 20; kill -KILL "$pid" 2>/dev/null
+      return 1
+    fi
+  done
+}
+
+log_usage() { # <label> <json-file>
+  local label="$1" f="$2" cost turns
+  cost=$(jsonfield "$f" total_cost_usd 2>/dev/null || echo "")
+  turns=$(jsonfield "$f" num_turns 2>/dev/null || echo "")
+  [[ -z "$cost" ]] && return 0
+  {
+    printf '\n## %s UTC - Session usage — %s [%s]\n' "$(date -u +%Y-%m-%dT%H:%M:%S)" "$label" "$MODEL"
+    printf -- '- cost (exact, from claude -p): $%s over %s turn(s)\n' "$cost" "${turns:-?}"
+    printf -- '- transcript: %s\n' "$f"
+  } >> "$PROGRESS"
+  printf '%s\n' "$cost" >> "$COST_FILE"
+}
+
+# run_session <label> <prompt-file> — writes the session's final text to
+# $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
+run_session() {
+  local label="$1" pf="$2" out rc pid
+  SESSION_N=$((SESSION_N + 1))
+  out="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.json"
+  LAST_JSON="$out"
+  say "session $SESSION_N [$label] starting (model=$MODEL)"
+  claude "${CLAUDE_ARGS[@]}" < "$pf" > "$out" 2> "$out.err" &
+  pid=$!
+  watchdog "$pid" "$label"
+  wait "$pid"; rc=$?
+  log_usage "$label" "$out"
+  (( rc != 0 )) && say "session [$label] exited rc=$rc — see $out.err"
+  jsonfield "$out" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
+  return 0
+}
+
+# ── prompt assembly ──────────────────────────────────────────────────────────
+# prompt-build.md is piped in verbatim (with [ralph-iteration] substituted), the
+# way ghuntley's ralph does it — it stays the single tuning surface.
+
+# Verbatim from the workflow's ENV_NOTE (9fa504a). The exact select: list matters —
+# it is ONE ToolSearch call, not a search. The subagent bullet's "single Sonnet
+# subagent for build/tests" is deliberate backpressure, not a stylistic choice.
+env_note() {
+  cat <<'ENVNOTE'
+
+## Environment
+- Repo: the current working directory. Stack per the specs and CLAUDE.md.
+- You run with full permissions (--dangerously-skip-permissions) and Chrome attached (--chrome).
+- Browser/computer use: when verifying user-facing or HTTP behavior, load the browser tools in ONE ToolSearch call ("select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__tabs_create_mcp") and drive the app in a real tab; use the computer tool for screenshots/clicks as needed. Create new tabs; never reuse old tab IDs.
+- Use subagents (Agent tool) as your prompt instructs: parallel Sonnet subagents for study/searches, a single Sonnet subagent for build/tests (backpressure), Opus subagents for complex reasoning.
+ENVNOTE
+}
+
+build_prompt_file() { # <iter> <extra-context> -> prints path
+  local iter="$1" extra="$2" f="$RUNDIR/prompt-build-$iter.txt"
+  sed "s/\[ralph-iteration\]/$iter/g" ralph/prompt-build.md > "$f"
+  {
+    printf '\n\n## Orchestrator notes (these refine, never override, the instructions above)\n'
+    printf -- '- This is Ralph iteration %s. Every "[ralph-iteration]" above is already %s.\n' "$iter" "$iter"
+    printf -- '- You are a fresh, clean-context session: all continuity is on disk (todo.md, %s, git history). Study before assuming.\n' "$PROGRESS"
+    printf -- '- A shell watchdog SIGTERMs this session after %s seconds with no append to %s. Narrate as you go.\n' "$WATCHDOG" "$PROGRESS"
+    printf -- '- Your final message is parsed by the orchestrator for the promise tag ONLY: end with <promise>NEXT</promise> or <promise>COMPLETE</promise> and stop. A missing tag counts as an abnormal exit.\n'
+    [[ -n "$extra" ]] && printf -- '\n### Context from the orchestrator\n%s\n' "$extra"
+    env_note
+  } >> "$f"
+  printf '%s' "$f"
+}
+
+# ── phase 1: build loop ──────────────────────────────────────────────────────
+
+ITER=1
+
+build_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
+  local phase="$1" extra="$2" fails=0 pf out p
+  while :; do
+    if (( MAX_ITER > 0 && ITER > MAX_ITER )); then
+      say "reached max iterations ($MAX_ITER) without COMPLETE — stopping"
+      return 1
+    fi
+    if budget_exhausted; then
+      say "budget target nearly exhausted (\$$(spent_usd) of \$$BUDGET_TOTAL_USD) — pausing the loop"
+      note "[ralph] budget target nearly exhausted — loop paused before iteration $ITER; remaining items stay in todo.md."
+      return 1
+    fi
+    pf="$(build_prompt_file "$ITER" "$extra")"
+    run_session "build-$ITER" "$pf"
+    out="$(cat "$RESULT_FILE")"
+    p="$(promise_of "$out")"
+    if [[ -z "$p" ]]; then
+      fails=$((fails + 1))
+      say "iteration $ITER [$phase]: no promise tag ($fails/3 consecutive) — retrying the slot"
+      (( fails >= 3 )) && { say "aborting: 3 consecutive abnormal exits at iteration $ITER"; return 1; }
+      continue
+    fi
+    fails=0
+    say "iteration $ITER [$phase] -> <promise>$p</promise>"
+    ITER=$((ITER + 1))
+    [[ "$p" == COMPLETE ]] && return 0
+  done
+}
+
+note "═══════════════════════════════════════════════════════"
+note "ralph (shell loop) starting — model=$MODEL max-iter=${MAX_ITER:-∞} verify-rounds=$VERIFY_ROUNDS watchdog=${WATCHDOG}s"
+say "build loop starting"
+if ! build_loop Build ""; then
+  say "stopped during Build after $((ITER - 1)) iteration(s)"
+  exit 1
+fi
+say "build reported COMPLETE after $((ITER - 1)) iteration(s)"
+(( BUILD_ONLY )) && { say "--build-only: stopping before verification"; exit 0; }
+
+# ── phase 2+3: verify (Chrome E2E) -> fix, until a clean round ───────────────
+
+DOMAIN_FILE="$RUNDIR/domains.tsv"
+if [[ ! -s "$DOMAIN_FILE" ]]; then
+  cat > "$RUNDIR/prompt-domains.txt" <<PROMPT
+Partition the product surface into verification domains for end-to-end testing.
+
+Read todo.md in full (pending AND completed items — completed items describe what was built) and
+locate the project's spec documents (todo.md and ralph/prompt-build.md reference where they live).
+Group the work into 3-8 coherent verification domains, each sized so a single verification agent
+can exercise it end-to-end in one session. For each domain:
+- key: a short kebab-case identifier (e.g. "core-platform")
+- scope: one sentence describing what it covers, followed by the specific spec files it maps to (comma-separated; globs allowed)
+
+Every spec file must belong to exactly one domain. Write the result to $DOMAIN_FILE, one domain per
+line, as: <key><TAB><scope>. Emit between 3 and 8 lines. Do not modify any other file.
+PROMPT
+  run_session "verify-domains" "$RUNDIR/prompt-domains.txt"
+fi
+[[ -s "$DOMAIN_FILE" ]] || printf 'full-product\tthe entire product surface (domain discovery returned nothing)\n' > "$DOMAIN_FILE"
+say "verification domains: $(cut -f1 "$DOMAIN_FILE" | tr '\n' ' ')"
+
+VERIFY_CLEAN=0
+round=1
+while (( VERIFY_CLEAN == 0 )); do
+  if (( VERIFY_ROUNDS > 0 && round > VERIFY_ROUNDS )); then
+    say "hit verify-rounds cap ($VERIFY_ROUNDS) without a clean round — remaining items stay in todo.md"
+    break
+  fi
+  if budget_exhausted; then
+    say "budget target nearly exhausted — stopping before verification round $round; remaining items stay in todo.md"
+    break
+  fi
+  FIND_DIR="$RUNDIR/findings/round-$round"
+  mkdir -p "$FIND_DIR"
+  say "verification round $round: $(wc -l < "$DOMAIN_FILE") domain session(s)"
+
+  # Domains run one at a time: they start servers and drive a real browser, and
+  # concurrent sessions would fight over ports, tabs and the git index.
+  while IFS=$'\t' read -r key scope; do
+    [[ -z "$key" ]] && continue
+    out_md="$FIND_DIR/$key.md"
+    cat > "$RUNDIR/prompt-verify-$round-$key.txt" <<PROMPT
+You are a product-verification agent for domain "$key" (round $round). Scope: $scope
+
+Goal: prove the implemented product actually behaves per the specs — not just that tests pass.
+1. Read the domain's specs and the relevant source code (parallel Sonnet subagents for breadth).
+2. Run the real thing: the repo's verification protocol first (as defined in todo.md and CLAUDE.md — build + tests); then if the domain has a user-facing surface (app UI, server, CLI), START/LAUNCH IT and exercise the domain's flows end-to-end — use Chrome tools (load via ToolSearch; navigate/read_page/computer for screenshots and clicks) for anything browser-reachable, and computer use for native app UI. If there is no user-facing surface for this domain, exercise the relevant layer directly with small scripts or targeted tests. Honor any testing constraints CLAUDE.md defines (e.g., dedicated test fixtures or throwaway repos).
+3. Check the invariants each spec defines for this domain, exactly as written (edge cases, lifecycle rules, error paths included).
+4. Report ONLY real, reproducible gaps vs the specs with citations. Do not modify any tracked file and do not commit — the one file you may write is the findings file named below. Narrate progress to $PROGRESS per the house style (printf '\n%s\n' "..." >> $PROGRESS), prefixed "[verify:$key]".
+
+Write your findings to $out_md — one "## <severity: blocker|major|minor> — <title>" section each,
+with what you observed vs what the spec requires, a spec citation (path:line) and repro steps.
+An absent or empty findings file means the domain is clean.
+$(env_note)
+PROMPT
+    run_session "verify-$round-$key" "$RUNDIR/prompt-verify-$round-$key.txt"
+  done < "$DOMAIN_FILE"
+
+  found=$(find "$FIND_DIR" -name '*.md' -size +0 2>/dev/null | wc -l)
+  say "round $round: $found domain(s) reported findings"
+  if (( found == 0 )); then VERIFY_CLEAN=1; break; fi
+
+  cat > "$RUNDIR/prompt-triage-$round.txt" <<PROMPT
+Triage the verification findings in $FIND_DIR/*.md into todo.md as new pending items — blockers
+first, then major, then minor; each scoped to about one build iteration, each keeping its spec
+citation and repro notes. Follow the todo format rules in ralph/prompt-plan.md section 3.
+Deduplicate findings that different domains reported about the same defect (the workflow edition
+did this in code, keyed on spec-citation + title; here it is your job).
+Do NOT implement any fix. Then append a short progress note to $PROGRESS, run git add -A, commit
+with message "triage: verification round $round findings", and git push.
+PROMPT
+  run_session "triage-$round" "$RUNDIR/prompt-triage-$round.txt"
+
+  say "fix loop for round $round"
+  if ! build_loop Fix "This is a FIX round: todo.md was just repopulated with verification findings from round $round. Work them top-down exactly like normal todo items."; then
+    say "stopped during Fix (round $round) after $((ITER - 1)) iteration(s)"
+    exit 1
+  fi
+  round=$((round + 1))
+done
+
+# ── phase 4: ship ────────────────────────────────────────────────────────────
+
+sed "s/\[ralph-iteration\]/$ITER/g" ralph/prompt-build.md > "$RUNDIR/prompt-ship.txt"
+cat >> "$RUNDIR/prompt-ship.txt" <<PROMPT
+
+## Orchestrator notes
+The instructions above define the house protocol (progress logging, commit discipline, promise
+tags). This is Ralph iteration $ITER. Your one step this session is SHIPPING, not a todo item:
+
+1. Ensure a from-scratch setup path exists and works (dependencies, build, any seed/fixture step
+   the specs call for); document it.
+2. Write/refresh README.md: what this is, prerequisites, install/build, run, test/verify commands,
+   project layout. Verify every command by actually running it.
+3. Run the repo's full verification protocol (per todo.md and CLAUDE.md) — it must be green.
+4. Full smoke pass: launch the product and walk one realistic end-to-end flow across its main
+   domains, with screenshots via the computer tool (chrome tools for anything browser-reachable).
+   Honor any testing constraints CLAUDE.md defines. Fix small issues you hit; anything larger goes
+   to todo.md.
+5. Follow the protocol above for the progress block, git add -A, commit, push, and post-push
+   verification.
+
+End with <promise>COMPLETE</promise> if everything shipped green, else <promise>NEXT</promise>.
+$(env_note)
+PROMPT
+run_session "ship" "$RUNDIR/prompt-ship.txt"
+ship_out="$(cat "$RESULT_FILE")"
+ship_p="$(promise_of "$ship_out")"
+say "ship -> <promise>${ship_p:-none}</promise>"
+
+TOTAL_COST="$(spent_usd)"
+
+{
+  printf '\n## %s UTC - RUN TOTALS (ralph shell loop)\n' "$(date -u +%Y-%m-%dT%H:%M:%S)"
+  printf -- '- sessions: %s; build iterations: %s; verify rounds: %s\n' "$SESSION_N" "$((ITER - 1))" "$((round - 1))"
+  printf -- '- verification ended %s\n' "$( ((VERIFY_CLEAN)) && echo clean || echo 'with findings outstanding')"
+  printf -- '- total cost (exact, summed from claude -p): $%s\n' "$TOTAL_COST"
+  printf -- '- shipped: %s\n' "$( [[ "$ship_p" == COMPLETE ]] && echo yes || echo 'no — re-run ralph')"
+  printf -- '---\n'
+} >> "$PROGRESS"
+say "run totals: $SESSION_N session(s), \$$TOTAL_COST"
+
+# The workflow committed and pushed its run-totals entry; do the same so the
+# ledger is never left sitting uncommitted in the working tree.
+git add -A && git commit -q -m "ralph: run totals" && git push -q \
+  && say "run totals committed and pushed" \
+  || say "run totals written to $PROGRESS but not committed (nothing to commit, or push failed)"
+
+[[ "$ship_p" == COMPLETE ]] && exit 0 || exit 1
