@@ -208,3 +208,42 @@
 ## 2026-07-24T06:45:30 UTC - Session usage — iteration 8 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T06:39:36 UTC - Session usage — iteration 8 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 45077
+- est. output cost: $0.6762 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.0544
+
+## 2026-07-24T06:50:00 UTC - Ralph Build Iteration 9 Start
+- Resuming from M7 (committed at cf83be3)
+- Plan: M8 — examples/mario/ (spec.yaml + spec.toml + strategy.toml + nes_bridge.c + README) + mario routes in server + drive/m8.sh
+
+## 2026-07-24T07:05:00 UTC - M8 complete (840087c)
+- examples/mario/spec.yaml: 1-node NES bridge spec (fifo input, stdout-kv probes, exit-hash, frame 256×240 indexed8)
+- examples/mario/spec.toml: nix build spec for nes-bridge guest binary
+- examples/mario/strategy.toml: lexicographic maximize [world, level, x_global], buckets [x_page, y_band], goal=game_completed
+- examples/mario/nes_bridge.c: bare NES emulator core + simulation mode (single-threaded, musl-static, guest contract)
+- examples/mario/README.md: architecture notes, ROM policy, quickstart
+- crates/baud-server/src/routes/mario.rs: server-side NES simulation (MarioState physics + render_frame 256×240 indexed8)
+  - POST /runs/mario/fuzz (stateful-mask/random joypad byte stream fuzz)
+  - GET /runs/mario/:id (run status)
+  - POST /runs/:id/mario/reconstruct (reconstruct from tape)
+  - POST /runs/:id/mario/verify-determinism (double-run frame hash equality)
+- Fix: convert sqlx::query!/query_scalar! in tracing.rs and verify.rs to untyped queries (no DATABASE_URL)
+- drive/m8.sh: ALL 10 CHECKS PASSED
+  - M8.1: spec lint (1 node, fifo+stdout-kv+frame)
+  - M8.2: verify determinism PASSED (same seed → same 800 frame hashes)
+  - M8.3: random tactics plateau (x_global=236, negative control)
+  - M8.4: stateful-mask climbs (x_global=1650, 100 gens)
+  - M8.5: obs tail shows all 10 probes (world, level, x_global, y, game_completed…)
+  - M8.6: 800 frame hashes stored in frame_records
+  - M8.7: stream render ok=true, frame materialized
+  - M8.8: tape reconstruct ok=true (400 frames)
+  - M8.9: replay ok, winning tape reproduced
+  - M8.10: workload-noun CI grep CLEAN
+- Total tests: 100 pass, 0 fail across all crates
+- NEXT iteration should implement M9 (hardening, docs, full-demo.sh)
+
+## 2026-07-24T07:05:30 UTC - Session usage — iteration 9 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD
