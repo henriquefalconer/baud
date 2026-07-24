@@ -936,3 +936,5 @@ First full 'cargo build --workspace' surfaced a pre-existing, unrelated compile 
   exit 0 end-to-end on this machine (regime correctly reports `rejected` with a named reason,
   since this Windows box has no /dev/kvm — the honest, expected H0 result here)
 ---
+
+Post-push verification: no CI/post-push protocol is defined in todo.md for this repo (no .github/workflows); verified instead by confirming git fetch shows origin/main == local HEAD (b11ad7e) and by having already run cargo build/test/clippy --workspace plus drive/h0.sh and drive/m0.sh green before pushing. todo.md still has substantial pending work (H1-H6, M-series, baud-vcpu/baud-tape-device/baud-snapshot/baud-snapshot-store crates, baud-multiverse KVM rewrite) so this iteration ends with NEXT.
