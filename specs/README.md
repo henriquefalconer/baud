@@ -5,48 +5,47 @@
 
 # Baud Specifications
 
-Design documentation for Baud, deterministic-validation infrastructure for distributed systems. Guest
-programs run under a deterministic supervisor so that execution is a pure function of
-`(binary, manifest, tape)`; the input tape is then pure-fuzzed toward a strategy goal, with every
-observation journaled so any run can be replayed, shrunk, streamed as video, or reconstructed from the
-journal alone.
+Design documentation for Baud. baud runs a whole guest machine inside a virtual machine (Linux KVM +
+Intel VT-x) and makes its execution a reproducible function of one input tape, then fuzzes the tape while
+snapshotting any moment and forking many continuations that share memory — a branching tree of universes.
 
-**Implementation Plan:** [../todo.md](../todo.md) — milestones (H0–H3, M0–M9), CLI drive scripts, risks
+**Implementation Plan:** [../todo.md](../todo.md) — milestones (H0–H6, M-series), drive scripts, and the
+problem → specification → test matrix.
 
 ## Core (determinism-critical)
 
-Owned from scratch; everything determinism depends on.
+The deterministic VMM and everything execution reproducibility depends on.
 
 | Spec | Code | Purpose |
 |------|------|---------|
-| [baud-multiverse.md](./baud-multiverse.md) | [crates/baud-multiverse](../crates/baud-multiverse/) | Deterministic supervisor (first deliverable) |
-| [baud-proto.md](./baud-proto.md) | [crates/baud-proto](../crates/baud-proto/) | Wire & domain types |
-| [baud-driver.md](./baud-driver.md) | [crates/baud-driver](../crates/baud-driver/) | Fuzzing engine (tape / strategy / tactics / shrink) |
-| [baud-journal.md](./baud-journal.md) | [crates/baud-journal](../crates/baud-journal/) | Journal, replay, reconstruction (age-encrypted at rest) |
+| [baud-multiverse.md](./baud-multiverse.md) | [crates/baud-multiverse](../crates/baud-multiverse/) | Deterministic KVM/VT-x VMM (first deliverable) |
+| [baud-vcpu.md](./baud-vcpu.md) | [crates/baud-vcpu](../crates/baud-vcpu/) | Single-vCPU state machine + exit dispatch + interrupt injection |
+| [baud-tape-device.md](./baud-tape-device.md) | [crates/baud-tape-device](../crates/baud-tape-device/) | Paravirtual device — the sole nondeterministic-input channel |
+| [baud-snapshot.md](./baud-snapshot.md) | [crates/baud-snapshot](../crates/baud-snapshot/) | Universe capture/restore + userfaultfd CoW branching + rewind |
+| [baud-snapshot-store.md](./baud-snapshot-store.md) | [crates/baud-snapshot-store](../crates/baud-snapshot-store/) | Durable branch tree of universes (age-encrypted) — supersedes the journal |
+| [baud-proto.md](./baud-proto.md) | [crates/baud-proto](../crates/baud-proto/) | Wire & domain types incl. hypercall/probe messages |
+| [baud-driver.md](./baud-driver.md) | [crates/baud-driver](../crates/baud-driver/) | Tape/fuzzing engine + snapshot-tree exploration |
 
-## Orchestration
+## Host & Orchestration
 
 | Spec | Code | Purpose |
 |------|------|---------|
+| [baud-host.md](./baud-host.md) | [crates/baud-host](../crates/baud-host/) | KVM-capable host: probe, regime decision, one-core-per-VM fleet |
 | [baud-server.md](./baud-server.md) | [crates/baud-server](../crates/baud-server/) | Local daemon, orchestration, reconstruction |
-| [baud-cli.md](./baud-cli.md) | [crates/baud-cli](../crates/baud-cli/) | The `baud` command surface |
+| [baud-cli.md](./baud-cli.md) | [crates/baud-cli](../crates/baud-cli/) | The `baud` command surface (adds `host`/`image`/`snapshot`/`branch`/`rewind`/`shell-into`) |
 
-## Sandboxing & Provisioning
+## Guest Images & Provisioning
 
 | Spec | Code | Purpose |
 |------|------|---------|
-| [baud-tape.md](./baud-tape.md) | [crates/baud-tape](../crates/baud-tape/) | Sandbox backend (Daytona) |
-| [baud-tape-local.md](./baud-tape-local.md) | [crates/baud-tape-local](../crates/baud-tape-local/) | Sandbox backend (local subprocess) |
-| [baud-tape-agent.md](./baud-tape-agent.md) | [crates/baud-tape-agent](../crates/baud-tape-agent/) | In-sandbox agent |
-| [baud-init.md](./baud-init.md) | [crates/baud-init](../crates/baud-init/) | Provisioning + adapters |
-| [baud-packages.md](./baud-packages.md) | [crates/baud-packages](../crates/baud-packages/) | Guest builds from pinned Nix |
+| [baud-packages.md](./baud-packages.md) | [crates/baud-packages](../crates/baud-packages/) | Builds reproducible bootable guest images (kernel + rootfs + agent) |
 
 ## Observation
 
 | Spec | Code | Purpose |
 |------|------|---------|
-| [baud-tracing.md](./baud-tracing.md) | [crates/baud-tracing](../crates/baud-tracing/) | Kernel-side observation plane (eBPF) |
-| [baud-stream.md](./baud-stream.md) | [crates/baud-stream](../crates/baud-stream/) | Frame capture / fingerprint / render |
+| [baud-tracing.md](./baud-tracing.md) | [crates/baud-tracing](../crates/baud-tracing/) | Cross-check plane (VMM exit log vs independent witness) |
+| [baud-stream.md](./baud-stream.md) | [crates/baud-stream](../crates/baud-stream/) | Guest framebuffer capture / fingerprint / render |
 
 ## Security & Identity
 
@@ -60,25 +59,32 @@ Owned from scratch; everything determinism depends on.
 
 | Spec | Code | Purpose |
 |------|------|---------|
-| [baud-raftlet.md](./baud-raftlet.md) | [crates/baud-raftlet](../crates/baud-raftlet/) | Validation target (planted-bug distributed toy) |
+| [baud-raftlet.md](./baud-raftlet.md) | examples/raftlet (guest image) | Validation target (planted-bug distributed toy) |
 
-## Determinism Contract
+## Superseded
 
-All guests obey, and the supervisor enforces:
+| Spec | Note |
+|------|------|
+| baud-journal.md | Superseded by `baud-snapshot` + `baud-snapshot-store` (snapshot-branch replaces replay-from-zero) |
+| baud-tape.md / baud-tape-local.md / baud-tape-agent.md / baud-init.md | Container-sandbox model; replaced by `baud-host` (KVM hosts) + guest images. Retained for history until removed. |
 
-| Rule | Enforcement |
-|------|-------------|
-| One thread, one process per guest | `clone`/`fork`/`vfork`/`execve` → kill with report |
-| No async signal delivery | Only synchronous faults reach guests |
-| No wall clocks | Virtual time served per syscall/quantum |
-| No `rdtsc`/`cpuid` free execution | Trapped and emulated |
-| All entropy from the tape | `getrandom`, `/dev/urandom`, `AT_RANDOM` served from draws |
-| Fixed memory layout | `ADDR_NO_RANDOMIZE`; layout in manifest |
-| Statically linked, no-PIE, musl | Built by baud-packages |
-| Syscalls outside the allowlist | Kill with report |
+## Determinism Model
 
-Execution is a pure function of `(binary, manifest, tape)`, verified by double-run observation-stream-hash
-equality (`baud verify determinism`).
+baud makes a whole guest machine reproducible by owning it at the virtualization layer:
+
+| Source | Handling |
+|--------|----------|
+| CPUID (RDRAND/RDSEED/TSX/x2APIC/topology) | Always exits under VT-x; served fixed; nondeterministic bits masked |
+| RDTSC / time | Work-clock (retired conditional branches); TSC offset/scale (cooperative) or forced exit (enforced) |
+| Randomness | Masked in CPUID (cooperative) or hardware-trapped and tape-served (enforced) |
+| External input / entropy | Served from the tape via the tape device |
+| Interrupt timing | Injected at an exact instruction boundary (arm-early-then-single-step) |
+| Memory | Zeroed RAM at fixed addresses |
+| Any unmodeled exit | Fails loud (`DeterminismHole`) |
+
+Two regimes: **cooperative** (stock KVM; reproducible for guests that take entropy/clock/input from the tape
+device) and **enforced** (custom KVM module; hardware-traps the raw random and timestamp instructions). Each
+run records its regime; guarantees are reported only for the regime in force.
 
 ## Exit Codes
 

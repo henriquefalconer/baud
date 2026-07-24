@@ -6,8 +6,8 @@
 # Baud Multiverse Specification
 
 **Status:** Planned\
-**Version:** 1.0\
-**Last Updated:** 2026-07-23
+**Version:** 2.0\
+**Last Updated:** 2026-07-24
 
 ---
 
@@ -15,23 +15,24 @@
 
 ### Purpose
 
-`baud-multiverse` is the deterministic supervisor and the foundation of baud. It runs guest processes
-inside a sandbox such that execution is a pure function of `(binary, manifest, tape)`. It owns every
-interaction between a guest and the outside world, serving each from a device model whose decisions come
-from the tape. It is the first deliverable.
+`baud-multiverse` is the deterministic virtual machine monitor (VMM) and the foundation of baud. It runs a
+whole guest machine (a bootable OS image + the software under test) on Linux KVM + Intel VT-x such that the
+machine's execution is a reproducible function of `(guest image, tape)`. It owns every guest-visible source
+of nondeterminism — time, randomness, device input, interrupt timing — and serves each from, or seeds each
+from, the tape. It is the first deliverable.
 
 ### Goals
 
-- **Total mediation**: no guest syscall reaches the real kernel unmediated
-- **Enforcement over trust**: contract violations kill the guest at the offending instruction, with a report
-- **Deterministic multi-guest**: N guests share one virtual clock and one network; switching is a tape draw
-- **Rich observation**: every syscall is recorded (observation plane 1)
+- **Own the machine**: control the guest at the virtualization layer, not by intercepting a process
+- **Every exit deterministic**: each VM exit resolves to a computed value; the catch-all fails loud
+- **Work-clock time**: guest time is a function of work done (retired conditional branches), not wall-clock
+- **Snapshot-branchable**: capture any moment, fork many continuations sharing memory
 
 ### Non-Goals
 
-- Running arbitrary multi-threaded software (guests are single-threaded)
-- Full device emulation beyond the closed model set
-- Instruction-counting or PMC-based scheduling
+- More than one vCPU per VM (multi-core guest determinism is out of scope)
+- Real device emulation beyond the console + tape device
+- Claiming enforced guarantees while running on stock KVM (see §7 regimes)
 
 ---
 
@@ -39,130 +40,140 @@ from the tape. It is the first deliverable.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                     baud-multiverse                       │
-│  seccomp user-notify (allowlist) + ptrace (trap handling)   │
-│  Device models: clock · entropy · fs · input · net · exit   │
-│  Syscall log (observation plane 1)                          │
+│                      baud-multiverse                        │
+│  KVM/VT-x VMM · CPUID+TSC+MSR control · work-clock          │
+│  interrupt injection engine · tape device · snapshot hooks  │
 └───────────────────────────────────────────────────────────┘
-        ▲ launched by baud-tape-agent · types from baud-proto
+   uses baud-vcpu · baud-tape-device · baud-snapshot · baud-proto
 ```
 
 ### Rationale
 
-- Deps = `{nix/libc, seccomp bindings, baud-proto}`; no `tokio` (single-threaded event loop).
-- Soft budget ≤ 4,000 LOC. Knows syscalls, not workloads.
+- Deps = `{kvm-ioctls 0.25, kvm-bindings 0.14, vm-memory 0.18, linux-loader 0.14, vmm-sys-util 0.15,
+  vm-superio 0.8, perf, baud-vcpu, baud-tape-device, baud-snapshot, baud-proto}`. One VMM thread + one vCPU
+  thread. Soft budget ≤ 4,000 LOC. Knows the machine, not workloads.
 
 ---
 
-## 3. Guest Contract (enforced)
-
-| Rule | Enforcement |
-| ---------------------------------- | ------------------------------------------ |
-| One thread, one process            | `clone`/`fork`/`vfork`/post-start `execve` → kill |
-| No async signals                   | None delivered; only synchronous faults |
-| Static, no-PIE, musl               | Built by baud-packages; verified at spec lint |
-| Fixed argv/env/locale              | From the manifest |
-| `ADDR_NO_RANDOMIZE`                | Set before exec; layout recorded |
-| Allowlisted syscalls (~25)         | Others → kill with report |
-
----
-
-## 4. Nondeterminism Handling
+## 3. Nondeterminism Handling (normative)
 
 | Source | Handling |
 | --------------------------------------- | ---------------------------------------------------------- |
-| Thread/process scheduling               | Eliminated; cross-guest switch at syscall boundaries, order = draw |
-| Async signals/interrupts                | Eliminated |
-| Clocks (`clock_gettime`, `nanosleep`, …) | Virtual clock; advances deterministically per syscall/quantum |
-| `rdtsc`/`rdtscp`                         | `PR_SET_TSC=SIGSEGV` → trap → emulate from virtual clock |
-| `cpuid`                                 | `ARCH_SET_CPUID=0` → trap → synthetic fixed leaves; else record-and-pin |
-| `rdrand`/`rdseed`                       | Masked in synthetic CPUID; misuse caught by double-run check |
-| Entropy (`getrandom`, `/dev/urandom`, `AT_RANDOM`) | Served from tape draws |
-| Filesystem                              | RO snapshot + in-memory COW; writes hashed into observations |
-| Network                                 | Virtual socket device; order/delay/drop/dup/partition = draws |
-| External input (stdin, fifo)            | Tape-fed input channel |
-| Other syscalls (pids, uids, uname)      | Fixed virtualized values |
-| CPU/FP/microarch variation              | CPU class + CPUID leaves in manifest; double-run backstop |
+| CPUID (RDRAND/RDSEED/TSX/x2APIC/topology) | Always exits under VT-x; served fixed via `KVM_SET_CPUID2`; nondeterministic bits masked |
+| RDTSC / RDTSCP                          | Cooperative: `KVM_SET_TSC_KHZ` + `KVM_VCPU_TSC_OFFSET`. Enforced: force RDTSC-exiting → work-clock value |
+| Other time (kvmclock, APIC/TSC-deadline) | Follow the virtual TSC; delivered by the injection engine |
+| HPET / PIT / PM-timer / RTC             | Deleted — a minimal machine has none |
+| Randomness                              | Masked in CPUID (cooperative); hardware-trapped and tape-served (enforced) |
+| External input / entropy                | Served from the tape via the tape device |
+| Interrupt timing                        | Injected at an exact instruction boundary (§5) |
+| Memory init                             | Zeroed RAM at fixed guest-physical addresses |
+| Any unmodeled exit                      | `Err(DeterminismHole)` — never a best-effort continue |
 
 ---
 
-## 5. Mechanism
+## 4. CPUID & Time Control
 
-- **seccomp user-notify** for allowlisted syscalls → supervisor serves them from device models.
-- **ptrace** for trap handling: TSC/CPUID emulation, kill-with-report.
-- **Device models** (`clock`, `entropy`, `fs`, `input`, `net`, `exit`) consume draws via baud-proto and
-  emit observations.
+- **CPUID**: start from `KVM_GET_SUPPORTED_CPUID`; clear RDRAND `01H:ECX[30]`, RDSEED `07H:EBX[18]`, TSX
+  `07H:EBX[4]/[11]`, x2APIC `01H:ECX[21]`; pin topology `0BH/1FH`; set invariant-TSC `80000007H:EDX[8]` and
+  a fixed hypervisor-present bit; `KVM_SET_CPUID2`.
+- **Work-clock**: `perf_event_open(PERF_COUNT_HW_BRANCH_INSTRUCTIONS, conditional, guest-filtered)` on the
+  vCPU thread; `virtual_tsc = base + k × rcb`. Raw retired-instruction count is forbidden (double-counts).
+- **MSR filter**: `KVM_X86_SET_MSR_FILTER` routes `IA32_TSC`/`TSC_AUX`/`TSC_DEADLINE` to the VMM.
 
-### API
+---
+
+## 5. Interrupt Injection at an Exact Boundary
+
+Arm the branch counter a margin before the target work-count → take the early exit →
+`KVM_SET_GUEST_DEBUG(SINGLESTEP | BLOCKIRQ)` and step until `(PC + GP regs + RCB [+RCX/+stack checksum])`
+matches → confirm `ready_for_interrupt_injection` (else `request_interrupt_window`) → inject via
+`KVM_INTERRUPT` / `KVM_SET_VCPU_EVENTS`. (Detail in `specs/baud-vcpu.md`.)
+
+---
+
+## 6. API
 
 ```rust
 impl Multiverse {
-    fn load(manifest: RunManifest, guests: Vec<GuestImage>) -> Result<Self>;
-    fn run(&mut self, tape: impl DrawSource) -> ObservationStream;
+    fn load(image: GuestImage, manifest: RunManifest) -> Result<Self>;
+    fn run(&mut self, tape: impl TapeSource) -> ObservationStream;   // to next Hlt/branch point
+    fn snapshot(&self) -> Universe;                                  // baud-snapshot capture
+    fn restore(u: Universe) -> Result<Self>;
 }
 ```
 
----
-
-## 6. Multi-Guest Clusters
-
-- N guests, one supervisor, one virtual clock, one net device.
-- Guests run one at a time; the switch order at each syscall boundary is a draw (schedule chaos = tactics).
-- A guest that spins without syscalls starves the cluster → wall-clock watchdog (outside the deterministic
-  boundary) kills it with a report.
+`ObservationStream` exposes `completed()` (guest halted normally) and `work_clock_reads_are_monotone()`
+(the emitted rdtsc observations are non-decreasing); both operate on real guest execution, not synthetic
+data.
 
 ---
 
-## 7. Determinism Claim & Verification
+## 7. Regimes
 
-Single-threaded guests + no async delivery + all syscalls served deterministically + trapped TSC/CPUID +
-fixed layout ⇒ execution is a pure function of `(binary, manifest, tape)`.
-
-Verified by `baud verify determinism`: same seed, two fresh tapes, byte-identical observation-stream
-hashes. Untrappable violations (CPU-class drift, RDRAND misuse on non-faulting CPUs) surface as a reported
-first-divergent step; the run is marked unusable for replay/shrink/reconstruct.
+- **Cooperative (stock KVM)** — first target. Full CPUID control, fixed-frequency virtual TSC + controllable
+  offset, MSR trapping, single vCPU, zeroed memory, tape device. Reproducible for guests that take
+  entropy/clock/input from the tape device.
+- **Enforced (custom KVM module)** — forces every RDTSC and random instruction to exit and be served from
+  the work-clock/tape, so even an adversarial guest is reproducible.
+- The manifest records the regime; `run` and `verify` report guarantees only for the regime in force.
 
 ---
 
 ## 8. Testing
 
 ```rust
-#[test]
-fn double_run_is_bit_identical() {
-    assert_eq!(hyper.run(tape.clone()).hash_stream(), hyper.run(tape).hash_stream());
+#[test] fn double_boot_memory_identical() {
+    let a = boot(hello_image(), tape.clone()).ram_hash_at_first_hlt();
+    let b = boot(hello_image(), tape).ram_hash_at_first_hlt();
+    assert_eq!(a, b);
 }
 
-#[test]
-fn clone_syscall_is_killed() {
-    assert!(matches!(hyper.run(guest("calls_clone")).outcome,
-        Crash { detail, .. } if detail.contains("clone")));
+#[test] fn cpuid_leaves_are_fixed() {
+    let (a, b) = (served_cpuid(&run1), served_cpuid(&run2));
+    assert_eq!(a, b);
+    assert!(a.rdrand_bit() == 0 && a.rdseed_bit() == 0 && a.tsx_bits() == 0 && a.x2apic_bit() == 0);
 }
 
-#[test]
-fn rdtsc_is_trapped_and_served_virtual_time() {
-    let obs = hyper.run(guest("reads_rdtsc"));
-    assert!(obs.completed() && obs.tsc_reads_are_monotonic_virtual());
+#[test] fn work_clock_is_monotone_and_reproducible() {
+    let s1 = run(timestamp_guest(), tape.clone()).tsc_reads();
+    let s2 = run(timestamp_guest(), tape).tsc_reads();
+    assert!(is_monotone(&s1) && s1 == s2);
+}
+
+#[test] fn rdrand_guest_is_flagged() {
+    // cooperative: divergent double-run; enforced: Crash{detail:"rdrand"}
+    let out = run(rdrand_guest(), tape);
+    assert!(out.is_divergent() || matches!(out.outcome, Crash{ detail, .. } if detail.contains("rdrand")));
+}
+
+#[test] fn regime_is_recorded_and_not_overclaimed() {
+    let run = start_on_stock_kvm(spec);
+    assert_eq!(run.manifest.regime, Regime::Cooperative);
+    assert!(request_enforced_guarantee(&run).is_err());   // exit 1, not a false pass
 }
 ```
 
-- **H1 exit criterion**: the double-run test above passes on a static hello guest.
-- Multi-guest: a 3-guest topology under `markov-partition` weather is double-run identical (H3).
+Additional named tests owned here and exercised by drives: `no_unmodeled_exit_is_silent` (§`baud-vcpu`),
+`host_tsc_is_stable` / `rcb_is_deterministic_on_this_cpu` (H0 via `baud-host`),
+`divergence_is_detected_and_reported`, `amd_host_refused_in_enforced_regime`.
 
 ---
 
 ## 9. Security Considerations
 
-| Concern                     | Handling                                      |
+| Concern | Handling |
 | --------------------------- | --------------------------------------------- |
-| Guest escapes mediation     | eBPF cross-check (plane 2) compares syscall sequences |
-| Guest writes real disk/net  | Impossible via allowlist; attempts killed     |
-| ptrace/seccomp unavailable  | H0 spike decides fallback (seccomp-only + static scan) |
+| Guest escapes the machine   | KVM confines the guest to its memory slots; no host device/DMA |
+| Nondeterminism leaks via an exit | Catch-all fails loud; open-bus reads fixed |
+| Over-claimed determinism    | Regime recorded; enforced needs the module + Intel host |
+| Host TSC instability        | Rejected at H0 (`KVM_GET_TSC_KHZ` = -EIO) |
 
 ---
 
 ## 10. Future Considerations
 
-| Feature            | Description                                        |
+| Feature | Description |
 | ------------------ | -------------------------------------------------- |
-| Threaded guests    | Deterministic syscall-boundary switching for N threads |
-| More device models | Deterministic timezone, DNS, and clock-adjust surfaces |
+| Custom KVM module  | The enforced regime: hardware RDTSC/random-instruction exiting |
+| AMD support        | VMCB intercepts + TSC-ratio scaling (phase-2) |
+| Multi-machine nets | Several single-vCPU VMs on a tape-driven virtual network |
