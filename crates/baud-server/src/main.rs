@@ -109,8 +109,12 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/mario/{id}", get(routes::mario::status))
         .route("/runs/{id}/mario/reconstruct", post(routes::mario::reconstruct))
         .route("/runs/{id}/mario/verify-determinism", post(routes::mario::verify_determinism))
-        // Budget
+        // Budget (M9)
         .route("/budget", get(routes::budget::budget))
+        .route("/budget/record", post(routes::budget::record))
+        // Shrink (M9)
+        .route("/runs/{id}/shrink", post(routes::shrink::shrink))
+        .route("/runs/{id}/shrink", get(routes::shrink::get_shrink))
         .with_state(state)
 }
 

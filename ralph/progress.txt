@@ -247,3 +247,8 @@
 ## 2026-07-24T07:05:30 UTC - Session usage — iteration 9 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T07:02:45 UTC - Session usage — iteration 9 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 52931
+- est. output cost: $0.7940 (sonnet output rate)
+- exact accounting unavailable this entry

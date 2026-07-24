@@ -13,6 +13,7 @@ pub mod raftlet;
 pub mod replay;
 pub mod runs;
 pub mod server;
+pub mod shrink;
 pub mod spec;
 pub mod stream;
 pub mod tapes;
