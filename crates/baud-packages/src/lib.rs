@@ -14,6 +14,15 @@
 // This crate is a pure library (no I/O in the library proper for testability).
 // The `build` and `build_in_dir` functions shell out to `nix` when a real build
 // is requested.
+//
+// KVM pivot (todo.md §4, specs/baud-packages.md §9): a workload is now a bootable guest image
+// (kernel + rootfs + agent), not a single static-no-PIE ELF process for a ptrace tracee -- the
+// static/no-PIE ELF contract above (`BuildResult::verify_guest_contract`) is the pre-pivot
+// process-level contract, retained because it still applies to building individual pieces that
+// end up inside a guest image's rootfs (e.g. the in-guest agent binary itself), just not as the
+// top-level deliverable's contract anymore. The `image` module (`image_lint`/
+// `GuestImageManifest`) is the new top-level contract: it lints a guest kernel's `.config`
+// for the tape-device driver and the absence of real hardware timers baud does not model.
 
 use serde::{Deserialize, Serialize};
 use anyhow::{bail, Result};
@@ -21,9 +30,14 @@ use std::path::PathBuf;
 
 mod spec;
 mod flake;
+mod image;
 
 pub use spec::{WorkloadSpec, WorkloadPackage};
 pub use flake::FlakeTemplate;
+pub use image::{
+    image_lint, lint_kernel_config, ConfigState, GuestImageManifest, LintReport, LintViolation,
+    FORBIDDEN_REAL_TIMERS, TAPE_DEVICE_CONFIG,
+};
 
 // ---------------------------------------------------------------------------
 // Pinned nixpkgs revision (the single source of truth)

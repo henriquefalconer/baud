@@ -411,352 +411,153 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 
 ## 14. Build status (updated as milestones land — not a duplicate of ralph/progress.txt)
 
-- **H0 (capability spike) — in progress.** `crates/baud-host` implements `Host::probe()` /
-  `Probe` / `Regime` / `Vendor` / fleet `Placement` per `specs/baud-host.md` §3-§5, wired to
-  `GET /host/probe` (`baud-server`) and `baud host probe --json` (`baud-cli`). The
-  regime-decision logic (`compute_probe`, capacity/placement, sibling-safety) is
-  hardware-independent and unit-tested via an injectable `CapabilityChecks` seam
-  (`cargo test -p baud-host` — `capacity_refuses_sibling_split`, `doctor_checks_kvm`,
-  `rejected_host_names_the_failing_check`, plus vendor/gate edge cases). The real Linux
-  implementation (`crates/baud-host/src/linux.rs`: `/dev/kvm`, `/proc/cpuinfo`,
-  `kvm-ioctls`/`kvm-bindings` CPUID/TSC/MSR-filter/single-step round-trips, a
-  `perf-event`-based branch-counter determinism smoke test, `/sys` topology parsing) type-checks
-  against the real crate sources (`cargo check --target x86_64-unknown-linux-gnu -p baud-host`)
-  but is **not yet validated on real KVM hardware** — this dev machine has no Linux/KVM host
-  (see `docs/determinism.md`'s H0 section and `CLAUDE.md`). `drive/h0.sh` runs the probe
-  end-to-end and asserts the JSON shape + honest-rejection behavior on whatever host it runs on.
-  **Next H0 action**: get this validated on a real Linux/KVM host (bare-metal, or a WSL2 distro
-  with nested virt) and record the result in `docs/determinism.md`, replacing the "not yet
-  exercised" caveat.
-- **`docs/determinism.md`** still describes the superseded ptrace/seccomp mechanism below its
-  2026-07-24 pivot notice; a full rewrite for the KVM/VT-x model is still open (tracked here, not
-  yet started beyond the H0 addendum).
-- **`baud-vcpu` (specs/baud-vcpu.md) — core built, not yet wired into a real VMM.** New crate:
-  the exit-dispatch match (`Exit`/`Bus`/`TimeSource`/`dispatch_exit`/`DeterminismHole`,
-  `crates/baud-vcpu/src/lib.rs`) and the arm-early-then-single-step interrupt-injection engine
-  (`ExecPoint`/`PmuStepper`/`inject_at`/`MARGIN`, `crates/baud-vcpu/src/boundary.rs`) are
-  hardware-independent, exhaustively matched (no wildcard arm — `Exit::Unmodeled` is the only
-  path to `Err`), and unit-tested on this Windows dev machine with no KVM at all: 15/15 tests
-  pass, including a 1,000-case proptest fuzz for `no_unmodeled_exit_is_silent`, the open-bus
-  fixed-byte (`0xFF`, never host memory) behavior, `vm_creation_refuses_multiple_vcpus`, and an
-  `inject_at`-driven `timer_tick_lands_at_identical_instruction`-style tuple-equality test
-  (`identical_target_yields_identical_injection_tuple_across_runs`). The real Linux half
-  (`crates/baud-vcpu/src/linux/{mod,pmu}.rs`: `kvm_ioctls::VcpuExit` → `Exit` conversion covering
-  every variant in kvm-ioctls 0.25, thread affinity pin, `KVM_SET_GUEST_DEBUG` single-step toggle,
-  and a `perf_event_open` branch-counter + SIGIO-driven `LinuxPmuStepper` that interrupts a
-  blocking `KVM_RUN` via `kvm_run.immediate_exit`) type-checks clean (`cargo check`/`clippy
-  --target x86_64-unknown-linux-gnu -p baud-vcpu`) but is **not yet exercised on real KVM/perf
-  hardware** — same caveat as `baud-host`. **Known scope gap to revisit once baud-multiverse's
-  thread model exists**: `LinuxPmuStepper`'s signal delivery uses process-wide `F_SETOWN` (assumes
-  the vCPU thread is the only thread with the overflow signal unblocked), not
-  `F_SETOWN_EX(F_OWNER_TID, ...)` — documented in `crates/baud-vcpu/src/linux/pmu.rs`'s module
-  doc, revisit when the "one VMM thread + one vCPU thread" model (specs/baud-multiverse.md §3.1)
-  actually lands. **Not yet built**: `baud-vcpu` is not wired into any VM/vCPU creation flow (no
-  `Kvm::new`/`create_vm`/`create_vcpu` boot flow — that is `baud-multiverse`'s job per the crate
-  split in specs/baud-vcpu.md §1) and is not yet a dependency of `crates/baud-multiverse`.
-- **`baud-multiverse` boot flow (specs/baud-multiverse.md §2) — built, not yet wired to a real
-  KVM host or to `baud-server`/`baud-tape-agent`.** New modules, additive alongside the untouched
-  pre-pivot ptrace simulation the server/agent still actually run guests through today (see the
-  pivot notice at the top of `crates/baud-multiverse/src/lib.rs`):
-  - `crates/baud-multiverse/src/cpuid.rs` — the determinism mask table (specs/baud-multiverse.md
-    §4, todo.md §3.2): clears RDRAND/RDSEED/TSX-HLE/TSX-RTM/x2APIC, pins the `0BH`/`1FH`
-    extended-topology leaves to one core no-SMT, sets invariant-TSC and a fixed hypervisor-present
-    bit. Hardware-independent (a `CpuidEntry` trait implemented for both a portable `CpuidLeaf` and
-    — directly, unmodified — `kvm_bindings::kvm_cpuid_entry2`), unit-tested on this Windows machine
-    with no KVM at all: 7 tests including a proptest fuzz (`masked_bits_are_always_fixed_regardless_
-    of_host_input`) covering `cpuid_leaves_are_fixed`'s guarantee for any starting bit pattern.
-  - `crates/baud-multiverse/src/layout.rs` — fixed guest-physical addresses (RAM/kernel/cmdline/
-    zero-page/page-table addresses, specs/baud-multiverse.md §2's "write boot params at fixed
-    addresses") and `build_identity_page_tables`, a pure function building the long-mode identity
-    map (1 PML4 + 1 PDPTE + N PDE pages of 2 MiB leaves). 6 tests, plus a module-level `const`
-    assertion (not a runtime one — both sides are compile-time constants) that the fixed regions
-    never overlap.
-  - `crates/baud-multiverse/src/linux/{mod,pagetables,bootparams}.rs` (`cfg(target_os =
-    "linux")`) — the real boot flow: `Kvm::new` → `create_vm` → register one zeroed guest-RAM
-    region (`vm-memory` `GuestMemoryMmap`) → `create_vcpu` → apply the CPUID mask + `KVM_SET_
-    CPUID2` → write the identity page tables into guest RAM → `KVM_SET_SREGS` into 64-bit long
-    mode (CR0.PE|PG, CR4.PAE, EFER.LME|LMA, flat 64-bit code/data segments — the standard
-    rust-vmm direct-boot technique that skips the kernel's own real-mode setup code entirely) →
-    `KVM_X86_SET_MSR_FILTER` + `KVM_CAP_X86_USER_SPACE_MSR` (reason `Filter`) routes
-    `IA32_TSC`/`IA32_TSC_DEADLINE`/`IA32_TSC_AUX` to userspace exits → `KVM_SET_TSC_KHZ` pins
-    `VIRTUAL_TSC_KHZ` (1 GHz, host-independent) → `linux_loader::loader::bzimage::BzImage::load`
-    loads the kernel, builds the `boot_params` zero page (e820 map: first MiB reserved, rest
-    usable RAM) and command line, `LinuxBootConfigurator::write_bootparams` → `RIP` set to
-    `kernel_load + 0x200` (the Linux/x86 64-bit boot protocol's direct entry point), `RSI` = zero
-    page, ready for `baud_vcpu::linux::run_until_halted`. Type-checks and clippy-clean against the
-    real crate sources (`cargo check`/`clippy --target x86_64-unknown-linux-gnu -p
-    baud-multiverse`, including the `linux`-only tests) but **not yet exercised on real KVM
-    hardware** — same caveat as `baud-host`/`baud-vcpu` (no Linux/KVM host on this dev machine,
-    CLAUDE.md).
-  - **Work-clock `TimeSource` + console `Bus` + a `Multiverse` boot/run struct — built, wired
-    together, still type-check-only pending real hardware.** Closes most of the previous "Next
-    build action" below:
-    - `crates/baud-multiverse/src/timesource.rs` (hardware-independent, no `cfg` at all) — `WorkClock<C:
-      BranchCounter>` implementing `baud_vcpu::TimeSource`: `virtual_tsc = base + k * rcb`
-      (todo.md §3.3), served for `IA32_TSC`/`IA32_TSC_DEADLINE`/`IA32_TSC_AUX` (the MSR constants
-      formerly duplicated in `linux/mod.rs` now live here and are imported by it); a guest `wrmsr`
-      to `IA32_TSC` rebases `base` so the next read reflects the written value exactly. Generic
-      over a `BranchCounter` trait, so the formula's monotonicity/reproducibility
-      (`work_clock_is_monotone_and_reproducible`) is unit-tested on this Windows machine with a
-      scripted mock counter — no perf/KVM hardware needed for this half. 5 tests.
-    - `crates/baud-multiverse/src/console.rs` (hardware-independent — `vm_superio` has zero non-dev
-      dependencies of its own, confirmed against its Cargo.toml, so it moved out of the
-      `cfg(target_os = "linux")` dependency block to a plain one) — `Console`, a COM1 (0x3f8-0x3ff)
-      16550 UART built on `vm_superio::Serial` with an in-memory `Vec<u8>` writer and a
-      recording-not-delivering `NoIrqTrigger` (no interrupt controller wired yet — that lands with
-      the tape device); `DeviceBus` composes `Console` with `baud_vcpu::OpenBusFallback` for every
-      other address. 5 tests, including that the LSR always reports "ready to transmit" (a real
-      guest UART driver would spin forever otherwise).
-    - `crates/baud-multiverse/src/linux/mod.rs` — `LinuxBranchCounter` (a free-running
-      `perf_event_open(PERF_COUNT_HW_BRANCH_INSTRUCTIONS)` counter, distinct from
-      `baud_vcpu::linux::pmu::LinuxPmuStepper`'s own armed/overflow counter — reconciling the two
-      into one perf fd is deferred to when this can actually be exercised on real perf/KVM
-      hardware, documented in-line same as `pmu.rs`'s existing scope note) implementing
-      `timesource::BranchCounter`; and `linux::Multiverse` — `boot(kernel_path, cmdline, base, k)`
-      runs `boot_guest` plus this wiring, `run_to_first_halt()` drives
-      `baud_vcpu::linux::run_until_halted` to the guest's first `Hlt`/`Shutdown` through the new
-      `DeviceBus`/`WorkClock` and returns a `HaltOutcome { console_output, ram_hash }` — the real
-      boot flow behind specs/baud-multiverse.md §8's `boot(...).ram_hash_at_first_hlt()`
-      pseudocode. This is H1's target ("boot a guest, print to the serial console, clean
-      `Hlt`/`Shutdown`"), not yet the full §6 API — `snapshot`/`restore` still need `baud-snapshot`
-      (doesn't exist yet) and the tape-device-driven `run(tape: impl TapeSource)` signature still
-      needs `baud-tape-device` (doesn't exist yet either), so neither is stubbed here.
-    - **Verification**: `cargo test -p baud-multiverse` — 28/28 pass natively on this Windows
-      machine (9 new: 5 `console` + 4 `timesource`, the rest pre-existing and unaffected); `cargo
-      check`/`clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean for
-      every new/touched file (0 new warnings; `console.rs`/`timesource.rs`/`linux/mod.rs` each
-      contribute zero clippy warnings on both the native and Linux targets — the only warnings
-      clippy reports are the same ~10 pre-existing ones in the untouched pre-pivot `lib.rs`
-      simulation code, already tracked, not this increment's); `cargo build`/`test --workspace`
-      green (all crates, no regressions); `drive/h0.sh` still exits 0 (re-verified post-change).
-    - **Not yet done**: no tape-device `Bus` (still needs `baud-tape-device`, H2/§3.5); nothing
-      calls `Multiverse::boot`/`run_to_first_halt` end-to-end on real hardware yet — no Linux/KVM
-      host exists on this dev machine (same caveat as every other `linux/` module, CLAUDE.md).
-      **Next build action**: get an actual Linux/KVM host (bare-metal or a WSL2 distro with nested
-      virt enabled — `wsl -l -v` currently lists no installed distro on this machine, so that is
-      itself the first step) and drive `linux::Multiverse::boot` against a real minimal kernel
-      image end-to-end, replacing every "type-check-only" caveat above with an actual boot; H0's
-      own "not yet validated on real KVM hardware" caveat blocks the same way and should be closed
-      at the same time (same missing host). Once that lands: `drive/h1.sh` per §10 ("boot the hello
-      image, assert expected console output; `double_boot_memory_identical` passes").
+- **H0 (capability spike) — logic complete, unvalidated on real hardware.** `crates/baud-host`:
+  `Host::probe()`/`Probe`/`Regime`/`Vendor`/fleet `Placement` (specs/baud-host.md §3-§5), wired to
+  `GET /host/probe` + `baud host probe --json`. Regime-decision logic is hardware-independent and
+  unit-tested via an injectable `CapabilityChecks` seam (`cargo test -p baud-host`). The real Linux
+  backend (`src/linux.rs`: `/dev/kvm`, `/proc/cpuinfo`, `kvm-ioctls`/`kvm-bindings`
+  CPUID/TSC/MSR-filter/single-step, a `perf-event` branch-counter smoke test, `/sys` topology)
+  type-checks (`cargo check --target x86_64-unknown-linux-gnu -p baud-host`) but is **not yet run
+  on real KVM hardware** (no Linux/KVM host on this dev machine — see `CLAUDE.md`,
+  `docs/determinism.md`). `docs/determinism.md` still describes the superseded ptrace/seccomp
+  mechanism below its pivot notice; a full rewrite for KVM/VT-x is still open.
+- **`baud-vcpu` (specs/baud-vcpu.md) — core built, not yet wired into a real VMM.** Exit-dispatch
+  match (`Exit`/`Bus`/`TimeSource`/`dispatch_exit`/`DeterminismHole`, `src/lib.rs`, no wildcard arm
+  — `Exit::Unmodeled` is the only path to `Err`) and the arm-early-then-single-step
+  interrupt-injection engine (`ExecPoint`/`PmuStepper`/`inject_at`, `src/boundary.rs`) are
+  hardware-independent, 15/15 tests pass with no KVM at all. Real Linux half (`src/linux/{mod,
+  pmu}.rs`: `VcpuExit`→`Exit` conversion, thread affinity, `KVM_SET_GUEST_DEBUG` single-step,
+  `perf_event_open` branch counter + SIGIO `LinuxPmuStepper`) type-checks clean but unexercised on
+  real hardware. **Known gap**: `LinuxPmuStepper` uses process-wide `F_SETOWN`, not
+  `F_SETOWN_EX(F_OWNER_TID, ...)` — revisit once the one-VMM-thread/one-vCPU-thread model lands
+  (documented in `pmu.rs`'s module doc). Not yet a dependency of `baud-multiverse`.
+- **`baud-multiverse` boot flow (specs/baud-multiverse.md §2) — built, unexercised on real
+  hardware.** `cpuid.rs` (determinism mask table, 7 tests incl. a proptest fuzz), `layout.rs`
+  (fixed guest-physical addresses + `build_identity_page_tables`, 6 tests), `linux/{mod,
+  pagetables,bootparams}.rs` (`Kvm::new`→`create_vm`→zeroed RAM→`create_vcpu`→CPUID mask→identity
+  page tables→64-bit long mode via `KVM_SET_SREGS`→MSR filter for
+  `IA32_TSC`/`_DEADLINE`/`_AUX`→`KVM_SET_TSC_KHZ`→`linux_loader` kernel load→`boot_params`→RIP at
+  direct-boot entry), `timesource.rs` (`WorkClock<C: BranchCounter>`: `virtual_tsc = base + k *
+  rcb`, 5 tests, hardware-independent), `console.rs` (`Console`: COM1 16550 UART on
+  `vm_superio::Serial`, `DeviceBus` composing console + open-bus fallback, 5 tests,
+  hardware-independent), `linux/mod.rs`'s `LinuxBranchCounter` (perf-event-based) and
+  `linux::Multiverse` (`boot`/`run_to_first_halt` → `HaltOutcome{console_output, ram_hash}` — H1's
+  target). All type-check/clippy-clean cross-target but **not yet booted on real KVM hardware**
+  (same missing-host caveat throughout). 28/28 native tests pass (`cargo test -p baud-multiverse`).
 - **`baud-tape-device` (specs/baud-tape-device.md) — built and wired into `baud-multiverse`'s
-  device bus.** New crate (`crates/baud-tape-device`, deps = `{baud-proto}` only, matching the
-  spec's §2 rationale): `TapeDevice` — a pure function of the tape bytes and the guest's own
-  register writes (`pio_read(off)`/`pio_write(off,b)` at `reg::DATA`/`CONTROL`/`STATUS` per §3),
-  `ControlOp` (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`, §4), and `drain_records() ->
-  Vec<Msg>`. Hardware-independent, no KVM/perf needed: 18 unit/property tests on this Windows
-  machine, including the spec's own named tests (`all_input_is_tape_derived`,
-  `read_past_end_is_fixed`) translated onto this crate's pure device model, plus a 128-op proptest
-  fuzz (`arbitrary_register_traffic_never_panics`) asserting arbitrary guest register traffic never
-  panics the device (may legitimately report `OpcodeResult::MalformedPayload`/`UnknownOpcode`).
-  Extended `baud-proto`'s `Msg` enum with two new variants the tape device's control opcodes need
-  and no existing message fit (`MarkBranch { step }` for `MARK_BRANCH`, `Log { bytes, step }` for
-  `LOG`) — additive, not a breaking wire change (existing golden vectors unaffected; new
-  roundtrip/proptest coverage added), and mirrored into `specs/baud-proto.md` §5 so the wire
-  schema doc stays the single source of truth. `PROBE`'s outbound-buffer wire format (key-length
-  byte + key bytes + opaque value bytes) is this crate's own implementation choice — the spec
-  names the opcode's meaning but not a byte layout, documented inline in `parse_probe`'s doc
-  comment. **Wired into `baud-multiverse`** (`crates/baud-multiverse/src/tape_bus.rs`, new,
-  hardware-independent — same split as `console.rs`): `TapeBus` adapts `TapeDevice`'s per-byte API
-  onto `baud_vcpu::Bus`'s slice-based PIO interface at a fixed port window (`TAPE_DEVICE_BASE =
-  0x0500`, chosen to avoid `console::COM1_BASE`'s 0x3f8-0x3ff range); `console::DeviceBus` gained a
-  `tape: TapeBus` field routed ahead of the `OpenBusFallback` catch-all (todo.md §3.6's subtractive
-  rule: "down to a console plus the tape device" — now both are actually on the bus). `linux::
-  Multiverse::boot` now takes the run's `tape: Vec<u8>` directly and seeds `DeviceBus::with_tape`
-  with it (`DeviceBus::with_tape` added because `DeviceBus`'s `fallback` field is private to
-  `console.rs` — struct-update syntax from `linux/mod.rs` couldn't construct it directly); a new
-  `Multiverse::drain_tape_records()` exposes what the guest emitted after a run. This closes the
-  "tape-device-driven `run(tape: impl TapeSource)` signature still needs `baud-tape-device`" gap
-  called out in iteration 4's notes below (the shape differs slightly from the spec's — `boot`
-  takes the tape directly since there is exactly one run per `Multiverse` today; re-running the
-  same booted guest against a different tape is `baud-driver`'s eventual job, not built yet).
-  **Verification**: `cargo test -p baud-proto -p baud-tape-device -p baud-multiverse` — 12+18+33 =
-  63 tests pass (18 new in `baud-tape-device`, 5 new `tape_bus` tests + 2 new/extended `console`
-  tests in `baud-multiverse`, 2 new roundtrip tests in `baud-proto`); `cargo check`/`clippy
-  --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean for the `tape_bus`
-  module and the updated `linux/mod.rs` (0 new warnings — the pre-existing warnings are all in
-  `lib.rs`'s untouched pre-pivot simulation code, same as every prior iteration); `cargo
-  build/test/clippy --workspace` all green, 0 regressions; `drive/h0.sh` and `drive/m0.sh` both
-  re-verified passing end-to-end (stale-server port-7734 environmental issue avoided this time by
-  killing any leftover `baud-server.exe` via PowerShell before each run, per the note below).
-  **Not yet done**: no real guest ever writes to this port range yet (no in-guest driver/shim
-  exists — that is `baud-packages`' job per specs/baud-tape-device.md §2's "guest-side driver
-  contract", not started); `TapeBus`/`DeviceBus` wiring is type-check-only on this dev machine,
-  same "not yet exercised on real KVM hardware" caveat as the rest of `linux/`.
-- **`baud-snapshot` (specs/baud-snapshot.md) — hardware-independent core built and unit-tested,
-  plus a real Linux capture/restore backend; branch/reset (userfaultfd/dirty-ring) not yet
-  built.** New crate (`crates/baud-snapshot`, deps = `{baud-proto, kvm-ioctls, kvm-bindings,
-  vm-memory}` — `userfaultfd` deliberately not pinned yet, see below):
-  - `page_store.rs` — `PageStore`/`PageRef`/`PageHash`: content-addressed guest-RAM pages
-    (blake3-hashed, same hash `baud-multiverse::linux::Multiverse::ram_hash` already uses),
-    deduplicated across every universe interned through one store (specs/baud-snapshot.md §4's
-    "per-branch memory ∝ write set" — proven at this layer by `Arc::ptr_eq` identity, not just
-    content equality). Hardware-independent, no KVM at all: 4 tests including a 1,000-universe
-    dedup proof (`a_thousand_mostly_identical_universes_share_the_common_pages`).
-  - `universe.rs` — the enumerated capture set (`Universe`/`VcpuState`/`ClockState`/`DeviceState`,
-    specs/baud-snapshot.md §3), `order_msrs_tsc_first` (§6: "restore `IA32_TSC` before
-    `IA32_TSC_DEADLINE`" — a stable 3-way-rank sort, order-of-input-independent), `restore_plan`
-    (§6's ordered restore sequence: TSC frequency first, RAM before any vCPU-state write, VM clock
-    only after every vCPU-state field, device state last), `model_matches`
-    (`restore_refuses_mismatched_cpu`'s CPU-signature guard), and `dirty_pages` (the *planning*
-    half of §5's "reset cost scales with write-set, not total RAM" — real
-    `KVM_CAP_DIRTY_LOG_RING` bookkeeping is not built yet, but the guarantee that a reset only
-    touches what actually changed is proven here independent of it). 7 tests.
-  - `tree.rs` — `Tree`/`NodeId`: in-memory branch-point bookkeeping (parent/child links,
-    `nearest_ancestor_at_or_before`) so exploration/shrinking can fork from the nearest snapshot
-    instead of the root (§5's `shrink_reproduces_from_nearest_snapshot`, todo.md problem #22). 4
-    tests.
-  - `msr.rs` — `MSR_IA32_TSC`/`_DEADLINE`/`_AUX` moved here as the single source of truth (this
-    crate sits below `baud-multiverse` in the dependency graph per specs/baud-snapshot.md §2's
-    diagram); `baud-multiverse::timesource` now `pub use`s them instead of duplicating the values,
-    and `baud-multiverse`'s `Cargo.toml` gained a `baud-snapshot` path dependency.
-  - `linux.rs` (`cfg(target_os = "linux")`) — real `capture`/`restore` functions walking every
-    `KVM_GET_*`/`KVM_SET_*` specs/baud-snapshot.md §3 enumerates (regs/sregs/msrs via
-    `KVM_GET_MSR_INDEX_LIST` + `KVM_GET_MSRS`/`KVM_SET_MSRS`/lapic/xsave (`KVM_GET_XSAVE`, not
-    `KVM_GET_XSAVE2` — see note below/xcrs/vcpu_events/mp_state/`KVM_GET_CLOCK`/`KVM_GET_TSC_KHZ`),
-    plus RAM paged through `page_store`; `restore` walks `universe::restore_plan` literally,
-    step-by-step, and refuses a CPU-model mismatch via `model_matches` before touching anything.
-    Type-checks and clippy-clean against the real crate sources (`cargo check`/`clippy --target
-    x86_64-unknown-linux-gnu -p baud-snapshot`) but **not yet exercised on real KVM hardware** —
-    same caveat as every other `linux/` module (no Linux/KVM host on this dev machine, CLAUDE.md).
-    Uses `KVM_GET_XSAVE`/`KVM_SET_XSAVE` (the fixed 4096-byte struct) rather than the spec's named
-    `KVM_GET_XSAVE2` — sufficient for the minimal single-guest-kernel images baud targets through
-    H5 (no dynamically-enabled AVX-512/AMX XSTATE features in play); switching to XSAVE2 for a
-    guest that needs it is a bounded follow-up, not a redesign (`Xsave`'s FAM-sized allocation is
-    the only new piece).
-  - **Deliberately not built this iteration** (tracked as the next action, not a stub — nothing
-    here pretends to work): userfaultfd-based CoW branching (`Snapshot::branch`) and
-    `KVM_CAP_DIRTY_LOG_RING`-based cheap reset (`Snapshot::reset`), specs/baud-snapshot.md §4-§5.
-    Root cause, discovered this iteration and worth recording so nobody re-derives it: the
-    `userfaultfd` crate's sys bindings (`userfaultfd-sys`) generate their FFI layer with `bindgen`
-    at build time, which needs `libclang` — and a build script always runs on the *host*
-    regardless of `--target`, so even `cargo check --target x86_64-unknown-linux-gnu` for a crate
-    depending on `userfaultfd` fails right here on this Windows box with "Unable to find libclang"
-    (confirmed by fetching the crate into a scratch project and running exactly that check — see
-    `crates/baud-snapshot/src/linux.rs`'s module doc for the two ways forward: install
-    LLVM/libclang here, or hand-roll the handful of needed `UFFDIO_*` ioctls against
-    `libc::syscall(SYS_userfaultfd, ..)` the same way `baud-vcpu::linux::pmu` already hand-rolls
-    `F_SETSIG` instead of pulling in a heavier dependency).
-  - **Verification**: `cargo test -p baud-snapshot` — 15/15 pass natively on this Windows machine
-    (0 KVM/perf needed for any of it); `cargo check`/`clippy --target x86_64-unknown-linux-gnu -p
-    baud-snapshot -p baud-multiverse --all-targets` clean for every new/touched file (0 new
-    warnings — one unused-import warning surfaced mid-iteration and was fixed before this checkpoint,
-    not left in; the only warnings clippy reports across the whole workspace are the same
-    pre-existing ones in `baud-multiverse`'s untouched pre-pivot
-    `lib.rs` and a handful of unrelated crates, already tracked, not this increment's); `cargo
-    build/test --workspace` green (all crates, no regressions, 15 new tests total: `baud-snapshot`
-    didn't exist before this iteration); `drive/h0.sh` and `drive/m0.sh` re-verified passing
-    end-to-end (killing any leftover `baud-server.exe` via PowerShell first, per the established
-    note below).
-- **`baud-snapshot` wired into `baud-multiverse`'s boot/run flow — `Multiverse::snapshot`/
-  `Multiverse::restore` built (specs/baud-multiverse.md §6's `Snapshot::capture`/
-  `Snapshot::restore` API), type-check-only pending real hardware.** Closes the "capture/restore
-  are not called from `baud-multiverse` yet" gap the previous iteration left open:
-  - `crates/baud-multiverse/src/linux/mod.rs` — `create_vm_vcpu_shell()` extracted from
-    `boot_guest` (the shared `Kvm::new → create_vm → register zeroed RAM → create_vcpu → CPUID mask
-    → MSR filter` prefix both a fresh boot and a restore need identically); `restore_guest(universe,
-    template_active)` builds that shell then walks `baud_snapshot::linux::restore`'s `restore_plan`
-    onto it. `Multiverse::snapshot(&mut self, page_store: &mut PageStore) -> Result<Universe, ...>`
-    calls `baud_snapshot::linux::capture` against this instance's own KVM handles plus the three
-    pieces of state only this crate's device models know (work-clock anchor/deadline/aux,
-    tape-device cursor, console output). `Multiverse::restore(universe, tape, k, template_active) ->
-    Result<Self, RestoreError>` is the inverse: `restore_guest` rebuilds the KVM/vCPU/RAM state,
-    then `DeviceBus::restore` (new, `console.rs`) and `WorkClock::restore` (new, `timesource.rs`)
-    reassemble the device/clock layer `baud-snapshot` deliberately leaves to the caller
-    (`RestoreStep::RestoreDevice`'s doc) — `tape` is the run's whole tape (unchanged across a run,
-    same value the original `boot` call used), fast-forwarded to the captured cursor via
-    `baud-tape-device`'s new `TapeDevice::restore_cursor`; the console is pre-seeded with the
-    captured output history via `Console::with_output` so `.output()` shows the full history
-    post-restore, not just what's written after.
-  - **Correctness gap found and closed while wiring this**: `IA32_TSC_DEADLINE`/`IA32_TSC_AUX` are
-    served entirely by `WorkClock` in software (the MSR filter routes them to userspace, so a guest
-    `wrmsr` to either never reaches KVM's own MSR storage) — a capture that only saved
-    `KVM_GET_MSRS`' view of those two indices would silently restore stale/zero values regardless of
-    what the guest had actually armed. Fixed by extending `baud-snapshot::universe::ClockState` with
-    `tsc_deadline`/`tsc_aux` fields (alongside the existing `work_clock_base`), threading them
-    through `baud_snapshot::linux::capture`'s signature, and adding `WorkClock::restore`/`base()`/
-    `tsc_deadline()`/`tsc_aux()` accessors so `Multiverse::snapshot`/`restore` round-trip them
-    exactly — documented inline on both sides (`ClockState::tsc_deadline`'s doc, `WorkClock::
-    restore`'s doc) so a future reader doesn't have to re-derive why `vcpu.get_msrs()` alone isn't
-    enough for a filtered MSR.
-  - **Verification**: `cargo test -p baud-tape-device -p baud-snapshot -p baud-multiverse` — 70/70
-    pass natively (19+15+36; new: 1 `TapeDevice::restore_cursor` test, 2 `console.rs` tests
-    (`Console::with_output`, `DeviceBus::restore`), 1 `WorkClock::restore` round-trip test); `cargo
-    check`/`clippy --target x86_64-unknown-linux-gnu -p baud-snapshot -p baud-multiverse -p
-    baud-tape-device --all-targets` clean (0 new warnings — one `clippy::default_constructed_unit_
-    structs` this iteration introduced was fixed before the checkpoint, not left in); `cargo
-    build/test/clippy --workspace` all green, 0 regressions; `drive/h0.sh` and `drive/m0.sh`
-    re-verified passing end-to-end (both hit the already-documented "sleep 1 too short" race at
-    least once this iteration — re-running cleanly after killing the leftover `baud-server.exe`
-    resolved it both times, consistent with the existing note below, not a new issue).
-  - **Not yet done**: `baud-snapshot`'s own branch/reset (userfaultfd/dirty-ring) is still open (see
-    above); the `baud-snapshot-store` crate does not exist yet; no in-guest tape-device driver/shim
-    exists in `baud-packages` yet; nothing calls `Multiverse::snapshot`/`restore` on real KVM
-    hardware yet (same "no Linux/KVM host on this dev machine" caveat as every other `linux/`
-    module, CLAUDE.md) — the round-trip (`snapshot_roundtrip_is_bit_identical`) is provable in unit
-    tests at the level each underlying piece already covers (restore ordering, MSR round-tripping,
-    tape-cursor/console reconstruction) but not yet as one end-to-end real-hardware test, which
-    needs H1 (booting a real guest) to land first since there is no real halted guest to snapshot
-    from yet.
+  device bus.** New crate (deps = `{baud-proto}` only): `TapeDevice` (pure function of tape bytes +
+  guest register writes, `pio_read`/`pio_write` at DATA/CONTROL/STATUS), `ControlOp`
+  (PROBE/MARK_BRANCH/GOAL/VIOLATION/LOG), `drain_records()`. Hardware-independent, 18+ tests incl.
+  the spec's own named tests and a 128-op proptest fuzz. Extended `baud-proto::Msg` with
+  `MarkBranch`/`Log` variants (additive, mirrored in specs/baud-proto.md §5). Wired into
+  `baud-multiverse` via `tape_bus::TapeBus` (fixed port window 0x0500) composed into `DeviceBus`
+  alongside console + open-bus fallback (todo.md §3.6's "console plus the tape device"); `linux::
+  Multiverse::boot` takes the tape directly, `drain_tape_records()` exposes guest output.
+  **Not yet done**: no real guest ever writes to this port range (no in-guest driver/shim built in
+  `baud-packages` yet — the manifest/lint half now exists, see the guest-image entry below, but not
+  the actual driver code); wiring is type-check-only pending real hardware.
+- **`baud-snapshot` (specs/baud-snapshot.md) — hardware-independent core built + real Linux
+  capture/restore backend; branch/reset (userfaultfd/dirty-ring) not yet built.** `page_store.rs`
+  (content-addressed `PageStore`, blake3-hashed, dedup proven via `Arc::ptr_eq`), `universe.rs`
+  (`Universe`/`VcpuState`/`ClockState`/`DeviceState` enumerated capture set, `order_msrs_tsc_first`,
+  `restore_plan`, `model_matches`, `dirty_pages`), `tree.rs` (branch-point bookkeeping,
+  `nearest_ancestor_at_or_before` for shrink-from-nearest), `msr.rs` (MSR constants, single source
+  of truth — `baud-multiverse::timesource` re-exports them), `linux.rs` (real `capture`/`restore`
+  walking every `KVM_GET_*`/`KVM_SET_*` the spec enumerates; uses `KVM_GET_XSAVE` not `XSAVE2` —
+  sufficient for minimal guest images through H5, a bounded follow-up if a guest needs AVX-512/AMX).
+  **Deliberately not built**: userfaultfd-based `Snapshot::branch` and
+  `KVM_CAP_DIRTY_LOG_RING`-based `Snapshot::reset` — the `userfaultfd` crate's `bindgen`/`libclang`
+  build-script requirement fails on this Windows box even for cross-target `cargo check` (build
+  scripts run on the host, not the target); two ways forward documented in `linux.rs`'s module doc
+  (install LLVM/libclang here, or hand-roll the `UFFDIO_*` ioctls the way `baud-vcpu::linux::pmu`
+  hand-rolls `F_SETSIG`). 15/15 tests pass.
+  - **Wired into `baud-multiverse`**: `Multiverse::snapshot()`/`Multiverse::restore()`
+    (specs/baud-multiverse.md §6). `create_vm_vcpu_shell()` extracted as the shared boot/restore
+    prefix; `restore_guest` walks `restore_plan` onto it. **Correctness gap found and fixed**:
+    `IA32_TSC_DEADLINE`/`IA32_TSC_AUX` are served entirely by `WorkClock` in software (the MSR
+    filter means KVM's own `KVM_GET_MSRS` never sees a guest's real write) — `ClockState` extended
+    with `tsc_deadline`/`tsc_aux` fields captured from `WorkClock` directly, not from KVM's MSR
+    list (documented inline, `ClockState::tsc_deadline`'s doc). `DeviceBus::restore`/
+    `Console::with_output`/`TapeDevice::restore_cursor`/`WorkClock::restore` reassemble the
+    device/clock layer snapshot deliberately leaves to the caller. 70/70 tests pass across
+    `baud-tape-device`/`baud-snapshot`/`baud-multiverse`.
+  - **Not yet done**: branch/reset (see above); nothing calls `snapshot`/`restore` on real KVM
+    hardware yet (needs H1 — a real halted guest to snapshot from — first).
 - **`baud-snapshot-store` (specs/baud-snapshot-store.md) — built and unit-tested, fully
-  hardware-independent.** New crate (`crates/baud-snapshot-store`, deps = `{blake3, baud-keys,
-  baud-proto}` per the spec's §2 pinned skeleton, plus `serde`/`serde_json`/`thiserror`): the
-  durable, content-addressed, age-encrypted-at-rest record of a run (universe tree + tape + run
-  manifest, §1) that supersedes `baud-journal`'s replay-from-zero design. Unlike every other
-  post-pivot crate so far, this one has **no `cfg(target_os = "linux")` half at all** — it never
-  touches a guest/vCPU (§1's own Non-Goal: "Capturing/restoring VM state (that is
-  `baud-snapshot`)"), so every test here runs and proves the real behavior on this Windows dev
-  machine with no "not yet exercised on real KVM hardware" caveat.
-  - `crates/baud-snapshot-store/src/types.rs` — `Sha` (blake3 content hash, hex-roundtrippable),
-    `RunId`, `NodeId` (= `Sha`), `Node`, `RunManifest`, `PageRef`. Three documented departures
-    from specs/baud-snapshot-store.md §3's literal Rust pseudocode (each with an inline doc
-    comment explaining why, and mirrored into the spec's new §9 "Implementation Notes"): (1)
-    `Node.universe: Option<Hash>` — not every branch point has a captured universe (capturing is
-    comparatively expensive; `MARK_BRANCH` events are far more frequent than actual snapshots);
-    (2) `RunManifest.regime: String` — this crate's declared deps deliberately exclude
-    `baud-host`, so the regime enum (`baud_host::Regime` remains its single source of truth) is
-    archived as an opaque tag, not interpreted; (3) `NodeId` is content-addressed from
-    `(parent, at_step, tape_range)` via `Sha::of_node_identity`, not an opaque counter — two
-    `put_universe`/`mark_branch` calls describing the same branch point collapse onto the same
-    node.
-  - `crates/baud-snapshot-store/src/store.rs` — `SnapshotStore`: `open`/`open_with_keys`,
-    `put_manifest`/`get_manifest`, `put_tape`/`get_tape`, `put_page`/`get_page`,
-    `put_universe`/`get_universe`, `mark_branch` (this crate's extension — records a
-    branch-point-only node with `universe: None`, idempotent via content-addressing),
-    `nearest`/`reconstruct` (walk parent links past `None`-universe nodes to the nearest captured
-    ancestor, §5's "fork from nearest, not root"), `put_records`/`get_records` (this crate's other
-    extension — persists the guest's tape-device `baud_proto::Msg` write-channel records per node,
-    CBOR-encoded via `baud_proto::encode`/`decode`, reusing the existing wire format rather than
-    inventing a second one). Every body (`universe`/page/tape/records) is age-encrypted via new
-    `baud-keys` functions; every index file (`manifest.json`, `nodes/*.json`) is plain JSON, per
-    §4's "In clear: only the (run, node) index + addresses."
-  - **`baud-keys` gained real `age` encryption** (`age_public_key`/`age_encrypt`/`age_decrypt`,
-    `crates/baud-keys/src/lib.rs`): uses the pure-Rust `age` crate 0.12 in-process (streamlined
-    `age::encrypt(&Recipient, &[u8])`/`age::decrypt(&Identity, &[u8])` API, confirmed against the
-    real crate docs) rather than shelling out to an `age`/`sops` binary per call — no
-    `libclang`/`bindgen` dependency (unlike the `userfaultfd` crate blocking `baud-snapshot`'s
-    branch/reset, §14's H5 entry below), so it builds and its tests run fully on this Windows dev
-    machine with no external `sops`/`age` binaries installed at all (confirmed: neither is on
-    PATH here). `age_key_path()`'s existing $SOPS_AGE_KEY_FILE → macOS → Linux resolution order is
-    reused unchanged, so one identity file guards both `infra/secrets` and this new store.
-  - **Verification**: `cargo test -p baud-keys -p baud-snapshot-store` — 28/28 pass (9 new
-    `baud-keys` age tests incl. a roundtrip against a hardcoded throwaway test keypair and
-    negative paths for malformed recipients/identities; 19 new `baud-snapshot-store` tests incl.
-    the spec's own three named tests verbatim —
-    `snapshot_store_bodies_are_ciphertext`/`pages_dedup_by_plaintext_hash`/
-    `reconstruct_forks_from_nearest_node` — plus a 40-case proptest fuzz on node-identity
-    content-addressing and coverage for run-id path-escape sanitization, missing-key error paths,
-    and manifest/node-index plaintext-readability); `cargo build/test/clippy --workspace` all
-    green (0 regressions, 0 new clippy warnings in either touched crate — the only warnings
-    reported anywhere in the workspace are pre-existing ones in unrelated crates, same as every
-    prior iteration); `drive/h0.sh` and `drive/m0.sh` both re-verified passing end-to-end.
-  - **Not yet done**: no garbage collection / per-run recipients / remote store (§8, already
-    tracked there as future work); nothing in `baud-server`/`baud-driver` calls into this crate
-    yet (it exists standalone, same "built, not yet wired up" stage `baud-snapshot` itself passed
-    through for two iterations before `baud-multiverse` wired it in) — wiring
-    `baud-snapshot::Universe` capture bytes through `SnapshotStore::put_universe`'s `body: &[u8]`
-    parameter, and `baud-driver`'s branch-point choices through `mark_branch`, is the natural next
-    step once there is a real exploration loop to drive it.
+  hardware-independent** (no `cfg(target_os = "linux")` half at all — never touches a guest/vCPU).
+  `types.rs` (`Sha`/`RunId`/`NodeId`/`Node`/`RunManifest`/`PageRef`; three documented departures
+  from the spec's literal pseudocode, mirrored into specs/baud-snapshot-store.md §9), `store.rs`
+  (`SnapshotStore`: `put/get_manifest`, `put/get_tape`, `put/get_page` (dedup by plaintext hash),
+  `put/get_universe`, `mark_branch` (branch-point-only nodes, this crate's extension),
+  `nearest`/`reconstruct` (fork from nearest captured ancestor), `put/get_records` (guest
+  tape-device records, CBOR via `baud_proto`)). Bodies are age-encrypted (new
+  `baud-keys::age_encrypt`/`age_decrypt`/`age_public_key`, pure-Rust `age` crate 0.12 in-process, no
+  libclang/sops/age binary needed); the (run,node) index is plain JSON per spec §4. 28/28 tests
+  (9 `baud-keys` + 19 `baud-snapshot-store`) incl. the spec's own three named tests verbatim.
+  **Not yet done**: no GC/per-run recipients/remote store (§8, tracked there); nothing in
+  `baud-server`/`baud-driver` calls into this crate yet — wiring `baud-snapshot::Universe` bytes
+  through `put_universe` and `baud-driver`'s branch choices through `mark_branch` is the natural
+  next step once there is a real exploration loop.
+- **Guest-image contract + `baud image lint` (specs/baud-packages.md §9, todo.md §4, test matrix
+  row 14) — built and unit-tested, wired end-to-end (crate → server → CLI), fully
+  hardware-independent.** Closes a real gap found this iteration: `crates/baud-packages` still only
+  implemented the *pre-pivot* ptrace-tracee contract (static/no-PIE/musl ELF), not the KVM-era
+  bootable-guest-image contract todo.md §4 actually requires — a genuine spec/code inconsistency
+  (specs/baud-packages.md described the wrong deliverable), now fixed with a pivot notice at the
+  top of that spec and a new §9 documenting the guest-image contract as the top-level one.
+  - `crates/baud-packages/src/image.rs` (new module, no `cfg(target_os = "linux")` — operates on
+    text, no KVM/nix/hardware needed): `GuestImageManifest::parse_kernel_config(text)` parses the
+    standard Linux Kconfig `.config` text format (`CONFIG_FOO=y`/`=m`, `# CONFIG_FOO is not set`);
+    `image_lint(manifest)` checks (1) `CONFIG_BAUD_TAPE_DEVICE` (the Kconfig symbol baud's
+    out-of-tree tape-device kernel shim would register under, specs/baud-tape-device.md §2's
+    "guest-side driver ... shipped in the image") is enabled, and (2) none of
+    `CONFIG_RTC_CLASS`/`CONFIG_RTC_DRV_CMOS`/`CONFIG_HPET_TIMER`/`CONFIG_HPET_MMAP`
+    (specs/baud-multiverse.md §3.3's "delete HPET/RTC entirely" — the device bus never serves
+    them) are enabled; each violation carries a `symbol` + a specific `reason`, both reported
+    together in one lint pass. 16 new tests including the spec's own named test
+    (`image_lint_requires_tape_driver`) plus RTC/HPET rejection, a well-formed-image pass case,
+    `.config`-format parsing (real Kconfig banner comments, string/int-valued symbols correctly
+    ignored, module vs. built-in), and a proptest fuzz asserting every subset of the forbidden-timer
+    set is fully and correctly reported regardless of which symbols are enabled.
+  - Wired end-to-end, mirroring the existing `host probe` pattern exactly: `POST /image/lint`
+    (`crates/baud-server/src/routes/image.rs`, registered in `main.rs`) → `baud image lint <path>`
+    (`crates/baud-cli/src/cmds/image.rs`, registered in `main.rs`'s `Commands` enum) — reads the
+    kernel `.config` file, posts it, exits `1` on any violation (never a false pass, same
+    convention as `host probe`'s rejected-regime handling). Manually verified end-to-end this
+    iteration (server + CLI, not just unit tests): a well-formed config → `ok:true`, exit 0; a
+    config missing the tape driver with RTC enabled → both violations reported with their specific
+    reasons, exit 1.
+  - `crates/baud-packages/src/lib.rs`'s module doc gained a short pivot note explaining why the old
+    `verify_guest_contract` (static/no-PIE ELF check) is retained unchanged — it still applies to
+    building individual pieces that end up inside a guest image's rootfs (e.g. the in-guest agent
+    binary), just demoted from "the top-level contract" to that narrower scope.
+  - **Verification**: `cargo test -p baud-packages` (17/17 pass — 16 new `image` tests + the
+    pre-existing `flake`/`spec` tests, 1 pre-existing `#[ignore]`d real-ELF integration test
+    unaffected); `cargo build/test/clippy --workspace` all green, 0 regressions, 0 new clippy
+    warnings anywhere (confirmed `cargo clippy -p baud-packages -p baud-server -p baud-cli
+    --all-targets` specifically — the handful of warnings reported are all pre-existing, in
+    unrelated files `net.rs`/`tape.rs`/`fuzz.rs`/`replay.rs`/`tracing.rs`, none in any new/touched
+    file); `drive/h0.sh` and `drive/m0.sh` both re-verified passing end-to-end.
+  - **Not yet built** (documented in specs/baud-packages.md §9.4): `CONFIG_PIT`/PM-timer gating
+    (todo.md §3.3 names them too, but neither has as clean a single boolean Kconfig symbol as
+    RTC/HPET — PIT is typically compiled into core x86 platform code, not a separately toggleable
+    driver; needs a real kernel `.config` to see what actually needs gating, tracked as a
+    follow-up); no real Nix guest-image build pipeline producing a `.config` from a `spec.toml`
+    exists yet — `lint_kernel_config` operates on a `.config` handed to it, nothing yet generates
+    that `.config` end-to-end from a guest-image spec. That, plus the actual in-guest tape-device
+    driver/shim binary itself (the code `CONFIG_BAUD_TAPE_DEVICE=y` would compile), remain open —
+    both need a real kernel-build toolchain (Nix + a Linux kernel source tree), not available on
+    this dev machine, and are the natural next `baud-packages` increment.
+- **Stale pre-pivot drive scripts found this iteration (not fixed — out of scope, documented for
+  whoever touches `drive/` next)**: `drive/h1.sh`/`h2.sh`/`h3.sh` already exist as files but
+  validate the *old* ptrace-era H1-H3 definitions (`clone_syscall_is_killed`,
+  `rdtsc_is_trapped_and_served_virtual_time`, "supervisor MVP") from before the KVM-pivot rewrite
+  of this plan — they do **not** match the H1-H3 this document's §10 now defines (boot a guest,
+  deterministic double-run, randomness/time control via KVM). They still pass (they test
+  `crates/baud-multiverse`'s untouched pre-pivot `lib.rs` simulation code, which nothing has
+  removed), so they are not lying about anything they claim, but they are testing a different,
+  no-longer-current plan. A future iteration should either rewrite them to match the current H1-H3
+  (needs a real KVM host to mean anything) or clearly mark/rename them as legacy until then.
 - H2-H6 and the rest of the M-series remain **not yet started** beyond the above.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a

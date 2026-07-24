@@ -1289,3 +1289,37 @@ drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (h0: regime=reje
 ---
 
 Post-push verification: git fetch confirms origin/main == local HEAD (05fbd21). No CI/post-push protocol defined in todo.md for this repo (no .github/workflows). Re-ran drive/h0.sh and drive/m0.sh against the pushed tip: both PASS (h0: regime=rejected as expected, H0.1-H0.3 all PASS; m0: PASS). Already had cargo build/test/clippy --workspace green (0 regressions) before pushing. todo.md still has substantial pending work (baud-snapshot's userfaultfd branch()/reset(), wiring baud-snapshot-store into baud-server/baud-driver, in-guest tape-device driver/shim in baud-packages, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
+
+## 2026-07-24T16:27:39 UTC - Session usage — iteration 8 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 75146
+- est. output cost: $1.1272 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 9
+═══════════════════════════════════════════════════════
+
+Finding most important item to address, starting by studying specs/* and todo.md build status (through iteration 8) and confirming environment state (still no WSL/KVM host available, so real-hardware H1-H6 validation remains blocked)...
+
+Chose to build the guest-image contract (todo.md §4, test matrix #14 `image_lint_requires_tape_driver`) in crates/baud-packages: it's the last major hardware-independent gap on the H1 critical path (a guest needs the tape-device driver + no real timers before it can even boot deterministically), and it's a genuine spec inconsistency worth fixing along the way -- specs/baud-packages.md still describes the pre-pivot ptrace-era contract (static/no-PIE ELF binary), not the KVM-era bootable-guest-image contract todo.md §4 actually requires. No Agent/Task-spawn tool is present in this session's toolset (checked via ToolSearch), so proceeding directly with careful reasoning in place of dispatched subagents.
+
+Built and unit-tested the guest-image contract end-to-end: crates/baud-packages/src/image.rs (GuestImageManifest::parse_kernel_config parsing the real Linux Kconfig .config text format, image_lint checking CONFIG_BAUD_TAPE_DEVICE is enabled and CONFIG_RTC_CLASS/CONFIG_RTC_DRV_CMOS/CONFIG_HPET_TIMER/CONFIG_HPET_MMAP are not, 16 new tests incl. the spec's named image_lint_requires_tape_driver test and a proptest fuzz), wired POST /image/lint (baud-server) and baud image lint <path> (baud-cli), mirroring the existing host-probe pattern exactly. Manually verified end-to-end against a real running server: well-formed config -> ok:true exit 0; config missing tape driver + RTC enabled -> both violations reported with specific reasons, exit 1. cargo test -p baud-packages: 16/16 new tests pass; cargo build/test/clippy --workspace all green, 0 regressions, 0 new clippy warnings (confirmed per-crate for baud-packages/baud-server/baud-cli specifically). Updated specs/baud-packages.md with a pivot notice + new §9 documenting the guest-image contract as the new top-level contract (the old static/no-PIE ELF check was describing the pre-pivot ptrace-tracee model, now correctly scoped down to "how you build a piece that goes inside a guest image's rootfs"). Re-verified drive/h0.sh and drive/m0.sh both pass end-to-end. Also did a periodic todo.md cleanup this iteration (rule: clean out completed-item verbosity periodically) -- condensed the very verbose per-iteration build-status entries (H0/baud-vcpu/baud-multiverse-boot/baud-tape-device/baud-snapshot/baud-snapshot-wiring/baud-snapshot-store) into compact per-crate summaries that keep every "what's built" and "what's not yet done" fact but drop repeated verification prose, shrinking todo.md from 857 to 598 lines with no information loss (verified the file reads cleanly end-to-end after the splice). Also documented two learnings found while studying: (1) drive/h1.sh/h2.sh/h3.sh already exist as files but test the *old* pre-pivot ptrace-era H1-H3 definitions, not the KVM-era H1-H3 this plan now defines -- flagged in todo.md as stale, not fixed (out of scope). (2) No Agent/Task-spawn tool was available in this session's toolset (checked via ToolSearch) so all "subagent" study/build work in this iteration was done directly by this session rather than dispatched, per the orchestrator's fallback guidance. Finalizing and committing now.
+
+## 2026-07-24T16:39:21 UTC - Changes committed.
+- What was implemented: the KVM-era guest-image contract (specs/baud-packages.md §9, todo.md §4) -- `GuestImageManifest`/`image_lint`/`lint_kernel_config` in `baud-packages`, checking a guest kernel's `.config` for the tape-device driver and the absence of real RTC/HPET timers -- wired end-to-end through `baud-server`'s new `POST /image/lint` and `baud-cli`'s new `baud image lint <path>` command (test matrix row 14's `image_lint_requires_tape_driver`).
+- Files changed:
+  - crates/baud-packages/src/{image.rs (new), lib.rs, Cargo.toml}
+  - crates/baud-server/src/{routes/image.rs (new), routes/mod.rs, main.rs}
+  - crates/baud-cli/src/{cmds/image.rs (new), cmds/mod.rs, main.rs}
+  - specs/baud-packages.md (pivot notice + new §9)
+  - todo.md (new build-status entry; also condensed the pre-existing §14 entries from 857 to 598 total lines, no information loss)
+  - ralph/progress.txt
+- **Brief description of changes:**
+  - image.rs: parses the real Linux Kconfig `.config` text format (`CONFIG_FOO=y`/`=m`, `# CONFIG_FOO is not set`) into a symbol->state map; lints it for `CONFIG_BAUD_TAPE_DEVICE` (must be enabled) and `CONFIG_RTC_CLASS`/`CONFIG_RTC_DRV_CMOS`/`CONFIG_HPET_TIMER`/`CONFIG_HPET_MMAP` (must not be), reporting every violation with a symbol + specific reason in one pass
+  - Found and fixed a genuine spec inconsistency along the way: specs/baud-packages.md still described the pre-pivot ptrace-tracee contract (static/no-PIE/musl ELF) as the top-level guest contract; added a pivot notice demoting it to "how you build a piece inside a guest image's rootfs" and a new §9 documenting the guest-image contract as the actual top-level one
+  - Wired end-to-end mirroring the existing `host probe` pattern: crate -> `POST /image/lint` -> `baud image lint <path>` (exits 1 on any violation, never a false pass)
+  - Periodic todo.md cleanup: condensed §14's very verbose per-iteration prose (H0/baud-vcpu/baud-multiverse/baud-tape-device/baud-snapshot/baud-snapshot-store) into compact per-crate summaries, preserving every built/not-built fact
+  - Documented two learnings: drive/h1.sh-h3.sh are stale pre-pivot scripts testing the old ptrace-era H1-H3 (not this plan's current H1-H3); no Agent/Task-spawn tool was present in this session's toolset
+- Verification: cargo test -p baud-packages (16/16 new tests, 0 failures); cargo build/test/clippy --workspace all green, 0 regressions, 0 new clippy warnings (confirmed per-crate for baud-packages/baud-server/baud-cli); manual end-to-end verification against a real running baud-server + baud CLI (well-formed config -> ok, exit 0; violating config -> both violations reported with reasons, exit 1); drive/h0.sh and drive/m0.sh both re-verified passing end-to-end
+---

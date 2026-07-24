@@ -5,6 +5,7 @@ pub mod budget;
 pub mod doctor;
 pub mod fuzz;
 pub mod host;
+pub mod image;
 pub mod keys;
 pub mod net;
 pub mod obs;

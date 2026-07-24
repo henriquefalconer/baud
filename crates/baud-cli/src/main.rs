@@ -37,6 +37,8 @@ pub enum Commands {
     Doctor,
     /// KVM host capability probe + regime decision (H0)
     Host(cmds::host::HostCmd),
+    /// Guest-image contract checks (tape-device driver, no real RTC/HPET)
+    Image(cmds::image::ImageCmd),
     /// Secrets management (alias: keys)
     Secrets(cmds::keys::KeysCmd),
     /// Secrets management (deprecated alias for 'secrets')
@@ -86,6 +88,7 @@ async fn main() {
         Commands::Server(cmd) => cmds::server::run(cmd, &c, json).await,
         Commands::Doctor => cmds::doctor::run(&c, json).await,
         Commands::Host(cmd) => cmds::host::run(cmd, &c, json).await,
+        Commands::Image(cmd) => cmds::image::run(cmd, &c, json).await,
         Commands::Secrets(cmd) => cmds::keys::run(cmd, &c, json).await,
         Commands::Keys(cmd) => cmds::keys::run(cmd, &c, json).await,
         Commands::Spec(cmd) => cmds::spec::run(cmd, &c, json).await,

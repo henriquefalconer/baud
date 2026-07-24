@@ -11,6 +11,27 @@
 
 ---
 
+> **2026-07-24 KVM pivot notice.** §§1-8 below describe this crate's original scope: building a
+> single **static, no-PIE, musl ELF process** for a ptrace-based tracee. Under the
+> deterministic-hypervisor pivot (`todo.md`, top-level plan), a workload is no longer a lone
+> process traced from userspace — it is a **bootable guest image** (kernel + rootfs + a tiny
+> in-guest agent) that `baud-multiverse` boots and owns at the KVM/VT-x layer (`todo.md` §4). The
+> static/no-PIE/musl constraint was a **ptrace-tracee** limitation, not a hardware one; the pivot's
+> whole point was removing it — a guest under KVM may run threads, dynamic binaries, multiple
+> processes, any language (`todo.md` §0, §4). §§1-8's flake-templating machinery (`spec.toml` →
+> pinned Nix flake → `nix build`/`nix copy` → closure hash) is **still valid and still used**, just
+> demoted from "the top-level deliverable's contract" to "how you build one piece that ends up
+> inside a guest image's rootfs" (e.g. the in-guest agent binary itself, or a workload binary the
+> guest's init runs) — `BuildResult::verify_guest_contract`'s static/no-PIE check is retained
+> unchanged for exactly that narrower use.
+>
+> **§9 below is the new top-level contract**: what a guest image's kernel must and must not do to
+> satisfy `baud-multiverse`'s determinism guarantees, and `baud image lint` — the command that
+> enforces it (`todo.md` §4's `image_lint_requires_tape_driver` test, problem/spec/test matrix
+> row 14). Read §9 first; treat §§1-8 as "how workload pieces get built," not "the guest contract."
+
+---
+
 ## 1. Overview
 
 ### Purpose
@@ -123,3 +144,69 @@ fn guest_is_static_no_pie() {
 | ------------------ | ---------------------------------------------- |
 | Remote binary cache | Shared warm store across sandboxes            |
 | Closure signing    | Verify closure provenance before a run         |
+
+---
+
+## 9. The Guest Image Contract (KVM pivot, `todo.md` §4)
+
+### 9.1 What a guest image must satisfy
+
+A workload is a **bootable guest image**: a Linux kernel (or unikernel) + a rootfs with the
+software under test + a tiny in-guest agent that speaks to the tape device. Before
+`baud-multiverse` will boot it under a determinism guarantee, the guest kernel's build must:
+
+1. **Include the tape-device driver** — the boot-time kernel shim that talks to
+   `baud-tape-device`'s PIO/MMIO window (`specs/baud-tape-device.md` §2's "guest-side driver
+   contract"). Without it the guest has no way to take entropy, clock, or external input from the
+   tape at all — every read that should be tape-derived instead falls through to whatever the
+   kernel's stock drivers do, which is exactly the determinism hole the whole plan exists to close.
+2. **Not enable a real hardware timer `baud-multiverse` does not model.** `baud-multiverse`'s
+   device bus (`crates/baud-multiverse/src/console.rs`'s `DeviceBus`) serves exactly two things:
+   the console and the tape device; every other port/MMIO address falls through to a fixed-byte
+   open-bus fallback (`specs/baud-multiverse.md` §4/§6, `todo.md` §3.6's "down to a console plus
+   the tape device"). A guest kernel built with the RTC or HPET enabled either hangs waiting on a
+   device that never answers in the way it expects, or — the failure mode that actually matters —
+   reads real host time through a path the VMM never intended to expose, silently reintroducing the
+   nondeterminism the tape/work-clock model exists to remove (`todo.md` §3.3, §3.6).
+
+### 9.2 `baud image lint`
+
+`baud-packages`'s `image` module (`crates/baud-packages/src/image.rs`) implements this contract as
+a lint over a Linux kernel `.config` — the standard Kconfig-output text format nix's kernel builder
+(and `make menuconfig`) both produce, so this reads the artifact the build already has, no new
+build-time instrumentation required:
+
+- `GuestImageManifest::parse_kernel_config(text)` parses `CONFIG_FOO=y`/`=m` assignments and
+  `# CONFIG_FOO is not set` disables into a symbol → `ConfigState` map (`Yes`/`Module`/`No`); an
+  unmentioned symbol defaults to `No`, matching Kconfig's own convention.
+- `image_lint(manifest)` checks two things, both reported together (a caller should not have to
+  fix-and-relint twice to see every violation):
+  1. `CONFIG_BAUD_TAPE_DEVICE` (the Kconfig symbol baud's out-of-tree tape-device shim registers
+     under) must be `Yes` or `Module`.
+  2. None of `CONFIG_RTC_CLASS`, `CONFIG_RTC_DRV_CMOS`, `CONFIG_HPET_TIMER`, `CONFIG_HPET_MMAP`
+     (§3.3's "delete HPET/RTC entirely," `FORBIDDEN_REAL_TIMERS`) may be `Yes` or `Module`.
+- Each violation carries a `symbol` and a human-readable `reason` — `baud image lint` fails with a
+  specific, actionable reason per violation, never a bare "invalid."
+- Wired end-to-end: `baud_packages::lint_kernel_config` (crate) → `POST /image/lint`
+  (`baud-server`) → `baud image lint <path>` (`baud-cli`, exits `1` on any violation — never a
+  false pass, mirroring `baud host probe`'s rejected-regime handling).
+
+### 9.3 Test
+
+- **`image_lint_requires_tape_driver`** (`todo.md` §4, problem/spec/test matrix row 14): an image
+  `.config` without the tape-device driver, or with a real RTC/HPET enabled, fails `baud image
+  lint` with a specific reason naming the offending symbol. (`crates/baud-packages/src/image.rs`'s
+  test module; plus `image_lint_rejects_real_rtc`/`_real_hpet`, `well_formed_image_passes_lint`,
+  and a property test asserting every subset of the forbidden-timer set is fully reported
+  regardless of which symbols are enabled or what order the `.config` lists them in.)
+
+### 9.4 Not yet built
+
+- `PIT`/`PM-timer` are named alongside RTC/HPET in `todo.md` §3.3's "delete entirely" but have no
+  single canonical boolean Kconfig symbol as clean as HPET/RTC's (PIT is usually compiled in as
+  part of the core x86 platform code, not a separately toggleable driver) — tracked as a follow-up
+  once a real guest kernel `.config` is available to check what actually needs gating.
+- No real Nix guest-image build pipeline (kernel + rootfs + agent, §4's "prebaked Daytona snapshot
+  image") exists yet — `lint_kernel_config` operates on a `.config` text handed to it; nothing yet
+  produces that `.config` from a `spec.toml`-style guest-image spec. That is the natural next step
+  once there is a real kernel build to lint the output of.
