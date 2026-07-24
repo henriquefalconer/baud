@@ -1359,3 +1359,37 @@ Full workspace verification green: cargo build/test/clippy --workspace (0 regres
 ---
 
 Post-push verification: git fetch confirms origin/main == local HEAD (9906d34). No CI/post-push protocol defined in todo.md for this repo (no .github/workflows). Re-ran drive/h0.sh and drive/m0.sh against the pushed tip: both PASS (h0: regime=rejected as expected on this KVM-less machine, H0.1-H0.3 all PASS; m0: PASS). Already had cargo build/test/clippy --workspace green (0 regressions, 0 new clippy warnings) before pushing. todo.md still has substantial pending work (baud-snapshot Snapshot::branch, wiring DirtyRing into baud-multiverse, wiring baud-snapshot-store into baud-server/baud-driver, the in-guest tape-device driver + real Nix guest-image build pipeline in baud-packages, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
+
+## 2026-07-24T17:05:32 UTC - Session usage — iteration 10 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 81216
+- est. output cost: $1.2182 (sonnet output rate)
+- exact (from transcript): in=40 out=14132 cache_read=676232 cache_write=153048 → $0.3296
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 11
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+Chose DirtyRing wiring into baud-multiverse (Multiverse::reset_dirty_pages()-style entry point), the explicitly flagged "natural next step" from iteration 10 todo.md notes -- mirrors how snapshot/restore were wired last iteration.
+
+Wiring done: dirty.rs (pure ram_page_indices, 8 tests) + linux/mod.rs Multiverse::enable_dirty_ring/reset_dirty_pages. cargo test -p baud-multiverse 42/42 green (was 34). cargo build/test/clippy --workspace all green, 0 regressions, 0 new clippy warnings. Re-running drive/h0.sh and drive/m0.sh to confirm end-to-end health before committing...
+
+drive/h0.sh and drive/m0.sh both PASS end-to-end (after clearing a stray baud-server.exe holding port 7734 from a prior stuck backgrounded process -- the same pre-existing Windows kill/port-reuse race documented in todo.md, not this iterations fault). Updated specs/baud-snapshot.md section 10 and todo.md section 14 with the DirtyRing wiring status. Preparing final commit...
+
+## 2026-07-24T17:20:00 UTC - Changes committed.
+- What was implemented: wired baud-snapshot's KVM_CAP_DIRTY_LOG_RING-based DirtyRing into baud-multiverse::Multiverse (the "natural next step" flagged at the end of iteration 10), closing the todo.md §14 gap between the dirty-ring reset mechanism (built iteration 10) and an actual caller.
+- Files changed:
+  - crates/baud-multiverse/src/dirty.rs (new)
+  - crates/baud-multiverse/src/{lib.rs, linux/mod.rs}
+  - specs/baud-snapshot.md (§10 update)
+  - todo.md (§14 build status)
+  - ralph/progress.txt
+- **Brief description of changes:**
+  - dirty.rs (new, hardware-independent, NOT under linux/ so cargo test actually runs it on this Windows box): ram_page_indices(harvested, ram_slot) reduces DirtyRing::collect()'s (slot, offset) pairs down to the RAM page indices a rewind must restore, keeping only entries for the single registered RAM memslot. 8 unit + proptest tests prove the filtering (order preservation, verbatim-offset pass-through, length never exceeds input) with no KVM/mmap involved.
+  - linux/mod.rs: Multiverse gained a dirty_ring: Option<DirtyRing> field (None until opted into), Multiverse::enable_dirty_ring(entries) (negotiates the ring right after boot/restore, before any guest execution -- matching DirtyRing::enable's "must be negotiated before any dirty page could occur" requirement), and Multiverse::reset_dirty_pages(base_ram) (collects the harvest, writes back exactly those RAM pages from a caller-supplied base Universe::ram, confirms the reset to the kernel only after every page restored successfully -- a mid-loop failure leaves affected pages un-confirmed rather than lying to the kernel about what was reclaimed). New ResetError enum (NotEnabled/PageOutOfRange/GuestMemory/DirtyRing variants).
+  - reset_dirty_pages's return value (pages restored) is, by construction, exactly the dirty ring's harvested RAM-page count -- the direct observable specs/baud-snapshot.md §5's reset_cost_scales_with_write_set checks.
+- Verification: cargo test -p baud-multiverse 42/42 pass (was 34/34, 8 new in dirty::tests); cargo check --target x86_64-unknown-linux-gnu -p baud-multiverse clean; cargo build/test/clippy --workspace all green, 0 regressions, 0 new clippy warnings anywhere (confirmed cargo clippy --target x86_64-unknown-linux-gnu -p baud-multiverse -p baud-snapshot --all-targets specifically -- every warning reported is pre-existing in the untouched pre-pivot lib.rs code); drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (hit and worked around the already-documented Windows stray-baud-server-holding-port-7734 race from a prior backgrounded run, not a code bug -- Stop-Process then a clean re-run, both scripts PASS).
+
+Post-push verification: git fetch will confirm origin/main == local HEAD after push. No CI/post-push protocol defined in todo.md for this repo (no .github/workflows). drive/h0.sh and drive/m0.sh already re-verified passing end-to-end above; cargo build/test/clippy --workspace already green before pushing. todo.md still has substantial pending work (Snapshot::branch's userfaultfd blocker, wiring baud-snapshot-store into baud-server/baud-driver, the in-guest tape-device driver + real Nix guest-image build pipeline, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
+---

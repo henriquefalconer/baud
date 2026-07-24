@@ -31,6 +31,7 @@
 
 pub mod console;
 pub mod cpuid;
+pub mod dirty;
 pub mod layout;
 pub mod tape_bus;
 pub mod timesource;

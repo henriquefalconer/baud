@@ -20,7 +20,7 @@ use crate::console::DeviceBus;
 use crate::cpuid::{self, CpuidEntry};
 use crate::layout;
 use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX};
-use baud_snapshot::{PageStore, Universe};
+use baud_snapshot::{PageRef, PageStore, Universe};
 use baud_vcpu::DeterminismHole;
 use kvm_bindings::{
     kvm_cpuid_entry2, kvm_enable_cap, kvm_userspace_memory_region, KVM_MAX_CPUID_ENTRIES,
@@ -139,6 +139,23 @@ pub enum RestoreError {
     Shell(#[from] BootError),
     #[error(transparent)]
     Snapshot(#[from] baud_snapshot::linux::RestoreError),
+}
+
+/// Errors from [`Multiverse::reset_dirty_pages`] (specs/baud-snapshot.md §5's "reset" guarantee
+/// wired onto a live `Multiverse`).
+#[derive(Debug, thiserror::Error)]
+pub enum ResetError {
+    #[error("reset_dirty_pages called before enable_dirty_ring")]
+    NotEnabled,
+    #[error(
+        "dirty ring reported RAM page {0}, but the supplied base snapshot only has that many pages \
+         (base_ram and this Multiverse's guest RAM layout have diverged)"
+    )]
+    PageOutOfRange(usize),
+    #[error("failed to write guest RAM at page {0}: {1}")]
+    GuestMemory(usize, vm_memory::guest_memory::Error),
+    #[error(transparent)]
+    DirtyRing(#[from] baud_snapshot::linux::DirtyRingError),
 }
 
 /// Reconstruct a [`BootedGuest`] from a captured [`Universe`] instead of loading a kernel image:
@@ -326,6 +343,12 @@ pub struct Multiverse {
     guest: BootedGuest,
     bus: DeviceBus,
     time: WorkClock<LinuxBranchCounter>,
+    /// `Some` once [`enable_dirty_ring`](Self::enable_dirty_ring) has negotiated
+    /// `KVM_CAP_DIRTY_LOG_RING` on this guest's vCPU (specs/baud-snapshot.md §5) — `None` until
+    /// then, since the ring is an opt-in cost (an extra mmap + capability negotiation) a caller
+    /// that never rewinds this `Multiverse` should not pay. [`reset_dirty_pages`](Self::
+    /// reset_dirty_pages) requires it to be `Some`.
+    dirty_ring: Option<baud_snapshot::linux::DirtyRing>,
 }
 
 /// What running a booted guest to its first halt observed (specs/baud-multiverse.md §8's
@@ -354,7 +377,7 @@ impl Multiverse {
         let guest = boot_guest(kernel_path, cmdline)?;
         let counter = LinuxBranchCounter::new()?;
         let bus = DeviceBus::with_tape(tape);
-        Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter) })
+        Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter), dirty_ring: None })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -417,7 +440,65 @@ impl Multiverse {
             universe.clock.tsc_aux,
             counter,
         );
-        Ok(Multiverse { guest, bus, time })
+        Ok(Multiverse { guest, bus, time, dirty_ring: None })
+    }
+
+    /// Negotiate `KVM_CAP_DIRTY_LOG_RING` on this guest's vCPU and start tracking dirtied RAM
+    /// pages from this moment forward (specs/baud-snapshot.md §5's "reset" guarantee:
+    /// `baud_snapshot::linux::DirtyRing::enable`'s doc — "the capability must be negotiated before
+    /// any dirty page could occur"). Callers that intend to [`reset_dirty_pages`](Self::
+    /// reset_dirty_pages) later must call this *before* [`run_to_first_halt`](Self::
+    /// run_to_first_halt) or any other guest execution — any page dirtied before `enable_
+    /// dirty_ring` runs is invisible to the ring and would not be restored by a later reset
+    /// (it is, however, already baked into whatever `Universe` a subsequent [`snapshot`](Self::
+    /// snapshot) captures as the "base" to reset back to, so a `boot`-then-`enable_dirty_ring`-
+    /// then-`snapshot` sequence is self-consistent: everything written before enablement is part
+    /// of the base itself, not a page the reset needs to touch).
+    ///
+    /// `entries` is the ring's slot count and must be a nonzero power of two (`baud_snapshot::
+    /// linux::DirtyRing::enable`'s own validation) — 4096 slots (one page's worth of `kvm_dirty_
+    /// gfn` entries times 256, comfortably above a typical branch's write set) is a reasonable
+    /// default for callers with no sharper estimate of how many pages a run segment will dirty.
+    pub fn enable_dirty_ring(&mut self, entries: u32) -> Result<(), baud_snapshot::linux::DirtyRingError> {
+        let ring = baud_snapshot::linux::DirtyRing::enable(&self.guest.vm, &self.guest.vcpu, entries)?;
+        self.dirty_ring = Some(ring);
+        Ok(())
+    }
+
+    /// Rewind guest RAM to `base_ram`'s content for exactly the pages the dirty ring reports as
+    /// touched since the last [`enable_dirty_ring`](Self::enable_dirty_ring)/`reset_dirty_pages`
+    /// call (specs/baud-snapshot.md §5: "rewind copies back only dirtied pages ... cost ∝ change,
+    /// not machine size", `reset_cost_scales_with_write_set`'s guarantee). `base_ram` is normally
+    /// a prior [`snapshot`](Self::snapshot)'s `Universe::ram` — the state this `Multiverse` should
+    /// return to — indexed identically to a captured `Universe`'s own RAM (`universe.rs`'s "page
+    /// `i` covers guest-physical `[i * PAGE_SIZE, (i+1) * PAGE_SIZE)`" convention, matched exactly
+    /// by [`crate::dirty::ram_page_indices`]'s doc).
+    ///
+    /// Returns the number of pages actually restored — by construction (`crate::dirty::
+    /// ram_page_indices` only ever selects, never invents, RAM-slot entries) this is exactly the
+    /// dirty ring's harvested RAM-page count for this call, the direct observable
+    /// `reset_cost_scales_with_write_set` checks against `dirty_ring_count`. Confirms the reset to
+    /// the kernel (`KVM_RESET_DIRTY_RINGS`) only after every harvested page has been successfully
+    /// written back, so a mid-loop I/O failure never tells the kernel pages were reclaimed that
+    /// this call did not actually restore.
+    pub fn reset_dirty_pages(&mut self, base_ram: &[PageRef]) -> Result<usize, ResetError> {
+        let harvested = self.dirty_ring.as_mut().ok_or(ResetError::NotEnabled)?.collect();
+        let pages = crate::dirty::ram_page_indices(&harvested, crate::dirty::RAM_SLOT);
+        for &page in &pages {
+            let page_ref = base_ram.get(page).ok_or(ResetError::PageOutOfRange(page))?;
+            let offset = layout::GUEST_RAM_START + (page * baud_snapshot::PAGE_SIZE) as u64;
+            self.guest
+                .guest_mem
+                .write_slice(page_ref.bytes(), GuestAddress(offset))
+                .map_err(|e| ResetError::GuestMemory(page, e))?;
+        }
+        // SAFETY-relevant-in-spirit-not-code: only confirmed after every page above wrote
+        // successfully, so a partial failure (returned `Err` above) leaves the ring's RESET-marked
+        // entries un-confirmed -- they stay DIRTY and are re-harvested by the next `collect()`
+        // call rather than being silently dropped (`DirtyRing::confirm_reset`'s own doc).
+        let ring = self.dirty_ring.as_mut().ok_or(ResetError::NotEnabled)?;
+        ring.confirm_reset(&self.guest.vm)?;
+        Ok(pages.len())
     }
 
     /// Drive the run loop to the guest's first `Hlt`/`Shutdown` (specs/baud-multiverse.md §8's

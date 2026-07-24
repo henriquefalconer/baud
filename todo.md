@@ -499,11 +499,26 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     `Console::with_output`/`TapeDevice::restore_cursor`/`WorkClock::restore` reassemble the
     device/clock layer snapshot deliberately leaves to the caller. 70/70 tests pass across
     `baud-tape-device`/`baud-snapshot`/`baud-multiverse` (pre-`dirty_ring` count; now 78/78).
-  - **Not yet done**: `Snapshot::branch` (see above); `DirtyRing` is not yet wired into
-    `baud-multiverse`'s `Multiverse` (a `Multiverse::reset_dirty_pages()`-style entry point calling
-    `DirtyRing::enable` once at guest creation and `collect`/`confirm_reset` around a rewind is the
-    natural next step, mirroring how `snapshot`/`restore` were wired); nothing calls
-    `snapshot`/`restore`/`DirtyRing` on real KVM hardware yet (needs H1 — a real halted guest — first).
+  - **`DirtyRing` now wired into `baud-multiverse`'s `Multiverse` (this iteration).**
+    `Multiverse::enable_dirty_ring(entries)` negotiates the ring right after boot/restore, before
+    any guest execution (`linux/mod.rs`); `Multiverse::reset_dirty_pages(base_ram)` collects the
+    harvest, writes back exactly those RAM pages from a caller-supplied base `Universe::ram`, and
+    only then confirms the reset to the kernel (a mid-loop write failure leaves the affected pages
+    un-confirmed, re-harvested next time, rather than lying to the kernel about what was
+    reclaimed). The one piece of real logic in that wiring — reducing a harvest's `(slot, offset)`
+    pairs down to RAM page indices — is factored into a new hardware-independent module,
+    `crates/baud-multiverse/src/dirty.rs` (`ram_page_indices`), deliberately **not** placed under
+    `linux/` (which is `#[cfg(target_os = "linux")]`-gated and so never compiled by `cargo test`
+    on this Windows dev machine — a pattern worth remembering for future KVM-adjacent-but-pure
+    logic in this crate): 8 unit/property tests prove it with no KVM/mmap at all.
+    `cargo test -p baud-multiverse` 42/42 (was 34/34). `enable_dirty_ring`/`reset_dirty_pages`
+    themselves are, like every other real ioctl call in this workspace, type-checked
+    (`cargo check --target x86_64-unknown-linux-gnu -p baud-multiverse`) but not yet exercised on
+    real KVM hardware — nothing calls `snapshot`/`restore`/`DirtyRing` on real KVM hardware yet
+    (needs H1 — a real halted guest — first).
+  - **Not yet done**: `Snapshot::branch` (see above); no caller (`baud-driver`/`baud-server`) yet
+    invokes `enable_dirty_ring`/`reset_dirty_pages` — that is blocked on a real exploration loop
+    existing, same as the rest of this crate's snapshot API.
 - **`baud-snapshot-store` (specs/baud-snapshot-store.md) — built and unit-tested, fully
   hardware-independent** (no `cfg(target_os = "linux")` half at all — never touches a guest/vCPU).
   `types.rs` (`Sha`/`RunId`/`NodeId`/`Node`/`RunManifest`/`PageRef`; three documented departures

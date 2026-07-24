@@ -172,16 +172,36 @@ impl Snapshot {
   `capture`/`restore` walking every `KVM_GET_*`/`KVM_SET_*` the table above lists, in the plan's
   exact order. Type-checked cross-target, unexercised on real hardware (no KVM host on the
   reference dev machine — this applies to every claim in this section).
-- **Reset (§5) — built.** `KVM_CAP_DIRTY_LOG_RING` is real: `crates/baud-snapshot/src/dirty_ring.rs`
-  is the hardware-independent ring-scan protocol (decode a `kvm_dirty_gfn` ring into harvested
-  `(slot, offset)` pairs, unit- and property-tested with no KVM involved), driven by
-  `src/linux.rs`'s `DirtyRing` (`KVM_ENABLE_CAP(KVM_CAP_DIRTY_LOG_RING, ...)`, an mmap of the
-  per-vCPU ring at `KVM_DIRTY_LOG_PAGE_OFFSET`, and `KVM_RESET_DIRTY_RINGS` to reclaim harvested
-  pages). Because §1's hard constraint (one vCPU per VM) holds workspace-wide, a per-vCPU ring is a
-  whole VM's dirty-page record with no cross-vCPU merge to do. `KVM_RESET_DIRTY_RINGS`'s ioctl
-  number is not in the pinned `kvm-ioctls` 0.25 — it is derived from the same `ioctl_expr` helper
-  `kvm-ioctls` itself is built from (`vmm_sys_util::ioctl`), not hand-encoded, to minimize the risk
-  of an unverifiable-on-this-machine mistake.
+- **Reset (§5) — built and wired into `baud-multiverse`.** `KVM_CAP_DIRTY_LOG_RING` is real:
+  `crates/baud-snapshot/src/dirty_ring.rs` is the hardware-independent ring-scan protocol (decode a
+  `kvm_dirty_gfn` ring into harvested `(slot, offset)` pairs, unit- and property-tested with no KVM
+  involved), driven by `src/linux.rs`'s `DirtyRing` (`KVM_ENABLE_CAP(KVM_CAP_DIRTY_LOG_RING, ...)`,
+  an mmap of the per-vCPU ring at `KVM_DIRTY_LOG_PAGE_OFFSET`, and `KVM_RESET_DIRTY_RINGS` to
+  reclaim harvested pages). Because §1's hard constraint (one vCPU per VM) holds workspace-wide, a
+  per-vCPU ring is a whole VM's dirty-page record with no cross-vCPU merge to do.
+  `KVM_RESET_DIRTY_RINGS`'s ioctl number is not in the pinned `kvm-ioctls` 0.25 — it is derived
+  from the same `ioctl_expr` helper `kvm-ioctls` itself is built from (`vmm_sys_util::ioctl`), not
+  hand-encoded, to minimize the risk of an unverifiable-on-this-machine mistake.
+  - **Wired into `baud-multiverse`**: `Multiverse::enable_dirty_ring(entries)` negotiates the ring
+    right after a guest is booted/restored (before any guest execution, matching
+    `DirtyRing::enable`'s own "must be negotiated before any dirty page could occur" requirement);
+    `Multiverse::reset_dirty_pages(base_ram)` collects the harvest, restores exactly those RAM
+    pages from a caller-supplied base `Universe::ram` slice, and only then confirms the reset to
+    the kernel — a mid-loop write failure leaves the un-restored pages un-confirmed rather than
+    lying to the kernel about what was reclaimed. The one piece of real logic in that wiring —
+    reducing a harvest's `(slot, offset)` pairs down to the RAM page indices a rewind must touch —
+    is factored into a small, hardware-independent, *ungated* module
+    (`crates/baud-multiverse/src/dirty.rs`, deliberately outside the `#[cfg(target_os = "linux")]`
+    `linux/` tree so `cargo test -p baud-multiverse` actually exercises it on this Windows dev
+    machine, unlike the KVM-calling code around it): `ram_page_indices` keeps only entries for the
+    single registered RAM memslot and passes every other offset through as the literal RAM page
+    index (`universe.rs`'s "page `i` covers `[i*PAGE_SIZE, (i+1)*PAGE_SIZE)`" convention), proven
+    by 8 unit/property tests with no KVM/mmap at all — `reset_dirty_pages`'s return value (pages
+    actually restored) is therefore provably bounded by the dirty ring's own harvest count, the
+    direct observable `reset_cost_scales_with_write_set` checks. The real
+    `enable_dirty_ring`/`reset_dirty_pages` calls themselves are, like every other `linux/`-tree
+    method in this workspace, type-checked (`cargo check --target x86_64-unknown-linux-gnu -p
+    baud-multiverse`) but not yet exercised on real KVM hardware.
 - **Branching (§4) — not built; a real blocker found, not just a missing wrapper.** The spec's
   `UFFDIO_CONTINUE`-based sharing requires the kernel's *minor-fault* mechanism, which only exists
   for shared (memfd/hugetlbfs/shmem) mappings — but `baud-multiverse`'s guest RAM
