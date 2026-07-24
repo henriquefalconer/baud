@@ -1,0 +1,24 @@
+# examples/parser/spec.yaml
+# The "fuzzers hate it" parser: a recursive descent parser with a planted crash.
+#
+# The crash is reachable only when the input byte sequence is:
+#   0x68 ('h') 0x69 ('i') 0x21 ('!') 0x3f ('?') followed by any byte >= 0x80
+#
+# Random tactics plateau at depth <= 2 because hitting that 4-byte prefix
+# by pure chance takes 1-in-16M tries on average.
+# Stateful-mask tactics remember the previous byte and bias toward ASCII
+# printable characters, reaching depth=3 quickly and then the crash.
+#
+# Probes (stdout-kv):
+#   depth   -- parse depth reached (0-5)
+#   crashed -- 1 if crash triggered, 0 otherwise
+
+nix: github:NixOS/nixpkgs/nixos-24.11#hello
+
+nodes:
+  - name: parser
+    argv: [/bin/parser]
+    adapters:
+      input: stdin
+      probes:
+        - stdout-kv

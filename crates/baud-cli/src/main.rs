@@ -59,6 +59,8 @@ pub enum Commands {
     Shrink(cmds::shrink::ShrinkArgs),
     /// Replay a run
     Replay(cmds::replay::ReplayArgs),
+    /// Fuzz a workload (M4)
+    Fuzz(cmds::fuzz::FuzzCmd),
     /// Budget accounting
     Budget,
 }
@@ -90,6 +92,7 @@ async fn main() -> Result<()> {
         Commands::Verify(cmd) => cmds::verify::run(cmd, &c, cli.json).await,
         Commands::Shrink(args) => cmds::shrink::run(args, &c, cli.json).await,
         Commands::Replay(args) => cmds::replay::run(args, &c, cli.json).await,
+        Commands::Fuzz(cmd) => cmds::fuzz::run(cmd, &c, cli.json).await,
         Commands::Budget => cmds::budget::run(&c, cli.json).await,
     }
 }

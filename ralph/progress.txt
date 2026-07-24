@@ -91,3 +91,32 @@
 ## 2026-07-24T07:16:00 UTC - Session usage — iteration 4 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T05:52:49 UTC - Session usage — iteration 4 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 35172
+- est. output cost: $0.5276 (sonnet output rate)
+- exact accounting unavailable this entry
+
+## 2026-07-24T06:05:00 UTC - Ralph Build Iteration 5 Start
+- Resuming from M3 (committed at c0e722d)
+- Plan: M4 — examples/parser workload spec + fuzz loop endpoint (random + stateful-mask) + baud fuzz CLI + drive/m4.sh
+
+## 2026-07-24T06:10:00 UTC - M4 complete
+- examples/parser/spec.yaml: "fuzzers hate it" parser workload spec with planted crash
+- crates/baud-server/src/routes/fuzz.rs: POST /runs/fuzz fuzz loop; parser simulation with XOR-layer crash; random/stateful-mask tactics; plateau detection; 0004_fuzz.sql migration
+- crates/baud-cli/src/cmds/fuzz.rs: baud fuzz start --spec --tactics --seed --max-iterations; exit 2 on goal/crash
+- drive/m4.sh: ALL 8 CHECKS PASSED
+  - M4.1: spec lint passes for parser workload
+  - M4.2: random tactics plateau (goal NOT reached, depth=1, exit 0)
+  - M4.3: observations stored (120 obs for random run)
+  - M4.4: stateful-mask finds crash in 70 gens (exit 2)
+  - M4.5: crashed observations stored
+  - M4.6: depth trajectory shows max_depth=5.0 (crash path reached)
+  - M4.7: workload-noun CI grep CLEAN
+  - M4.8: winning tape journaled
+- Total tests: 61 pass, 0 fail across all crates
+- NEXT iteration should implement M5 (multi-guest + baud-stream, framedemo)
+
+## 2026-07-24T06:10:30 UTC - Session usage — iteration 5 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD

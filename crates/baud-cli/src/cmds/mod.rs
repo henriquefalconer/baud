@@ -3,6 +3,7 @@
 
 pub mod budget;
 pub mod doctor;
+pub mod fuzz;
 pub mod keys;
 pub mod net;
 pub mod obs;

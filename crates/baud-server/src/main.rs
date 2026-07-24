@@ -80,6 +80,9 @@ fn build_router(state: AppState) -> Router {
         .route("/verify/observation/{id}", get(routes::verify::observation))
         // Replay (M3)
         .route("/replay/{id}", post(routes::replay::replay))
+        // Fuzz (M4)
+        .route("/runs/fuzz", post(routes::fuzz::start))
+        .route("/runs/fuzz/{id}", get(routes::fuzz::get_session))
         // Budget
         .route("/budget", get(routes::budget::budget))
         .with_state(state)
