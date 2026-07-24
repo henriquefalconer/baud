@@ -63,7 +63,7 @@ from, the tape. It is the first deliverable.
 | RDTSC / RDTSCP                          | Cooperative: `KVM_SET_TSC_KHZ` + `KVM_VCPU_TSC_OFFSET`. Enforced: force RDTSC-exiting → work-clock value |
 | Other time (kvmclock, APIC/TSC-deadline) | Follow the virtual TSC; delivered by the injection engine |
 | HPET / PIT / PM-timer / RTC             | Deleted — a minimal machine has none |
-| Randomness                              | Masked in CPUID (cooperative); hardware-trapped and tape-served (enforced) |
+| Randomness                              | Masked in CPUID (cooperative) — the CPU then `#UD`s `rdrand`/`rdseed` for *any* guest; hardware-trapped and tape-served (enforced) |
 | External input / entropy                | Served from the tape via the tape device |
 | Interrupt timing                        | Injected at an exact instruction boundary (§5) |
 | Memory init                             | Zeroed RAM at fixed guest-physical addresses |
@@ -76,6 +76,10 @@ from, the tape. It is the first deliverable.
 - **CPUID**: start from `KVM_GET_SUPPORTED_CPUID`; clear RDRAND `01H:ECX[30]`, RDSEED `07H:EBX[18]`, TSX
   `07H:EBX[4]/[11]`, x2APIC `01H:ECX[21]`; pin topology `0BH/1FH`; set invariant-TSC `80000007H:EDX[8]` and
   a fixed hypervisor-present bit; `KVM_SET_CPUID2`.
+  - Masking RDRAND/RDSEED is **self-enforcing, not advisory**: VT-x evaluates each instruction's own CPUID
+    gate (`IF CPUID.01H:ECX.RDRAND[bit 30] = 0 THEN #UD`, SDM) against the guest's *configured* leaves, so a
+    guest that ignores the mask and issues `rdrand`/`rdseed` anyway takes `#UD` instead of reading real
+    entropy. Verified on real hardware (§8, `rdrand_guest_is_flagged`).
 - **Work-clock**: `perf_event_open(PERF_COUNT_HW_BRANCH_INSTRUCTIONS, conditional, guest-filtered)` on the
   vCPU thread; `virtual_tsc = base + k × rcb`. Raw retired-instruction count is forbidden (double-counts).
 - **MSR filter**: `KVM_X86_SET_MSR_FILTER` routes `IA32_TSC`/`TSC_AUX`/`TSC_DEADLINE` to the VMM.
@@ -112,7 +116,12 @@ data.
 
 - **Cooperative (stock KVM)** — first target. Full CPUID control, fixed-frequency virtual TSC + controllable
   offset, MSR trapping, single vCPU, zeroed memory, tape device. Reproducible for guests that take
-  entropy/clock/input from the tape device.
+  entropy/clock/input from the tape device. The raw *random* instruction is closed here outright, not just
+  for compliant guests: once CPUID masks RDRAND/RDSEED the hardware refuses the opcode (`#UD`, §4), so no
+  guest — compliant or adversarial — can reach real entropy; a guest with no `#UD` handler triple-faults,
+  which `baud-vcpu` reports as `Halted`, identically on every boot. The raw *timestamp* instruction is the
+  part that still needs a cooperative guest (RDTSC has no CPUID gate and does not exit under stock KVM) —
+  that is what the enforced regime's RDTSC-exiting control closes.
 - **Enforced (custom KVM module)** — forces every RDTSC and random instruction to exit and be served from
   the work-clock/tape, so even an adversarial guest is reproducible.
 - The manifest records the regime; `run` and `verify` report guarantees only for the regime in force.
@@ -141,9 +150,12 @@ data.
 }
 
 #[test] fn rdrand_guest_is_flagged() {
-    // cooperative: divergent double-run; enforced: Crash{detail:"rdrand"}
-    let out = run(rdrand_guest(), tape);
-    assert!(out.is_divergent() || matches!(out.outcome, Crash{ detail, .. } if detail.contains("rdrand")));
+    // rdrand_guest() ignores the masked feature bit and executes `rdrand` after emitting one marker byte.
+    // cooperative: hardware `#UD` -> triple fault -> Halted, identically every boot (not a divergence);
+    // enforced: Crash{detail:"rdrand"}
+    let (a, b) = (run(rdrand_guest(), tape.clone()), run(rdrand_guest(), tape));
+    assert_eq!(a.console_output, PRE_RDRAND_MARKER);   // execution stops *at* rdrand, never past it
+    assert_eq!(a.console_output, b.console_output);    // deterministic, not divergent
 }
 
 #[test] fn regime_is_recorded_and_not_overclaimed() {

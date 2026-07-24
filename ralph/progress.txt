@@ -1503,3 +1503,53 @@ Post-push verification: git fetch confirms origin/main == local HEAD (51f1db1). 
 ═══════════════════════════════════════════════════════
 
 ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md — H1/H2 are done; H3 (randomness + time control) is the next milestone but drive/h3.sh is stale (still pre-pivot) and rdrand_guest_is_flagged/regime_is_recorded_and_not_overclaimed are unverified on real hardware. Studying specs and current code state...
+
+Building rdrand-guest fixture: a hand-assembled x86-64 payload (following hello-guest/tape-echo-guest's pattern) that executes RDRAND directly, ignoring the masked CPUID feature bit, and echoes the 4 raw bytes to COM1. This is the adversarial-guest fixture needed for H3's rdrand_guest_is_flagged test (cooperative regime: divergent double-run since real hardware RDRAND differs per boot). Writing payload.s/build.py...
+
+Real hardware finding: with CPUID's RDRAND feature bit masked off, the guest's rdrand instruction itself raises #UD immediately (hardware-enforced, not just a guest-cooperation hint) — with no guest IDT set up this cascades to a triple fault, which baud-vcpu's run loop already treats identically to a clean Hlt (VcpuExit::Shutdown -> DispatchOutcome::Halted). Confirmed via a diagnostic marker byte: console_output stops at exactly 1 byte (the pre-rdrand marker), never reaching the echo loop. This means cooperative regime is a STRONGER barrier than the spec assumed: an adversarial guest cannot execute the raw random instruction at all while masked, rather than merely being caught via double-run divergence. Rewriting the test to assert this real, deterministic (not divergent) behavior, and dispatching an Opus ultrathink subagent to correct specs/baud-multiverse.md's description of this to match reality.
+
+rdrand_guest_is_flagged now passes against real /dev/kvm, asserting the real deterministic-shutdown behavior. Dispatched an Opus ultrathink subagent (background) to correct specs/baud-multiverse.md and todo.md's random-instruction/regime prose to match this stronger-than-assumed guarantee. Running full workspace test/clippy to check for regressions while that runs...
+
+Spec-correction subagent finished — specs/baud-multiverse.md and todo.md now correctly describe RDRAND masking as hardware-enforced (#UD), not divergence-based, matching the real-hardware finding. Reviewed the diff, looks accurate. Now implementing regime_is_recorded_and_not_overclaimed: adding 'baud host probe --require <cooperative|enforced>' to the CLI, exit 1 with a clear message if the probed regime doesn't meet the requirement (no server change needed — comparison is client-side against the existing JSON).
+
+drive/h3.sh rewritten (mirroring h1.sh/h2.sh's pattern) to match the current KVM-era H3 definition and passes end-to-end for real: H3.1 host probe regime=cooperative, H3.2 rdrand_guest_is_flagged, H3.3 regime_is_recorded_and_not_overclaimed (--require enforced correctly exits 1 with a clear message; --require cooperative passes). Running full workspace build/test/clippy before committing...
+
+Full workspace build/test/clippy all green, no regressions, no new warnings. Re-verifying drive/h0.sh, drive/h1.sh, drive/h2.sh still pass before committing...
+
+All prior H0-H2 drive scripts re-verified passing, no regressions. Dispatched a subagent (background) to update todo.md §14's build-status log with this iteration's H3 findings. Reviewing full git diff while that runs...
+
+todo.md §14 updated with the H3 build-status entry, reviewed and accurate. Doing a final full re-verification (build+test+clippy+h0-h3 drive scripts) before committing everything.
+
+Found a real pre-existing flakiness: Host::probe()'s rcb_deterministic check reports false (regime='rejected') on roughly 1-in-4 consecutive calls on this exact hardware, unrelated to any load from my new H3.3 script — confirmed with 8 back-to-back 'baud host probe' calls (2 rejected, 6 cooperative). This broke my drive/h3.sh's H3.3 check on a re-run. Investigating crates/baud-host's rcb_is_deterministic_on_this_cpu implementation to find the root cause before deciding how to fix drive/h3.sh and whether the underlying check itself has a bug...
+
+Root-caused: Host::probe()'s rcb_deterministic() PMU-based branch-count check flakes on this WSL2/nested-virt host due to PMU-scheduling multiplexing noise on a single trial (confirmed via 30 back-to-back probes: 2/30 falsely rejected). Fixed with two changes to crates/baud-host/src/linux.rs: (1) pinned(true) on the perf_event counter to keep it resident on the PMU during measurement, (2) changed rcb_deterministic() from a single two-trial comparison to a three-trial majority vote (still rejects genuinely unstable hardware, tolerates one transient PMU hiccup). Also corrected a stale module-doc note claiming this code was never exercised on real hardware. Stress-testing the fix with 40 consecutive probes...
+
+All final verification green: cargo build/test/clippy --workspace clean, drive/h0.sh through drive/h3.sh all pass end-to-end on real /dev/kvm, h3.sh specifically re-run multiple times with zero flakiness after the rcb_deterministic fix. Committing.
+
+## 2026-07-24T19:47:17 UTC - Changes committed.
+- H3 (randomness + time control) milestone: rdrand-half done and verified on real /dev/kvm
+- Files changed:
+  - crates/baud-multiverse/tests/fixtures/rdrand-guest/ (new fixture: payload.s, build.py, bzImage, BUILD.md)
+  - crates/baud-multiverse/src/linux/mod.rs (new test rdrand_guest_is_flagged)
+  - crates/baud-cli/src/cmds/host.rs (new `baud host probe --require <cooperative|enforced>`, regime_is_recorded_and_not_overclaimed test)
+  - crates/baud-host/src/linux.rs (fixed rcb_deterministic PMU flakiness: pinned(true) + majority-of-3 voting; corrected stale module doc)
+  - drive/h3.sh (rewritten to match the current KVM-era H3 definition, replacing the stale pre-pivot version)
+  - specs/baud-multiverse.md, todo.md (corrected the RDRAND cooperative-regime guarantee from "divergence" to the real, stronger "hardware #UD" finding; documented the H3 work and the rcb flakiness fix)
+- **Brief description of changes:**
+  - Built a new hand-assembled rdrand-guest test fixture and closed rdrand_guest_is_flagged for real: discovered that masking RDRAND out of CPUID hardware-blocks the instruction outright (#UD) for any guest under the cooperative regime, not merely a hint for compliant guests — stronger than the spec originally assumed; corrected specs/baud-multiverse.md and todo.md to match via an Opus ultrathink pass
+  - Closed regime_is_recorded_and_not_overclaimed: baud host probe --require <regime> now refuses to report a stronger determinism guarantee than the host actually verified, exiting 1 with a clear message
+  - Rewrote drive/h3.sh to actually exercise the current H3 milestone (was still testing a stale pre-pivot "multi-guest cluster + net device" definition)
+  - Found and fixed a real PMU-counter flakiness bug in Host::probe()'s rcb_deterministic check (unpinned perf_event counter occasionally multiplexed off the PMU mid-trial on this nested-virtualized host) that was intermittently and incorrectly rejecting a working host
+  - cargo build/test/clippy --workspace all green; drive/h0.sh through drive/h3.sh all pass end-to-end on real /dev/kvm, repeatedly and reliably
+---

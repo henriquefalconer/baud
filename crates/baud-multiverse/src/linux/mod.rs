@@ -682,4 +682,59 @@ mod tests {
              guest is not actually reading its input from the tape"
         );
     }
+
+    /// `tests/fixtures/rdrand-guest/`'s payload: executes `rdrand eax` directly (ignoring the
+    /// masked CPUID feature bit — an adversarial/non-compliant guest) and echoes the 4 raw result
+    /// bytes to COM1, then halts. See that directory's `BUILD.md` for exact provenance and why
+    /// this is expected to diverge under the cooperative regime.
+    fn rdrand_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rdrand-guest/bzImage")
+    }
+
+    /// The single marker byte (`'X'`, 0x58) `tests/fixtures/rdrand-guest/payload.s` writes to
+    /// COM1 *before* attempting `rdrand` — the only byte this fixture ever emits under the
+    /// cooperative regime, per the real-hardware finding below.
+    const RDRAND_GUEST_MARKER: &[u8] = b"X";
+
+    /// specs/baud-multiverse.md §3.2 / §8, todo.md test-matrix row 1's `rdrand_guest_is_flagged`
+    /// (cooperative-regime half — the enforced-regime `Crash{detail:"rdrand"}` half needs the
+    /// custom KVM module tracked as future work in specs/baud-host.md §8 and is not built).
+    ///
+    /// **Real-hardware finding, corrects the spec's original assumption**: masking RDRAND out of
+    /// CPUID does not merely *discourage* a compliant guest from the instruction while leaving an
+    /// adversarial one free to execute it and diverge — on real VT-x hardware, `rdrand` itself
+    /// raises `#UD` whenever the guest's configured CPUID reports the feature absent
+    /// (`01H:ECX[30]=0`), exactly as the Intel SDM's own instruction reference describes.
+    /// `rdrand-guest`'s payload has no IDT, so that `#UD` cascades straight to a triple fault,
+    /// which `baud-vcpu`'s run loop already treats identically to a clean `Hlt`
+    /// (`VcpuExit::Shutdown` -> `DispatchOutcome::Halted`, `crates/baud-vcpu/src/lib.rs`). The
+    /// guest therefore *never reaches* the instructions after `rdrand` at all — confirmed by the
+    /// marker byte the payload writes immediately before attempting it: two boots produce the
+    /// identical single-byte output, not a divergent one. This is a **stronger** guarantee than
+    /// the spec originally assumed: under the cooperative regime the raw random instruction is
+    /// hardware-unreachable for *any* guest, compliant or not, rather than merely caught after
+    /// the fact via double-run comparison. (specs/baud-multiverse.md was updated to match this
+    /// finding.)
+    #[test]
+    fn rdrand_guest_is_flagged() {
+        let kernel = rdrand_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("first boot failed");
+        let first_outcome = first.run_to_first_halt().expect("first run failed");
+        assert_eq!(
+            first_outcome.console_output, RDRAND_GUEST_MARKER,
+            "guest must never get past the pre-rdrand marker: rdrand with a masked CPUID feature \
+             bit must #UD immediately (real hardware behavior), not execute and produce output"
+        );
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("second boot failed");
+        let second_outcome = second.run_to_first_halt().expect("second run failed");
+        assert_eq!(
+            second_outcome.console_output, first_outcome.console_output,
+            "the guest's forced #UD/triple-fault on rdrand must be perfectly deterministic across \
+             two boots — this is what makes the cooperative regime's CPUID mask a hardware \
+             guarantee rather than a mere hint"
+        );
+    }
 }

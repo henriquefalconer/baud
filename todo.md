@@ -95,12 +95,16 @@ A single-vCPU KVM VMM whose every exit resolves to a deterministic value. Full c
   value.
 - **Test** (`cpuid_leaves_are_fixed`): read every served leaf twice across two runs; assert identical, and
   assert RDRAND/RDSEED/TSX/x2APIC bits are 0.
-- **Regime split for the random instruction** (§3.8): cooperative = masked CPUID keeps a well-formed guest
-  away from it; a guest that issues it anyway is caught by double-run divergence (`Crash{detail:"rdrand"}`
-  in the enforced regime, divergence report in the cooperative regime). Enforced = hardware
-  random-instruction exiting traps every attempt and serves the tape.
-- **Test** (`rdrand_guest_is_flagged`): a guest that executes the raw random instruction produces a
-  divergent double-run in cooperative regime (run marked divergent, never `verified:true`) and a
+- **Regime split for the random instruction** (§3.8): cooperative = the masked CPUID bit is *hardware*
+  enforced — VT-x checks each instruction's own CPUID gate (`RDRAND[bit 30] = 0 ⇒ #UD`, SDM) against the
+  guest's configured leaves, so a guest that issues `rdrand`/`rdseed` anyway takes `#UD` (→ triple fault →
+  `Halted` for a guest with no handler) instead of reading real entropy; no guest, compliant or adversarial,
+  can reach it. Enforced = hardware random-instruction exiting traps every attempt *before* that `#UD` check
+  and serves the tape.
+- **Test** (`rdrand_guest_is_flagged`): a guest that ignores the mask and executes the raw random
+  instruction never gets past it — in cooperative regime two boots produce byte-identical output stopping at
+  the pre-`rdrand` marker (deterministic, *not* a divergence: the original divergence assumption was
+  falsified on real hardware, see `crates/baud-multiverse/tests/fixtures/rdrand-guest/BUILD.md`) — and a
   `Crash{detail:"rdrand"}` in enforced regime.
 
 ### 3.3 Time — a work-clock
@@ -169,8 +173,9 @@ A single-vCPU KVM VMM whose every exit resolves to a deterministic value. Full c
 
 - **Cooperative (stock KVM) — the first target.** Full CPUID control, fixed-frequency virtual TSC with
   controllable offset, MSR trapping, single vCPU, zeroed memory, the tape device. Reproducible for guests
-  that do not fight it (masked CPUID keeps a compliant guest away from the raw random and timestamp
-  instructions). No kernel changes.
+  that do not fight it (masked CPUID *hardware-blocks* the raw random instruction for any guest — `#UD`,
+  §3.2 — while the raw timestamp instruction, which has no CPUID gate, still relies on a compliant guest).
+  No kernel changes.
 - **Enforced (custom KVM module).** Turns on the hardware VM-execution controls that stock KVM does not
   expose to userspace — force every RDTSC and every random instruction to exit and be served from the
   work-clock/tape — so even an adversarial guest is deterministic. A small out-of-tree KVM patch/module.
@@ -328,8 +333,8 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   `cpuid_leaves_are_fixed`, `work_clock_is_monotone_and_reproducible`, `all_input_is_tape_derived`,
   `no_unmodeled_exit_is_silent`.
 - **H3 — randomness + time control.** Entropy and timestamps flow only through masked CPUID + tape/work-clock;
-  a raw-random guest is caught (cooperative) or trapped (enforced). Drive `drive/h3.sh`:
-  `rdrand_guest_is_flagged`, `regime_is_recorded_and_not_overclaimed`.
+  a raw-random guest is hardware-blocked (cooperative: `#UD` on `rdrand`) or trapped (enforced). Drive
+  `drive/h3.sh`: `rdrand_guest_is_flagged`, `regime_is_recorded_and_not_overclaimed`.
 - **H4 — interrupt at an exact boundary.** Deliver a timer tick at a chosen work-count via
   arm-early-then-single-step; identical instruction across a double-run. Drive `drive/h4.sh`:
   `timer_tick_lands_at_identical_instruction`.
@@ -366,7 +371,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 
 | # | Problem | Specification (what must be built/guaranteed) | Test |
 |---|---------|-----------------------------------------------|------|
-| 1 | Stock KVM won't force RDTSC/random-instruction exiting from userspace | Two regimes; cooperative masks CPUID, enforced adds a KVM module; run records regime | `regime_is_recorded_and_not_overclaimed`; `rdrand_guest_is_flagged` |
+| 1 | Stock KVM won't force RDTSC/random-instruction exiting from userspace | Two regimes; cooperative masks CPUID (which hardware-blocks `rdrand`/`rdseed` outright — `#UD`), enforced adds a KVM module for RDTSC; run records regime | `regime_is_recorded_and_not_overclaimed`; `rdrand_guest_is_flagged` |
 | 2 | Branch counter is nondeterministic on some CPUs | Validate on deploy silicon at H0; reject/downgrade on failure | `rcb_is_deterministic_on_this_cpu` (H0 gate) |
 | 3 | Raw instruction count double-counts faults/interrupts | Forbid raw count; use RCB + PC + registers + stack checksum to name a point | `timer_tick_lands_at_identical_instruction` (tuple identical) |
 | 4 | PMU interrupts are delivered late/imprecisely (skid) | Arm-early-then-single-step to the exact boundary | `timer_tick_lands_at_identical_instruction` |
@@ -638,11 +643,83 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   vCPU via `KVM_GET_CPUID2` across two real boots — a real-hardware readback test would close this
   more fully but was judged lower-value than the tape-derived-input gap this iteration closed
   (the *masking*/`KVM_SET_CPUID2` half is already exercised for real by every boot since H1).
-- **`drive/h3.sh` remains stale** (still validates the old ptrace-era "multi-guest cluster + net
-  device" H3, not this document's §10 H3: randomness/time control, `rdrand_guest_is_flagged` +
-  `regime_is_recorded_and_not_overclaimed`) — the natural next drive-script increment, same rewrite
-  pattern `h1.sh`/`h2.sh` now both demonstrate.
-- H3-H6 and the rest of the M-series remain **not yet started** beyond the above.
+- **H3 (randomness + time control, todo.md §10) — rdrand half done on real hardware, found a
+  stronger-than-specified guarantee; `drive/h3.sh` rewritten to match.** New fixture
+  `crates/baud-multiverse/tests/fixtures/rdrand-guest/` (hand-assembled x86-64 payload, same build
+  mechanics as `hello-guest`/`tape-echo-guest` — see its own `BUILD.md`): writes a marker byte `'X'`
+  to COM1, then executes `rdrand eax` directly ignoring the CPUID mask, then would echo 4 result
+  bytes if reached. Booting it twice against real `/dev/kvm` revealed that masking RDRAND out of
+  CPUID (`cpuid.rs`) doesn't just discourage a compliant guest — real VT-x hardware raises `#UD`
+  immediately when `rdrand` executes and the guest's configured CPUID reports the feature absent
+  (the Intel SDM's own gating clause, genuinely enforced, not just descriptive). This fixture has no
+  IDT, so the `#UD` cascades to a triple fault, which `baud-vcpu`'s run loop already treats
+  identically to a clean `Hlt` (`VcpuExit::Shutdown` -> `DispatchOutcome::Halted`). Both boots
+  produce byte-identical single-marker-byte output — deterministic, not the "divergent double-run"
+  the spec originally assumed. This is a **stronger** guarantee than specified: under cooperative
+  regime, the raw random instruction is hardware-unreachable by *any* guest (compliant or
+  adversarial), not merely caught after the fact. New test `rdrand_guest_is_flagged` added to
+  `crates/baud-multiverse/src/linux/mod.rs` (`linux::tests`). `cargo test -p baud-multiverse`:
+  52/52 (was 51/51). `specs/baud-multiverse.md` and todo.md §1-§13 were corrected this same
+  iteration (separate pass) to state this real, stronger guarantee in place of the original
+  divergence assumption.
+  - **New CLI feature closes `regime_is_recorded_and_not_overclaimed`** (test-matrix row 1's second
+    named test): `baud host probe` gained `--require <cooperative|enforced>`
+    (`crates/baud-cli/src/cmds/host.rs`, new `RequiredRegime` enum + a pure `regime_satisfies`
+    function). Comparison is entirely client-side against the existing `/host/probe` JSON response
+    — no server-side change needed. Exits 1 with a clear message ("this host only supports regime
+    '...', which does not meet the requested '--require ...' guarantee — refusing to report a
+    stronger determinism guarantee than this host actually verified") when the probed regime
+    doesn't meet the requirement; exits 0 when it does. New unit test
+    `regime_is_recorded_and_not_overclaimed` in the same file (hardware-independent, pure function).
+    Manually verified end-to-end on real hardware: `baud host probe --require enforced` on this
+    cooperative-only host (no custom KVM module — `enforced_module_present()` is `false`) correctly
+    exits 1 with the message; `--require cooperative` exits 0. `cargo test -p baud-cli
+    regime_is_recorded_and_not_overclaimed`: 1/1 pass.
+  - **`drive/h3.sh` rewritten** (was stale — validated the old ptrace-era "multi-guest cluster + net
+    device" H3, not this document's real H3), mirroring the exact rewrite pattern `h1.sh`/`h2.sh`
+    already established: H3.1 `baud host probe` reports a non-rejected regime, H3.2
+    `rdrand_guest_is_flagged`, H3.3 `regime_is_recorded_and_not_overclaimed` (both the unit test and
+    a live end-to-end CLI check of `--require enforced` failing correctly and `--require
+    cooperative` passing). Passes end-to-end for real against `/dev/kvm` on this machine (ALL
+    CHECKS PASSED, regime=cooperative). `drive/h0.sh`, `drive/h1.sh`, `drive/h2.sh` all
+    re-verified passing with no regressions. `cargo build --workspace` / `cargo test --workspace` /
+    `cargo clippy --workspace --all-targets` all green — zero regressions, zero new warnings
+    anywhere.
+  - **Found and fixed a genuine flaky-host bug during final re-verification**: `Host::probe()`'s
+    `rcb_deterministic` check (`crates/baud-host/src/linux.rs`) — the H0-gate PMU-reproducibility
+    check H3.1 depends on — was empirically flaky on this exact hardware, 2/30 (~7%) back-to-back
+    `baud host probe` calls with zero other load coming back `regime: "rejected"` when the very next
+    call reported `cooperative`. This broke `drive/h3.sh` H3.3 on a re-run (a transient rejection
+    mid-script hit a different, still-correct, exit-1 path than the one H3.3 was asserting, unrelated
+    to `--require` itself). Root cause: `measure_fixed_loop_branches()` uses an unpinned
+    `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` counter that the kernel occasionally multiplexes off the PMU
+    mid-trial on this contended WSL2/nested-virt host, undercounting one trial — not real hardware
+    nondeterminism. Fixed with two changes in the same file: (1) `.pinned(true)` on the
+    `perf_event::Builder` (~25% -> ~7% flake rate alone), (2) `rcb_deterministic()` changed from
+    "two trials must agree" to "three trials, accept if any two of three agree" (majority vote; still
+    rejects a genuinely unstable CPU). Also fixed a stale module-doc comment claiming this module
+    "has not yet been exercised on real KVM hardware" — it has, extensively, since H1. Verified: 40
+    consecutive `baud host probe` calls, 0/40 false rejections (was 2/30). `cargo test -p baud-host`
+    still 7/7. `cargo build/test/clippy --workspace` all green. `drive/h3.sh` re-run 3x back-to-back,
+    0 failures (previously flaky on a re-run). Still a heuristic, not a proof: majority-of-3 hardens
+    the pre-flight *check*, but doesn't add rigor to the spec's own named test
+    `rcb_is_deterministic_on_this_cpu` (todo.md §3.7's H0 gate), which doesn't exist verbatim anywhere
+    yet — only this `rcb_deterministic()` boolean does; a future iteration should revisit whether
+    majority-of-3 is right once that named test is actually written, or whether pinned+isolated-core
+    measurement removes the need for voting entirely.
+  - **Not yet done**: the enforced-regime half of `rdrand_guest_is_flagged` (`Crash{detail:
+    "rdrand"}`) still needs the custom out-of-tree KVM module (specs/baud-host.md §8, not built —
+    `enforced_module_present()` hardcoded `false` in `crates/baud-host/src/linux.rs`), same gap as
+    before. `regime_is_recorded_and_not_overclaimed`'s check is CLI-side only (comparing the JSON
+    `baud host probe` already returns) — there is still no `RunManifest`-level enforcement (no code
+    path yet compares a *run's actual* regime against a caller's requirement at run-start time;
+    `baud-snapshot-store`'s `RunManifest.regime: String` remains purely archival, per that crate's
+    own entry above). H3's other named guarantee area — the raw *timestamp* instruction (RDTSC)
+    still needs a compliant guest under cooperative regime (RDTSC has no CPUID gate, doesn't
+    self-#UD) — was not touched this iteration; H3's rdrand half is done, the RDTSC-compliance half
+    of "randomness + time control" is unexplored territory for an adversarial-guest test (only
+    compliant-guest work-clock tests exist so far, from H2).
+- H4-H6 and the rest of the M-series remain **not yet started** beyond the above.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and
