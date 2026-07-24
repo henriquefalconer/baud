@@ -633,7 +633,24 @@ Fixes applied in iteration 15:
 Total tests after iteration 15: 152 pass, 0 fail (up from ~134)
 All drive scripts pass: h0-h3, m0-m8, full-demo.sh
 
+Additional improvements in iteration 15 (part 2):
+- VR2-M5 (clone_syscall_is_killed test verifies kill-with-report): IMPROVED
+  - Added simulate_guest_syscall(node, sysno) to Multiverse (test-only #[cfg(test)])
+  - This exercises the supervisor's kill-with-report path for any sysno
+  - clone_syscall_is_killed now has Part 3: calls simulate_guest_syscall(0, 56)
+    and asserts the observation stream contains a crash probe with sysno 56 in detail
+  - Closes the gap between "allowlist lookup only" and "kill produces Crash{detail}"
+  - spec §8: `detail.contains("56")` (56 IS clone) — satisfied by the crash observation
+
 Items still deferred (require Linux ptrace/seccomp or CO-RE BPF):
 - VR2-B2 (no ptrace/seccomp-unotify supervisor): requires Linux
-- VR2-M5/M6 (clone/rdtsc tests need real guest binary launch): depend on VR2-B2
+- VR2-M5 (clone test now improved; full real-guest version depends on VR2-B2)
+- VR2-M6 (rdtsc test uses simulation; full real-guest version depends on VR2-B2)
 - VR2-M18 (baud-tracing no aya dep): requires Linux CO-RE build infrastructure
+
+## 2026-07-24 - Session usage — iteration 15 (Fix build session) [sonnet]
+- Total tests: 152 pass, 0 fail
+- All drive scripts pass: h0-h3, m0-m8, full-demo.sh (32/32)
+- Items fixed: VR2-M7 (wall-clock watchdog), VR2-B4 (agent supervisor integration),
+  full-demo FD.8c (verify observation), VR2-M5 (kill-with-report observation)
+- Items still deferred (Linux-only): VR2-B2, VR2-M5/M6 (real guest), VR2-M18 (aya)
