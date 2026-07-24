@@ -78,6 +78,16 @@ pub struct ClockState {
     /// `WorkClock`'s `base` at the moment of capture, so a restored `WorkClock` resumes reading
     /// exactly the same virtual-TSC sequence a straight run would have produced from this point.
     pub work_clock_base: u64,
+    /// The last value the guest wrote to `IA32_TSC_DEADLINE`, as the software work-clock currently
+    /// serves it (`baud_multiverse::timesource::WorkClock::tsc_deadline`) — captured separately
+    /// from `vcpu.msrs` because once the MSR filter routes this MSR to userspace
+    /// (`baud_multiverse::linux::configure_msr_filter`), `KVM_GET_MSRS` never sees the guest's real
+    /// write: KVM's own copy of a filtered MSR is never updated by an intercepted `wrmsr`, so
+    /// without this field a restore would silently resume with a deadline of whatever KVM's
+    /// internal default is, not what the guest actually armed.
+    pub tsc_deadline: u64,
+    /// The last value the guest wrote to `IA32_TSC_AUX`, same rationale as `tsc_deadline` above.
+    pub tsc_aux: u64,
 }
 
 /// The capture set's device row (specs/baud-snapshot.md §3): the tape-device cursor (how many

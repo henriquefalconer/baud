@@ -142,9 +142,21 @@ impl TapeDevice {
         std::mem::take(&mut self.records)
     }
 
-    /// The tape cursor — captured in a `Universe` snapshot (`baud-snapshot`, not yet built).
+    /// The tape cursor — captured in a `Universe` snapshot (`baud-snapshot::universe::DeviceState`).
     pub fn cursor(&self) -> u64 {
         self.cursor
+    }
+
+    /// Fast-forward the cursor to `cursor` — the other half of the capture above: a `Universe`
+    /// restore (`baud-snapshot::linux::restore`'s `RestoreStep::RestoreDevice`, deliberately left
+    /// to the caller since this crate has no dependency on `baud-snapshot`) reconstructs a fresh
+    /// `TapeDevice` over the run's full tape and must replay the cursor to exactly where the
+    /// captured guest had gotten to, so the very next read continues from the same tape byte a
+    /// straight run would have reached. Does not touch `hit_eot`/`records`/`outbound` — a restored
+    /// universe resumes with an empty in-flight record and a clean drain queue, matching what a
+    /// freshly-captured device's caller already observed and drained before the snapshot was taken.
+    pub fn restore_cursor(&mut self, cursor: u64) {
+        self.cursor = cursor;
     }
 
     /// Whether a guest read has ever run past the end of the tape (`read_past_end_is_fixed`).

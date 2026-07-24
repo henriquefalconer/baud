@@ -141,6 +141,8 @@ pub fn capture(
     ram_size: usize,
     page_store: &mut PageStore,
     work_clock_base: u64,
+    tsc_deadline: u64,
+    tsc_aux: u64,
     tape_cursor: u64,
     console: Vec<u8>,
 ) -> Result<Universe, CaptureError> {
@@ -183,8 +185,13 @@ pub fn capture(
         }
     };
 
-    let clock =
-        ClockState { kvm_clock: unsafe { struct_to_bytes(&kvm_clock) }, tsc_khz, work_clock_base };
+    let clock = ClockState {
+        kvm_clock: unsafe { struct_to_bytes(&kvm_clock) },
+        tsc_khz,
+        work_clock_base,
+        tsc_deadline,
+        tsc_aux,
+    };
 
     let device = DeviceState { tape_cursor, console };
 

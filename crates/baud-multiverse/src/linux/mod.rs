@@ -20,6 +20,7 @@ use crate::console::DeviceBus;
 use crate::cpuid::{self, CpuidEntry};
 use crate::layout;
 use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX};
+use baud_snapshot::{PageStore, Universe};
 use baud_vcpu::DeterminismHole;
 use kvm_bindings::{
     kvm_cpuid_entry2, kvm_enable_cap, kvm_userspace_memory_region, KVM_MAX_CPUID_ENTRIES,
@@ -75,10 +76,14 @@ pub struct BootedGuest {
     pub guest_mem: GuestMemory,
 }
 
-/// Run the full boot flow (specs/baud-multiverse.md §2's `Kvm::new → create_vm → register guest
-/// RAM → create_vcpu → CPUID/TSC/MSR setup → linux-loader boot`) and return a [`BootedGuest`]
-/// positioned at the kernel's 64-bit entry point, ready to enter `KVM_RUN`.
-pub fn boot_guest(kernel_path: &Path, cmdline: &str) -> Result<BootedGuest, BootError> {
+/// The `Kvm::new → create_vm → register zeroed guest RAM → create_vcpu → CPUID mask + MSR filter`
+/// prefix shared by both ways a [`BootedGuest`] comes into existence (specs/baud-multiverse.md §2):
+/// [`boot_guest`] continues it with a fresh kernel image (page tables, boot params, entry-point
+/// regs); [`restore_guest`] continues it by walking a captured [`Universe`]'s `restore_plan`
+/// instead (specs/baud-snapshot.md §6) — RAM/regs/sregs/etc. all come from the universe rather than
+/// a freshly-loaded image, so this prefix is exactly the part both paths need identically and
+/// nothing more.
+fn create_vm_vcpu_shell() -> Result<BootedGuest, BootError> {
     baud_vcpu::validate_vcpu_count(1)?; // todo.md §1: exactly one vCPU per VM, checked first
 
     let kvm = Kvm::new()?;
@@ -89,27 +94,74 @@ pub fn boot_guest(kernel_path: &Path, cmdline: &str) -> Result<BootedGuest, Boot
     let vcpu = vm.create_vcpu(0)?;
     apply_cpuid_mask(&kvm, &vcpu)?;
     configure_msr_filter(&vm)?;
-    vcpu.set_tsc_khz(VIRTUAL_TSC_KHZ)?;
 
-    pagetables::write_identity_page_tables(&guest_mem, layout::GUEST_RAM_SIZE)
+    Ok(BootedGuest { kvm, vm, vcpu, guest_mem })
+}
+
+/// Run the full boot flow (specs/baud-multiverse.md §2's `Kvm::new → create_vm → register guest
+/// RAM → create_vcpu → CPUID/TSC/MSR setup → linux-loader boot`) and return a [`BootedGuest`]
+/// positioned at the kernel's 64-bit entry point, ready to enter `KVM_RUN`.
+pub fn boot_guest(kernel_path: &Path, cmdline: &str) -> Result<BootedGuest, BootError> {
+    let guest = create_vm_vcpu_shell()?;
+    guest.vcpu.set_tsc_khz(VIRTUAL_TSC_KHZ)?;
+
+    pagetables::write_identity_page_tables(&guest.guest_mem, layout::GUEST_RAM_SIZE)
         .map_err(BootError::PageTables)?;
-    vcpu.set_sregs(&pagetables::long_mode_sregs())?;
+    guest.vcpu.set_sregs(&pagetables::long_mode_sregs())?;
 
     let loader_result = bootparams::load_kernel_and_write_boot_params(
-        &guest_mem,
+        &guest.guest_mem,
         kernel_path,
         cmdline,
         layout::GUEST_RAM_SIZE,
     )?;
 
-    let mut regs = vcpu.get_regs()?;
+    let mut regs = guest.vcpu.get_regs()?;
     regs.rip = loader_result.kernel_load.raw_value() + layout::KERNEL_64BIT_ENTRY_OFFSET;
     regs.rsi = layout::ZERO_PAGE_ADDR; // Linux/x86 64-bit entry contract: RSI = &boot_params
     regs.rsp = layout::BOOT_STACK_POINTER;
     regs.rflags = 0x2; // bit 1 is reserved-must-be-1; every other flag starts clear
-    vcpu.set_regs(&regs)?;
+    guest.vcpu.set_regs(&regs)?;
 
-    Ok(BootedGuest { kvm, vm, vcpu, guest_mem })
+    Ok(guest)
+}
+
+/// Errors from reconstructing a [`BootedGuest`] out of a captured [`Universe`]
+/// (`baud-snapshot::linux::restore`, specs/baud-snapshot.md §6) instead of a fresh kernel image —
+/// [`RestoreError::Shell`] covers the same `Kvm::new`/`create_vm`/`create_vcpu`/CPUID/MSR-filter
+/// prefix [`BootError`] already names (shared with [`boot_guest`] via
+/// [`create_vm_vcpu_shell`]), plus branch-counter creation for the restored work-clock;
+/// [`RestoreError::Snapshot`] is `baud-snapshot::linux::restore`'s own error (CPU-model mismatch or
+/// a `KVM_SET_*` ioctl failure while walking `restore_plan`).
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreError {
+    #[error(transparent)]
+    Shell(#[from] BootError),
+    #[error(transparent)]
+    Snapshot(#[from] baud_snapshot::linux::RestoreError),
+}
+
+/// Reconstruct a [`BootedGuest`] from a captured [`Universe`] instead of loading a kernel image:
+/// the shell (`Kvm`/`VmFd`/`VcpuFd`/zeroed guest RAM, CPUID-masked, MSR-filtered — identical to
+/// what [`boot_guest`] sets up before it ever touches a kernel image) is created first, then
+/// `baud_snapshot::linux::restore` walks the universe's `restore_plan` onto it in order
+/// (specs/baud-snapshot.md §6): TSC frequency, then RAM, then every vCPU-state field, then the VM
+/// clock — refusing up front if `universe.cpu_signature` does not match this host's (unless
+/// `template_active`). Device/console state is deliberately left to the caller by
+/// `baud-snapshot::linux::restore` (see `RestoreStep::RestoreDevice`'s doc) — reassembling that
+/// into a live [`Multiverse`] is [`Multiverse::restore`]'s job, one layer up.
+pub fn restore_guest(universe: &Universe, template_active: bool) -> Result<BootedGuest, RestoreError> {
+    let guest = create_vm_vcpu_shell()?;
+    baud_snapshot::linux::restore(
+        &guest.kvm,
+        &guest.vm,
+        &guest.vcpu,
+        &guest.guest_mem,
+        layout::GUEST_RAM_START,
+        universe,
+        template_active,
+    )?;
+    Ok(guest)
 }
 
 /// Register [`layout::GUEST_RAM_START`]..`+ram_size` as one zeroed, anonymous-mmap-backed memory
@@ -250,9 +302,8 @@ impl BranchCounter for LinuxBranchCounter {
 }
 
 /// The wiring point specs/baud-multiverse.md §6's API targets for H1 ("boot a guest, print to the
-/// serial console, clean Hlt/Shutdown"). `snapshot`/`restore` are not implemented here yet — they
-/// depend on `baud-snapshot` (todo.md §14: "H1-H6 ... baud-snapshot ... crates do not exist yet").
-/// The tape device (`baud-tape-device`, H2/§3.5) IS wired in now (`DeviceBus::tape`,
+/// serial console, clean Hlt/Shutdown") and H5 (snapshot/branch/restore, specs/baud-snapshot.md).
+/// The tape device (`baud-tape-device`, H2/§3.5) is wired in (`DeviceBus::tape`,
 /// `crate::tape_bus::TapeBus`) — [`boot`] takes the run's tape bytes directly rather than the
 /// spec's `run(tape: impl TapeSource)` shape, since there is exactly one run per `Multiverse`
 /// here (no re-run-with-a-different-tape use case yet; that is `baud-driver`'s job once it exists).
@@ -260,10 +311,17 @@ impl BranchCounter for LinuxBranchCounter {
 /// and [`run_to_first_halt`] drives it to the guest's first `Hlt`/`Shutdown` and returns the
 /// console output plus a blake3 hash of guest RAM — `boot(...).ram_hash_at_first_hlt()` from
 /// specs/baud-multiverse.md §8's `double_boot_memory_identical` pseudocode, on the real boot flow
-/// instead of that pseudocode's placeholder.
+/// instead of that pseudocode's placeholder. [`snapshot`] and [`restore`] are the spec's `Snapshot
+/// ::capture`/`Snapshot::restore` (specs/baud-snapshot.md §2's API) wired onto this struct's own
+/// fields: `snapshot` hands every piece of state `baud_snapshot::linux::capture` needs (RAM/vCPU/
+/// clock via the KVM handles, plus this crate's own work-clock anchor/tape cursor/console bytes
+/// that `baud-snapshot` cannot see into); `restore` is the inverse, reconstructing a whole new
+/// `Multiverse` from a captured [`Universe`] rather than a kernel image.
 ///
 /// [`boot`]: Multiverse::boot
 /// [`run_to_first_halt`]: Multiverse::run_to_first_halt
+/// [`snapshot`]: Multiverse::snapshot
+/// [`restore`]: Multiverse::restore
 pub struct Multiverse {
     guest: BootedGuest,
     bus: DeviceBus,
@@ -297,6 +355,69 @@ impl Multiverse {
         let counter = LinuxBranchCounter::new()?;
         let bus = DeviceBus::with_tape(tape);
         Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter) })
+    }
+
+    /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
+    /// `Snapshot::capture`, §3's enumerated capture set): every `KVM_GET_*`
+    /// `baud_snapshot::linux::capture` walks over this instance's own `kvm`/`vm`/`vcpu`/`guest_mem`
+    /// handles, plus the three pieces of state only this crate's device models know —
+    /// `WorkClock`'s `base`/`tsc_deadline`/`tsc_aux` (todo.md §3.3's work-clock anchor; without the
+    /// latter two a restored guest that had already armed `IA32_TSC_DEADLINE` would resume with it
+    /// disarmed, see `WorkClock::restore`'s doc), the tape-device cursor, and the console's output
+    /// history so far. RAM pages are deduplicated into `page_store`, shared across every universe
+    /// interned through the same store (specs/baud-snapshot.md §4) — callers exploring many branch
+    /// points from one run pass the same `PageStore` to every `snapshot` call for that guest.
+    pub fn snapshot(
+        &mut self,
+        page_store: &mut PageStore,
+    ) -> Result<Universe, baud_snapshot::linux::CaptureError> {
+        baud_snapshot::linux::capture(
+            &self.guest.kvm,
+            &self.guest.vm,
+            &self.guest.vcpu,
+            &self.guest.guest_mem,
+            layout::GUEST_RAM_START,
+            layout::GUEST_RAM_SIZE,
+            page_store,
+            self.time.base(),
+            self.time.tsc_deadline(),
+            self.time.tsc_aux(),
+            self.bus.tape.device().cursor(),
+            self.bus.console.output().to_vec(),
+        )
+    }
+
+    /// Reconstruct a whole new `Multiverse` from a captured [`Universe`] (specs/baud-snapshot.md
+    /// §2's `Snapshot::restore`) instead of booting a kernel image: [`restore_guest`] rebuilds the
+    /// KVM/vCPU/RAM state per `restore_plan`'s ordered sequence (specs/baud-snapshot.md §6,
+    /// refusing a CPU-model mismatch unless `template_active`), then this method reassembles the
+    /// device layer `baud-snapshot` deliberately left to the caller
+    /// (`RestoreStep::RestoreDevice`'s doc): the tape device over `tape` (the run's whole tape —
+    /// unchanged across a run's lifetime, same value `boot`'s caller would have passed, only the
+    /// cursor differs) fast-forwarded to `universe.device.tape_cursor`, the console pre-seeded with
+    /// `universe.device.console`'s captured output history, and the work-clock rebuilt via
+    /// [`WorkClock::restore`] so a guest that had armed `IA32_TSC_DEADLINE`/set `IA32_TSC_AUX`
+    /// resumes seeing those exact values. `k` is a run-level constant (`virtual_tsc = base + k *
+    /// rcb`), not part of the captured state, so the caller supplies the same `k` the original
+    /// `boot` used — a mismatched `k` would silently desynchronize the restored guest's clock from
+    /// what a straight run would have produced, even though every other field is byte-exact.
+    pub fn restore(
+        universe: &Universe,
+        tape: Vec<u8>,
+        k: u64,
+        template_active: bool,
+    ) -> Result<Self, RestoreError> {
+        let guest = restore_guest(universe, template_active)?;
+        let counter = LinuxBranchCounter::new().map_err(BootError::BranchCounter)?;
+        let bus = DeviceBus::restore(tape, universe.device.tape_cursor, universe.device.console.clone());
+        let time = WorkClock::restore(
+            universe.clock.work_clock_base,
+            k,
+            universe.clock.tsc_deadline,
+            universe.clock.tsc_aux,
+            counter,
+        );
+        Ok(Multiverse { guest, bus, time })
     }
 
     /// Drive the run loop to the guest's first `Hlt`/`Shutdown` (specs/baud-multiverse.md §8's

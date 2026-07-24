@@ -20,6 +20,29 @@ fn data_reads_return_tape_bytes_in_order_and_advance_the_cursor() {
 }
 
 #[test]
+fn restore_cursor_fast_forwards_so_the_next_read_continues_from_the_captured_position() {
+    let mut dev = TapeDevice::new(vec![1, 2, 3, 4, 5]);
+    dev.pio_read(reg::DATA); // cursor -> 1, as if a straight run had consumed one byte
+    let captured_cursor = dev.cursor();
+    assert_eq!(captured_cursor, 1);
+
+    // A restored device starts fresh (cursor 0) over the same tape, then fast-forwards.
+    let mut restored = TapeDevice::new(vec![1, 2, 3, 4, 5]);
+    restored.restore_cursor(captured_cursor);
+    assert_eq!(restored.cursor(), captured_cursor);
+
+    // From here both devices must read the identical remaining sequence.
+    let mut original_rest = Vec::new();
+    let mut restored_rest = Vec::new();
+    for _ in 0..4 {
+        original_rest.push(dev.pio_read(reg::DATA));
+        restored_rest.push(restored.pio_read(reg::DATA));
+    }
+    assert_eq!(original_rest, restored_rest);
+    assert_eq!(original_rest, vec![2, 3, 4, 5]);
+}
+
+#[test]
 fn read_past_end_of_tape_returns_the_fixed_sentinel_never_host_memory() {
     let mut dev = TapeDevice::new(vec![9]);
     assert_eq!(dev.pio_read(reg::DATA), 9);

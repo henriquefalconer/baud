@@ -63,6 +63,17 @@ impl Default for Console {
 }
 
 impl Console {
+    /// A [`Console`] pre-seeded with `output` — restoring a `Universe` snapshot
+    /// (`baud-snapshot::universe::DeviceState::console`) reconstructs the console this way so that
+    /// [`output`](Self::output) immediately after restore returns the full history (captured bytes
+    /// followed by anything written post-restore), matching what a straight run would show at the
+    /// same point. `vm_superio::Serial`'s writer is a plain `Vec<u8>` (any `std::io::Write`
+    /// implementor), so pre-filling it and letting subsequent `write()` calls append is exact — no
+    /// separate "history" field is needed.
+    pub fn with_output(output: Vec<u8>) -> Self {
+        Console { serial: Serial::new(NoIrqTrigger::default(), output) }
+    }
+
     /// Bytes the guest has written to the UART's transmit register so far, in order.
     pub fn output(&self) -> &[u8] {
         self.serial.writer()
@@ -140,6 +151,19 @@ impl DeviceBus {
     /// from outside `console.rs`).
     pub fn with_tape(tape: Vec<u8>) -> Self {
         DeviceBus { tape: TapeBus::new(tape), ..Default::default() }
+    }
+
+    /// A [`DeviceBus`] reconstructed from a `Universe` snapshot's device row
+    /// (`baud-snapshot::universe::DeviceState`, `RestoreStep::RestoreDevice` — deliberately left to
+    /// the caller by `baud-snapshot::linux::restore`, since that crate does not know this device
+    /// model's concrete types). `tape` is the run's whole tape (unchanged across the run's
+    /// lifetime, same as [`with_tape`](Self::with_tape) — restore does not need a different tape,
+    /// only a fast-forwarded cursor into the same one); `tape_cursor`/`console_output` are the
+    /// captured [`DeviceState::tape_cursor`](baud_snapshot::DeviceState)/`console` fields.
+    pub fn restore(tape: Vec<u8>, tape_cursor: u64, console_output: Vec<u8>) -> Self {
+        let mut tape_bus = TapeBus::new(tape);
+        tape_bus.device_mut().restore_cursor(tape_cursor);
+        DeviceBus { console: Console::with_output(console_output), tape: tape_bus, fallback: OpenBusFallback }
     }
 }
 
@@ -238,5 +262,39 @@ mod tests {
         let mut data = [0u8; 4];
         console.pio_read(COM1_BASE, &mut data); // DATA register, empty RX FIFO -> 0
         assert_eq!(&data[1..], &[OPEN_BUS_BYTE; 3]);
+    }
+
+    /// A restored console's output starts with the captured history, and further writes append
+    /// after it — exactly what a straight run's `output()` would show at the same point.
+    #[test]
+    fn console_with_output_preserves_captured_history_and_appends_new_writes() {
+        let mut console = Console::with_output(b"captured before snapshot, ".to_vec());
+        assert_eq!(console.output(), b"captured before snapshot, ");
+        // A real UART `OUT` instruction writes one byte at a time (same convention as
+        // `a_byte_written_to_the_data_register_appears_in_output` above), so drive the write byte
+        // by byte rather than handing `pio_write` a multi-byte slice.
+        for &byte in b"after restore" {
+            console.pio_write(COM1_BASE, &[byte]);
+        }
+        assert_eq!(console.output(), b"captured before snapshot, after restore");
+    }
+
+    /// `DeviceBus::restore` must reproduce both the tape cursor position and the console history —
+    /// the two halves of `baud-snapshot::universe::DeviceState` this crate is responsible for
+    /// reassembling (the third field, the tape bytes themselves, is not part of `DeviceState` at
+    /// all: it is the run's own input, supplied by the caller here just as `with_tape` requires).
+    #[test]
+    fn device_bus_restore_reproduces_tape_cursor_and_console_history() {
+        use crate::tape_bus::TAPE_DEVICE_BASE;
+        use baud_tape_device::reg;
+
+        let tape = vec![10, 20, 30, 40];
+        let mut bus = DeviceBus::restore(tape, 2, b"hello".to_vec());
+        assert_eq!(bus.console.output(), b"hello");
+
+        // Cursor was restored to 2: the next tape read must be the third byte (30), not the first.
+        let mut data = [0u8; 1];
+        bus.pio_read(TAPE_DEVICE_BASE + reg::DATA, &mut data);
+        assert_eq!(data, [30]);
     }
 }

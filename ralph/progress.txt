@@ -1205,3 +1205,31 @@ Post-change verification complete: drive/h0.sh and drive/m0.sh both re-verified 
 ---
 
 Post-push verification: git fetch confirms origin/main == local HEAD (9230d35); no CI/post-push protocol defined in todo.md for this repo (no .github/workflows). Already had cargo build/test/clippy --workspace green, cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-snapshot -p baud-multiverse clean, and drive/h0.sh + drive/m0.sh both green before pushing. todo.md still has substantial pending work (baud-snapshot's userfaultfd branch()/reset(), wiring baud-snapshot into baud-multiverse's boot/run flow, baud-snapshot-store, in-guest tape-device driver/shim in baud-packages, H1-H6 real-hardware validation, the full M-series) so this iteration ends with NEXT.
+
+## 2026-07-24T15:50:00 UTC - Session usage — iteration 6 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 94774
+- est. output cost: $1.4216 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+Chose wiring baud-snapshot capture/restore into baud-multiverse (Multiverse::snapshot/restore, specs/baud-multiverse.md §6), the next build action recorded at the end of iteration 6 -- it is the highest-leverage next step toward H5 (snapshot/branch/restore) and unblocks baud-driver/baud-snapshot-store later.
+
+Implemented TapeDevice::restore_cursor, Console::with_output + DeviceBus::restore, WorkClock::restore/base()/tsc_deadline()/tsc_aux(), extended baud-snapshot ClockState with tsc_deadline/tsc_aux (captured separately since the MSR filter means KVM never sees the guest's real write to those two MSRs), and added Multiverse::snapshot()/Multiverse::restore() in baud-multiverse/src/linux/mod.rs (refactored boot_guest to share a create_vm_vcpu_shell() helper with the new restore_guest()). Added/updated unit tests across baud-tape-device, baud-multiverse (console.rs, timesource.rs), and verified: cargo test -p baud-tape-device -p baud-snapshot -p baud-multiverse = 70/70 passing natively; cargo check/clippy --target x86_64-unknown-linux-gnu clean (0 new warnings, fixed one clippy default_constructed_unit_structs I introduced); cargo build/test/clippy --workspace all green, 0 regressions. Now re-running drive/h0.sh and drive/m0.sh end-to-end before committing.
+
+## 2026-07-24T16:06:24 UTC - Changes committed.
+- Wired baud-snapshot's capture/restore into baud-multiverse: Multiverse::snapshot()/Multiverse::restore()
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/src/console.rs, crates/baud-multiverse/src/timesource.rs, crates/baud-snapshot/src/linux.rs, crates/baud-snapshot/src/universe.rs, crates/baud-tape-device/src/lib.rs, crates/baud-tape-device/src/tests.rs, todo.md
+- **Brief description of changes:**
+  - baud-multiverse/linux/mod.rs: extracted create_vm_vcpu_shell() (shared KVM/vCPU/RAM/CPUID/MSR-filter prefix) out of boot_guest; added restore_guest(universe, template_active) that builds the shell then walks baud_snapshot::linux::restore's restore_plan; added Multiverse::snapshot(&mut self, page_store) -> Result<Universe, ...> and Multiverse::restore(universe, tape, k, template_active) -> Result<Self, RestoreError>
+  - baud-multiverse/console.rs: Console::with_output (pre-seed captured console history) + DeviceBus::restore (tape fast-forwarded to captured cursor + pre-seeded console)
+  - baud-multiverse/timesource.rs: WorkClock::restore/base()/tsc_deadline()/tsc_aux() so a restored guest resumes with the exact same IA32_TSC_DEADLINE/IA32_TSC_AUX values it had armed, not zero
+  - baud-snapshot: ClockState gained tsc_deadline/tsc_aux fields (a real correctness gap: the MSR filter means KVM_GET_MSRS never sees a guest's real write to those two MSRs, so they must be captured from WorkClock directly, not from the KVM MSR list) -- capture()'s signature extended accordingly
+  - baud-tape-device: TapeDevice::restore_cursor(cursor) -- the other half of the already-existing cursor() capture accessor
+  - todo.md: recorded the new baud-multiverse<->baud-snapshot wiring under §14, closing the "capture/restore are not called from baud-multiverse yet" gap the previous iteration left open
+  - Verification: cargo test -p baud-tape-device -p baud-snapshot -p baud-multiverse = 70/70 passing natively; cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-snapshot -p baud-multiverse -p baud-tape-device --all-targets clean (0 new warnings); cargo build/test/clippy --workspace all green, 0 regressions; drive/h0.sh and drive/m0.sh both re-verified passing end-to-end (exit 0)
+---

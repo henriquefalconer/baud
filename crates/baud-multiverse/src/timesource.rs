@@ -51,11 +51,44 @@ impl<C: BranchCounter> WorkClock<C> {
         WorkClock { base, k, counter, tsc_deadline: 0, tsc_aux: 0 }
     }
 
+    /// Reconstruct a [`WorkClock`] from a captured `Universe`'s clock state
+    /// (`baud-snapshot::universe::ClockState::work_clock_base`/`tsc_deadline`/`tsc_aux`) rather
+    /// than a fresh guest's zeroed defaults — the counterpart to [`new`](Self::new) that a
+    /// `Multiverse::restore` uses so a guest resumes reading the exact virtual-TSC/deadline/aux
+    /// sequence a straight run would have produced from this point, not a clock that appears to
+    /// have just reset to zero (specs/baud-snapshot.md §3: "Work-clock anchor | branch-count
+    /// base" is only half the served state — a guest that had already armed `IA32_TSC_DEADLINE` or
+    /// set `IA32_TSC_AUX` before the snapshot must see those same values after restore too, since
+    /// both MSRs are served entirely in software here and never reach KVM's own MSR storage once
+    /// the MSR filter routes them to userspace — see `linux::configure_msr_filter`'s doc).
+    pub fn restore(base: u64, k: u64, tsc_deadline: u64, tsc_aux: u64, counter: C) -> Self {
+        WorkClock { base, k, counter, tsc_deadline, tsc_aux }
+    }
+
     /// The current virtual TSC value: `base + k * rcb`. Saturating, not wrapping — a silent
     /// wraparound would itself be a determinism hole disguised as a valid-looking small number.
     pub fn virtual_tsc(&mut self) -> u64 {
         let rcb = self.counter.read();
         self.base.saturating_add(self.k.saturating_mul(rcb))
+    }
+
+    /// The work-clock anchor at the moment of the most recent `IA32_TSC` write (or construction, if
+    /// none yet) — the value `baud-snapshot::universe::ClockState::work_clock_base` captures
+    /// (specs/baud-snapshot.md §3's "Work-clock anchor" row).
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// The last value the guest wrote to `IA32_TSC_DEADLINE` (`0` if never written) — captured
+    /// alongside `base` so a restore reproduces it exactly (see [`restore`](Self::restore)'s doc).
+    pub fn tsc_deadline(&self) -> u64 {
+        self.tsc_deadline
+    }
+
+    /// The last value the guest wrote to `IA32_TSC_AUX` (`0` if never written) — same rationale as
+    /// [`tsc_deadline`](Self::tsc_deadline).
+    pub fn tsc_aux(&self) -> u64 {
+        self.tsc_aux
     }
 }
 
@@ -164,6 +197,26 @@ mod tests {
 
         // An MSR this TimeSource was never meant to see is served a fixed value, not a panic.
         assert_eq!(clock.serve_rdmsr(0xDEAD), 0);
+    }
+
+    /// The counterpart to `wrmsr_to_tsc_rebases_...` below: `base()`/`tsc_deadline()`/`tsc_aux()`
+    /// expose exactly what a caller needs to capture into `ClockState`, and `restore()` rebuilds a
+    /// `WorkClock` that reads back identically to the one it was captured from — the round-trip
+    /// `Multiverse::snapshot`/`Multiverse::restore` depends on.
+    #[test]
+    fn restore_reproduces_the_captured_base_deadline_and_aux() {
+        let mut original = WorkClock::new(1_000, 3, ConstantCounter(7));
+        original.absorb_wrmsr(MSR_IA32_TSC_DEADLINE, 0xABCD);
+        original.absorb_wrmsr(MSR_IA32_TSC_AUX, 42);
+        assert_eq!(original.base(), 1_000);
+        assert_eq!(original.tsc_deadline(), 0xABCD);
+        assert_eq!(original.tsc_aux(), 42);
+
+        let mut restored =
+            WorkClock::restore(original.base(), 3, original.tsc_deadline(), original.tsc_aux(), ConstantCounter(7));
+        assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC), original.serve_rdmsr(MSR_IA32_TSC));
+        assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC_DEADLINE), 0xABCD);
+        assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC_AUX), 42);
     }
 
     #[test]

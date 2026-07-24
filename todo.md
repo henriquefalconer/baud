@@ -609,10 +609,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   - `msr.rs` — `MSR_IA32_TSC`/`_DEADLINE`/`_AUX` moved here as the single source of truth (this
     crate sits below `baud-multiverse` in the dependency graph per specs/baud-snapshot.md §2's
     diagram); `baud-multiverse::timesource` now `pub use`s them instead of duplicating the values,
-    and `baud-multiverse`'s `Cargo.toml` gained a `baud-snapshot` path dependency — the first real
-    edge from `baud-multiverse` to this crate, though `capture`/`restore` are not called from
-    `baud-multiverse` yet (that wiring — `Multiverse::snapshot`/`restore`, specs/baud-multiverse.md
-    §6 — is still open).
+    and `baud-multiverse`'s `Cargo.toml` gained a `baud-snapshot` path dependency.
   - `linux.rs` (`cfg(target_os = "linux")`) — real `capture`/`restore` functions walking every
     `KVM_GET_*`/`KVM_SET_*` specs/baud-snapshot.md §3 enumerates (regs/sregs/msrs via
     `KVM_GET_MSR_INDEX_LIST` + `KVM_GET_MSRS`/`KVM_SET_MSRS`/lapic/xsave (`KVM_GET_XSAVE`, not
@@ -651,12 +648,57 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     didn't exist before this iteration); `drive/h0.sh` and `drive/m0.sh` re-verified passing
     end-to-end (killing any leftover `baud-server.exe` via PowerShell first, per the established
     note below).
-- H1-H6 and the rest of the M-series remain **not yet started** beyond the above: `baud-snapshot`
-  is not yet wired into `baud-multiverse`'s boot/run flow (`Multiverse::snapshot`/`restore`, no
-  `PageStore`/tape-device-cursor/console-bytes plumbing exists in `baud-multiverse` yet);
-  `baud-snapshot`'s own branch/reset (userfaultfd/dirty-ring) is open (see above); the
-  `baud-snapshot-store` crate does not exist yet; no in-guest tape-device driver/shim exists in
-  `baud-packages` yet.
+- **`baud-snapshot` wired into `baud-multiverse`'s boot/run flow — `Multiverse::snapshot`/
+  `Multiverse::restore` built (specs/baud-multiverse.md §6's `Snapshot::capture`/
+  `Snapshot::restore` API), type-check-only pending real hardware.** Closes the "capture/restore
+  are not called from `baud-multiverse` yet" gap the previous iteration left open:
+  - `crates/baud-multiverse/src/linux/mod.rs` — `create_vm_vcpu_shell()` extracted from
+    `boot_guest` (the shared `Kvm::new → create_vm → register zeroed RAM → create_vcpu → CPUID mask
+    → MSR filter` prefix both a fresh boot and a restore need identically); `restore_guest(universe,
+    template_active)` builds that shell then walks `baud_snapshot::linux::restore`'s `restore_plan`
+    onto it. `Multiverse::snapshot(&mut self, page_store: &mut PageStore) -> Result<Universe, ...>`
+    calls `baud_snapshot::linux::capture` against this instance's own KVM handles plus the three
+    pieces of state only this crate's device models know (work-clock anchor/deadline/aux,
+    tape-device cursor, console output). `Multiverse::restore(universe, tape, k, template_active) ->
+    Result<Self, RestoreError>` is the inverse: `restore_guest` rebuilds the KVM/vCPU/RAM state,
+    then `DeviceBus::restore` (new, `console.rs`) and `WorkClock::restore` (new, `timesource.rs`)
+    reassemble the device/clock layer `baud-snapshot` deliberately leaves to the caller
+    (`RestoreStep::RestoreDevice`'s doc) — `tape` is the run's whole tape (unchanged across a run,
+    same value the original `boot` call used), fast-forwarded to the captured cursor via
+    `baud-tape-device`'s new `TapeDevice::restore_cursor`; the console is pre-seeded with the
+    captured output history via `Console::with_output` so `.output()` shows the full history
+    post-restore, not just what's written after.
+  - **Correctness gap found and closed while wiring this**: `IA32_TSC_DEADLINE`/`IA32_TSC_AUX` are
+    served entirely by `WorkClock` in software (the MSR filter routes them to userspace, so a guest
+    `wrmsr` to either never reaches KVM's own MSR storage) — a capture that only saved
+    `KVM_GET_MSRS`' view of those two indices would silently restore stale/zero values regardless of
+    what the guest had actually armed. Fixed by extending `baud-snapshot::universe::ClockState` with
+    `tsc_deadline`/`tsc_aux` fields (alongside the existing `work_clock_base`), threading them
+    through `baud_snapshot::linux::capture`'s signature, and adding `WorkClock::restore`/`base()`/
+    `tsc_deadline()`/`tsc_aux()` accessors so `Multiverse::snapshot`/`restore` round-trip them
+    exactly — documented inline on both sides (`ClockState::tsc_deadline`'s doc, `WorkClock::
+    restore`'s doc) so a future reader doesn't have to re-derive why `vcpu.get_msrs()` alone isn't
+    enough for a filtered MSR.
+  - **Verification**: `cargo test -p baud-tape-device -p baud-snapshot -p baud-multiverse` — 70/70
+    pass natively (19+15+36; new: 1 `TapeDevice::restore_cursor` test, 2 `console.rs` tests
+    (`Console::with_output`, `DeviceBus::restore`), 1 `WorkClock::restore` round-trip test); `cargo
+    check`/`clippy --target x86_64-unknown-linux-gnu -p baud-snapshot -p baud-multiverse -p
+    baud-tape-device --all-targets` clean (0 new warnings — one `clippy::default_constructed_unit_
+    structs` this iteration introduced was fixed before the checkpoint, not left in); `cargo
+    build/test/clippy --workspace` all green, 0 regressions; `drive/h0.sh` and `drive/m0.sh`
+    re-verified passing end-to-end (both hit the already-documented "sleep 1 too short" race at
+    least once this iteration — re-running cleanly after killing the leftover `baud-server.exe`
+    resolved it both times, consistent with the existing note below, not a new issue).
+  - **Not yet done**: `baud-snapshot`'s own branch/reset (userfaultfd/dirty-ring) is still open (see
+    above); the `baud-snapshot-store` crate does not exist yet; no in-guest tape-device driver/shim
+    exists in `baud-packages` yet; nothing calls `Multiverse::snapshot`/`restore` on real KVM
+    hardware yet (same "no Linux/KVM host on this dev machine" caveat as every other `linux/`
+    module, CLAUDE.md) — the round-trip (`snapshot_roundtrip_is_bit_identical`) is provable in unit
+    tests at the level each underlying piece already covers (restore ordering, MSR round-tripping,
+    tape-cursor/console reconstruction) but not yet as one end-to-end real-hardware test, which
+    needs H1 (booting a real guest) to land first since there is no real halted guest to snapshot
+    from yet.
+- H2-H6 and the rest of the M-series remain **not yet started** beyond the above.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a
   drive script's `trap cleanup EXIT` → `kill "$SERVER_PID"` does not reliably terminate the
