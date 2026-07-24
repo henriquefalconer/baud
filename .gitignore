@@ -1,0 +1,42 @@
+# ─── Rust workspace ───
+/target/
+**/*.rs.bk
+# Cargo.lock IS committed — this workspace ships binaries.
+
+# ─── Nix ───
+/result
+/result-*
+.direnv/
+# flake.lock IS committed (pins nixpkgs). infra/pkgs build outputs are ./result symlinks (ignored above).
+
+# ─── Secrets (age / sops) ───
+# Encrypted files are committed (ciphertext). Private keys and decrypted material never are.
+# infra/secrets/ has its own deny-all allowlist .gitignore for that directory.
+*.age
+age.key
+keys.txt
+*.plain.yaml
+*.dec.yaml
+*.decrypted
+.sops-tmp/
+
+# ─── Copyrighted / user-supplied inputs (never commit) ───
+*.nes
+*.sav
+*.savestate
+
+# ─── baud run artifacts ───
+/out/
+/runs/
+*.tape
+*.journal
+*.y4m
+*.qoi
+
+# ─── OS / editors ───
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+.zed/
