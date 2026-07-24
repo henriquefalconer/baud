@@ -1,0 +1,18 @@
+[package]
+name = "baud-journal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Append-only CBOR journal with blake3 content-addressing for runs"
+
+[dependencies]
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+ciborium = { workspace = true }
+baud-proto = { path = "../baud-proto" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "baud-driver"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hegel-like deterministic driver: seeded ChaCha PRNG, draw API, corpus, scheduler, shrinker"
+
+[dependencies]
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rand_chacha = { workspace = true }
+rand = { workspace = true }
+baud-proto = { path = "../baud-proto" }
+
+[dev-dependencies]

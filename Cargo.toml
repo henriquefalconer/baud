@@ -11,6 +11,8 @@ members = [
     "crates/baud-tape-local",
     "crates/baud-init",
     "crates/baud-packages",
+    "crates/baud-driver",
+    "crates/baud-journal",
 ]
 
 [workspace.package]

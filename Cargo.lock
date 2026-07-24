@@ -212,6 +212,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "baud-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "baud-proto",
+ "rand",
+ "rand_chacha",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "baud-identity"
 version = "0.1.0"
 dependencies = [
@@ -232,6 +244,19 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_yaml",
+ "thiserror",
+]
+
+[[package]]
+name = "baud-journal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "baud-proto",
+ "blake3",
+ "ciborium",
+ "serde",
+ "tempfile",
  "thiserror",
 ]
 
@@ -283,8 +308,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "baud-driver",
  "baud-identity",
  "baud-init",
+ "baud-journal",
  "baud-keys",
  "baud-packages",
  "baud-proto",

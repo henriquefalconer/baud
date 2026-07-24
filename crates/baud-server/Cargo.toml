@@ -18,6 +18,8 @@ baud-tape-local = { path = "../baud-tape-local" }
 baud-identity = { path = "../baud-identity" }
 baud-init = { path = "../baud-init" }
 baud-packages = { path = "../baud-packages" }
+baud-driver = { path = "../baud-driver" }
+baud-journal = { path = "../baud-journal" }
 serde_yaml = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
