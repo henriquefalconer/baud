@@ -414,6 +414,7 @@ dependencies = [
  "anyhow",
  "baud-identity",
  "baud-init",
+ "baud-multiverse",
  "baud-proto",
  "baud-tracing",
  "blake3",

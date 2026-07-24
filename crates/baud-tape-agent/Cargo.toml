@@ -14,10 +14,11 @@ name = "baud-agent"
 path = "src/main.rs"
 
 [dependencies]
-baud-proto  = { path = "../baud-proto" }
-baud-init   = { path = "../baud-init" }
-baud-identity = { path = "../baud-identity" }
-baud-tracing  = { path = "../baud-tracing" }
+baud-proto       = { path = "../baud-proto" }
+baud-init        = { path = "../baud-init" }
+baud-identity    = { path = "../baud-identity" }
+baud-tracing     = { path = "../baud-tracing" }
+baud-multiverse  = { path = "../baud-multiverse" }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 anyhow       = { workspace = true }

@@ -338,16 +338,19 @@ fi
 echo ""
 echo "=== FD.8: M7 — eBPF tracing + verify observation ==="
 
-# Start a run for tracing
-TRACE_RUN=$(curl -sf -X POST "$SRV/runs" \
-    -H "Content-Type: application/json" \
-    -d "{\"spec\": $PARSER_SPEC, \"seed\": 7, \"backend\": \"local\"}" 2>&1)
-TRACE_RUN_ID=$(echo "$TRACE_RUN" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',d.get('run_id','tr-1')))" 2>/dev/null || echo "tr-1")
+# Reuse the raftlet fuzz run from FD.7 — it already has syscall records
+# (populated by the fuzz loop). Fall back to creating a new parser fuzz run.
+TRACE_RUN_ID="${RAFT_RUN_ID:-}"
+if [[ -z "$TRACE_RUN_ID" ]]; then
+    TRACE_FUZZ=$(curl -sf -X POST "$SRV/runs/fuzz" \
+        -H "Content-Type: application/json" \
+        -d "{\"spec\": $PARSER_SPEC, \"tactics\": \"stateful-mask\", \"seed\": 7, \"max_iterations\": 30}" 2>&1)
+    TRACE_RUN_ID=$(echo "$TRACE_FUZZ" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('run_id',''))" 2>/dev/null || echo "")
+fi
 
-# Seed tracing records (fallback)
-curl -sf -X POST "$SRV/runs/$TRACE_RUN_ID/tracing/seed" \
-    -H "Content-Type: application/json" \
-    -d '{"n_records": 50}' > /dev/null
+# Seed plane-2 eBPF records from plane-1 syscall log (fallback path)
+# This mirrors syscall_records → ebpf_records so verify observation can cross-check them.
+curl -sf -X POST "$SRV/runs/$TRACE_RUN_ID/tracing/seed" > /dev/null 2>&1 || true
 
 TRACING_TAIL=$(BAUD_SERVER=http://127.0.0.1:7734 "$BAUD" tracing tail --tape "$TRACE_RUN_ID" --json 2>&1)
 TRACING_OK=$(echo "$TRACING_TAIL" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok',False))")
