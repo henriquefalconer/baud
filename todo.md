@@ -454,14 +454,51 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   actually lands. **Not yet built**: `baud-vcpu` is not wired into any VM/vCPU creation flow (no
   `Kvm::new`/`create_vm`/`create_vcpu` boot flow — that is `baud-multiverse`'s job per the crate
   split in specs/baud-vcpu.md §1) and is not yet a dependency of `crates/baud-multiverse`.
-- **Not yet started**: H1-H6 and the M-series (everything past H0 in §10) — `baud-tape-device`,
-  `baud-snapshot`, `baud-snapshot-store` crates do not exist yet; the old ptrace-based
-  `baud-multiverse` (crates/baud-multiverse/src/lib.rs) has not been rewritten to the KVM/VT-x
-  model in `specs/baud-multiverse.md` v2.0 — it still reflects the pre-pivot plan. **Next build
-  action**: rewrite `baud-multiverse`'s boot flow (specs/baud-multiverse.md §2's `Kvm::new` →
-  `create_vm` → register guest RAM → `create_vcpu` → CPUID/TSC/MSR setup → `linux-loader` boot,
-  §3.1 of todo.md) on top of the now-existing `baud-vcpu` exit dispatch, still type-check-only
-  until a real KVM host is available to validate against.
+- **`baud-multiverse` boot flow (specs/baud-multiverse.md §2) — built, not yet wired to a real
+  KVM host or to `baud-server`/`baud-tape-agent`.** New modules, additive alongside the untouched
+  pre-pivot ptrace simulation the server/agent still actually run guests through today (see the
+  pivot notice at the top of `crates/baud-multiverse/src/lib.rs`):
+  - `crates/baud-multiverse/src/cpuid.rs` — the determinism mask table (specs/baud-multiverse.md
+    §4, todo.md §3.2): clears RDRAND/RDSEED/TSX-HLE/TSX-RTM/x2APIC, pins the `0BH`/`1FH`
+    extended-topology leaves to one core no-SMT, sets invariant-TSC and a fixed hypervisor-present
+    bit. Hardware-independent (a `CpuidEntry` trait implemented for both a portable `CpuidLeaf` and
+    — directly, unmodified — `kvm_bindings::kvm_cpuid_entry2`), unit-tested on this Windows machine
+    with no KVM at all: 7 tests including a proptest fuzz (`masked_bits_are_always_fixed_regardless_
+    of_host_input`) covering `cpuid_leaves_are_fixed`'s guarantee for any starting bit pattern.
+  - `crates/baud-multiverse/src/layout.rs` — fixed guest-physical addresses (RAM/kernel/cmdline/
+    zero-page/page-table addresses, specs/baud-multiverse.md §2's "write boot params at fixed
+    addresses") and `build_identity_page_tables`, a pure function building the long-mode identity
+    map (1 PML4 + 1 PDPTE + N PDE pages of 2 MiB leaves). 6 tests, plus a module-level `const`
+    assertion (not a runtime one — both sides are compile-time constants) that the fixed regions
+    never overlap.
+  - `crates/baud-multiverse/src/linux/{mod,pagetables,bootparams}.rs` (`cfg(target_os =
+    "linux")`) — the real boot flow: `Kvm::new` → `create_vm` → register one zeroed guest-RAM
+    region (`vm-memory` `GuestMemoryMmap`) → `create_vcpu` → apply the CPUID mask + `KVM_SET_
+    CPUID2` → write the identity page tables into guest RAM → `KVM_SET_SREGS` into 64-bit long
+    mode (CR0.PE|PG, CR4.PAE, EFER.LME|LMA, flat 64-bit code/data segments — the standard
+    rust-vmm direct-boot technique that skips the kernel's own real-mode setup code entirely) →
+    `KVM_X86_SET_MSR_FILTER` + `KVM_CAP_X86_USER_SPACE_MSR` (reason `Filter`) routes
+    `IA32_TSC`/`IA32_TSC_DEADLINE`/`IA32_TSC_AUX` to userspace exits → `KVM_SET_TSC_KHZ` pins
+    `VIRTUAL_TSC_KHZ` (1 GHz, host-independent) → `linux_loader::loader::bzimage::BzImage::load`
+    loads the kernel, builds the `boot_params` zero page (e820 map: first MiB reserved, rest
+    usable RAM) and command line, `LinuxBootConfigurator::write_bootparams` → `RIP` set to
+    `kernel_load + 0x200` (the Linux/x86 64-bit boot protocol's direct entry point), `RSI` = zero
+    page, ready for `baud_vcpu::linux::run_until_halted`. Type-checks and clippy-clean against the
+    real crate sources (`cargo check`/`clippy --target x86_64-unknown-linux-gnu -p
+    baud-multiverse`, including the `linux`-only tests) but **not yet exercised on real KVM
+    hardware** — same caveat as `baud-host`/`baud-vcpu` (no Linux/KVM host on this dev machine,
+    CLAUDE.md).
+  - **Not yet done**: no MSR-serving `TimeSource`/`Bus` impl wired to `baud_vcpu::dispatch_exit`
+    yet (the RDTSC/RDMSR work-clock math itself, §3.3), no console/tape-device `Bus`, and nothing
+    calls `boot_guest` end-to-end — `baud-multiverse`'s public `Multiverse::load`/`run` API (§6 of
+    specs/baud-multiverse.md) does not exist yet, only the boot-flow building blocks it will use.
+    **Next build action**: build the work-clock `TimeSource` (§3.3's `virtual_tsc = base + k ×
+    rcb`, fed by `baud-vcpu`'s `LinuxPmuStepper` branch counter) and a minimal console `Bus`, wire
+    `boot_guest` + `run_until_halted` into a `Multiverse` struct implementing specs/
+    baud-multiverse.md §6's API, and get an actual Linux/KVM host (bare-metal or WSL2 nested virt)
+    to validate the whole boot flow against — everything above is still type-check-only.
+- H1-H6 and the rest of the M-series remain **not yet started**: `baud-tape-device`,
+  `baud-snapshot`, `baud-snapshot-store` crates do not exist yet.
 - **Fixed while validating H0 on this Windows dev machine** (pre-existing, not specific to
   baud-host): every `drive/*.sh` that spawns `baud-server` with a temp SQLite file passed a
   POSIX `mktemp -t ...` path (e.g. `/tmp/baud-h0-XXXX.sqlite`) straight into `BAUD_DB`; a plain

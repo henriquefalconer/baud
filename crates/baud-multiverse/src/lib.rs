@@ -15,8 +15,25 @@
 // Public API:
 //   Multiverse::load(manifest, guests) -> Result<Self>
 //   run(&mut self, tape: impl DrawSource) -> ObservationStream
+//
+// ---------------------------------------------------------------------------------------------
+// Pivot in progress (todo.md §13, specs/baud-multiverse.md v2.0): everything below this notice is
+// the pre-pivot ptrace/seccomp simulation, still what `baud-server`/`baud-tape-agent` actually run
+// guests through today (`baud_multiverse::{Multiverse, RunManifest, ...}` — see those crates'
+// imports). It is being replaced by a real KVM/VT-x VMM, built bottom-up in new modules below
+// (`cpuid`, `layout`, and `linux` for the real boot flow) that do not yet replace or call into
+// this code: swapping the server/agent over is a separate step, gated on validating the new code
+// against a real Linux/KVM host (this dev machine has none — see CLAUDE.md). Until that swap,
+// both exist; the new modules are additive, not yet wired into any request path.
+// ---------------------------------------------------------------------------------------------
 
 #![allow(dead_code)]
+
+pub mod cpuid;
+pub mod layout;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -1005,3 +1005,85 @@ Wrote crates/baud-vcpu (specs/baud-vcpu.md): hardware-independent exit-dispatch 
   `cargo build/test/clippy --workspace` all green (0 failures, only pre-existing warnings in
   crates this increment did not touch); `drive/h0.sh` still exits 0 end-to-end (unaffected).
 ---
+
+Post-push verification: no CI/post-push protocol is defined in todo.md for this repo (no .github/workflows); verified instead by confirming git fetch shows origin/main == local HEAD (a7d5307) and by having already run cargo build/test/clippy --workspace (green) plus the linux-target cross-compile check/clippy for the new crate and drive/h0.sh (still green, unaffected) before pushing. todo.md still has substantial pending work (H1-H6, M-series, baud-tape-device/baud-snapshot/baud-snapshot-store crates, the full baud-multiverse KVM rewrite) so this iteration ends with NEXT.
+
+## 2026-07-24T14:24:28 UTC - Session usage — iteration 2 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 93711
+- est. output cost: $1.4057 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address: studying todo.md build-status (§14), specs/*, and current crates (baud-host, baud-vcpu done) to pick the next H-milestone or M-series item...
+
+Chose the next H1 step per todo.md §14's "Next build action": rewrite baud-multiverse's boot flow (specs/baud-multiverse.md §2) on top of the now-existing baud-vcpu exit dispatch. It's the K of Z: the boot flow is the piece every H1+ milestone depends on, and todo.md itself named it as the next concrete step after H0 (baud-host) and baud-vcpu landed in iterations 1-2.
+
+Studied specs/baud-multiverse.md v2.0 and specs/baud-vcpu.md, then the real kvm-ioctls 0.25 / kvm-bindings 0.14 / linux-loader 0.14 / vm-memory 0.18 crate sources (fetched into the local cargo registry cache) to get exact real APIs rather than guessing: KernelLoader::load, LinuxBootConfigurator::write_bootparams, kvm_userspace_memory_region, set_cpuid2/set_tsc_khz/set_msr_filter, kvm_sregs/kvm_segment field layouts, and the KVM_CAP_X86_USER_SPACE_MSR + KVM_MSR_EXIT_REASON_FILTER mechanism for routing specific MSRs to userspace exits (confirmed via kvm-ioctls' own test_userspace_rdmsr_exit test, not memory).
+
+Built three new modules in crates/baud-multiverse, additive alongside the untouched pre-pivot ptrace simulation baud-server/baud-tape-agent still actually run guests through today (that swap is gated on validating this new code against a real Linux/KVM host, which this dev machine does not have): cpuid.rs (the determinism mask table, hardware-independent, 7 tests incl. a proptest fuzz), layout.rs (fixed guest memory addresses + a pure identity-page-table builder, 6 tests + a compile-time overlap-invariant const-assert), and linux/{mod,pagetables,bootparams}.rs (the real Kvm::new -> create_vm -> register RAM -> create_vcpu -> CPUID/TSC/MSR setup -> long-mode sregs -> linux-loader bzImage boot -> RIP at the kernel's 64-bit entry point flow). Fixed real compile errors the cross-target check caught along the way: BufReader<File> doesn't implement ReadVolatile (File itself does, given vm-memory's "rawfd" feature), and reading a field of a #[repr(C,packed)] struct even from a local copy still needs the scalar copied out (not just the aggregate) before assert_eq! can take a reference to it.
+
+cargo build/test/clippy --workspace all green natively (0 new warnings; the ~20 pre-existing warnings are all in files this increment did not touch). cargo check/clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets clean (0 warnings, 0 errors) for the new linux module. drive/h0.sh and drive/m0.sh both still exit 0 end-to-end (unaffected — confirms the new code is genuinely additive, not a regression on the working M-series path). Updating todo.md §14 now, then committing and pushing.
+
+## 2026-07-24T14:50:00 UTC - Changes committed.
+- What was implemented: real KVM/VT-x boot-flow modules for `crates/baud-multiverse`
+  (specs/baud-multiverse.md v2.0 §2), continuing the H0/baud-vcpu work from iterations 1-2 —
+  the "Next build action" todo.md itself named after those landed.
+- Files changed:
+  - crates/baud-multiverse/{Cargo.toml,src/lib.rs} (deps added, pivot notice + new module wiring)
+  - crates/baud-multiverse/src/cpuid.rs (new — CPUID determinism mask table)
+  - crates/baud-multiverse/src/layout.rs (new — fixed boot memory layout + identity page tables)
+  - crates/baud-multiverse/src/linux/{mod,pagetables,bootparams}.rs (new — real KVM boot flow)
+  - Cargo.lock (linux-loader/vm-memory/vm-superio + transitive deps added)
+  - todo.md (§14 build-status: baud-multiverse boot-flow entry, next action pointer)
+- **Brief description of changes:**
+  - `cpuid.rs`: `apply_determinism_mask` implements specs/baud-multiverse.md §4's mask table
+    (clear RDRAND 01H:ECX[30]/RDSEED 07H:EBX[18]/TSX-HLE 07H:EBX[4]/TSX-RTM 07H:EBX[11]/x2APIC
+    01H:ECX[21]; pin 0BH/1FH topology to one core no-SMT; set invariant-TSC 80000007H:EDX[8] and a
+    fixed hypervisor-present bit) behind a `CpuidEntry` trait implemented for both a portable
+    `CpuidLeaf` (7 unit/property tests run natively, no KVM needed) and, in `linux/mod.rs`,
+    `kvm_bindings::kvm_cpuid_entry2` directly — the exact same masking logic runs against the real
+    `KVM_SET_CPUID2` payload.
+  - `layout.rs`: every fixed guest-physical address the boot flow uses (RAM base, kernel load,
+    zero page, cmdline, PML4/PDPTE/PDE, boot stack), plus `build_identity_page_tables` — a pure
+    function building the long-mode identity map (1 PML4 + 1 PDPTE + N PDE pages of 2 MiB leaves,
+    RAM-sized), unit-tested (6 tests) without touching KVM or host memory at all. A module-level
+    `const` assertion (both operands are `const`, so `assertions_on_constants` correctly flags a
+    runtime `assert!` here) checks the fixed regions never overlap.
+  - `linux/mod.rs` (`cfg(target_os = "linux")`): `boot_guest` — `Kvm::new` -> `create_vm` ->
+    register one zeroed guest-RAM region (`vm-memory::GuestMemoryMmap`, unsafe
+    `set_user_memory_region`) -> `create_vcpu` -> `apply_cpuid_mask` + `set_cpuid2` ->
+    `configure_msr_filter` (`KVM_CAP_X86_USER_SPACE_MSR` with reason `Filter` +
+    `KVM_X86_SET_MSR_FILTER` denying `IA32_TSC`/`IA32_TSC_DEADLINE`/`IA32_TSC_AUX` so they exit to
+    userspace instead of KVM's native handling or #GP — verified against kvm-ioctls' own
+    `test_userspace_rdmsr_exit` test, not memory) -> `set_tsc_khz(VIRTUAL_TSC_KHZ)` -> write
+    identity page tables + long-mode `kvm_sregs` -> `linux_loader::bzimage::BzImage::load` +
+    `boot_params`/e820/cmdline via `LinuxBootConfigurator` -> `RIP = kernel_load + 0x200` (the
+    Linux/x86 64-bit direct-boot entry point), `RSI` = zero page.
+  - `linux/pagetables.rs`: writes `layout::build_identity_page_tables`'s output into real guest
+    RAM and builds the long-mode `kvm_sregs` (CR0.PE|PG, CR4.PAE, EFER.LME|LMA, flat 64-bit
+    code/data segments) — the standard rust-vmm direct-boot technique that skips the kernel's own
+    16-/32-bit real-mode setup code entirely.
+  - `linux/bootparams.rs`: loads the bzImage kernel, writes the command line and a complete
+    `boot_params` zero page (e820: first MiB reserved, rest usable RAM) at the fixed addresses.
+  - Two real compile bugs the `x86_64-unknown-linux-gnu` cross-check caught (this dev machine has
+    no Linux host to build natively): `BufReader<File>` doesn't implement vm-memory's
+    `ReadVolatile` (plain `File` does, once the crate's `rawfd` feature is enabled — added to
+    Cargo.toml); reading a field of a `#[repr(C, packed)]` struct is unaligned-UB even from a
+    locally-copied instance of that struct (packed applies to the type itself, not just its
+    placement) — fixed by copying each scalar field out individually before comparing.
+  - Deliberately NOT done this iteration: swapping `baud-server`/`baud-tape-agent` over to this
+    new code. They still run guests through the pre-pivot ptrace simulation
+    (`crates/baud-multiverse/src/lib.rs`, now carrying a pivot notice) — that swap needs a real
+    Linux/KVM host to validate against, which this dev machine does not have (CLAUDE.md). The new
+    modules are purely additive; nothing new is called from any request path yet.
+- Verification: `cargo build/test/clippy --workspace` all green natively (0 failures; 0 new
+  warnings — the ~20 pre-existing warnings are all in files this increment did not touch);
+  `cargo check`/`clippy --target x86_64-unknown-linux-gnu -p baud-multiverse --all-targets` clean
+  (0 warnings, 0 errors) for the new `linux` module, including its own `#[cfg(test)]` blocks;
+  `drive/h0.sh` and `drive/m0.sh` both still exit 0 end-to-end on this machine (confirms the new
+  code is additive, not a regression on the working M-series path).
+---

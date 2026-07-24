@@ -7,6 +7,8 @@ description = "Deterministic supervisor for baud guest processes"
 
 [dependencies]
 baud-proto = { path = "../baud-proto" }
+baud-vcpu = { path = "../baud-vcpu" }
+baud-host = { path = "../baud-host" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -15,5 +17,19 @@ tracing = { workspace = true }
 blake3 = { workspace = true }
 libc = "0.2"
 
+# specs/baud-multiverse.md §2's pinned skeleton deps. Real KVM/guest-boot code (Kvm::new →
+# create_vm → register RAM → create_vcpu → CPUID/TSC/MSR → linux-loader boot, crates/
+# baud-multiverse/src/linux/) is cfg(target_os = "linux")-gated, same pattern as baud-host and
+# baud-vcpu: type-checked via `cargo check --target x86_64-unknown-linux-gnu -p baud-multiverse`
+# on this Windows dev machine, not yet exercised against real /dev/kvm (todo.md §14).
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.25"
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+vm-memory = { version = "0.18", features = ["backend-mmap", "rawfd"] }
+linux-loader = { version = "0.14", features = ["bzimage", "elf"] }
+vmm-sys-util = "0.15"
+vm-superio = "0.8"
+
 [dev-dependencies]
 tempfile = { workspace = true }
+proptest = "1"
