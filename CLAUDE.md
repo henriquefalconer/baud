@@ -41,6 +41,10 @@ This machine ships with **no Rust toolchain and no C linker** out of the box. On
    ```
    Drive scripts under `drive/` already do this at the top.
 
+## Running Rust inside WSL2 (from the Git Bash tool)
+
+To run cargo/rustc inside WSL2 Ubuntu from Git Bash, invoke them by absolute Linux path with MSYS path-conversion disabled — e.g. `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -u baud -- /home/baud/.cargo/bin/cargo build` — because WSL inherits Git Bash's `HOME`/`PATH`, which otherwise shadows the Linux rustup with the Windows one and leaves cargo/rustc unresolved on `PATH`.
+
 ## No real KVM host here
 
 This dev machine has no `/dev/kvm` (Windows, and WSL2 has no distro installed — `wsl --status`
