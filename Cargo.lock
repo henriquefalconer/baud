@@ -293,6 +293,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "baud-raftlet"
+version = "0.1.0"
+dependencies = [
+ "baud-proto",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "baud-secret"
 version = "0.1.0"
 dependencies = [
@@ -315,6 +324,7 @@ dependencies = [
  "baud-keys",
  "baud-packages",
  "baud-proto",
+ "baud-raftlet",
  "baud-secret",
  "baud-tape",
  "baud-tape-local",

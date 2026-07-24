@@ -20,6 +20,7 @@ baud-init = { path = "../baud-init" }
 baud-packages = { path = "../baud-packages" }
 baud-driver = { path = "../baud-driver" }
 baud-journal = { path = "../baud-journal" }
+baud-raftlet = { path = "../baud-raftlet" }
 serde_yaml = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

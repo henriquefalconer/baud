@@ -1,0 +1,23 @@
+# examples/raftlet/spec.toml — raftlet workload build spec
+#
+# Defines how to build the raftlet guest binary via nix.
+# baud-packages resolves this to a pinned closure hash.
+
+[workload]
+name = "raftlet"
+description = "3-node leader-election + replicated-log with planted modal bug"
+
+[nix]
+flake = "github:nixos/nixpkgs/nixos-24.05"
+package = "raftlet"
+# Static musl build targeting x86_64-linux (sandbox environment)
+target = "x86_64-unknown-linux-musl"
+features = []
+
+[build]
+# baud-raftlet is built as a static binary; the spec adapter declarations
+# wire up net, stdout-kv, and syscall-counter adapters at the baud-init level.
+# The workload binary itself communicates with the supervisor via the allowed
+# syscall set only (read/write/exit).
+static = true
+no_pie = true

@@ -8,6 +8,7 @@ pub mod health;
 pub mod keys;
 pub mod net;
 pub mod obs;
+pub mod raftlet;
 pub mod replay;
 pub mod runs;
 pub mod server;

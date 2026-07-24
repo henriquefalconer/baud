@@ -1,0 +1,22 @@
+[package]
+name = "baud-raftlet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# baud-raftlet — a validation TARGET (a program under test, not infrastructure).
+#
+# 3-node leader-election + replicated-log toy with a planted safety violation.
+# Invariant checks (single leader per term, log prefix agreement) run in-harness
+# and report Crash{invariant}.
+#
+# Deployed via examples/raftlet/spec.toml through the same CLI, adapters, and code
+# paths as every other workload. < 1,000 LOC, no deps beyond baud-proto.
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]

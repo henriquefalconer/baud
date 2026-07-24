@@ -143,3 +143,35 @@
 ## 2026-07-24T06:20:30 UTC - Session usage — iteration 6 (Build build session) [sonnet]
 - output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
 - est. output cost: TBD
+
+## 2026-07-24T06:16:04 UTC - Session usage — iteration 6 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 33260
+- est. output cost: $0.4989 (sonnet output rate)
+- exact accounting unavailable this entry
+
+## 2026-07-24T06:24:00 UTC - Ralph Build Iteration 7 Start
+- Resuming from M5 (committed at eec9d34 / b567d31)
+- Plan: M6 — baud-raftlet (3-node consensus with planted modal bug) + examples/raftlet + raftlet fuzz routes + drive/m6.sh
+
+## 2026-07-24T06:30:00 UTC - M6 complete
+- crates/baud-raftlet/: 3-node leader-election + replicated-log with planted safety violation (log_prefix_agreement + single_leader_per_term); 7 tests pass
+- Planted bug: >= instead of > in truncating AppendEntries handler (stale leader overwrites committed entries)
+- examples/raftlet/spec.yaml: 3-node net topology (consensus-node, net input, stdout-kv probes)
+- examples/raftlet/spec.toml: nix build spec for raftlet guest binary
+- crates/baud-server/src/routes/raftlet.rs: POST /runs/raftlet/fuzz (random-drops / markov-partition / markov-crash-restart), GET /runs/raftlet/{id}, POST /runs/{id}/raftlet/reconstruct
+- drive/m6.sh: ALL 9 CHECKS PASSED
+  - M6.1: spec lint: raftlet spec valid (3 nodes)
+  - M6.2: random-drops: 200 gens, violation NOT found (exit 0)
+  - M6.3: random-drops observations stored (800 obs)
+  - M6.4: markov-crash-restart + grid strategy: log_prefix_agreement violated in 113 gens (exit 2)
+  - M6.5: crashed run observations stored (452 obs, 1 violation_found event), status=crashed
+  - M6.6: net weather: 498 events (249 partition_on, 249 partition_off)
+  - M6.7: tape reconstruct: winning tape replays, violation reproduced
+  - M6.8: replay via /runs/:id/raftlet/reconstruct verifies same violation
+  - M6.9: workload-noun CI grep CLEAN
+- Total tests: 90 pass, 0 fail across all crates
+- NEXT iteration should implement M7 (eBPF plane + cross-check, baud-tracing)
+
+## 2026-07-24T06:30:30 UTC - Session usage — iteration 7 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD

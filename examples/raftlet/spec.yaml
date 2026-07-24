@@ -1,0 +1,40 @@
+# examples/raftlet/spec.yaml — 3-node raftlet workload spec
+#
+# A 3-node leader-election + replicated-log validation target with a planted
+# safety violation (two nodes commit different values at the same log index),
+# reachable only via leader-election × in-flight-truncation × second-partition.
+#
+# Invariant checks:
+#   - single_leader_per_term: at most one node believes it is leader in any term
+#   - log_prefix_agreement: for any two committed prefixes, one is a prefix of the other
+#
+# Deployed through the standard baud run/fuzz/verify/replay CLI.
+
+nix: "github:nixos/nixpkgs/nixos-24.05#consensus-node"
+
+nodes:
+  - name: n0
+    argv: ["/bin/consensus-node", "--id=0", "--peers=1,2"]
+    adapters:
+      input: net
+      probes:
+        - stdout-kv:
+            prefix: "baud:"
+        - syscall-counter:
+            pattern: "write"
+
+  - name: n1
+    argv: ["/bin/consensus-node", "--id=1", "--peers=0,2"]
+    adapters:
+      input: net
+      probes:
+        - stdout-kv:
+            prefix: "baud:"
+
+  - name: n2
+    argv: ["/bin/consensus-node", "--id=2", "--peers=0,1"]
+    adapters:
+      input: net
+      probes:
+        - stdout-kv:
+            prefix: "baud:"

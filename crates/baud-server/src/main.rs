@@ -92,6 +92,10 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/{id}/net/weather", get(routes::net::weather))
         .route("/runs/{id}/net/weather", post(routes::net::append_event))
         .route("/runs/{id}/net/simulate", post(routes::net::simulate_weather))
+        // Raftlet (M6)
+        .route("/runs/raftlet/fuzz", post(routes::raftlet::fuzz))
+        .route("/runs/raftlet/{id}", get(routes::raftlet::status))
+        .route("/runs/{id}/raftlet/reconstruct", post(routes::raftlet::reconstruct))
         // Budget
         .route("/budget", get(routes::budget::budget))
         .with_state(state)
