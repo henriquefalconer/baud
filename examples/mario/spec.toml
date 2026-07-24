@@ -1,0 +1,35 @@
+# examples/mario/spec.toml — Mario NES workload build spec
+#
+# Defines how to build the nes-bridge guest binary via nix.
+# baud-packages resolves this to a pinned closure hash.
+#
+# The nes-bridge is a bare NES emulator core + bridge fixture built as a
+# single-threaded, statically linked, musl x86_64-linux binary. It satisfies
+# the baud guest contract: one thread, one process, no dynamic libraries,
+# no-PIE, deterministic given the same ROM + joypad byte stream.
+#
+# ROM note: the NES ROM is NOT bundled here. Supply the ROM path via the
+# `--spec-param rom_path=<path>` flag at `baud run start`. CI uses a homebrew ROM.
+
+[workload]
+name = "mario"
+description = "Super Mario Bros NES emulator guest under baud-multiverse"
+
+[nix]
+flake = "github:nixos/nixpkgs/nixos-24.05"
+package = "nes-bridge"
+# Static musl build for the baud sandbox (x86_64-linux)
+target = "x86_64-unknown-linux-musl"
+features = []
+
+[build]
+static = true
+no_pie = true
+
+[params]
+# User-supplied ROM path (never bundled; CI uses a homebrew ROM)
+rom_path = ""
+# Optional savestate path; empty = start from power-on
+savestate_path = ""
+# Number of virtual frames to emulate per tape step
+frames_per_step = 1

@@ -239,7 +239,8 @@ pub async fn observation(
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> Json<Value> {
     // Ensure run exists
-    let run_exists = sqlx::query!("SELECT id FROM runs WHERE id = ?", run_id)
+    let run_exists = sqlx::query_as::<_, (String,)>("SELECT id FROM runs WHERE id = ?")
+        .bind(&run_id)
         .fetch_optional(&state.db)
         .await
         .unwrap_or(None)
@@ -249,72 +250,76 @@ pub async fn observation(
         return Json(json!({ "ok": false, "error": format!("run not found: {run_id}") }));
     }
 
-    // Fetch plane-1: syscall records from supervisor
-    let syscall_rows = sqlx::query!(
+    // Fetch plane-1: syscall records from supervisor (untyped)
+    let syscall_rows: Vec<(i64, i64, Vec<u8>, i64, i64)> = sqlx::query_as(
         "SELECT node, sysno, args_digest, ret, vtime FROM syscall_records
-         WHERE run_id = ? ORDER BY vtime ASC",
-        run_id
+         WHERE run_id = ? ORDER BY vtime ASC"
     )
+    .bind(&run_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
-    let syscall_records: Vec<baud_proto::SyscallRecord> = syscall_rows.iter().map(|r| {
+    let syscall_records: Vec<baud_proto::SyscallRecord> = syscall_rows.iter().map(|(node, sysno, args_digest, ret, vtime)| {
         let mut digest = [0u8; 32];
-        let b = &r.args_digest;
+        let b = args_digest;
         let len = b.len().min(32);
         digest[..len].copy_from_slice(&b[..len]);
         baud_proto::SyscallRecord {
-            node: r.node as u16,
-            sysno: r.sysno as u32,
+            node: *node as u16,
+            sysno: *sysno as u32,
             args_digest: baud_proto::Hash(digest),
-            ret: r.ret,
-            vtime: r.vtime as u64,
+            ret: *ret,
+            vtime: *vtime as u64,
         }
     }).collect();
 
-    // Fetch plane-2: eBPF records
-    let ebpf_rows = sqlx::query!(
+    // Fetch plane-2: eBPF records (untyped)
+    let ebpf_rows: Vec<(i64, String, i64, i64, String)> = sqlx::query_as(
         "SELECT node, event, value, vtime, source FROM ebpf_records
-         WHERE run_id = ? ORDER BY vtime ASC",
-        run_id
+         WHERE run_id = ? ORDER BY vtime ASC"
     )
+    .bind(&run_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
-    // Build a TracingSession from the stored eBPF records
+    // Build a TracingSession from the stored eBPF records (now tuples: node, event, value, vtime, source)
     let mut session = baud_tracing::TracingSession::new(&run_id);
     // Register pids (synthetic: pid = 1000 + node)
-    for row in &ebpf_rows {
-        let node = row.node as u16;
-        let pid = 1000 + node as u32;
-        session.register_pid(pid, node);
+    for (node, _event, _value, _vtime, _source) in &ebpf_rows {
+        let node_u16 = *node as u16;
+        let pid = 1000 + node_u16 as u32;
+        session.register_pid(pid, node_u16);
     }
     // Replay eBPF records into the session to populate syscall counts
-    for row in &ebpf_rows {
-        if row.event.starts_with("syscall:") {
-            let node = row.node as u16;
-            // Directly increment the counter by injecting through the pid
-            let pid = 1000 + node as u32;
-            let sysno: u32 = row.event.trim_start_matches("syscall:").parse().unwrap_or(0);
-            session.ingest_syscall(pid, sysno, row.vtime as u64);
+    for (node, event, _value, vtime, _source) in &ebpf_rows {
+        if event.starts_with("syscall:") {
+            let node_u16 = *node as u16;
+            let pid = 1000 + node_u16 as u32;
+            let sysno: u32 = event.trim_start_matches("syscall:").parse().unwrap_or(0);
+            session.ingest_syscall(pid, sysno, *vtime as u64);
         }
     }
 
     // Run the cross-check
     let result = baud_tracing::cross_check(&run_id, &syscall_records, &session);
 
-    // Store the result
+    // Store the result (untyped)
     let now = crate::state::unix_now() as i64;
     let passed_i = if result.passed { 1i64 } else { 0i64 };
     let div_node = result.divergent_node.map(|n| n as i64);
     let p2_source_str = if matches!(result.plane2_source, baud_proto::Source::Native) { "native" } else { "fallback" };
-    let _ = sqlx::query!(
+    let _ = sqlx::query(
         "INSERT INTO observation_checks (run_id, passed, divergent_node, plane2_source, message, checked_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-        run_id, passed_i, div_node, p2_source_str, result.message, now
+         VALUES (?, ?, ?, ?, ?, ?)"
     )
+    .bind(&run_id)
+    .bind(passed_i)
+    .bind(div_node)
+    .bind(p2_source_str)
+    .bind(&result.message)
+    .bind(now)
     .execute(&state.db)
     .await;
 

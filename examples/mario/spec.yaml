@@ -1,0 +1,47 @@
+# examples/mario/spec.yaml — Super Mario Bros NES emulator workload spec
+#
+# A single-threaded NES emulator core running as a guest under baud-multiverse.
+# The emulator binary receives no trust; the supervisor enforces determinism on
+# it like any other guest.
+#
+# Guest contract:
+#   - Single-threaded, statically linked, musl-built via nix; no-PIE
+#   - Controller bytes delivered via `fifo` input adapter
+#   - NES memory probes emitted via stdout-kv (bridge fixture reads NES RAM)
+#   - NES framebuffer exposed via `frame` display adapter (256x240, indexed8, fifo)
+#
+# ROM and savestate are user-supplied (never bundled; CI uses a homebrew ROM).
+# Pass ROM path via --spec-param rom_path=<absolute-path>.
+#
+# Strategy (strategy.toml):
+#   maximize = ["probe:world", "probe:level", "probe:x_global"]
+#   buckets  = ["probe:x_page", "probe:y_band"]
+#   goal     = "probe:game_completed == 1"
+#
+# Tactics:
+#   stateful-mask{p_flip=0.03} for main run; random as negative control.
+#
+# M8 validation: the agent and supervisor binaries used are those built at M2,
+# unmodified. This workload runs on the same code paths as parser and raftlet.
+
+nix: "github:nixos/nixpkgs/nixos-24.05#nes-bridge"
+
+nodes:
+  - name: n0
+    argv: ["/bin/nes-bridge", "--rom=/tmp/mario.nes"]
+    adapters:
+      input:
+        fifo:
+          path: /tmp/mario-joypad.fifo
+      probes:
+        - stdout-kv:
+            prefix: "baud:"
+        - syscall-counter:
+            pattern: "read"
+        - exit-hash
+      display:
+        frame:
+          width: 256
+          height: 240
+          format: indexed8
+          transport: fifo

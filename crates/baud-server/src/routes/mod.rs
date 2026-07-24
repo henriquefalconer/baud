@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod fuzz;
 pub mod health;
 pub mod keys;
+pub mod mario;
 pub mod net;
 pub mod obs;
 pub mod raftlet;

@@ -45,15 +45,16 @@ pub async fn tail(
 
     // Find the most recent run for this tape (or list all eBPF records if tape="" )
     let run_filter: Option<String> = if !tape_id.is_empty() {
-        // Look up runs by tape_id
-        sqlx::query_scalar!(
-            "SELECT id FROM runs WHERE tape_id = ? ORDER BY created_at DESC LIMIT 1",
-            tape_id
+        // Look up runs by tape_id (untyped query — no DATABASE_URL required)
+        let row = sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM runs WHERE tape_id = ? ORDER BY created_at DESC LIMIT 1"
         )
+        .bind(&tape_id)
         .fetch_optional(&state.db)
         .await
-        .unwrap_or(None)
-        .flatten()
+        .ok()
+        .flatten();
+        row.map(|(id,)| id)
     } else {
         None
     };
@@ -63,7 +64,7 @@ pub async fn tail(
         (recs, rid)
     } else {
         // No tape filter: return most recent 50 records across all runs
-        let rows = sqlx::query!(
+        let rows = sqlx::query_as::<_, (String, i64, String, i64, i64, String)>(
             "SELECT run_id, node, event, value, vtime, source FROM ebpf_records
              ORDER BY recorded_at DESC LIMIT 50"
         )
@@ -71,13 +72,13 @@ pub async fn tail(
         .await
         .unwrap_or_default();
 
-        let recs: Vec<Value> = rows.iter().map(|r| json!({
-            "run_id": r.run_id,
-            "node": r.node,
-            "event": r.event,
-            "value": r.value,
-            "vtime": r.vtime,
-            "source": r.source,
+        let recs: Vec<Value> = rows.iter().map(|(run_id, node, event, value, vtime, source)| json!({
+            "run_id": run_id,
+            "node": node,
+            "event": event,
+            "value": value,
+            "vtime": vtime,
+            "source": source,
         })).collect();
         (recs, "(all)".to_string())
     };
@@ -102,7 +103,8 @@ pub async fn summary(
     let run_id = &q.run;
 
     // Check run exists
-    let run_exists = sqlx::query!("SELECT id FROM runs WHERE id = ?", run_id)
+    let run_exists = sqlx::query_as::<_, (String,)>("SELECT id FROM runs WHERE id = ?")
+        .bind(run_id)
         .fetch_optional(&state.db)
         .await
         .unwrap_or(None)
@@ -112,56 +114,71 @@ pub async fn summary(
         return Json(json!({ "ok": false, "error": format!("run not found: {run_id}") }));
     }
 
-    // Aggregate eBPF records
-    let total_ebpf: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ?", run_id
+    // Aggregate eBPF records (untyped)
+    let total_ebpf: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ?"
     )
+    .bind(run_id)
     .fetch_one(&state.db)
     .await
+    .map(|(c,)| c)
     .unwrap_or(0);
 
-    let syscall_ebpf: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event LIKE 'syscall:%'", run_id
+    let syscall_ebpf: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event LIKE 'syscall:%'"
     )
+    .bind(run_id)
     .fetch_one(&state.db)
     .await
+    .map(|(c,)| c)
     .unwrap_or(0);
 
-    let sched_ebpf: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event LIKE 'sched_switch%'", run_id
+    let sched_ebpf: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event LIKE 'sched_switch%'"
     )
+    .bind(run_id)
     .fetch_one(&state.db)
     .await
+    .map(|(c,)| c)
     .unwrap_or(0);
 
-    let exec_ebpf: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event = 'exec'", run_id
+    let exec_ebpf: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event = 'exec'"
     )
+    .bind(run_id)
     .fetch_one(&state.db)
     .await
+    .map(|(c,)| c)
     .unwrap_or(0);
 
-    let fault_ebpf: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event = 'fault'", run_id
+    let fault_ebpf: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM ebpf_records WHERE run_id = ? AND event = 'fault'"
     )
+    .bind(run_id)
     .fetch_one(&state.db)
     .await
+    .map(|(c,)| c)
     .unwrap_or(0);
 
     // Source
-    let source: Option<String> = sqlx::query_scalar!(
-        "SELECT source FROM ebpf_records WHERE run_id = ? LIMIT 1", run_id
+    let source: Option<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT source FROM ebpf_records WHERE run_id = ? LIMIT 1"
     )
+    .bind(run_id)
     .fetch_optional(&state.db)
     .await
-    .unwrap_or(None);
+    .ok()
+    .flatten()
+    .map(|(s,)| s);
 
     // Syscall log (plane 1) count
-    let total_syscalls: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM syscall_records WHERE run_id = ?", run_id
+    let total_syscalls: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM syscall_records WHERE run_id = ?"
     )
+    .bind(run_id)
     .fetch_one(&state.db)
     .await
+    .map(|(c,)| c)
     .unwrap_or(0);
 
     Json(json!({
@@ -191,63 +208,66 @@ pub async fn summary(
 //
 // This is the fallback path: mirror plane-1 syscall records into plane-2 eBPF
 // records (with source=fallback). Used when BPF is not available.
-// In a real deployment this would be driven by the aya probe ringbuf.
 
 pub async fn seed_from_syscalls(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
 ) -> Json<Value> {
-    // Fetch plane-1 syscall records
-    let rows = sqlx::query!(
-        "SELECT node, sysno, ret, vtime FROM syscall_records WHERE run_id = ? ORDER BY vtime ASC",
-        run_id
+    // Fetch plane-1 syscall records (untyped)
+    let rows = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        "SELECT node, sysno, ret, vtime FROM syscall_records WHERE run_id = ? ORDER BY vtime ASC"
     )
+    .bind(&run_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
     if rows.is_empty() {
         // No syscall records yet — generate synthetic from observations
-        let obs_rows = sqlx::query!(
-            "SELECT node, step FROM observations WHERE run_id = ? ORDER BY step ASC",
-            run_id
+        let obs_rows = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT node, step FROM observations WHERE run_id = ? ORDER BY step ASC"
         )
+        .bind(&run_id)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
 
-        // Generate one synthetic syscall record per observation step per node
         let now = crate::state::unix_now() as i64;
         let mut inserted = 0u64;
         let mut node_counts: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
 
-        for obs in &obs_rows {
-            let node = obs.node;
-            let step = obs.step;
+        for (node, step) in &obs_rows {
             let count_val = {
-                let count = node_counts.entry(node).or_insert(0);
+                let count = node_counts.entry(*node).or_insert(0);
                 *count += 1;
                 *count as i64
             };
             let sysno = (step % 10 + 1) as i64;
             let digest_zero: Vec<u8> = vec![0u8; 32];
 
-            // Insert syscall record (plane 1) — no recorded_at (not in original schema)
-            let _ = sqlx::query!(
+            let _ = sqlx::query(
                 "INSERT INTO syscall_records (run_id, node, sysno, args_digest, ret, vtime)
-                 VALUES (?, ?, ?, ?, 0, ?)",
-                run_id, node, sysno, digest_zero, step
+                 VALUES (?, ?, ?, ?, 0, ?)"
             )
+            .bind(&run_id)
+            .bind(node)
+            .bind(sysno)
+            .bind(&digest_zero)
+            .bind(step)
             .execute(&state.db)
             .await;
 
-            // Insert corresponding eBPF record (plane 2, fallback)
             let event = format!("syscall:{sysno}");
-            let _ = sqlx::query!(
+            let _ = sqlx::query(
                 "INSERT INTO ebpf_records (run_id, node, event, value, vtime, source, recorded_at)
-                 VALUES (?, ?, ?, ?, ?, 'fallback', ?)",
-                run_id, node, event, count_val, step, now
+                 VALUES (?, ?, ?, ?, ?, 'fallback', ?)"
             )
+            .bind(&run_id)
+            .bind(node)
+            .bind(&event)
+            .bind(count_val)
+            .bind(step)
+            .bind(now)
             .execute(&state.db)
             .await;
 
@@ -267,19 +287,24 @@ pub async fn seed_from_syscalls(
     let mut inserted = 0u64;
     let mut node_counts: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
 
-    for row in &rows {
+    for (node, sysno, _ret, vtime) in &rows {
         let count_val = {
-            let count = node_counts.entry(row.node).or_insert(0);
+            let count = node_counts.entry(*node).or_insert(0);
             *count += 1;
             *count as i64
         };
-        let event = format!("syscall:{}", row.sysno);
+        let event = format!("syscall:{sysno}");
 
-        let _ = sqlx::query!(
+        let _ = sqlx::query(
             "INSERT INTO ebpf_records (run_id, node, event, value, vtime, source, recorded_at)
-             VALUES (?, ?, ?, ?, ?, 'fallback', ?)",
-            run_id, row.node, event, count_val, row.vtime, now
+             VALUES (?, ?, ?, ?, ?, 'fallback', ?)"
         )
+        .bind(&run_id)
+        .bind(node)
+        .bind(&event)
+        .bind(count_val)
+        .bind(vtime)
+        .bind(now)
         .execute(&state.db)
         .await;
 
@@ -330,25 +355,39 @@ pub async fn list_syscalls(
     let node_filter = q.node.map(|n| n as i64);
     let sysno_filter = q.sysno.map(|n| n as i64);
 
-    let rows = sqlx::query!(
-        "SELECT node, sysno, ret, vtime FROM syscall_records
-         WHERE run_id = ?
-           AND (? IS NULL OR node = ?)
-           AND (? IS NULL OR sysno = ?)
-         ORDER BY vtime ASC LIMIT 1000",
-        run_id,
-        node_filter, node_filter,
-        sysno_filter, sysno_filter,
-    )
+    // SQLite does not support typed NULL comparison via bind in the same way
+    // across all drivers; use conditional queries instead.
+    let rows: Vec<(i64, i64, i64, i64)> = match (node_filter, sysno_filter) {
+        (Some(n), Some(s)) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ? AND node = ? AND sysno = ?
+             ORDER BY vtime ASC LIMIT 1000"
+        ).bind(&run_id).bind(n).bind(s),
+        (Some(n), None) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ? AND node = ?
+             ORDER BY vtime ASC LIMIT 1000"
+        ).bind(&run_id).bind(n),
+        (None, Some(s)) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ? AND sysno = ?
+             ORDER BY vtime ASC LIMIT 1000"
+        ).bind(&run_id).bind(s),
+        (None, None) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ?
+             ORDER BY vtime ASC LIMIT 1000"
+        ).bind(&run_id),
+    }
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
-    let records: Vec<Value> = rows.iter().map(|r| json!({
-        "node": r.node,
-        "sysno": r.sysno,
-        "ret": r.ret,
-        "vtime": r.vtime,
+    let records: Vec<Value> = rows.iter().map(|(node, sysno, ret, vtime)| json!({
+        "node": node,
+        "sysno": sysno,
+        "ret": ret,
+        "vtime": vtime,
     })).collect();
 
     Json(json!({
@@ -364,29 +403,40 @@ pub async fn tail_syscalls(
     Path(run_id): Path<String>,
     Query(q): Query<SyscallQuery>,
 ) -> Json<Value> {
-    // Same as list_syscalls but last 100
     let node_filter = q.node.map(|n| n as i64);
     let sysno_filter = q.sysno.map(|n| n as i64);
 
-    let rows = sqlx::query!(
-        "SELECT node, sysno, ret, vtime FROM syscall_records
-         WHERE run_id = ?
-           AND (? IS NULL OR node = ?)
-           AND (? IS NULL OR sysno = ?)
-         ORDER BY vtime DESC LIMIT 100",
-        run_id,
-        node_filter, node_filter,
-        sysno_filter, sysno_filter,
-    )
+    let rows: Vec<(i64, i64, i64, i64)> = match (node_filter, sysno_filter) {
+        (Some(n), Some(s)) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ? AND node = ? AND sysno = ?
+             ORDER BY vtime DESC LIMIT 100"
+        ).bind(&run_id).bind(n).bind(s),
+        (Some(n), None) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ? AND node = ?
+             ORDER BY vtime DESC LIMIT 100"
+        ).bind(&run_id).bind(n),
+        (None, Some(s)) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ? AND sysno = ?
+             ORDER BY vtime DESC LIMIT 100"
+        ).bind(&run_id).bind(s),
+        (None, None) => sqlx::query_as(
+            "SELECT node, sysno, ret, vtime FROM syscall_records
+             WHERE run_id = ?
+             ORDER BY vtime DESC LIMIT 100"
+        ).bind(&run_id),
+    }
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
-    let records: Vec<Value> = rows.iter().rev().map(|r| json!({
-        "node": r.node,
-        "sysno": r.sysno,
-        "ret": r.ret,
-        "vtime": r.vtime,
+    let records: Vec<Value> = rows.iter().rev().map(|(node, sysno, ret, vtime)| json!({
+        "node": node,
+        "sysno": sysno,
+        "ret": ret,
+        "vtime": vtime,
     })).collect();
 
     Json(json!({
@@ -413,31 +463,41 @@ async fn fetch_ebpf_records(
     node: Option<u16>,
     event_filter: Option<&str>,
 ) -> Vec<Value> {
-    let node_i = node.map(|n| n as i64);
-    let rows = sqlx::query!(
-        "SELECT node, event, value, vtime, source FROM ebpf_records
-         WHERE run_id = ?
-           AND (? IS NULL OR node = ?)
-         ORDER BY vtime ASC LIMIT 500",
-        run_id,
-        node_i, node_i,
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let rows: Vec<(i64, String, i64, i64, String)> = if let Some(n) = node {
+        sqlx::query_as(
+            "SELECT node, event, value, vtime, source FROM ebpf_records
+             WHERE run_id = ? AND node = ?
+             ORDER BY vtime ASC LIMIT 500"
+        )
+        .bind(run_id)
+        .bind(n as i64)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query_as(
+            "SELECT node, event, value, vtime, source FROM ebpf_records
+             WHERE run_id = ?
+             ORDER BY vtime ASC LIMIT 500"
+        )
+        .bind(run_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+    };
 
     rows.iter()
-        .filter(|r| {
+        .filter(|(_, event, _, _, _)| {
             event_filter
-                .map(|f| r.event.starts_with(f))
+                .map(|f| event.starts_with(f))
                 .unwrap_or(true)
         })
-        .map(|r| json!({
-            "node": r.node,
-            "event": r.event,
-            "value": r.value,
-            "vtime": r.vtime,
-            "source": r.source,
+        .map(|(node, event, value, vtime, source)| json!({
+            "node": node,
+            "event": event,
+            "value": value,
+            "vtime": vtime,
+            "source": source,
         }))
         .collect()
 }

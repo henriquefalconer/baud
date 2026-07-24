@@ -1,0 +1,37 @@
+# examples/mario/strategy.toml — Mario exploration strategy
+#
+# Lexicographic maximization: push as far right as possible in as many
+# worlds/levels as possible, using grid exploration over screen+y positions.
+#
+# Goal: game_completed == 1 (Mario reaches the end of 8-4)
+#
+# Reservoir keeps 32 best tapes as mutation seeds with 10% probability of
+# replaying an earlier prefix rather than extending the current best.
+
+[strategy]
+# Lexicographic: world first (coarse), then level, then global x position
+maximize = ["probe:world", "probe:level", "probe:x_global"]
+
+# Grid dimensions: explore by screen column + vertical band
+# x_page  = (x_global / 256) % 32  — which screen we're on (0-31)
+# y_band  = y / 30                  — rough vertical position (0-7)
+buckets = ["probe:x_page", "probe:y_band"]
+
+[reservoir]
+keep = 32
+p_backoff = 0.1
+
+[goal]
+# Emitted when Mario touches the flagpole at the end of 8-4
+probe = "probe:game_completed"
+value = 1
+
+[tactics.main]
+# stateful-mask: flip individual controller bits with low probability
+# p_flip=0.03 means each bit in each byte has a 3% chance of toggling
+type = "stateful-mask"
+p_flip = 0.03
+
+[tactics.negative_control]
+# White-noise negative control: demonstrates random tactics plateau quickly
+type = "random"

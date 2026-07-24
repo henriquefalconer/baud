@@ -104,6 +104,11 @@ fn build_router(state: AppState) -> Router {
         // Syscall log — plane 1 (M7)
         .route("/runs/{id}/syscalls", get(routes::tracing::list_syscalls))
         .route("/runs/{id}/syscalls/tail", get(routes::tracing::tail_syscalls))
+        // Mario (M8)
+        .route("/runs/mario/fuzz", post(routes::mario::fuzz))
+        .route("/runs/mario/{id}", get(routes::mario::status))
+        .route("/runs/{id}/mario/reconstruct", post(routes::mario::reconstruct))
+        .route("/runs/{id}/mario/verify-determinism", post(routes::mario::verify_determinism))
         // Budget
         .route("/budget", get(routes::budget::budget))
         .with_state(state)
