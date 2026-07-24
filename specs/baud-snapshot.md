@@ -5,7 +5,8 @@
 
 # Baud Snapshot Specification
 
-**Status:** Planned (capture/restore/reset built, unexercised on real hardware; branching open — see §10)\
+**Status:** Planned (capture/restore/reset/branch (small-N fallback) built and exercised on real
+hardware; memory-efficient UFFDIO_CONTINUE branching still open — see §10)\
 **Version:** 1.0\
 **Last Updated:** 2026-07-24
 
@@ -111,6 +112,14 @@ instead of silently rewinding it.
   - `UFFDIO_CONTINUE` — serve an unchanged page from the shared backing (share across many universes)
   - `UFFDIO_WRITEPROTECT` — copy-on-first-write so the child diverges only on the pages it writes
 - Per-branch memory ∝ the child's write set, not total RAM. `fork()` copy-on-write is the small-N fallback.
+- **Built today (§10): the small-N fallback, not this section's `UFFDIO_CONTINUE` mechanism.**
+  `Multiverse::branch` realizes "`fork()` copy-on-write is the small-N fallback" via a full
+  `restore` per branch (a real `KVM_CREATE_VM`/vCPU/guest-RAM region each), not a literal `fork(2)`
+  — see `Multiverse::branch`'s doc for why a raw OS fork can't safely reuse an already-open KVM
+  `vm`/`vcpu` fd (a `VmFd` is tied to its creating process's `mm` at `KVM_CREATE_VM` time). This
+  gives full correctness and independence (`thousand_branches_are_independent_and_deterministic`)
+  at `O(total RAM)` cost per branch, not this section's `O(write-set)` guarantee — memory-efficient
+  branching remains open.
 
 ## 5. Reset (rewind)
 
@@ -254,14 +263,41 @@ instead of silently rewinding it.
     page-table `ACCESSED`-bit updates from the guest's first address translations — real, accepted,
     non-bug behavior), never the full 65536-page RAM region, and a reset makes RAM byte-identical
     to the pre-run snapshot again.
-- **Branching (§4) — not built; a real blocker found, not just a missing wrapper.** The spec's
-  `UFFDIO_CONTINUE`-based sharing requires the kernel's *minor-fault* mechanism, which only exists
-  for shared (memfd/hugetlbfs/shmem) mappings — but `baud-multiverse`'s guest RAM
+- **Branching (§4) — the small-N fallback is built and exercised on real KVM hardware
+  (`thousand_branches_are_independent_and_deterministic`); the memory-efficient `UFFDIO_CONTINUE`
+  mechanism remains a real, documented blocker.** The spec's `UFFDIO_CONTINUE`-based sharing
+  requires the kernel's *minor-fault* mechanism, which only exists for shared
+  (memfd/hugetlbfs/shmem) mappings — but `baud-multiverse`'s guest RAM
   (`GuestMemoryMmap::from_ranges`) is a private anonymous mapping. Wiring `UFFDIO_CONTINUE` today
   would need switching guest-RAM backing to a shared memfd first, an architecture change to
-  `baud-multiverse`, not something this crate can absorb alone. The spec's own "small-N fallback",
-  `fork()`, is not a safe drop-in either: once specs/baud-multiverse.md §3.1's "one VMM thread + one
-  vCPU thread" model is live, `fork()`ing that process only leaves the calling thread in the child —
-  any lock the other thread held at fork time is frozen forever, a real hazard for this specific
-  threading model. Both findings are tracked in `crates/baud-snapshot/src/lib.rs`'s module doc and
-  todo.md §14; neither is fixed here.
+  `baud-multiverse`, not something this crate can absorb alone.
+  - **The spec's own "small-N fallback" is built, but as `Multiverse::restore` per branch, not a
+    literal `fork()`** (`crates/baud-multiverse/src/linux/mod.rs`'s `Multiverse::branch`, new this
+    iteration) — a real architectural finding, not a stylistic choice: a raw OS `fork()` cannot
+    safely reuse an already-open KVM `vm`/`vcpu` fd at all, independent of the threading-model
+    hazard prior iterations flagged (todo.md §14's now-superseded note about the "one VMM thread +
+    one vCPU thread" model). A `VmFd` is tied to its *creating* process's `mm` at `KVM_CREATE_VM`
+    time — a forked child inheriting the parent's `vm` fd would still have guest-physical memory
+    resolve through KVM's EPT against the *parent's* address space, not the child's own post-fork
+    CoW copy, no matter how the two processes' host page tables diverge afterward. Each branch
+    therefore gets its own fresh `KVM_CREATE_VM`/vCPU/guest-RAM region via `Multiverse::restore`
+    instead — fully correct and independent, at `O(total RAM)` cost per branch (a real copy of
+    every page in `universe.ram`) rather than this section's `O(write-set)` CoW-sharing guarantee.
+  - **Proven on real hardware**: `linux::tests::thousand_branches_are_independent_and_deterministic`
+    (`crates/baud-multiverse/src/linux/mod.rs`) captures a branch point immediately after boot
+    (before the guest executes a single instruction) using `tape-echo-guest` (H2's fixture: reads 4
+    tape bytes, echoes them to COM1, halts), then forks 1000 independent branches from it, each on
+    its own unique 4-byte tape suffix. Every branch's console output is asserted to match exactly
+    its own suffix — a stronger, more direct proof of "no branch perturbs another" than a pairwise
+    output comparison, since any cross-branch memory bleed would show up as a mismatched byte. A
+    sample of 8 branches is re-forked a second time from the same universe+suffix and proven
+    byte-identical (console output + RAM hash), closing the spec pseudocode's
+    `b.is_deterministic_double_run()` for a representative subset (full-N double-run was judged not
+    worth 2x this test's real-hardware wall time, given every branch already takes the same
+    `restore` code path `snapshot_roundtrip_is_bit_identical` already proved bit-identical).
+    `drive/h5.sh` gained a new H5.5 step running this test (takes ~3.5 minutes on this dev machine:
+    real KVM VM lifecycles, not a synthetic loop). `cargo test -p baud-multiverse`: adds 1 new test,
+    passing.
+  - **Not yet done**: the `O(write-set)` memory-efficiency guarantee itself (this section's actual
+    "cheap" promise) still needs the memfd/`UFFDIO_CONTINUE` rearchitecture described above. Both
+    findings remain tracked in `crates/baud-snapshot/src/lib.rs`'s module doc and todo.md §14.

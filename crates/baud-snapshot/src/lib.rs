@@ -41,18 +41,24 @@
 //     baud-snapshot`, not yet exercised on real KVM hardware (same caveat as every other `linux/`
 //     module in this workspace — CLAUDE.md).
 //
-// Deliberately NOT built (see `linux`'s module doc for why, and todo.md §14 for the tracked next
-// action): userfaultfd-based CoW branching (`Snapshot::branch`, specs/baud-snapshot.md §4) — the
-// spec's `UFFDIO_CONTINUE`-based page sharing needs guest RAM backed by a shared (memfd/hugetlbfs)
-// mapping for the kernel's "minor fault" mechanism, but today's guest RAM
-// (`baud_multiverse::linux::GuestMemory` = `GuestMemoryMmap::from_ranges`) is a private anonymous
-// mapping — a real architecture change, not just a missing ioctl wrapper, so it is scoped out
-// rather than built on a foundation that cannot support it. `fork()`'s copy-on-write (specs/
-// baud-snapshot.md §4's explicit "small-N fallback") gets branching's *cost* guarantee for free
-// from the OS on any anonymous mapping, but forking a process that already has the "one VMM thread
-// + one vCPU thread" (specs/baud-multiverse.md §3.1) live is only async-signal-safe in the child
-// until it execs or the parent's other thread's locks are known to be free — a real hazard for
-// this specific threading model, not yet resolved, so left unbuilt rather than built unsafely.
+// Branching (`Snapshot::branch`, specs/baud-snapshot.md §4) — the small-N fallback is built
+// (`baud_multiverse::linux::Multiverse::branch`, one layer up, since it needs the KVM handles this
+// crate deliberately doesn't own), the spec's actual memory-efficient mechanism is not:
+//   - Built: specs/baud-snapshot.md §4's "`fork()` copy-on-write is the small-N fallback" is
+//     realized as a full `Multiverse::restore` per branch, not a literal `fork(2)` — a raw OS
+//     `fork()` cannot safely reuse an already-open KVM `vm`/`vcpu` fd at all (independent of any
+//     threading-model concern): a `VmFd` is tied to its *creating* process's `mm` at
+//     `KVM_CREATE_VM` time, so a forked child sharing the parent's `vm` fd would still have guest
+//     memory resolve through KVM's EPT against the *parent's* address space, not the child's own
+//     post-fork CoW pages. Proven correct and independent on real hardware
+//     (`thousand_branches_are_independent_and_deterministic`, todo.md §14), at `O(total RAM)` cost
+//     per branch rather than the spec's `O(write-set)` guarantee.
+//   - NOT built: userfaultfd-based CoW branching, the spec's actual `O(write-set)` "cheap N-way
+//     branching" mechanism — `UFFDIO_CONTINUE`-based page sharing needs guest RAM backed by a
+//     shared (memfd/hugetlbfs) mapping for the kernel's "minor fault" mechanism, but today's guest
+//     RAM (`baud_multiverse::linux::GuestMemory` = `GuestMemoryMmap::from_ranges`) is a private
+//     anonymous mapping — a real architecture change, not just a missing ioctl wrapper, so it
+//     remains scoped out rather than built on a foundation that cannot support it.
 
 #![allow(dead_code)]
 

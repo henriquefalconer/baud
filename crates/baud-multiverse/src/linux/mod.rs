@@ -551,6 +551,37 @@ impl Multiverse {
         Ok(Multiverse { guest, bus, time, dirty_ring })
     }
 
+    /// Fork a new, independent continuation from a captured [`Universe`] on its own tape suffix
+    /// (specs/baud-snapshot.md §4's `Snapshot::branch(parent: &Universe, suffix: TapeSuffix) ->
+    /// Branch`) — todo.md §14's real architecture gap: the spec's `UFFDIO_CONTINUE` memory-sharing
+    /// mechanism needs guest RAM backed by a shared (memfd/hugetlbfs) mapping to fault minor faults
+    /// against, but this crate's guest RAM (`allocate_and_register_guest_ram`) is a private
+    /// anonymous mapping — switching that is an architecture change this crate cannot absorb alone
+    /// (specs/baud-snapshot.md §10). This realizes the spec's own documented escape hatch instead
+    /// ("`fork()` copy-on-write is the small-N fallback") — via [`restore`](Self::restore) rather
+    /// than a literal `fork(2)`, because a raw OS `fork()` cannot safely reuse this `Multiverse`'s
+    /// already-open KVM `vm`/`vcpu` fds either: a `VmFd` is tied to its *creating* process's `mm` at
+    /// `KVM_CREATE_VM` time, so a forked child inheriting the same `vm` fd would still have its
+    /// guest-physical memory resolve through KVM's EPT against the *parent's* address space, not the
+    /// child's own post-fork CoW copy, regardless of how the two processes' host page tables
+    /// diverge afterward — sharing a `vm`/`vcpu` fd across a fork does not give independent guest
+    /// memory no matter the thread model. Each branch therefore gets a fresh `KVM_CREATE_VM`/vCPU/
+    /// guest-RAM region via [`restore`](Self::restore) — fully correct and independent (proven by
+    /// `thousand_branches_are_independent_and_deterministic`, below), at the cost of a real
+    /// per-branch RAM copy (`baud_snapshot::linux::restore` walks all of `universe.ram`) instead of
+    /// the spec's O(write-set) CoW sharing; that memory-efficiency guarantee remains open (§10).
+    /// `template_active` is always `false` here — branching is always same-host/same-CPU-model by
+    /// construction (the parent `Universe` was just captured on this process), never the
+    /// cross-model scenario `template_active` exists for.
+    pub fn branch(
+        universe: &Universe,
+        tape_suffix: Vec<u8>,
+        k: u64,
+        dirty_ring_entries: Option<u32>,
+    ) -> Result<Self, RestoreError> {
+        Self::restore(universe, tape_suffix, k, false, dirty_ring_entries)
+    }
+
     /// Rewind guest RAM to `base_ram`'s content for exactly the pages the dirty ring reports as
     /// touched since the last [`boot`](Self::boot)/`reset_dirty_pages` call (specs/baud-snapshot.md
     /// §5: "rewind copies back only dirtied pages ... cost ∝ change,
@@ -1201,5 +1232,101 @@ mod tests {
              snapshot again — proving the reset genuinely rewound the dirtied pages' content, not \
              just returned a plausible-looking count"
         );
+    }
+
+    /// H5's `thousand_branches_are_independent_and_deterministic` (specs/baud-snapshot.md §7,
+    /// todo.md §10), exercised for the first time against real KVM hardware. Closes the
+    /// `Multiverse::branch` half of the real architecture gap todo.md §14 documented (§4's literal
+    /// `UFFDIO_CONTINUE` CoW mechanism is still open — see [`Multiverse::branch`]'s doc) by proving
+    /// its small-N `restore`-based fallback actually delivers the guarantee the named test cares
+    /// about: many independent continuations forked from one shared branch point, each internally
+    /// deterministic, none perturbing another.
+    ///
+    /// Reuses `tape-echo-guest` (H2's fixture, above) as the branch payload: it reads exactly 4
+    /// tape bytes and echoes them verbatim to COM1, then halts, so each branch's expected output is
+    /// pinned to its own tape suffix by construction — any cross-branch memory bleed (a branch
+    /// reading another's guest RAM, or two branches sharing a mutable resource) would surface
+    /// immediately as a branch's console output not matching the exact 4 bytes its own tape suffix
+    /// supplied, a stronger, more direct check than a pairwise "outputs don't collide" comparison.
+    ///
+    /// The branch point is captured immediately after boot, before the guest has executed a single
+    /// instruction (`Multiverse::boot` only configures state; nothing runs until `run_to_first_halt`
+    /// is called) — the simplest possible branch point, and the same one every branch forks from.
+    /// `NUM_BRANCHES` is a real, sized-for-this-host count, not the spec pseudocode's literal
+    /// `1000` figure scaled down for its own sake: each branch is a full `restore` (§4's documented
+    /// "small-N fallback" cost — a real `KVM_CREATE_VM`/vCPU/guest-RAM-region per branch, unlike the
+    /// spec's O(write-set) CoW sharing), so this test's wall-clock cost is `NUM_BRANCHES` real KVM
+    /// VM lifecycles; `NUM_BRANCHES` was chosen to keep this test's real run time on this dev
+    /// machine in the tens-of-seconds range while still exercising a genuinely large N, not a
+    /// token handful.
+    ///
+    /// `double_run_sample` re-forks a subset of branches a second time from the same universe and
+    /// the same suffix to prove per-branch internal determinism (the spec pseudocode's
+    /// `b.is_deterministic_double_run()`) — done for a sample rather than all `NUM_BRANCHES` purely
+    /// to bound this test's real-hardware run time; determinism itself is not sampled science here,
+    /// it is the same `restore` code path every branch already takes, already proven bit-identical
+    /// by `snapshot_roundtrip_is_bit_identical` above.
+    #[test]
+    fn thousand_branches_are_independent_and_deterministic() {
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const WORK_CLOCK_K: u64 = 1;
+        const NUM_BRANCHES: usize = 1000;
+        const DOUBLE_RUN_SAMPLE: usize = 8;
+
+        // The branch point: captured immediately after boot, before any guest instruction runs.
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None)
+            .expect("boot (branch point) failed");
+        let mut page_store = PageStore::new();
+        let universe = boot.snapshot(&mut page_store).expect("snapshot at branch point failed");
+
+        let suffix_for = |i: usize| -> Vec<u8> {
+            let i = i as u32;
+            vec![(i & 0xff) as u8, ((i >> 8) & 0xff) as u8, 0xAA, 0xBB]
+        };
+
+        let mut outputs = Vec::with_capacity(NUM_BRANCHES);
+        for i in 0..NUM_BRANCHES {
+            let suffix = suffix_for(i);
+            let mut branch = Multiverse::branch(&universe, suffix.clone(), WORK_CLOCK_K, None)
+                .unwrap_or_else(|e| panic!("branch {i} failed: {e}"));
+            let outcome = branch.run_to_first_halt().unwrap_or_else(|e| panic!("branch {i} run failed: {e}"));
+            assert_eq!(
+                outcome.console_output, suffix,
+                "branch {i} must echo exactly its own tape suffix {suffix:?}, got \
+                 {:?} — any mismatch means this branch observed another branch's state \
+                 (or stale/shared state), not its own",
+                outcome.console_output
+            );
+            outputs.push((suffix, outcome.ram_hash));
+        }
+
+        // Every branch's output is pinned to its own unique suffix by construction (asserted
+        // above), so distinct suffixes trivially mean distinct expected outputs — this is an
+        // explicit restatement of "no branch perturbs another" (the spec pseudocode's
+        // `no_branch_perturbs_another`) rather than a new check.
+        let unique_suffixes: std::collections::HashSet<_> = outputs.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(unique_suffixes.len(), NUM_BRANCHES, "every branch's tape suffix must be unique by construction");
+
+        // A sample of branches, re-forked from the same universe with the same suffix, must be
+        // internally deterministic (the spec pseudocode's `b.is_deterministic_double_run()`).
+        for i in (0..NUM_BRANCHES).step_by(NUM_BRANCHES / DOUBLE_RUN_SAMPLE) {
+            let suffix = suffix_for(i);
+            let mut replay = Multiverse::branch(&universe, suffix.clone(), WORK_CLOCK_K, None)
+                .unwrap_or_else(|e| panic!("branch {i} replay failed: {e}"));
+            let replay_outcome =
+                replay.run_to_first_halt().unwrap_or_else(|e| panic!("branch {i} replay run failed: {e}"));
+            let (_, first_ram_hash) = &outputs[i];
+            assert_eq!(
+                replay_outcome.console_output, suffix,
+                "branch {i} replayed from the same universe+suffix must produce the same output"
+            );
+            assert_eq!(
+                &replay_outcome.ram_hash, first_ram_hash,
+                "branch {i} replayed from the same universe+suffix must produce byte-identical \
+                 guest RAM — a double-run divergence here would mean this branch is not actually \
+                 deterministic"
+            );
+        }
     }
 }

@@ -927,15 +927,49 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     running this test; H5.1-H5.3 and `drive/h0.sh`-`h4.sh` re-verified with zero regressions.
     `cargo build/test/clippy --workspace` all green, zero new warnings in any touched file
     (confirmed `cargo clippy -p baud-multiverse -p baud-snapshot --all-targets` specifically).
-  - **Not yet done** (§10's remaining H5 guarantees): `Snapshot::branch` (userfaultfd CoW
-    branching) is still blocked on a real architecture gap — guest RAM is a private anonymous
-    mapping today, but `UFFDIO_CONTINUE` needs a shared (memfd/hugetlbfs) backing, which also
-    blocks `thousand_branches_are_independent_and_deterministic` (needs real branching to exist
-    first). `shell_into_universe_resumes` is materially larger: `Console` today wraps a fixed,
-    non-generic `Serial<NoIrqTrigger, NoEvents, Vec<u8>>` with no PTY/EventFd path at all and no
-    CLI/server verb exists — needs a `Console` API change, a new PTY dependency, real interrupt
-    delivery into a live terminal reader, and a new CLI/server surface, not incremental wiring.
-    Both still open. H6 and the rest of the M-series remain **not yet started**.
+  - **`thousand_branches_are_independent_and_deterministic` now closed on real hardware, via the
+    spec's own documented small-N fallback, not the spec's literal `UFFDIO_CONTINUE` mechanism.**
+    New `Multiverse::branch` (`crates/baud-multiverse/src/linux/mod.rs`) realizes
+    specs/baud-snapshot.md §4's "`fork()` copy-on-write is the small-N fallback" as a full
+    `Multiverse::restore` per branch rather than a literal `fork(2)` — a real architectural finding
+    surfaced while implementing it: a raw OS `fork()` cannot safely reuse an already-open KVM
+    `vm`/`vcpu` fd at all, independent of the threading-model hazard previously flagged here (the
+    "one VMM thread + one vCPU thread" model is not even live yet — confirmed no `thread::spawn`
+    anywhere in `baud-multiverse`/`baud-vcpu` — but the deeper reason fork() can't work is that a
+    `VmFd` is tied to its *creating* process's `mm` at `KVM_CREATE_VM` time; a forked child sharing
+    the parent's `vm` fd would still have guest-physical memory resolve through KVM's EPT against
+    the *parent's* address space, not the child's own post-fork CoW pages, no matter what the two
+    processes' host page tables look like). New test `linux::tests::thousand_branches_are_
+    independent_and_deterministic` (`crates/baud-multiverse/src/linux/mod.rs`): captures a branch
+    point immediately after boot (before the guest runs a single instruction) using `tape-echo-
+    guest` (H2's fixture — reads 4 tape bytes, echoes to COM1, halts), forks 1000 branches from it
+    each on a unique 4-byte tape suffix, and asserts every branch's output matches exactly its own
+    suffix (a direct, stronger proof of "no branch perturbs another" than a pairwise comparison —
+    any cross-branch memory bleed would show up as a mismatched byte). A sample of 8 branches is
+    re-forked a second time from the same universe+suffix and proven byte-identical (console output
+    + RAM hash), closing the spec pseudocode's `b.is_deterministic_double_run()` for a
+    representative subset (full-N double-run wasn't worth 2x the real-hardware wall time, given
+    every branch takes the same `restore` path `snapshot_roundtrip_is_bit_identical` already proved
+    bit-identical). Real cost: ~213s for 1000+8 branches on this dev machine (~200ms/branch — each
+    is a real `KVM_CREATE_VM`/vCPU/256MiB-guest-RAM-region lifecycle, dominated by the full RAM
+    copy `restore_ram` does unconditionally). `drive/h5.sh` gained a new H5.5 step running this
+    test. `cargo test -p baud-multiverse`: 59/59 (was 58/58). specs/baud-snapshot.md (§4/§10) and
+    `crates/baud-snapshot/src/lib.rs`'s module doc updated to match.
+  - **Not yet done**: the spec's literal `O(write-set)` memory-efficiency guarantee — real
+    `UFFDIO_CONTINUE` CoW sharing — is still blocked on the same real architecture gap as before:
+    guest RAM is a private anonymous mapping today, but `UFFDIO_CONTINUE` needs a shared
+    (memfd/hugetlbfs) backing, an architecture change to `baud-multiverse` no single crate can
+    absorb alone. `Multiverse::branch`'s current cost is `O(total RAM)` per branch (a real 256MiB
+    copy each), not `O(write-set)` — correct and fully independent, just not yet "cheap" the way
+    the spec's own framing promises. `shell_into_universe_resumes` is materially larger: `Console`
+    today wraps a fixed, non-generic `Serial<NoIrqTrigger, NoEvents, Vec<u8>>` with no PTY/EventFd
+    path at all and no CLI/server verb exists — needs a `Console` API change, a new PTY dependency,
+    real interrupt delivery into a live terminal reader, and a new CLI/server surface, not
+    incremental wiring; also, `baud-server` does not call into `baud_multiverse::linux::Multiverse`
+    at all yet (confirmed by grep) — everything `baud-server`'s existing routes import is the old
+    pre-pivot ptrace-era `Multiverse` in `baud-multiverse::lib.rs`, so `shell-into`'s CLI/server
+    surface would need to bridge that pivot gap too, not just add a new verb. Still open. H6 and
+    the rest of the M-series remain **not yet started**.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and

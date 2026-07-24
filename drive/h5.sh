@@ -24,10 +24,19 @@
 #         pushes/pops plus a few page-table ACCESSED-bit updates), never total RAM; rewinding via
 #         Multiverse::reset_dirty_pages makes guest RAM byte-identical to the pristine pre-run
 #         snapshot again.
+#   H5.5  thousand_branches_are_independent_and_deterministic: Multiverse::branch forks 1000+
+#         independent continuations from one captured Universe (tape-echo-guest), each on its own
+#         tape suffix — every branch's output matches exactly its own suffix (no cross-branch
+#         perturbation), and a sampled subset is proven internally deterministic via a second
+#         re-fork. Realized via the spec's documented "fork() copy-on-write is the small-N
+#         fallback" (as Multiverse::restore, not a literal fork(2) — see Multiverse::branch's doc
+#         for why a raw fork() can't safely share this process's KVM vm/vcpu fds), not the spec's
+#         literal UFFDIO_CONTINUE memory-sharing mechanism, which remains blocked on a guest-RAM
+#         backing change (see baud-snapshot/src/linux.rs's module doc).
 #
-# Not yet covered here (tracked in todo.md, later H5 slices): userfaultfd-based branching
-# (Snapshot::branch, blocked on a guest-RAM backing change — see baud-snapshot/src/linux.rs's
-# module doc), shell_into_universe_resumes.
+# Not yet covered here (tracked in todo.md): true memory-efficient CoW branching (UFFDIO_CONTINUE
+# over a shared memfd backing — the "cheap" half of Snapshot::branch's guarantee), and
+# shell_into_universe_resumes.
 
 set -euo pipefail
 
@@ -110,6 +119,15 @@ echo "$DIRTY_OUT" | grep -q "test result: ok" || fail "H5.4: reset_cost_scales_w
 pass "H5.4: reset_cost_scales_with_write_set — dirty-ring reset touches a handful of pages, never total RAM, and rewinds RAM exactly"
 
 # ---------------------------------------------------------------------------
+# H5.5 — thousand_branches_are_independent_and_deterministic
+# ---------------------------------------------------------------------------
+log "Running thousand_branches_are_independent_and_deterministic against real /dev/kvm (tape-echo-guest fixture, ~1000 real VM lifecycles — this takes a few minutes)..."
+BRANCH_OUT=$(cargo test -q -p baud-multiverse thousand_branches_are_independent_and_deterministic -- --test-threads=1 2>&1)
+echo "$BRANCH_OUT"
+echo "$BRANCH_OUT" | grep -q "test result: ok" || fail "H5.5: thousand_branches_are_independent_and_deterministic FAILED"
+pass "H5.5: thousand_branches_are_independent_and_deterministic — 1000+ branches forked from one Universe, each deterministic and non-perturbing"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -128,8 +146,11 @@ echo "  - A universe with a forged cpu_signature is refused by restore on this r
 echo "    a CPUID template is active"
 echo "  - Multiverse::reset_dirty_pages rewinds only the RAM pages a KVM_CAP_DIRTY_LOG_RING ring"
 echo "    reports as touched (a handful, never total RAM), and the rewind is byte-exact"
+echo "  - Multiverse::branch forks 1000+ independent, deterministic continuations from one"
+echo "    captured Universe (the spec's small-N fallback, not yet the memory-efficient"
+echo "    UFFDIO_CONTINUE mechanism)"
 echo ""
-echo "H-series H0-H4 complete; H5's capture/restore round trip, CPU-mismatch refusal, and"
-echo "dirty-ring reset are now proven on real hardware. Remaining H5 work (userfaultfd branching,"
-echo "shell-into): see todo.md."
+echo "H-series H0-H4 complete; H5's capture/restore round trip, CPU-mismatch refusal, dirty-ring"
+echo "reset, and branch/fork determinism are now proven on real hardware. Remaining H5 work"
+echo "(memory-efficient UFFDIO_CONTINUE branching, shell-into): see todo.md."
 echo ""
