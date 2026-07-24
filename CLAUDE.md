@@ -43,15 +43,26 @@ This machine ships with **no Rust toolchain and no C linker** out of the box. On
 
 ## Running Rust inside WSL2 (from the Git Bash tool)
 
-To run cargo/rustc inside WSL2 Ubuntu from Git Bash, invoke them by absolute Linux path with MSYS path-conversion disabled — e.g. `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -u baud -- /home/baud/.cargo/bin/cargo build` — because WSL inherits Git Bash's `HOME`/`PATH`, which otherwise shadows the Linux rustup with the Windows one and leaves cargo/rustc unresolved on `PATH`.
+Claude runs in the **Git Bash** tool, so **every** WSL command goes through `wsl.exe` — general form
+`MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -u baud -- bash -lc '<command>'`. The WSL2 Ubuntu login is
+**username `baud` / password `baud`**; use the password for `sudo` (e.g.
+`... -- bash -lc 'echo baud | sudo -S apt-get install -y build-essential python3'`).
 
-## No real KVM host here
+To run cargo/rustc specifically, invoke them by absolute Linux path with MSYS path-conversion disabled — e.g. `MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -u baud -- /home/baud/.cargo/bin/cargo build` — because WSL inherits Git Bash's `HOME`/`PATH`, which otherwise shadows the Linux rustup with the Windows one and leaves cargo/rustc unresolved on `PATH`.
 
-This dev machine has no `/dev/kvm` (Windows, and WSL2 has no distro installed — `wsl --status`
-shows the feature enabled but `wsl -l -v` lists nothing). `baud host probe` correctly reports
-`regime: rejected` here; this is expected, not a bug. See `docs/determinism.md`'s H0 section.
-Real KVM-hardware validation of `crates/baud-host/src/linux.rs`, and all of H1+ (booting a real
-guest), needs an actual Linux/KVM host — bare-metal or a WSL2 distro with nested virt enabled.
+**H1+ (booting a real guest, which needs `/dev/kvm`) must be run inside WSL**, not from Windows — e.g.
+`MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -u baud -- bash -lc 'cd "$(wslpath "$OLDPWD")" && bash drive/h1.sh'`
+(the repo on the Windows drive is reachable from WSL under `/mnt/...`).
+
+## The KVM host is WSL2 Ubuntu (on this bare-metal box)
+
+WSL2 Ubuntu is installed (login `baud`/`baud`) and this is a bare-metal Dell XPS 13 9310, so `/dev/kvm`
+lives **inside WSL**, not on the Windows side. Windows itself has no `/dev/kvm`, so `baud host probe` run
+from Git Bash still reports `regime: rejected` — that is expected; the KVM-hardware validation of
+`crates/baud-host/src/linux.rs` and all of H1+ (booting a real guest) must run **inside WSL** via `wsl.exe`
+(see the section above). Confirm the host is live with
+`MSYS_NO_PATHCONV=1 wsl.exe -d Ubuntu -u baud -- bash -lc 'ls -l /dev/kvm && grep -c vmx /proc/cpuinfo'`
+before running `drive/h1.sh` there.
 
 **Bare-metal check + WSL2 setup (one-liner):** if `Get-CimInstance Win32_ComputerSystem` shows a real
 vendor/model (e.g. `Dell Inc. / XPS 13 9310`, not "Virtual Machine" — a "hypervisor detected" line is just
