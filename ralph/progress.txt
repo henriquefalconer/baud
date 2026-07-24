@@ -37,3 +37,10 @@
 - baud-cli: tape subcommands fully implemented (create/ls/status/ensure/kill/exec)
 - drive/m1.sh: ALL CHECKS PASSED (15 checks)
 - Total tests: 30 pass, 0 fail across all crates
+- git commit: a689bb9
+- NEXT: M2 (baud-init + baud-packages provisioning) — or H-series if cross-compile environment is ready
+
+## 2026-07-24T05:36:00 UTC - Session usage — iteration 2 (Build build session) [sonnet]
+- output tokens (orchestrator-measured): estimated ~8000
+- est. output cost: ~$0.12 (sonnet output rate)
+- All M1 deliverables committed (a689bb9)
