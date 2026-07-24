@@ -8,7 +8,7 @@ HARD STOP: one iteration = one forward step against @todo.md. A step is complete
 3. Use chrome use and computer use as needed.
 4. Run the tests for the unit of code that was changed - including integration tests. If functionality is missing, add it per the specifications. Ultrathink.
 5. When you discover issues, update @todo.md with your findings using a subagent. Remove items when resolved.
-6. Before committing, run any pre-push validation @todo.md defines. Iterate on root causes until it is green. Do not bypass hooks or weaken the commands.
+6. Before committing, run any pre-push validation @todo.md defines. Iterate on root causes until it is green. Do not bypass hooks or weaken the commands. Run it as SEPARATE Bash calls — `cargo build`, then `cargo clippy`, then `cargo test`, then each `drive/*.sh` one at a time — each with `timeout: 600000`. Never chain them with `&&` into one command: the whole suite cannot finish inside one call, so it gets force-backgrounded and you lose the run.
 7. Append the "Changes committed" progress block to `ralph/progress.txt` first, then commit absolutely everything (`git add -A`, including `ralph/progress.txt`, `todo.md`, and `ralph/.last-branch` alongside your code changes) with a message describing the changes. `git push`.
 8. Verify the push against @todo.md's post-push verification protocol. If it reports a failure (deploy broke, regression, the fix did not take), keep iterating in this invocation (more commits allowed, still the same step). If it reports cannot-complete (upstream unreachable, ambiguous signal), record what you observed in @todo.md and emit `<promise>NEXT</promise>`. Only emit a promise once verification has resolved for this iteration.
 9. Do not write "Iteration NN" anywhere in @todo.md.
@@ -90,7 +90,7 @@ Do not perform any additional work after the promise. All verification happens b
 
 Nothing will resume you: this session ends when you stop, and an unfinished step is lost.
 
-Long commands: pass `timeout` (max 600000 ms), append a progress note first (silent sessions get terminated), and split what will not fit — never background: notifications and `ScheduleWakeup` do nothing here, and `sleep N; cat` is blocked.
+Long commands: split them into one Bash call per step, each with `timeout` (max 600000 ms), and append a progress note before each (silent sessions get terminated) — never chain with `&&` and never background, because a backgrounded command cannot be waited on here: notifications and `ScheduleWakeup` do nothing, and `sleep N; cat` is blocked.
 
 Before ending, re-read your last paragraph. If it is a plan, a question, or a promise about work you have not done ("Waiting for…", "I'll…"), the step is not closed — do it now.
 

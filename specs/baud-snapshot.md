@@ -126,6 +126,42 @@ instead of silently rewinding it.
 - Track dirtied pages with the **KVM dirty ring** (`KVM_CAP_DIRTY_LOG_RING`); rewind copies back only those
   pages. Cost ∝ change, not machine size.
 
+### 5.1 Restore into a live shell
+
+- Re-wire the console to a live, bidirectional channel and resume: a captured universe's guest
+  keeps taking input and producing output after restore, not just replaying frozen history — "a
+  prompt inside any moment of any run."
+- **Built today (§10): a real-hardware-verified crate-level primitive, not the CLI verb the
+  guarantee names.** `Console::enqueue_input` (`crates/baud-multiverse/src/console.rs`) wraps
+  `vm_superio::Serial::enqueue_raw_bytes` to push host-supplied bytes into the UART's RX FIFO;
+  `Multiverse::{console_output, enqueue_console_input, step_exit, run_until_console_len}`
+  (`crates/baud-multiverse/src/linux/mod.rs`) give a caller the building blocks to drive a
+  restored guest indefinitely (never `run_to_first_halt`, which by design stops at `Hlt`) while
+  feeding it live input. The UART still uses `NoIrqTrigger` (no in-kernel LAPIC exists in this
+  workspace — §3's interrupt-injection engine delivers directly via `KVM_INTERRUPT`, bypassing
+  IRQ4 entirely), so an interactive guest must poll the Line Status Register rather than block on
+  an interrupt; `vm_superio::Serial::enqueue_raw_bytes` sets the LSR "data ready" bit directly
+  regardless, so polling observes queued input correctly with no interrupt-delivery machinery
+  needed (`crates/baud-multiverse/tests/fixtures/shell-guest/BUILD.md` — a hand-assembled fixture
+  that prints a `$ ` prompt and echoes polled input — has the exact rationale). A real
+  `EventFd`-backed `Trigger` (replacing `NoIrqTrigger`) for a guest that blocks on IRQ4 instead of
+  polling remains future work, as does the actual `baud shell-into <universe>` CLI/server surface
+  (`baud-server` has never called into `linux::Multiverse` at all — this would be its first route
+  to do so, needing new bidirectional-streaming infrastructure this codebase does not have yet).
+- **Real-hardware finding (fixed, §10): `Multiverse::snapshot` could capture a stale,
+  not-yet-retired `RIP`.** None of this crate's ports are in-kernel-emulated, so every `IN`/`OUT`
+  round-trips to userspace; KVM defers that instruction's retirement (including the `RIP` advance)
+  to the *next* `KVM_RUN` call, not the exit that reported it. Every snapshot point before
+  `shell_into_universe_resumes` existed either at a fresh boot (zero exits behind it) or right
+  after `inject_timer_tick`'s single-step confirmation loop (which already calls `KVM_RUN` enough
+  times to retire whatever was pending) — this test is the first to snapshot immediately after a
+  plain, uninterrupted `step_exit()`, and the staleness was real: restoring from such a universe
+  silently re-executed the just-completed instruction (an observable duplicate byte, for `OUT`).
+  Fixed with `Multiverse::flush_pending_pio_completion` — the standard `kvm_run.immediate_exit`
+  technique (set it, call `KVM_RUN` once to retire the pending completion and get an immediate
+  `-EINTR` with no new guest instruction executed, clear it again), called at the top of
+  `snapshot` before any `KVM_GET_*` read.
+
 ## 6. Restore Ordering (determinism)
 
 1. Set TSC frequency (`KVM_SET_TSC_KHZ`) **before** creating the vCPU.
@@ -172,6 +208,17 @@ instead of silently rewinding it.
     let u = capture_on(cpu_model_a());
     assert!(restore_on(cpu_model_b(), &u).is_err());       // unless a CPUID template is active
     assert!(restore(timer_universe()).timer_resumes_cleanly()); // TSC-before-deadline ordering
+}
+
+#[test] fn shell_into_universe_resumes() {
+    let u = capture_at(shell_image(), tape, prompt_reached());
+    assert_eq!(u.console_tail(), b"$ ");                    // first output byte of the tail
+    let mut resumed = restore(&u);
+    assert_eq!(resumed.console_output(), u.console_tail()); // matches the captured tail exactly
+    resumed.enqueue_input(b"hi\r");
+    resumed.run_until_output_len(u.console_tail().len() + "hi\n$ ".len());
+    assert_eq!(resumed.console_output(), b"$ hi\n$ ");       // takes live input and re-prompts
+    // Real-hardware crate-level closure — no `baud shell-into` CLI/server verb exists yet, see §5.1.
 }
 ```
 
@@ -301,3 +348,29 @@ instead of silently rewinding it.
   - **Not yet done**: the `O(write-set)` memory-efficiency guarantee itself (this section's actual
     "cheap" promise) still needs the memfd/`UFFDIO_CONTINUE` rearchitecture described above. Both
     findings remain tracked in `crates/baud-snapshot/src/lib.rs`'s module doc and todo.md §14.
+- **Restore into a live shell (§5.1) — the crate-level primitive is built and exercised on real
+  KVM hardware (`shell_into_universe_resumes`, `drive/h5.sh`'s H5.6); the `baud shell-into` CLI/
+  server verb the test's name references is not.** `Console::enqueue_input`
+  (`crates/baud-multiverse/src/console.rs`) and `Multiverse::{console_output,
+  enqueue_console_input, step_exit, run_until_console_len}` (`crates/baud-multiverse/src/linux/
+  mod.rs`) are new. A new hand-assembled fixture, `tests/fixtures/shell-guest/` (prints a `$ `
+  prompt, polls COM1 for input, echoes it, re-prompts on `\r`, never `hlt`s), is the first fixture
+  in this workspace to exercise the UART's *receive* side against real hardware.
+  `linux::tests::shell_into_universe_resumes` captures a `Universe` right at the prompt, restores
+  it into a brand-new `Multiverse`, confirms the restored console output matches the captured tail
+  exactly, then proves the restored session is a genuine resumption — not a frozen replay — by
+  feeding it `"hi\r"` and getting back byte-identical output to an equivalent straight run that
+  never snapshotted at all.
+  - **Real-hardware finding, fixed**: closing this test surfaced `Multiverse::snapshot`'s stale-RIP
+    bug described in §5.1 above (`Multiverse::flush_pending_pio_completion`) — the first bug this
+    workspace has found from snapshotting immediately after a plain PIO exit, since every earlier
+    snapshot point avoided the situation by construction (a fresh boot, or right after
+    `inject_timer_tick`'s own settling `KVM_RUN` calls).
+  - **Not yet done**: the actual `baud shell-into <universe>` CLI/server surface — `baud-server` has
+    never called into `linux::Multiverse` at all (every existing route still imports the old
+    pre-pivot `Multiverse` in `baud-multiverse::lib.rs`), and a real interactive terminal session
+    needs bidirectional streaming infrastructure (e.g. a WebSocket route) this codebase does not
+    have yet, plus a `SnapshotStore`-backed universe lookup by ID (`get_universe` already exists in
+    `baud-snapshot-store`, but nothing deserializes its bytes back into a `baud_snapshot::Universe`
+    today). An `EventFd`-backed `Trigger` (replacing `NoIrqTrigger`) for a guest that blocks on IRQ4
+    instead of polling LSR is also open, tracked in `console.rs`'s module doc.

@@ -33,10 +33,17 @@
 #         for why a raw fork() can't safely share this process's KVM vm/vcpu fds), not the spec's
 #         literal UFFDIO_CONTINUE memory-sharing mechanism, which remains blocked on a guest-RAM
 #         backing change (see baud-snapshot/src/linux.rs's module doc).
+#   H5.6  shell_into_universe_resumes: capture a Universe from a running shell-guest fixture right
+#         at its "$ " prompt, restore it into a brand-new Multiverse, confirm the restored console
+#         output matches the captured tail exactly, then feed it live input ("hi\r") and confirm
+#         it echoes and re-prompts byte-identically to an equivalent straight run that never
+#         snapshotted at all — the crate-level real-hardware primitive specs/baud-snapshot.md §5.1
+#         names ("restore into a live shell"). This is not yet the `baud shell-into` CLI/server
+#         verb the test's name references (see that section for what remains).
 #
 # Not yet covered here (tracked in todo.md): true memory-efficient CoW branching (UFFDIO_CONTINUE
-# over a shared memfd backing — the "cheap" half of Snapshot::branch's guarantee), and
-# shell_into_universe_resumes.
+# over a shared memfd backing — the "cheap" half of Snapshot::branch's guarantee), and the
+# `baud shell-into` CLI/server verb.
 
 set -euo pipefail
 
@@ -128,6 +135,15 @@ echo "$BRANCH_OUT" | grep -q "test result: ok" || fail "H5.5: thousand_branches_
 pass "H5.5: thousand_branches_are_independent_and_deterministic — 1000+ branches forked from one Universe, each deterministic and non-perturbing"
 
 # ---------------------------------------------------------------------------
+# H5.6 — shell_into_universe_resumes
+# ---------------------------------------------------------------------------
+log "Running shell_into_universe_resumes against real /dev/kvm (shell-guest fixture)..."
+SHELL_OUT=$(cargo test -q -p baud-multiverse shell_into_universe_resumes -- --test-threads=1 2>&1)
+echo "$SHELL_OUT"
+echo "$SHELL_OUT" | grep -q "test result: ok" || fail "H5.6: shell_into_universe_resumes FAILED"
+pass "H5.6: shell_into_universe_resumes — a restored universe's console matches the captured tail and keeps taking live input, byte-identical to a straight run"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -149,8 +165,12 @@ echo "    reports as touched (a handful, never total RAM), and the rewind is byt
 echo "  - Multiverse::branch forks 1000+ independent, deterministic continuations from one"
 echo "    captured Universe (the spec's small-N fallback, not yet the memory-efficient"
 echo "    UFFDIO_CONTINUE mechanism)"
+echo "  - A universe captured mid-interaction restores with its console history intact and keeps"
+echo "    taking live input, byte-identical to an equivalent straight run (Multiverse::"
+echo "    enqueue_console_input/step_exit/run_until_console_len against shell-guest)"
 echo ""
 echo "H-series H0-H4 complete; H5's capture/restore round trip, CPU-mismatch refusal, dirty-ring"
-echo "reset, and branch/fork determinism are now proven on real hardware. Remaining H5 work"
-echo "(memory-efficient UFFDIO_CONTINUE branching, shell-into): see todo.md."
+echo "reset, branch/fork determinism, and live-shell resumption are now proven on real hardware."
+echo "Remaining H5 work (memory-efficient UFFDIO_CONTINUE branching, the baud shell-into CLI/"
+echo "server verb): see todo.md."
 echo ""

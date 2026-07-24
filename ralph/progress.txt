@@ -1803,3 +1803,79 @@ Correcting course: this session's orchestrator doesn't deliver background-task n
   - drive/h5.sh gained H5.5 running this test; specs/baud-snapshot.md and todo.md updated to document the closure and the honest remaining gap (branch cost is O(total RAM) per branch today, not the spec's O(write-set) CoW-sharing guarantee, which still needs a memfd guest-RAM rearchitecture).
   - cargo test -p baud-multiverse: 59/59 (was 58/58); cargo build/test/clippy --workspace all green, zero new warnings in any touched file; drive/h0.sh-h5.sh all re-verified passing end-to-end on real /dev/kvm with zero regressions.
 ---
+
+Pushed f181817 to origin/main. Post-push verification GREEN: local HEAD == origin/main; cargo build/test/clippy --workspace and drive/h0.sh-h5.sh (incl. new H5.5) all passed against this exact tip before the commit, with no further changes since. todo.md still has pending items (Snapshot::branch's O(write-set) memory-efficiency guarantee, shell_into_universe_resumes, H6, the whole M-series), so this iteration ends with NEXT.
+
+## 2026-07-24T22:47:23 UTC - Session usage — build-3 [sonnet]
+- cost $4.5158946 (exact, from claude -p)
+- context 192,642 tok peak of 1M (19%) across 49 inference calls, monotonic
+- models sonnet-5 $4.5129 (in 3,298 / out 58,916 / cache-read 7,848,327) · haiku-4-5 $0.0030
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/003-build-3.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose H5's shell_into_universe_resumes: restore a captured universe into a live PTY-backed shell. It's the last independently-buildable H5 guarantee (Snapshot::branch's O(write-set) memory efficiency is blocked on a memfd/UFFDIO rearchitecture; H6/M-series are much bigger). todo.md flags this needs a Console API change (PTY instead of the fixed Vec<u8> sink), a new CLI/server verb, and bridging baud-server (which still imports the old pre-pivot ptrace-era Multiverse) to the real linux::Multiverse. Studying the current Console/baud-server/CLI code before touching anything.
+
+Dispatched an Explore subagent to map Console/Multiverse/server/CLI/snapshot-store wiring before writing any code. Waiting for its report.
+
+Explore agent reported back: Console is hardcoded to Serial<NoIrqTrigger, NoEvents, Vec<u8>> with zero RX/input path; run_until_halted only runs to Hlt/Shutdown (no interactive loop exists); baud-server's routes still import the OLD pre-pivot Multiverse (lib.rs), never linux::Multiverse — a shell-into route would be the first to bridge that; no PTY crate is in the workspace yet; vm-superio's Serial already exposes enqueue_raw_bytes for RX and only requires W: Write (no Read bound) so making Console pluggable is mechanical. Neither specs/baud-snapshot.md's 'Restore into a live shell' section nor the shell_into_universe_resumes test exist yet -- only forward-looking code comments reference them. Checking cmds/stream.rs + routes/stream.rs next to see if a streaming (websocket) pattern already exists to mirror for the interactive PTY session.
+
+Design settled: add Console::enqueue_input (wraps vm_superio::Serial::enqueue_raw_bytes) for guest RX, Multiverse::{console_output, enqueue_console_input, step_exit, run_until_console_len} for interactive stepping, a new hand-assembled shell-guest fixture (prints "$ " prompt, polls COM1 LSR/DATA, echoes input, CR -> newline+reprompt, never halts), and a real-hardware test shell_into_universe_resumes: boot to prompt, snapshot, restore into a fresh Multiverse, assert restored console tail matches the capture, then interact (enqueue "hi\r") and prove the restored session produces byte-identical output to an un-snapshotted straight run doing the same interaction. Scoping CLI/server wiring as a documented next step (same precedent as thousand_branches, which also closed without a CLI/server surface) given baud-server has never touched linux::Multiverse and a real interactive verb needs new websocket infra -- writing the crate-level real-hardware guarantee first, honestly, rather than a half-built CLI stub. Starting implementation.
+
+Console RX support (enqueue_input), Multiverse interactive-session methods (console_output/enqueue_console_input/step_exit/run_until_console_len), the shell-guest hand-assembled fixture, and the shell_into_universe_resumes test are all written. Compiling baud-multiverse now to catch mistakes before the real-hardware run.
+
+Found a real, previously-undiscovered production bug via step-by-step debug tracing: Multiverse::snapshot could capture a STALE, not-yet-retired RIP when called immediately after a plain PIO exit (no in-kernel IRQ chip means every IN/OUT round-trips to userspace, and KVM defers that instruction's actual retirement -- including the RIP advance -- to the START of the *next* KVM_RUN call, not the exit that reported it). Every prior real-hardware snapshot point happened to avoid this (fresh boot = zero exits behind it, or right after inject_timer_tick's single-step confirmation loop which already flushes it) -- shell_into_universe_resumes is the first snapshot taken right after a plain step_exit(), and hit it: the restored guest re-executed the just-completed OUT, producing a duplicate byte. Fixed with the standard immediate_exit flush technique (set kvm_run.immediate_exit=1, one KVM_RUN call retires the pending completion and returns EINTR without running new guest code, then clear the flag). Verified via manual step tracing: extra byte disappeared, restored session now byte-identical to a straight run. Removing debug scaffolding and re-running the full test.
+
+No leftover scratch_debug code found (grep clean). Full cargo test -p baud-multiverse --lib suite is running in the background (thousand_branches_are_independent_and_deterministic alone takes ~3.5 minutes on real hardware per prior iteration notes, so the full suite will take a while) -- waiting for it to finish before moving on to spec/todo docs and drive/h5.sh.
+
+Updated specs/baud-snapshot.md (new §5.1 'Restore into a live shell', §7's test pseudocode, and a §10 implementation-status entry) documenting the closure honestly: crate-level real-hardware capability done, CLI/server shell-into verb explicitly flagged as not yet built (needs new websocket infra baud-server doesn't have). Checking on the background full-suite cargo test run.
+
+Full cargo test -p baud-multiverse --lib suite: 61/61 pass (was 60/60), including the new shell_into_universe_resumes test, no regressions. Updated drive/h5.sh with a new H5.6 step. Now updating todo.md's H5 build-status section to document the closure and the real snapshot-staleness bug found+fixed, then running the workspace-wide build/test/clippy and re-verifying drive/h0.sh through h5.sh end-to-end before committing.
+
+Kicked off full workspace verification in the background: cargo build/test/clippy --workspace, then drive/h0.sh through the updated drive/h5.sh (H5.6 included), sequentially. This covers ~10 minutes of real KVM work (thousand_branches alone is ~3.5 min, run twice -- once in cargo test --workspace, once inside h5.sh). Waiting for completion before committing.
+
+## 2026-07-24T23:11:24 UTC - Session usage — build-4 [sonnet]
+- cost $8.954888150000004 (exact, from claude -p)
+- context 259,244 tok peak of 1M (26%) across 101 inference calls, monotonic
+- models sonnet-5 $8.9519 (in 4,650 / out 97,243 / cache-read 19,595,983) · haiku-4-5 $0.0030
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/004-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and progress.txt to understand current state.
+
+Uncommitted work from prior session found: Console RX support, Multiverse interactive-session methods, shell-guest fixture, shell_into_universe_resumes test, snapshot staleness fix all present in working tree, matching todo.md's H5.6 build-status entry. Re-verifying build/test/clippy before committing (prior session appears to have been cut off mid-verification).
+
+cargo test --workspace running in background (thousand_branches_are_independent_and_deterministic alone takes ~3.5 min on real hardware per prior iteration notes); waiting for completion.
+
+## 2026-07-24T23:15:24 UTC - Session usage — build-4 [sonnet]
+- cost $0.6475813 (exact, from claude -p)
+- context 65,635 tok peak of 1M (7%) across 20 inference calls, monotonic
+- models sonnet-5 $0.6446 (in 40 / out 4,430 / cache-read 1,088,011) · haiku-4-5 $0.0030
+- transcript: ralph/.run/005-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md, progress.txt, and git status to pick up where the last session left off.
+
+Uncommitted work confirmed: this is the H5.6 shell_into_universe_resumes slice (Console RX, Multiverse interactive-session methods, shell-guest fixture, snapshot-staleness fix, drive/h5.sh H5.6 step) from a prior session that was cut off mid-verification, never committed. Re-running verification from scratch now: cargo build --workspace first.
+
+cargo build --workspace: green. Now running cargo test --workspace (includes thousand_branches_are_independent_and_deterministic, ~3.5 min real KVM time).
+
+cargo test --workspace completed one full pass, output tail showed all suites green (no FAILED lines observed) but tail -200 truncated the baud-multiverse section specifically. Re-checking full log for FAILED and baud-multiverse's summary line.
+
+cargo test --workspace: all green, baud-multiverse 61/61 confirmed (matches todo.md's H5.6 claim), 0 failures across every crate. Now running cargo clippy --workspace --all-targets.
+
+clippy --workspace --all-targets: clean, all warnings pre-existing in untouched files (tape-agent/transport.rs, server/routes/fuzz.rs, replay.rs, tracing.rs), none in console.rs or linux/mod.rs. Now running drive/h0.sh through h5.sh sequentially (h5.sh includes the new H5.6 shell_into_universe_resumes step).
+
+drive/h0.sh through h5.sh (H5.1-H5.6) all pass end-to-end on real /dev/kvm, zero regressions, exit 0 across the board. Full verification is now green: cargo build/test/clippy --workspace + all drive scripts. Appending the commit block and committing everything.

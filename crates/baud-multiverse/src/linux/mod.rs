@@ -490,10 +490,33 @@ impl Multiverse {
     /// history so far. RAM pages are deduplicated into `page_store`, shared across every universe
     /// interned through the same store (specs/baud-snapshot.md §4) — callers exploring many branch
     /// points from one run pass the same `PageStore` to every `snapshot` call for that guest.
+    ///
+    /// Flushes any pending PIO completion first (real-hardware finding, todo.md §14, found by
+    /// `shell_into_universe_resumes`): none of this crate's ports are in-kernel-emulated (no
+    /// `KVM_CREATE_IRQCHIP`/registered `KVM_IOEVENTFD`, every `IN`/`OUT` always exits to
+    /// userspace), so KVM defers that instruction's retirement — including the `RIP` advance —
+    /// until the *next* `KVM_RUN` call, not the exit that reported it (`vcpu->arch.
+    /// complete_userspace_io`, processed at the top of the following `kvm_arch_vcpu_ioctl_run`, is
+    /// the kernel mechanism). Every prior real-hardware snapshot point either had zero exits behind
+    /// it (a fresh boot) or came right after `inject_timer_tick`'s single-step confirmation loop
+    /// (which itself already calls `KVM_RUN` enough times to retire whatever was pending), so this
+    /// staleness never surfaced until a snapshot was taken immediately after a plain, uninterrupted
+    /// `step_exit()`. Calling `vcpu.get_regs()` at that moment reads the *stale* pre-retirement
+    /// `RIP` (still pointing *at* the just-exited instruction, not after it); a universe restored
+    /// from it starts a brand-new vCPU with no memory of "this instruction already retired", so it
+    /// genuinely re-executes that same `IN`/`OUT` — for `OUT`, an observable duplicate byte on the
+    /// console. [`flush_pending_pio_completion`] resolves this the standard way real VMMs do (the
+    /// same `immediate_exit` mechanism `crates/baud-vcpu/src/linux/pmu.rs`'s doc already names,
+    /// todo.md §14's H4 finding about that field's kernel-side stickiness): set
+    /// `kvm_run.immediate_exit = 1`, call `KVM_RUN` once (it retires the pending completion at
+    /// entry, then returns `-EINTR` immediately without executing any new guest instruction), clear
+    /// the flag back to `0` again afterward (the same stickiness this field has everywhere else in
+    /// this workspace).
     pub fn snapshot(
         &mut self,
         page_store: &mut PageStore,
     ) -> Result<Universe, baud_snapshot::linux::CaptureError> {
+        self.flush_pending_pio_completion()?;
         baud_snapshot::linux::capture(
             &self.guest.kvm,
             &self.guest.vm,
@@ -509,6 +532,23 @@ impl Multiverse {
             self.bus.tape.device().cursor(),
             self.bus.console.output().to_vec(),
         )
+    }
+
+    /// See [`snapshot`](Self::snapshot)'s doc for why this exists. `kvm_run.immediate_exit = 1`
+    /// makes the next `KVM_RUN` retire any pending PIO completion and return `-EINTR` immediately —
+    /// the standard technique real VMMs use to force a clean re-entry point without letting the
+    /// guest execute anything new (`crates/baud-vcpu/src/linux/pmu.rs`'s module doc names the same
+    /// mechanism). A non-`EINTR` error is a real ioctl failure (`DeterminismHole`-worthy elsewhere
+    /// in this crate, but `snapshot`'s own return type is `CaptureError`, so it is reported as
+    /// `CaptureError::Kvm` instead of inventing a second error path for the same call site).
+    fn flush_pending_pio_completion(&mut self) -> Result<(), kvm_ioctls::Error> {
+        self.guest.vcpu.get_kvm_run().immediate_exit = 1;
+        let errno = self.guest.vcpu.run().err().map(|e| e.errno());
+        self.guest.vcpu.get_kvm_run().immediate_exit = 0;
+        match errno {
+            None | Some(libc::EINTR) => Ok(()),
+            Some(_) => Err(kvm_ioctls::Error::new(errno.unwrap())),
+        }
     }
 
     /// Reconstruct a whole new `Multiverse` from a captured [`Universe`] (specs/baud-snapshot.md
@@ -626,6 +666,55 @@ impl Multiverse {
     pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, DeterminismHole> {
         baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
         Ok(HaltOutcome { console_output: self.bus.console.output().to_vec(), ram_hash: self.ram_hash() })
+    }
+
+    /// Every byte the guest has written to the console so far, in order — the live equivalent of
+    /// [`HaltOutcome::console_output`] for a `Multiverse` that has not (and, for an interactive
+    /// guest driven by [`step_exit`](Self::step_exit)/[`run_until_console_len`]
+    /// (Self::run_until_console_len), may never) reach `Hlt`.
+    pub fn console_output(&self) -> &[u8] {
+        self.bus.console.output()
+    }
+
+    /// Queue `bytes` for the guest's next console reads (specs/baud-snapshot.md §5's "restore into
+    /// a live shell") — [`Console::enqueue_input`] does the actual work; this just reaches through
+    /// the device bus the way [`console_output`](Self::console_output) does for the output side.
+    pub fn enqueue_console_input(&mut self, bytes: &[u8]) -> usize {
+        self.bus.console.enqueue_input(bytes)
+    }
+
+    /// Drive exactly one `KVM_RUN` + dispatch cycle (`baud_vcpu::linux::run_one_exit`) without
+    /// waiting for `Hlt` — the building block an interactive session needs instead of
+    /// [`run_to_first_halt`](Self::run_to_first_halt), which by design stops there.
+    pub fn step_exit(&mut self) -> Result<baud_vcpu::DispatchOutcome, DeterminismHole> {
+        baud_vcpu::linux::run_one_exit(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
+    }
+
+    /// Step the guest (via [`step_exit`](Self::step_exit)) until [`console_output`]
+    /// (Self::console_output) reaches at least `target_len` bytes, or `max_exits` host-side steps
+    /// have elapsed without getting there. A guest polling for input it has not yet received (e.g.
+    /// `shell-guest`'s LSR poll loop, specs/baud-snapshot.md §5) takes a variable, but for a fixed
+    /// guest image and a fixed input schedule fully deterministic, number of exits to produce its
+    /// next byte of output — this is the live-session equivalent of
+    /// [`run_to_first_halt`](Self::run_to_first_halt)'s "run until `Hlt`" for a guest that never
+    /// halts. Returns `Err(DeterminismHole)` (reusing that type rather than inventing a new one, the
+    /// same "no silent continuation" convention every other run-loop entry point here follows) if
+    /// `max_exits` is exhausted first — a caller-supplied bound that is too tight to observe real,
+    /// intended guest progress, not a determinism violation in itself.
+    pub fn run_until_console_len(&mut self, target_len: usize, max_exits: u32) -> Result<(), DeterminismHole> {
+        let mut exits = 0u32;
+        while self.console_output().len() < target_len {
+            if exits >= max_exits {
+                return Err(DeterminismHole(format!(
+                    "run_until_console_len: {target_len} bytes not reached within {max_exits} exits \
+                     (got {} bytes)",
+                    self.console_output().len()
+                )));
+            }
+            self.step_exit()?;
+            exits += 1;
+        }
+        Ok(())
     }
 
     /// Deliver `vector` at the exact instruction boundary `period_rcb` retired conditional
@@ -1329,4 +1418,90 @@ mod tests {
             );
         }
     }
+
+    /// `tests/fixtures/shell-guest/`'s payload: prints a `$ ` prompt, then polls COM1 for input,
+    /// echoing every byte except `\r` (carriage return, which prints a newline and re-prints the
+    /// prompt) — never `hlt`s, so it is driven with [`Multiverse::step_exit`]/
+    /// [`Multiverse::run_until_console_len`], not [`Multiverse::run_to_first_halt`]. See that
+    /// directory's `BUILD.md` for exact provenance and the LSR-polling-not-IRQ4 rationale.
+    fn shell_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shell-guest/bzImage")
+    }
+
+    /// The exact prompt `tests/fixtures/shell-guest/payload.s` prints before reading anything.
+    const SHELL_GUEST_PROMPT: &[u8] = b"$ ";
+
+    /// specs/baud-snapshot.md §5's "restore into a live shell" and its named test
+    /// `shell_into_universe_resumes` (todo.md §10/§14's H5 gap: "Console today wraps a fixed,
+    /// non-generic `Serial<..., Vec<u8>>` with no ... input ... path at all"). Proves the two
+    /// halves of "resumes" the spec cares about: (1) a universe captured mid-interaction restores
+    /// with its console history intact — `restored.console_output()` matches the captured tail
+    /// exactly, the strong form of "first output byte matches the captured console tail"; (2) the
+    /// restored session is not a frozen replay — it keeps taking live input
+    /// ([`Multiverse::enqueue_console_input`]) and producing live output
+    /// ([`Multiverse::step_exit`]/[`Multiverse::run_until_console_len`]), and does so
+    /// byte-identically to an equivalent straight run that never snapshotted at all, the same
+    /// bit-identical framing every other H5 test uses.
+    #[test]
+    fn shell_into_universe_resumes() {
+        let kernel = shell_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const WORK_CLOCK_K: u64 = 1;
+        const PROMPT_EXITS: u32 = 16;
+        const INTERACTION_EXITS: u32 = 100;
+        let after_interaction_len = SHELL_GUEST_PROMPT.len() + b"hi\n$ ".len();
+
+        // Capture-then-restore run: reach the first prompt, capture a Universe there, restore into
+        // a brand-new Multiverse, and interact only on the restored instance.
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None)
+            .expect("boot (branch point) failed");
+        boot.run_until_console_len(SHELL_GUEST_PROMPT.len(), PROMPT_EXITS)
+            .expect("guest must print its prompt within a handful of exits");
+        assert_eq!(boot.console_output(), SHELL_GUEST_PROMPT);
+
+        let mut page_store = PageStore::new();
+        let universe = boot.snapshot(&mut page_store).expect("snapshot at the prompt failed");
+        assert_eq!(
+            universe.device.console, SHELL_GUEST_PROMPT,
+            "captured universe's console history must be exactly the prompt observed pre-capture"
+        );
+
+        let mut restored = Multiverse::restore(&universe, vec![], WORK_CLOCK_K, false, None)
+            .expect("restore from captured universe failed");
+        assert_eq!(
+            restored.console_output(),
+            universe.device.console.as_slice(),
+            "a freshly restored Multiverse's console output must match the captured tail exactly, \
+             before any further interaction — the guarantee shell_into_universe_resumes names as \
+             \"first output byte matches the captured console tail\""
+        );
+
+        let queued = restored.enqueue_console_input(b"hi\r");
+        assert_eq!(queued, 3, "all 3 input bytes must fit the UART's RX FIFO");
+        restored
+            .run_until_console_len(after_interaction_len, INTERACTION_EXITS)
+            .expect("restored guest must echo the queued input and re-prompt");
+        assert_eq!(restored.console_output(), b"$ hi\n$ ");
+
+        // Straight run: the same image, never snapshotted, driven through the identical
+        // interaction — proves the restored session's behavior is genuinely a resumption, not an
+        // artifact of the restore path itself.
+        let mut straight = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None)
+            .expect("straight boot failed");
+        straight
+            .run_until_console_len(SHELL_GUEST_PROMPT.len(), PROMPT_EXITS)
+            .expect("straight run must print its prompt within a handful of exits");
+        straight.enqueue_console_input(b"hi\r");
+        straight
+            .run_until_console_len(after_interaction_len, INTERACTION_EXITS)
+            .expect("straight run must echo the queued input and re-prompt");
+
+        assert_eq!(
+            restored.console_output(),
+            straight.console_output(),
+            "a restored universe's interactive session must be byte-identical to an equivalent \
+             straight run that never snapshotted at all"
+        );
+    }
 }
+

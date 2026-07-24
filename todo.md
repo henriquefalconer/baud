@@ -961,15 +961,58 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     (memfd/hugetlbfs) backing, an architecture change to `baud-multiverse` no single crate can
     absorb alone. `Multiverse::branch`'s current cost is `O(total RAM)` per branch (a real 256MiB
     copy each), not `O(write-set)` — correct and fully independent, just not yet "cheap" the way
-    the spec's own framing promises. `shell_into_universe_resumes` is materially larger: `Console`
-    today wraps a fixed, non-generic `Serial<NoIrqTrigger, NoEvents, Vec<u8>>` with no PTY/EventFd
-    path at all and no CLI/server verb exists — needs a `Console` API change, a new PTY dependency,
-    real interrupt delivery into a live terminal reader, and a new CLI/server surface, not
-    incremental wiring; also, `baud-server` does not call into `baud_multiverse::linux::Multiverse`
-    at all yet (confirmed by grep) — everything `baud-server`'s existing routes import is the old
-    pre-pivot ptrace-era `Multiverse` in `baud-multiverse::lib.rs`, so `shell-into`'s CLI/server
-    surface would need to bridge that pivot gap too, not just add a new verb. Still open. H6 and
-    the rest of the M-series remain **not yet started**.
+    the spec's own framing promises.
+  - **`shell_into_universe_resumes` now closed on real hardware, at the crate level — the
+    `baud shell-into` CLI/server verb the test's name references is not.** New: `Console::
+    enqueue_input` (`crates/baud-multiverse/src/console.rs`, wraps `vm_superio::Serial::
+    enqueue_raw_bytes` into the UART's RX FIFO — the console's write side was already generic
+    enough via `vm_superio::Serial<T, EV, W: Write>`, only `Vec<u8>` was ever chosen as `W`, so no
+    Console API/PTY-dependency change was actually needed, contrary to a prior iteration's
+    estimate); `Multiverse::{console_output, enqueue_console_input, step_exit,
+    run_until_console_len}` (`crates/baud-multiverse/src/linux/mod.rs`) — the building blocks an
+    interactive session needs instead of `run_to_first_halt`, which by design stops at `Hlt`. New
+    fixture `tests/fixtures/shell-guest/` (prints a `$ ` prompt, polls COM1 LSR for input, echoes
+    it, re-prompts on `\r`, never halts — the first fixture in this workspace to exercise the
+    UART's *receive* side against real hardware; polls LSR rather than blocking on IRQ4 since this
+    workspace has no in-kernel LAPIC, same reason H4's interrupt engine injects directly via
+    `KVM_INTERRUPT`). New test `linux::tests::shell_into_universe_resumes`
+    (`crates/baud-multiverse/src/linux/mod.rs`): captures a `Universe` right at the prompt,
+    restores it into a brand-new `Multiverse`, confirms the restored console output matches the
+    captured tail exactly, then feeds it `"hi\r"` and confirms it echoes and re-prompts
+    byte-identically to an equivalent straight run that never snapshotted at all. `drive/h5.sh`
+    gained a new H5.6 step. `cargo test -p baud-multiverse`: 61/61 (was 59/59).
+    specs/baud-snapshot.md gained a new §5.1 documenting both the closure and the gap below.
+    - **Real-hardware finding and fix, found by this test**: `Multiverse::snapshot` could capture
+      a stale, not-yet-retired `RIP` when called immediately after a plain PIO exit. None of this
+      crate's ports are in-kernel-emulated, so every `IN`/`OUT` round-trips to userspace; KVM
+      defers that instruction's retirement (including the `RIP` advance) to the *next* `KVM_RUN`
+      call, not the exit that reported it. Every snapshot point before this test existed either at
+      a fresh boot (zero exits behind it: `thousand_branches`/`restore_refuses_mismatched_cpu`) or
+      right after `inject_timer_tick`'s single-step confirmation loop (already calls `KVM_RUN`
+      enough times to retire whatever was pending: `snapshot_roundtrip_is_bit_identical`/
+      `reset_cost_scales_with_write_set`) — this is the first snapshot taken right after a plain,
+      uninterrupted `step_exit()`, and hit it for real: a universe restored from the stale capture
+      silently re-executed the just-completed instruction (an observable duplicate byte for `OUT`,
+      confirmed by step-by-step debug tracing before the fix — `RIP` was identical pre-capture and
+      post-restore, `0x200209` both times, yet the very first post-restore step produced an extra
+      byte). Fixed with `Multiverse::flush_pending_pio_completion`: the standard `kvm_run.
+      immediate_exit` technique (set it, call `KVM_RUN` once — it retires the pending completion
+      at entry and returns `-EINTR` immediately with no new guest instruction executed — clear it
+      again), called at the top of `snapshot` before any `KVM_GET_*` read. This is a real, general
+      correctness gap in `Multiverse::snapshot`, not specific to this fixture — any future caller
+      that snapshots right after a plain (non-interrupt-injection) PIO exit would have hit it too.
+    - **Not yet done**: the actual `baud shell-into <universe>` CLI/server surface. `baud-server`
+      has never called into `linux::Multiverse` at all (every existing route still imports the old
+      pre-pivot `Multiverse` in `baud-multiverse::lib.rs`, confirmed by grep) — this would be its
+      first route to do so. A real interactive terminal session needs bidirectional-streaming
+      server infrastructure this codebase does not have yet (no WebSocket route exists anywhere;
+      `routes/stream.rs`'s "tail" endpoint is plain request/response, not live) — CLAUDE.md's own
+      "CLI: thin client, one subcommand = one server call" rule means this can't be a CLI-local
+      shortcut either. Also needs a `SnapshotStore`-backed universe lookup by ID (`get_universe`
+      already exists in `baud-snapshot-store`, but nothing deserializes its bytes back into a
+      `baud_snapshot::Universe` today). An `EventFd`-backed `Trigger` (replacing `NoIrqTrigger`)
+      for a guest that blocks on IRQ4 instead of polling LSR is also open, tracked in `console.rs`'s
+      module doc. H6 and the rest of the M-series remain **not yet started**.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and

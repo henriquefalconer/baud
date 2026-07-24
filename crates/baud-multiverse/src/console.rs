@@ -2,13 +2,19 @@
 // SPDX-License-Identifier: Proprietary
 //
 // The console device: a minimal 16550-compatible UART on COM1 (I/O ports 0x3f8-0x3ff), built on
-// `vm_superio::Serial` — the crate specs/baud-multiverse.md §2 pins for exactly this purpose
-// (`specs/baud-snapshot.md`'s "restore into a live shell" step re-wires the same device onto a PTY
-// trigger later, §5/H5). At H1 baud only needs guest -> host output (the guest kernel's serial
-// console), so the writer here is a plain in-memory buffer and interrupt delivery (IRQ4) uses a
-// no-op-but-recording `Trigger` — no guest-visible console *input* is modeled yet (todo.md §3.6's
-// subtractive rule: "down to a console plus the tape device", and the tape device is not built
-// yet either).
+// `vm_superio::Serial` — the crate specs/baud-multiverse.md §2 pins for exactly this purpose. At
+// H1 baud only needed guest -> host output (the guest kernel's serial console), so the writer here
+// was a plain in-memory buffer and interrupt delivery (IRQ4) used a no-op-but-recording `Trigger`.
+// H5's `shell_into_universe_resumes` (specs/baud-snapshot.md §5, "restore into a live shell") adds
+// the other direction: [`Console::enqueue_input`] wraps `vm_superio::Serial::enqueue_raw_bytes` to
+// push host-supplied bytes into the UART's RX FIFO, so a restored guest's own polling read loop
+// (`IN` on the DATA register, offset 0) observes them exactly as it would a real keystroke — no
+// change to the write-side buffer or the no-op `Trigger` was needed: `enqueue_raw_bytes` only sets
+// the LSR "data ready" bit directly (`Serial::read`'s existing DATA-offset arm already pops
+// `in_buffer`), it does not require a real interrupt to be delivered for a guest that polls LSR
+// instead of waiting for IRQ4 (`crates/baud-multiverse/tests/fixtures/shell-guest` does exactly
+// that). A real IRQ-driven trigger (an `EventFd`-backed one, replacing `NoIrqTrigger`) remains
+// future work for a guest that blocks on the interrupt instead of polling.
 //
 // `vm_superio` has no non-dev dependencies at all (checked against its own Cargo.toml — not even
 // `libc`), so unlike the rest of `linux/`, this whole module — including its tests — is
@@ -83,6 +89,16 @@ impl Console {
     /// a future integration can assert IRQ4 was actually requested once real injection lands.
     pub fn irq_requests(&self) -> u64 {
         self.serial.interrupt_evt().fired_count()
+    }
+
+    /// Push host-supplied bytes into the UART's receive FIFO — the guest's next `IN` on the DATA
+    /// register (offset 0) pops them in order, same as real keystrokes arriving over a wire
+    /// (specs/baud-snapshot.md §5's "restore into a live shell"). Silently caps at the FIFO's
+    /// remaining capacity (`vm_superio::Serial::enqueue_raw_bytes`'s own behavior) rather than
+    /// erroring — a full 16550 RX FIFO drops bytes on real hardware too; a caller that cares can
+    /// compare the returned count against `bytes.len()`.
+    pub fn enqueue_input(&mut self, bytes: &[u8]) -> usize {
+        self.serial.enqueue_raw_bytes(bytes).unwrap_or(0)
     }
 
     /// `port`'s offset within the COM1 register window, or `None` if `port` is outside it.
@@ -279,6 +295,21 @@ mod tests {
         console.pio_write(COM1_BASE, b"h");
         console.pio_write(COM1_BASE, b"i");
         assert_eq!(console.output(), b"hi");
+    }
+
+    #[test]
+    fn enqueued_input_is_readable_from_the_data_register_in_order() {
+        let mut console = Console::default();
+        let written = console.enqueue_input(b"hi");
+        assert_eq!(written, 2);
+        let mut lsr = [0u8; 1];
+        console.pio_read(COM1_BASE + 5, &mut lsr);
+        assert_eq!(lsr[0] & 0b0000_0001, 1, "LSR data-ready bit must be set once input is queued");
+        let mut byte = [0u8; 1];
+        console.pio_read(COM1_BASE, &mut byte);
+        assert_eq!(byte, *b"h");
+        console.pio_read(COM1_BASE, &mut byte);
+        assert_eq!(byte, *b"i");
     }
 
     #[test]
