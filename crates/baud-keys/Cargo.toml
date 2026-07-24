@@ -1,0 +1,13 @@
+[package]
+name = "baud-keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider secrets at rest for baud (wraps sops/age binaries)"
+
+[dependencies]
+baud-secret = { path = "../baud-secret" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

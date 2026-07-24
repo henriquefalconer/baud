@@ -1,0 +1,24 @@
+[package]
+name = "baud-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The baud command-line interface"
+
+[[bin]]
+name = "baud"
+path = "src/main.rs"
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+baud-secret = { path = "../baud-secret" }
+baud-keys = { path = "../baud-keys" }
+clap = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

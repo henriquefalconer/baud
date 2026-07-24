@@ -1,0 +1,27 @@
+[package]
+name = "baud-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local daemon for baud: orchestration, journal, reconstruction"
+
+[[bin]]
+name = "baud-server"
+path = "src/main.rs"
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+baud-secret = { path = "../baud-secret" }
+baud-keys = { path = "../baud-keys" }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

@@ -33,6 +33,11 @@ keys.txt
 *.y4m
 *.qoi
 
+# ─── SQLite dev databases ───
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
 # ─── OS / editors ───
 .DS_Store
 *.swp

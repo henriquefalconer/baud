@@ -1,0 +1,15 @@
+
+## 2026-07-24T05:07:48 UTC - Ralph Build Iteration 1 Start
+- Starting baud Rust workspace initialization
+- Rust 1.97.1 installed via rustup
+- Plan: baud-proto (types foundation) → baud-secret → baud-keys → baud-server skeleton → baud-cli skeleton (M0)
+
+## 2026-07-24T05:14:45 UTC - M0 skeleton built
+- Rust workspace created: Cargo.toml with 5 crates
+- baud-proto: all wire/domain types, CBOR encode/decode, 6 tests pass
+- baud-secret: Secret<T>, SecretString, load_secret_env, 6 tests pass
+- baud-keys: sops/age wrapper, doctor(), age_key_path() resolution
+- baud-server: axum skeleton, /health /server/status /doctor /keys /runs /budget, SQLite migrations
+- baud-cli: full command surface (all subcommands per spec §8), stubs for future milestones
+- All 12 tests pass, workspace builds cleanly, workload-noun CI grep CLEAN
+- Next: add baud-keys tests, CI workload grep script, drive/m0.sh
