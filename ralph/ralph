@@ -189,7 +189,7 @@ env_note() {
 - Repo: the current working directory. Stack per the specs and CLAUDE.md.
 - You run with full permissions (--dangerously-skip-permissions) and Chrome attached (--chrome).
 - Browser/computer use: when verifying user-facing or HTTP behavior, load the browser tools in ONE ToolSearch call ("select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__tabs_create_mcp") and drive the app in a real tab; use the computer tool for screenshots/clicks as needed. Create new tabs; never reuse old tab IDs.
-- If a step needs a browser and none is attached (the browser tools report no connected browser, or a navigate/computer call fails because nothing is there), you have standing permission to find and start one yourself: look for a Chrome or Chromium executable on this filesystem — check PATH first, then the usual places applications are installed on this machine — launch it, then carry on with the claude-in-chrome tools exactly as above. Launching a browser yourself is expected, not an escalation. Only call the browser unavailable once that has been tried and failed; say which route you took in ralph/progress.txt and fall back to exercising the surface directly.
+- If no browser is attached, you may search this filesystem for a Chrome or Chromium executable and launch it yourself, then carry on with the claude-in-chrome tools.
 - Use subagents (Agent tool) as your prompt instructs: parallel Sonnet subagents for study/searches, a single Sonnet subagent for build/tests (backpressure), Opus subagents for complex reasoning.
 ENVNOTE
 }
