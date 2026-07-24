@@ -114,7 +114,7 @@ COST_FILE="$RUNDIR/costs.txt"
 
 spent_usd() { # total cost so far, summed from the ledger file
   python3 -c "
-print(f\"{sum(float(l) for l in open('$COST_FILE') if l.strip()):.6f}\")" 2>/dev/null || echo 0
+print(f\"{sum(float(l) for l in open('$COST_FILE') if l.strip()):.4f}\")" 2>/dev/null || echo 0
 }
 
 # Returns 0 when --budget-total leaves too little headroom to start another
@@ -238,7 +238,7 @@ root = os.path.join(os.path.expanduser("~"), ".claude", "projects",
 # with 109 inference calls the server reported num_turns=14 and duration_ms=157840
 # (2.6 min). Neither could be reconciled with the transcript, so the ledger states
 # only the inference-call count, which is derived and verifiable.
-print(f"- cost ${meta.get('total_cost_usd', 0)} (exact, from claude -p)")
+print(f"- cost ${meta.get('total_cost_usd', 0):.4f} (from claude -p)")
 
 session = calls(os.path.join(root, sid + ".jsonl"))
 if session:
@@ -499,7 +499,7 @@ TOTAL_COST="$(spent_usd)"
   printf '\n## %s UTC - RUN TOTALS (ralph shell loop)\n' "$(date -u +%Y-%m-%dT%H:%M:%S)"
   printf -- '- sessions: %s; build iterations: %s; verify rounds: %s\n' "$SESSION_N" "$((ITER - 1))" "$((round - 1))"
   printf -- '- verification ended %s\n' "$( ((VERIFY_CLEAN)) && echo clean || echo 'with findings outstanding')"
-  printf -- '- total cost (exact, summed from claude -p): $%s\n' "$TOTAL_COST"
+  printf -- '- total cost $%s (summed from claude -p)\n' "$TOTAL_COST"
   printf -- '- shipped: %s\n' "$( [[ "$ship_p" == COMPLETE ]] && echo yes || echo 'no — re-run ralph')"
   printf -- '---\n'
 } >> "$PROGRESS"

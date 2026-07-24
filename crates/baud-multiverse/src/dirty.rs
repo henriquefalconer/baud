@@ -4,8 +4,8 @@
 // The pure half of wiring `baud-snapshot`'s `KVM_CAP_DIRTY_LOG_RING`-based reset into
 // `Multiverse` (specs/baud-snapshot.md §5: "rewind copies back only dirtied pages ... cost ∝
 // change, not machine size"; todo.md §14's "DirtyRing is not yet wired into baud-multiverse's
-// Multiverse" gap, closed by this module + `linux::Multiverse::{enable_dirty_ring,
-// reset_dirty_pages}`).
+// Multiverse" gap, closed by this module + `linux::Multiverse::boot`/`restore`'s
+// `dirty_ring_entries` parameter and `reset_dirty_pages`).
 //
 // Deliberately NOT inside `linux/mod.rs`: that module is `#[cfg(target_os = "linux")]`-gated
 // (`lib.rs`), so on this Windows dev machine `cargo test --workspace` never compiles it at all —

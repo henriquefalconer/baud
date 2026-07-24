@@ -309,15 +309,23 @@ pub enum DirtyRingError {
 /// Because this workspace enforces exactly one vCPU per VM (todo.md §1's hard constraint), a
 /// per-vCPU ring *is* the whole VM's dirty-page record — there is no cross-vCPU ring to merge.
 ///
-/// Usage: [`DirtyRing::enable`] once, right after `create_vcpu` and before the guest starts
-/// running (the capability must be negotiated before any dirty page could occur);
-/// [`DirtyRing::collect`] after a run segment to get every page the guest touched since the last
-/// collect, in the order the kernel published them; [`DirtyRing::confirm_reset`] once the caller
-/// has restored/rewound those exact pages, telling the kernel it may resume tracking from a clean
-/// slate for that set — the classic "harvest, act, confirm" three-step the kernel's own
-/// `KVM_CAP_DIRTY_LOG_RING` documentation describes, factored here into three explicit calls so a
-/// caller can (for example) crash between harvest and confirm without silently losing dirty pages
-/// (an un-confirmed entry stays `DIRTY` and is re-harvested next time).
+/// Usage is a two-step negotiation, not one call — **real-hardware finding**: an earlier version
+/// of this API offered a single combined `enable(vm, vcpu, entries)` documented as callable "right
+/// after `create_vcpu`," which is wrong. The kernel refuses `KVM_ENABLE_CAP(KVM_CAP_DIRTY_LOG_RING)`
+/// with `EINVAL` once the VM already has a vCPU (`kvm_vm_ioctl_enable_cap`'s own
+/// `kvm->created_vcpus` check) — confirmed on real `/dev/kvm` hardware the first time any caller
+/// actually exercised this path (todo.md §14's H5 `reset_cost_scales_with_write_set` test). So:
+/// [`DirtyRing::negotiate_capability`] must run on the `VmFd` *before* `create_vcpu`;
+/// [`DirtyRing::open`] mmaps the resulting per-vCPU ring afterward, once the vCPU exists, with the
+/// same `entries` count (`baud_multiverse::linux::create_vm_vcpu_shell` is the one place in this
+/// workspace that creates a VM and its vCPU together, so it is the caller responsible for getting
+/// this ordering right). After that: [`DirtyRing::collect`] after a run segment to get every page
+/// the guest touched since the last collect, in the order the kernel published them;
+/// [`DirtyRing::confirm_reset`] once the caller has restored/rewound those exact pages, telling the
+/// kernel it may resume tracking from a clean slate for that set — the classic "harvest, act,
+/// confirm" three-step the kernel's own `KVM_CAP_DIRTY_LOG_RING` documentation describes, factored
+/// here into explicit calls so a caller can (for example) crash between harvest and confirm without
+/// silently losing dirty pages (an un-confirmed entry stays `DIRTY` and is re-harvested next time).
 pub struct DirtyRing {
     ptr: *mut kvm_dirty_gfn,
     entries: usize,
@@ -332,29 +340,48 @@ pub struct DirtyRing {
 unsafe impl Send for DirtyRing {}
 
 impl DirtyRing {
-    /// Negotiate `KVM_CAP_DIRTY_LOG_RING` on `vm` for `entries` `kvm_dirty_gfn` slots and mmap the
-    /// resulting per-vCPU ring off `vcpu`'s file descriptor at `KVM_DIRTY_LOG_PAGE_OFFSET` pages
-    /// in (the kernel's documented convention for this specific ring: read-only, `MAP_SHARED` so
-    /// writes the kernel makes to publish new entries are visible without a re-mmap).
-    pub fn enable(vm: &VmFd, vcpu: &VcpuFd, entries: u32) -> Result<Self, DirtyRingError> {
+    /// Negotiate `KVM_CAP_DIRTY_LOG_RING` on `vm` for `entries` `kvm_dirty_gfn` slots. Must be
+    /// called before `vm.create_vcpu` — see [`DirtyRing`]'s own doc for the real-hardware `EINVAL`
+    /// this ordering requirement was found from.
+    pub fn negotiate_capability(vm: &VmFd, entries: u32) -> Result<(), DirtyRingError> {
+        if entries == 0 || !entries.is_power_of_two() {
+            return Err(DirtyRingError::NotPowerOfTwo(entries));
+        }
+        let bytes = dirty_ring::ring_bytes(entries);
+        let mut cap = kvm_enable_cap { cap: KVM_CAP_DIRTY_LOG_RING, ..Default::default() };
+        cap.args[0] = bytes as u64;
+        vm.enable_cap(&cap)?;
+        Ok(())
+    }
+
+    /// Mmap the per-vCPU ring off `vcpu`'s file descriptor at `KVM_DIRTY_LOG_PAGE_OFFSET` pages in
+    /// (the kernel's documented convention for this specific ring), `MAP_SHARED` so writes the
+    /// kernel makes to publish new entries are visible without a re-mmap. **Real-hardware finding**:
+    /// this must be `PROT_READ | PROT_WRITE`, not read-only — [`collect`](Self::collect) writes the
+    /// `RESET` flag bit back into this same mapping to mark harvested entries (the kernel's own
+    /// three-step "harvest, act, confirm" protocol requires userspace to mutate the ring in place,
+    /// matching how e.g. QEMU maps this same ring read-write); a read-only mapping segfaults
+    /// (`SIGSEGV`) the instant `collect` is first called, confirmed on real `/dev/kvm` hardware
+    /// (todo.md §14's H5 `reset_cost_scales_with_write_set` test — the first caller ever to reach a
+    /// live `collect()`). `entries` must be the exact same value already passed to
+    /// [`DirtyRing::negotiate_capability`] on this vCPU's VM — the kernel sized the ring from that
+    /// earlier call, not this one.
+    pub fn open(vcpu: &VcpuFd, entries: u32) -> Result<Self, DirtyRingError> {
         if entries == 0 || !entries.is_power_of_two() {
             return Err(DirtyRingError::NotPowerOfTwo(entries));
         }
         let bytes = dirty_ring::ring_bytes(entries);
 
-        let mut cap = kvm_enable_cap { cap: KVM_CAP_DIRTY_LOG_RING, ..Default::default() };
-        cap.args[0] = bytes as u64;
-        vm.enable_cap(&cap)?;
-
         // SAFETY: `vcpu.as_raw_fd()` is a live vCPU fd for the duration of this call;
         // `KVM_DIRTY_LOG_PAGE_OFFSET * HOST_PAGE_SIZE` is the kernel-documented mmap offset for
         // this exact ring (distinct from the vCPU's own `kvm_run` mmap at offset 0); `bytes` was
-        // just accepted by `KVM_ENABLE_CAP` above, so the kernel has sized this mapping already.
+        // already accepted by `KVM_ENABLE_CAP` in `negotiate_capability`, so the kernel has sized
+        // this mapping already; `PROT_WRITE` is required, see this method's doc.
         let addr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 bytes,
-                libc::PROT_READ,
+                libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
                 vcpu.as_raw_fd(),
                 (KVM_DIRTY_LOG_PAGE_OFFSET as libc::off_t) * (HOST_PAGE_SIZE as libc::off_t),

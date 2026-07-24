@@ -206,19 +206,36 @@ instead of silently rewinding it.
   base, not the cumulative RCB value, so a restored guest's brand-new branch counter silently
   reset the RCB space `inject_timer_tick`'s target computation depends on — fixed by adding an
   `rcb_anchor` field (§3's second note) via `WorkClock::rcb_offset`.
-- **Reset (§5) — built and wired into `baud-multiverse`.** `KVM_CAP_DIRTY_LOG_RING` is real:
-  `crates/baud-snapshot/src/dirty_ring.rs` is the hardware-independent ring-scan protocol (decode a
-  `kvm_dirty_gfn` ring into harvested `(slot, offset)` pairs, unit- and property-tested with no KVM
-  involved), driven by `src/linux.rs`'s `DirtyRing` (`KVM_ENABLE_CAP(KVM_CAP_DIRTY_LOG_RING, ...)`,
-  an mmap of the per-vCPU ring at `KVM_DIRTY_LOG_PAGE_OFFSET`, and `KVM_RESET_DIRTY_RINGS` to
-  reclaim harvested pages). Because §1's hard constraint (one vCPU per VM) holds workspace-wide, a
-  per-vCPU ring is a whole VM's dirty-page record with no cross-vCPU merge to do.
-  `KVM_RESET_DIRTY_RINGS`'s ioctl number is not in the pinned `kvm-ioctls` 0.25 — it is derived
-  from the same `ioctl_expr` helper `kvm-ioctls` itself is built from (`vmm_sys_util::ioctl`), not
-  hand-encoded, to minimize the risk of an unverifiable-on-this-machine mistake.
-  - **Wired into `baud-multiverse`**: `Multiverse::enable_dirty_ring(entries)` negotiates the ring
-    right after a guest is booted/restored (before any guest execution, matching
-    `DirtyRing::enable`'s own "must be negotiated before any dirty page could occur" requirement);
+- **Reset (§5) — built, wired into `baud-multiverse`, and exercised for real on real KVM
+  hardware (`reset_cost_scales_with_write_set`, `drive/h5.sh`'s H5.4).** `KVM_CAP_DIRTY_LOG_RING`
+  is real: `crates/baud-snapshot/src/dirty_ring.rs` is the hardware-independent ring-scan protocol
+  (decode a `kvm_dirty_gfn` ring into harvested `(slot, offset)` pairs, unit- and property-tested
+  with no KVM involved), driven by `src/linux.rs`'s `DirtyRing`. Because §1's hard constraint (one
+  vCPU per VM) holds workspace-wide, a per-vCPU ring is a whole VM's dirty-page record with no
+  cross-vCPU merge to do. `KVM_RESET_DIRTY_RINGS`'s ioctl number is not in the pinned `kvm-ioctls`
+  0.25 — it is derived from the same `ioctl_expr` helper `kvm-ioctls` itself is built from
+  (`vmm_sys_util::ioctl`), not hand-encoded, to minimize the risk of an unverifiable-on-this-machine
+  mistake.
+  - **Three real, previously-undiscovered bugs found the first time this path ever ran against a
+    live guest**, none reachable by `cargo check`: (1) `KVM_CAP_DIRTY_LOG_RING` cannot be
+    negotiated on a `VmFd` once any vCPU already exists (the kernel's own `kvm->created_vcpus`
+    check, `EINVAL`) — `DirtyRing::enable` (one combined call, documented as callable any time
+    after `create_vcpu`) is now split into `negotiate_capability(vm, entries)` (must run *before*
+    `create_vcpu`) and `open(vcpu, entries)` (the mmap step, after); `baud-multiverse`'s
+    `create_vm_vcpu_shell` calls the former between `create_vm` and `create_vcpu`. (2) the ring's
+    mmap was `PROT_READ`-only, but `DirtyRing::collect` writes the `RESET` flag bit back into that
+    same mapping to mark harvested entries — segfaulted (`SIGSEGV`) the instant `collect` was first
+    called for real; fixed to `PROT_READ | PROT_WRITE` (matching how e.g. QEMU maps this same
+    ring). (3) the guest-RAM memory slot was registered with `flags: 0` — KVM only tracks dirty
+    pages (bitmap or ring) for slots carrying `KVM_MEM_LOG_DIRTY_PAGES`, so a ring opened over an
+    untracked slot silently reported zero dirtied pages forever regardless of how much the guest
+    wrote; fixed by threading a `log_dirty_pages: bool` into
+    `linux::allocate_and_register_guest_ram`, set whenever a caller requests a dirty ring.
+  - **Wired into `baud-multiverse`**: dirty-ring negotiation moved to construction time —
+    `Multiverse::boot`/`Multiverse::restore` both take a `dirty_ring_entries: Option<u32>` (bug 1
+    above is exactly why this could not remain a separate "enable after boot" call); `Some`
+    negotiates+opens the ring and enables per-slot dirty logging before the guest ever runs,
+    matching `DirtyRing`'s "must be negotiated before any dirty page could occur" requirement.
     `Multiverse::reset_dirty_pages(base_ram)` collects the harvest, restores exactly those RAM
     pages from a caller-supplied base `Universe::ram` slice, and only then confirms the reset to
     the kernel — a mid-loop write failure leaves the un-restored pages un-confirmed rather than
@@ -232,10 +249,11 @@ instead of silently rewinding it.
     index (`universe.rs`'s "page `i` covers `[i*PAGE_SIZE, (i+1)*PAGE_SIZE)`" convention), proven
     by 8 unit/property tests with no KVM/mmap at all — `reset_dirty_pages`'s return value (pages
     actually restored) is therefore provably bounded by the dirty ring's own harvest count, the
-    direct observable `reset_cost_scales_with_write_set` checks. The real
-    `enable_dirty_ring`/`reset_dirty_pages` calls themselves are, like every other `linux/`-tree
-    method in this workspace, type-checked (`cargo check --target x86_64-unknown-linux-gnu -p
-    baud-multiverse`) but not yet exercised on real KVM hardware.
+    direct observable `reset_cost_scales_with_write_set` checks. On real hardware, a `timer-guest`
+    run past two ticks dirties a small handful of pages (the ISR's stack pushes/pops plus a few
+    page-table `ACCESSED`-bit updates from the guest's first address translations — real, accepted,
+    non-bug behavior), never the full 65536-page RAM region, and a reset makes RAM byte-identical
+    to the pre-run snapshot again.
 - **Branching (§4) — not built; a real blocker found, not just a missing wrapper.** The spec's
   `UFFDIO_CONTINUE`-based sharing requires the kernel's *minor-fault* mechanism, which only exists
   for shared (memfd/hugetlbfs/shmem) mappings — but `baud-multiverse`'s guest RAM

@@ -19,10 +19,15 @@
 #         refused by Multiverse::restore against this real host's real signature unless a CPUID
 #         template is active — exercised against the real cpuid_leaf1_eax(kvm) read and the real
 #         RestoreError::CpuMismatch path, not just the pure universe::model_matches comparator.
+#   H5.4  reset_cost_scales_with_write_set: with a dirty ring negotiated at boot, running
+#         timer-guest through two ticks dirties only a handful of RAM pages (the ISR's stack
+#         pushes/pops plus a few page-table ACCESSED-bit updates), never total RAM; rewinding via
+#         Multiverse::reset_dirty_pages makes guest RAM byte-identical to the pristine pre-run
+#         snapshot again.
 #
 # Not yet covered here (tracked in todo.md, later H5 slices): userfaultfd-based branching
 # (Snapshot::branch, blocked on a guest-RAM backing change — see baud-snapshot/src/linux.rs's
-# module doc), dirty-ring-based reset_cost_scales_with_write_set, shell_into_universe_resumes.
+# module doc), shell_into_universe_resumes.
 
 set -euo pipefail
 
@@ -96,6 +101,15 @@ echo "$CPU_OUT" | grep -q "test result: ok" || fail "H5.3: restore_refuses_misma
 pass "H5.3: restore_refuses_mismatched_cpu — a forged cpu_signature is refused, and template_active=true bypasses the refusal"
 
 # ---------------------------------------------------------------------------
+# H5.4 — reset_cost_scales_with_write_set
+# ---------------------------------------------------------------------------
+log "Running reset_cost_scales_with_write_set against real /dev/kvm (timer-guest fixture)..."
+DIRTY_OUT=$(cargo test -q -p baud-multiverse reset_cost_scales_with_write_set -- --test-threads=1 2>&1)
+echo "$DIRTY_OUT"
+echo "$DIRTY_OUT" | grep -q "test result: ok" || fail "H5.4: reset_cost_scales_with_write_set FAILED"
+pass "H5.4: reset_cost_scales_with_write_set — dirty-ring reset touches a handful of pages, never total RAM, and rewinds RAM exactly"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -112,8 +126,10 @@ echo "  - The restored run's whole observation stream (console output, RAM hash)
 echo "    final halt is byte-identical to the straight run's"
 echo "  - A universe with a forged cpu_signature is refused by restore on this real host unless"
 echo "    a CPUID template is active"
+echo "  - Multiverse::reset_dirty_pages rewinds only the RAM pages a KVM_CAP_DIRTY_LOG_RING ring"
+echo "    reports as touched (a handful, never total RAM), and the rewind is byte-exact"
 echo ""
-echo "H-series H0-H4 complete; H5's core capture/restore round trip and CPU-mismatch refusal are"
-echo "now proven on real hardware. Remaining H5 work (userfaultfd branching, dirty-ring reset,"
+echo "H-series H0-H4 complete; H5's capture/restore round trip, CPU-mismatch refusal, and"
+echo "dirty-ring reset are now proven on real hardware. Remaining H5 work (userfaultfd branching,"
 echo "shell-into): see todo.md."
 echo ""

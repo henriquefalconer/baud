@@ -1685,3 +1685,79 @@ todo.md updated: H5 build-status entry documents restore_refuses_mismatched_cpu 
   - todo.md's H5 build-status entry updated to document the closure and re-describe the two remaining H5 gaps (dirty-ring-reset real-hardware test, shell-into) with more precision on scope
   - cargo test -p baud-multiverse: 57/57 (was 56/56); cargo build/test/clippy --workspace all green, zero new warnings; drive/h0.sh-h5.sh all re-verified passing end-to-end on real /dev/kvm
 ---
+
+Pushed ac9b26f to origin/main. Running post-push verification: drive/h0.sh-h5.sh plus cargo build/test/clippy --workspace against the pushed tip.
+
+Post-push verification GREEN: drive/h0.sh-h5.sh all pass end-to-end on real /dev/kvm at pushed tip ac9b26f (verified local HEAD == origin/main); cargo build/test/clippy --workspace clean, zero regressions. todo.md still has pending items (H5's remaining sub-guarantees: userfaultfd branching, dirty-ring reset on real hardware, shell-into a live shell; plus H6 and the entire M-series) so this iteration ends with NEXT.
+
+## 2026-07-24T21:54:51 UTC - Session usage — build-1 [sonnet]
+- cost $3.9363649500000006 (exact, from claude -p)
+- context 159,310 tok peak of 1M (16%) across 48 inference calls, monotonic
+- models sonnet-5 $3.9334 (in 1,684 / out 36,968 / cache-read 6,978,729) · haiku-4-5 $0.0030
+- subagents (3) sonnet-5 x3
+- transcript: ralph/.run/001-build-1.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md and recent git history first.
+
+Chose reset_cost_scales_with_write_set (test-matrix row for H5's dirty-ring reset), it's a real-hardware test-writing task, not new plumbing — DirtyRing/enable_dirty_ring/reset_dirty_pages already exist and are wired into Multiverse per todo.md's H5 entry, just never called against real KVM. This is the smallest closeable H5 gap left (branch/userfaultfd is architecturally blocked; shell-into needs a new Console/PTY API).
+
+Dispatched an Explore subagent to study enable_dirty_ring/reset_dirty_pages wiring, DirtyRing::harvest, ram_page_indices, and existing fixtures — need a fixture that writes to guest RAM to give the dirty-ring test a real, boundable write set. Waiting on results...
+
+Explore agent confirmed: enable_dirty_ring/reset_dirty_pages/DirtyRing::collect/ram_page_indices all already wired, no production code needed. timer-guest (H4's fixture) is the only fixture that writes RAM (interrupt frame push/pop onto the boot stack page) so it's reusable without a new fixture. Writing the test now.
+
+Test written: linux::tests::reset_cost_scales_with_write_set in crates/baud-multiverse/src/linux/mod.rs. Boots timer-guest, enables dirty ring pre-run, snapshots pristine base, delivers 2 ticks + halts, resets via reset_dirty_pages, asserts page count is small/nonzero (<=4, <65536 total) and RAM hash matches base after reset. Building and running now...
+
+Found a real production bug: KVM_CAP_DIRTY_LOG_RING can't be negotiated once a vCPU exists (kernel EINVAL) — the old enable_dirty_ring(&mut self) API (callable any time after boot) could never actually succeed in this workspace. Fixing by splitting DirtyRing::enable into negotiate_capability (pre-create_vcpu) / open (post), and threading dirty_ring_entries through boot/restore/create_vm_vcpu_shell. Building now...
+
+Segfault root-caused: the dirty-ring mmap was PROT_READ-only, but DirtyRing::collect() writes the RESET flag back into that same mapping to mark harvested entries — the kernel's harvest/act/confirm protocol requires write access (matches QEMU's own PROT_READ|PROT_WRITE mapping). Fixed the mmap prot flags in DirtyRing::open. Rebuilding and rerunning...
+
+Second real bug found: reset_count was 0 because the guest RAM memory slot was registered with flags=0 — KVM only tracks dirty pages (bitmap or ring) for slots with KVM_MEM_LOG_DIRTY_PAGES set. Threaded log_dirty_pages through allocate_and_register_guest_ram, set only when dirty_ring_entries is Some. Rebuilding and rerunning...
+
+reset_cost_scales_with_write_set passes 5/5 runs on real /dev/kvm hardware after both fixes. Running full workspace build/test/clippy for regressions...
+
+cargo test --workspace: all green, zero failures/regressions (baud-multiverse now 58/58, was 57/57). Running clippy --workspace --all-targets...
+
+Updated drive/h5.sh with H5.4 step for reset_cost_scales_with_write_set. Running drive/h5.sh end-to-end...
+
+drive/h5.sh ALL CHECKS PASSED including new H5.4. Re-verifying drive/h0.sh through h4.sh for regressions before committing...
+
+drive/h0.sh-h4.sh all re-verified passing with zero regressions. Updating todo.md's H5 build-status entry to document reset_cost_scales_with_write_set's closure and the two real bugs found (EINVAL on late cap negotiation, PROT_READ-only mmap segfault, missing KVM_MEM_LOG_DIRTY_PAGES slot flag)...
+
+All verification green: cargo build/test/clippy --workspace clean (baud-multiverse 58/58), drive/h0.sh-h5.sh all pass end-to-end on real /dev/kvm with zero regressions. Writing final progress block and committing...
+
+
+## 2026-07-24T22:18:18 UTC - Changes committed.
+- What was implemented: H5's reset_cost_scales_with_write_set (test-matrix row for the dirty-ring
+  "reset" guarantee) closed on real KVM hardware — plus three real production bugs found and fixed
+  along the way, since this was the first time DirtyRing/enable_dirty_ring/reset_dirty_pages ever
+  ran against a live guest instead of just type-checking.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/src/dirty.rs,
+  crates/baud-snapshot/src/linux.rs, drive/h5.sh, specs/baud-snapshot.md, todo.md
+- **Brief description of changes:**
+  - New test linux::tests::reset_cost_scales_with_write_set: boots timer-guest with a dirty ring
+    requested, snapshots the pristine pre-run state, delivers two ticks + halts (dirtying a
+    handful of pages), resets via reset_dirty_pages, asserts the page count is small/nonzero and
+    far below total RAM, and that RAM is byte-identical to the pristine base after reset
+  - Bug 1: KVM_CAP_DIRTY_LOG_RING cannot be negotiated once a vCPU already exists (kernel EINVAL)
+    — the old Multiverse::enable_dirty_ring(&mut self, entries), callable any time after boot,
+    could never succeed. Fixed by splitting baud_snapshot::linux::DirtyRing::enable into
+    negotiate_capability (pre-create_vcpu) / open (post-create_vcpu, the mmap step), and moving
+    negotiation into create_vm_vcpu_shell between create_vm and create_vcpu. Multiverse::boot and
+    Multiverse::restore now take dirty_ring_entries: Option<u32>; enable_dirty_ring is gone.
+  - Bug 2: the ring's mmap was PROT_READ-only, but DirtyRing::collect writes the RESET flag back
+    into that same mapping — segfaulted (SIGSEGV) the instant collect() was first called for real.
+    Root-caused with gdb (installed via apt-get, wasn't present). Fixed to PROT_READ | PROT_WRITE.
+  - Bug 3: the guest-RAM memory slot was registered with flags: 0, so KVM never tracked dirty
+    pages for it at all regardless of the ring. Fixed by threading log_dirty_pages: bool through
+    allocate_and_register_guest_ram, setting KVM_MEM_LOG_DIRTY_PAGES only when dirty_ring_entries
+    is Some.
+  - drive/h5.sh gained a new H5.4 step; specs/baud-snapshot.md and todo.md's H5 build-status entry
+    updated to document the closure and all three findings.
+  - cargo test -p baud-multiverse: 58/58 (was 57/57); cargo build/test/clippy --workspace all
+    green, zero new warnings in any touched file; drive/h0.sh-h5.sh all re-verified passing
+    end-to-end on real /dev/kvm with zero regressions.
+---

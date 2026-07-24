@@ -28,6 +28,7 @@ use baud_snapshot::{PageRef, PageStore, Universe};
 use baud_vcpu::DeterminismHole;
 use kvm_bindings::{
     kvm_cpuid_entry2, kvm_enable_cap, kvm_userspace_memory_region, KVM_MAX_CPUID_ENTRIES,
+    KVM_MEM_LOG_DIRTY_PAGES,
 };
 use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd, VmFd};
 use perf_event::events::Hardware;
@@ -70,6 +71,8 @@ pub enum BootError {
     BootParams(#[from] bootparams::BootParamsError),
     #[error("failed to create the work-clock's perf_event branch counter: {0}")]
     BranchCounter(#[from] io::Error),
+    #[error("failed to set up the dirty ring: {0}")]
+    DirtyRing(#[from] baud_snapshot::linux::DirtyRingError),
 }
 
 /// A fully booted-but-not-yet-run guest: KVM handles, guest memory, and the vCPU, all configured
@@ -83,33 +86,56 @@ pub struct BootedGuest {
     pub guest_mem: GuestMemory,
 }
 
-/// The `Kvm::new → create_vm → register zeroed guest RAM → create_vcpu → CPUID mask + MSR filter`
-/// prefix shared by both ways a [`BootedGuest`] comes into existence (specs/baud-multiverse.md §2):
-/// [`boot_guest`] continues it with a fresh kernel image (page tables, boot params, entry-point
-/// regs); [`restore_guest`] continues it by walking a captured [`Universe`]'s `restore_plan`
-/// instead (specs/baud-snapshot.md §6) — RAM/regs/sregs/etc. all come from the universe rather than
-/// a freshly-loaded image, so this prefix is exactly the part both paths need identically and
-/// nothing more.
-fn create_vm_vcpu_shell() -> Result<BootedGuest, BootError> {
+/// The `Kvm::new → create_vm → [negotiate dirty ring] → register zeroed guest RAM → create_vcpu →
+/// CPUID mask + MSR filter → [open dirty ring]` prefix shared by both ways a [`BootedGuest`] comes
+/// into existence (specs/baud-multiverse.md §2): [`boot_guest`] continues it with a fresh kernel
+/// image (page tables, boot params, entry-point regs); [`restore_guest`] continues it by walking a
+/// captured [`Universe`]'s `restore_plan` instead (specs/baud-snapshot.md §6) — RAM/regs/sregs/etc.
+/// all come from the universe rather than a freshly-loaded image, so this prefix is exactly the
+/// part both paths need identically and nothing more.
+///
+/// `dirty_ring_entries`, when `Some`, negotiates `KVM_CAP_DIRTY_LOG_RING` on the VM *before*
+/// `create_vcpu` and mmaps the resulting per-vCPU ring right after — real-hardware finding
+/// (todo.md §14): the kernel returns `EINVAL` if that capability is negotiated after any vCPU
+/// already exists, so this is the only correct place in this workspace to do it (see
+/// `baud_snapshot::linux::DirtyRing`'s own doc for the exact mechanism).
+fn create_vm_vcpu_shell(
+    dirty_ring_entries: Option<u32>,
+) -> Result<(BootedGuest, Option<baud_snapshot::linux::DirtyRing>), BootError> {
     baud_vcpu::validate_vcpu_count(1)?; // todo.md §1: exactly one vCPU per VM, checked first
 
     let kvm = Kvm::new()?;
     let vm = kvm.create_vm()?;
 
-    let guest_mem = allocate_and_register_guest_ram(&vm, layout::GUEST_RAM_SIZE)?;
+    if let Some(entries) = dirty_ring_entries {
+        baud_snapshot::linux::DirtyRing::negotiate_capability(&vm, entries)?;
+    }
+
+    let guest_mem =
+        allocate_and_register_guest_ram(&vm, layout::GUEST_RAM_SIZE, dirty_ring_entries.is_some())?;
 
     let vcpu = vm.create_vcpu(0)?;
     apply_cpuid_mask(&kvm, &vcpu)?;
     configure_msr_filter(&vm)?;
 
-    Ok(BootedGuest { kvm, vm, vcpu, guest_mem })
+    let dirty_ring = dirty_ring_entries
+        .map(|entries| baud_snapshot::linux::DirtyRing::open(&vcpu, entries))
+        .transpose()?;
+
+    Ok((BootedGuest { kvm, vm, vcpu, guest_mem }, dirty_ring))
 }
 
 /// Run the full boot flow (specs/baud-multiverse.md §2's `Kvm::new → create_vm → register guest
 /// RAM → create_vcpu → CPUID/TSC/MSR setup → linux-loader boot`) and return a [`BootedGuest`]
-/// positioned at the kernel's 64-bit entry point, ready to enter `KVM_RUN`.
-pub fn boot_guest(kernel_path: &Path, cmdline: &str) -> Result<BootedGuest, BootError> {
-    let guest = create_vm_vcpu_shell()?;
+/// positioned at the kernel's 64-bit entry point, ready to enter `KVM_RUN`, alongside a
+/// [`baud_snapshot::linux::DirtyRing`] if `dirty_ring_entries` was `Some` (see
+/// [`create_vm_vcpu_shell`]'s doc for why negotiation must happen this early).
+pub fn boot_guest(
+    kernel_path: &Path,
+    cmdline: &str,
+    dirty_ring_entries: Option<u32>,
+) -> Result<(BootedGuest, Option<baud_snapshot::linux::DirtyRing>), BootError> {
+    let (guest, dirty_ring) = create_vm_vcpu_shell(dirty_ring_entries)?;
     guest.vcpu.set_tsc_khz(VIRTUAL_TSC_KHZ)?;
 
     pagetables::write_identity_page_tables(&guest.guest_mem, layout::GUEST_RAM_SIZE)
@@ -131,7 +157,7 @@ pub fn boot_guest(kernel_path: &Path, cmdline: &str) -> Result<BootedGuest, Boot
     regs.rflags = 0x2; // bit 1 is reserved-must-be-1; every other flag starts clear
     guest.vcpu.set_regs(&regs)?;
 
-    Ok(guest)
+    Ok((guest, dirty_ring))
 }
 
 /// Errors from reconstructing a [`BootedGuest`] out of a captured [`Universe`]
@@ -153,7 +179,7 @@ pub enum RestoreError {
 /// wired onto a live `Multiverse`).
 #[derive(Debug, thiserror::Error)]
 pub enum ResetError {
-    #[error("reset_dirty_pages called before enable_dirty_ring")]
+    #[error("reset_dirty_pages called on a Multiverse booted/restored without dirty_ring_entries")]
     NotEnabled,
     #[error(
         "dirty ring reported RAM page {0}, but the supplied base snapshot only has that many pages \
@@ -175,8 +201,12 @@ pub enum ResetError {
 /// `template_active`). Device/console state is deliberately left to the caller by
 /// `baud-snapshot::linux::restore` (see `RestoreStep::RestoreDevice`'s doc) — reassembling that
 /// into a live [`Multiverse`] is [`Multiverse::restore`]'s job, one layer up.
-pub fn restore_guest(universe: &Universe, template_active: bool) -> Result<BootedGuest, RestoreError> {
-    let guest = create_vm_vcpu_shell()?;
+pub fn restore_guest(
+    universe: &Universe,
+    template_active: bool,
+    dirty_ring_entries: Option<u32>,
+) -> Result<(BootedGuest, Option<baud_snapshot::linux::DirtyRing>), RestoreError> {
+    let (guest, dirty_ring) = create_vm_vcpu_shell(dirty_ring_entries)?;
     baud_snapshot::linux::restore(
         &guest.kvm,
         &guest.vm,
@@ -186,7 +216,7 @@ pub fn restore_guest(universe: &Universe, template_active: bool) -> Result<Boote
         universe,
         template_active,
     )?;
-    Ok(guest)
+    Ok((guest, dirty_ring))
 }
 
 /// Register [`layout::GUEST_RAM_START`]..`+ram_size` as one zeroed, anonymous-mmap-backed memory
@@ -194,19 +224,31 @@ pub fn restore_guest(universe: &Universe, template_active: bool) -> Result<Boote
 /// addresses" — `GuestMemoryMmap::from_ranges` anonymous-mmaps zeroed pages, and nothing in this
 /// boot flow ever writes host data into guest RAM except the specific structures this module
 /// builds).
-fn allocate_and_register_guest_ram(vm: &VmFd, ram_size: usize) -> Result<GuestMemory, BootError> {
+fn allocate_and_register_guest_ram(
+    vm: &VmFd,
+    ram_size: usize,
+    log_dirty_pages: bool,
+) -> Result<GuestMemory, BootError> {
     let guest_mem = GuestMemory::from_ranges(&[(GuestAddress(layout::GUEST_RAM_START), ram_size)])
         .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
 
     let host_addr = guest_mem
         .get_host_address(GuestAddress(layout::GUEST_RAM_START))
         .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
+    // Real-hardware finding (todo.md §14, H5 reset_cost_scales_with_write_set): KVM only tracks
+    // dirty pages — via the bitmap *or* the KVM_CAP_DIRTY_LOG_RING ring — for memory slots
+    // registered with KVM_MEM_LOG_DIRTY_PAGES; a dirty ring opened over a slot registered with
+    // flags=0 (this function's prior unconditional behavior) silently reports zero dirtied pages
+    // forever, no matter how much the guest actually writes. Only set when a caller actually wants
+    // dirty tracking (`dirty_ring_entries.is_some()`, `create_vm_vcpu_shell`'s caller) — the flag
+    // has a real cost (write-protecting the slot) callers that never reset shouldn't pay.
+    let flags = if log_dirty_pages { KVM_MEM_LOG_DIRTY_PAGES } else { 0 };
     let region = kvm_userspace_memory_region {
         slot: 0,
         guest_phys_addr: layout::GUEST_RAM_START,
         memory_size: ram_size as u64,
         userspace_addr: host_addr as u64,
-        flags: 0,
+        flags,
     };
     // SAFETY: `host_addr` came from `guest_mem` itself (the region this same call registers as
     // the backing for `guest_phys_addr`), sized exactly `ram_size`, and `guest_mem` outlives the
@@ -379,11 +421,11 @@ pub struct Multiverse {
     guest: BootedGuest,
     bus: DeviceBus,
     time: WorkClock<LinuxBranchCounter>,
-    /// `Some` once [`enable_dirty_ring`](Self::enable_dirty_ring) has negotiated
-    /// `KVM_CAP_DIRTY_LOG_RING` on this guest's vCPU (specs/baud-snapshot.md §5) — `None` until
-    /// then, since the ring is an opt-in cost (an extra mmap + capability negotiation) a caller
-    /// that never rewinds this `Multiverse` should not pay. [`reset_dirty_pages`](Self::
-    /// reset_dirty_pages) requires it to be `Some`.
+    /// `Some` when [`boot`](Self::boot)/[`restore`](Self::restore) negotiated `KVM_CAP_DIRTY_LOG_
+    /// RING` on this guest's vCPU (specs/baud-snapshot.md §5, via `dirty_ring_entries: Some(_)`) —
+    /// `None` otherwise, since the ring is an opt-in cost (an extra mmap + capability negotiation +
+    /// per-slot dirty-page write-protection) a caller that never rewinds this `Multiverse` should
+    /// not pay. [`reset_dirty_pages`](Self::reset_dirty_pages) requires it to be `Some`.
     dirty_ring: Option<baud_snapshot::linux::DirtyRing>,
 }
 
@@ -414,17 +456,28 @@ impl Multiverse {
     /// range for the guest's own clock arithmetic to work with sane-looking values. `tape` is the
     /// run's entire nondeterministic-input budget — the sole source the tape device serves
     /// (specs/baud-tape-device.md §5), fixed for this `Multiverse`'s whole lifetime.
+    ///
+    /// `dirty_ring_entries`, when `Some`, negotiates and opens a `KVM_CAP_DIRTY_LOG_RING` ring for
+    /// this guest right here at boot time — real-hardware finding (todo.md §14): the kernel
+    /// refuses to negotiate the capability once a vCPU already exists, so there is no correct way
+    /// to "turn it on later" after `boot` returns (see [`create_vm_vcpu_shell`]'s and
+    /// `baud_snapshot::linux::DirtyRing`'s docs). Pass `None` for a `Multiverse` that will never
+    /// call [`reset_dirty_pages`](Self::reset_dirty_pages) — the ring is an opt-in cost (an extra
+    /// mmap + capability negotiation) callers that never rewind should not pay. `entries` must be a
+    /// nonzero power of two; 4096 is a reasonable default with no sharper estimate of a run
+    /// segment's write set.
     pub fn boot(
         kernel_path: &Path,
         cmdline: &str,
         base: u64,
         k: u64,
         tape: Vec<u8>,
+        dirty_ring_entries: Option<u32>,
     ) -> Result<Self, BootError> {
-        let guest = boot_guest(kernel_path, cmdline)?;
+        let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, dirty_ring_entries)?;
         let counter = LinuxBranchCounter::new()?;
         let bus = DeviceBus::with_tape(tape);
-        Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter), dirty_ring: None })
+        Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter), dirty_ring })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -472,13 +525,19 @@ impl Multiverse {
     /// rcb`), not part of the captured state, so the caller supplies the same `k` the original
     /// `boot` used — a mismatched `k` would silently desynchronize the restored guest's clock from
     /// what a straight run would have produced, even though every other field is byte-exact.
+    ///
+    /// `dirty_ring_entries` behaves exactly as in [`boot`](Self::boot) — `Some` negotiates and opens
+    /// a fresh ring on the restored guest's newly-created vCPU (a restored `Multiverse` gets a
+    /// brand-new ring with no memory of whatever ring, if any, the original had; the same real-
+    /// hardware ordering constraint applies here too, since `restore_guest` also creates a vCPU).
     pub fn restore(
         universe: &Universe,
         tape: Vec<u8>,
         k: u64,
         template_active: bool,
+        dirty_ring_entries: Option<u32>,
     ) -> Result<Self, RestoreError> {
-        let guest = restore_guest(universe, template_active)?;
+        let (guest, dirty_ring) = restore_guest(universe, template_active, dirty_ring_entries)?;
         let counter = LinuxBranchCounter::new().map_err(BootError::BranchCounter)?;
         let bus = DeviceBus::restore(tape, universe.device.tape_cursor, universe.device.console.clone());
         let time = WorkClock::restore(
@@ -489,34 +548,12 @@ impl Multiverse {
             universe.clock.tsc_aux,
             counter,
         );
-        Ok(Multiverse { guest, bus, time, dirty_ring: None })
-    }
-
-    /// Negotiate `KVM_CAP_DIRTY_LOG_RING` on this guest's vCPU and start tracking dirtied RAM
-    /// pages from this moment forward (specs/baud-snapshot.md §5's "reset" guarantee:
-    /// `baud_snapshot::linux::DirtyRing::enable`'s doc — "the capability must be negotiated before
-    /// any dirty page could occur"). Callers that intend to [`reset_dirty_pages`](Self::
-    /// reset_dirty_pages) later must call this *before* [`run_to_first_halt`](Self::
-    /// run_to_first_halt) or any other guest execution — any page dirtied before `enable_
-    /// dirty_ring` runs is invisible to the ring and would not be restored by a later reset
-    /// (it is, however, already baked into whatever `Universe` a subsequent [`snapshot`](Self::
-    /// snapshot) captures as the "base" to reset back to, so a `boot`-then-`enable_dirty_ring`-
-    /// then-`snapshot` sequence is self-consistent: everything written before enablement is part
-    /// of the base itself, not a page the reset needs to touch).
-    ///
-    /// `entries` is the ring's slot count and must be a nonzero power of two (`baud_snapshot::
-    /// linux::DirtyRing::enable`'s own validation) — 4096 slots (one page's worth of `kvm_dirty_
-    /// gfn` entries times 256, comfortably above a typical branch's write set) is a reasonable
-    /// default for callers with no sharper estimate of how many pages a run segment will dirty.
-    pub fn enable_dirty_ring(&mut self, entries: u32) -> Result<(), baud_snapshot::linux::DirtyRingError> {
-        let ring = baud_snapshot::linux::DirtyRing::enable(&self.guest.vm, &self.guest.vcpu, entries)?;
-        self.dirty_ring = Some(ring);
-        Ok(())
+        Ok(Multiverse { guest, bus, time, dirty_ring })
     }
 
     /// Rewind guest RAM to `base_ram`'s content for exactly the pages the dirty ring reports as
-    /// touched since the last [`enable_dirty_ring`](Self::enable_dirty_ring)/`reset_dirty_pages`
-    /// call (specs/baud-snapshot.md §5: "rewind copies back only dirtied pages ... cost ∝ change,
+    /// touched since the last [`boot`](Self::boot)/`reset_dirty_pages` call (specs/baud-snapshot.md
+    /// §5: "rewind copies back only dirtied pages ... cost ∝ change,
     /// not machine size", `reset_cost_scales_with_write_set`'s guarantee). `base_ram` is normally
     /// a prior [`snapshot`](Self::snapshot)'s `Universe::ram` — the state this `Multiverse` should
     /// return to — indexed identically to a captured `Universe`'s own RAM (`universe.rs`'s "page
@@ -681,7 +718,7 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("first boot failed");
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_outcome = first.run_to_first_halt().expect("first run failed");
         assert_eq!(
             String::from_utf8_lossy(&first_outcome.console_output),
@@ -689,7 +726,7 @@ mod tests {
             "guest must print exactly its marker line before halting"
         );
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("second boot failed");
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
@@ -725,7 +762,7 @@ mod tests {
         let tape_a = vec![0x11, 0x22, 0x33, 0x44];
         let tape_b = vec![0x11, 0x22, 0x33, 0x99]; // differs in the last byte only
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone())
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None)
             .expect("first boot (tape A) failed");
         let first_outcome = first.run_to_first_halt().expect("first run (tape A) failed");
         assert_eq!(
@@ -733,7 +770,7 @@ mod tests {
             "guest must echo exactly the 4 tape bytes it read, byte for byte"
         );
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone())
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None)
             .expect("second boot (tape A) failed");
         let second_outcome = second.run_to_first_halt().expect("second run (tape A) failed");
         assert_eq!(
@@ -741,7 +778,7 @@ mod tests {
             "same tape twice must produce byte-identical guest output"
         );
 
-        let mut third = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b.clone())
+        let mut third = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b.clone(), None)
             .expect("third boot (tape B) failed");
         let third_outcome = third.run_to_first_halt().expect("third run (tape B) failed");
         assert_eq!(
@@ -792,7 +829,7 @@ mod tests {
         let kernel = rdrand_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("first boot failed");
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_outcome = first.run_to_first_halt().expect("first run failed");
         assert_eq!(
             first_outcome.console_output, RDRAND_GUEST_MARKER,
@@ -800,7 +837,7 @@ mod tests {
              bit must #UD immediately (real hardware behavior), not execute and produce output"
         );
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("second boot failed");
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
@@ -862,12 +899,12 @@ mod tests {
         const PERIOD_RCB: u64 = 100_000;
         const NUM_TICKS: u32 = 2;
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("first boot failed");
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let (first_ticks, first_halt) = first
             .run_with_timer_ticks(PERIOD_RCB, TIMER_VECTOR, NUM_TICKS)
             .expect("first run with timer ticks failed");
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("second boot failed");
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let (second_ticks, second_halt) = second
             .run_with_timer_ticks(PERIOD_RCB, TIMER_VECTOR, NUM_TICKS)
             .expect("second run with timer ticks failed");
@@ -955,7 +992,7 @@ mod tests {
 
         // The straight run: both ticks delivered on one continuous Multiverse, never snapshotted.
         let mut straight =
-            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![]).expect("straight boot failed");
+            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None).expect("straight boot failed");
         let straight_tick_1 = straight
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
             .expect("straight run: first tick failed");
@@ -968,7 +1005,7 @@ mod tests {
         // the second tick and the halt happen on a brand-new `Multiverse` reconstructed from that
         // capture, sharing nothing with the original beyond the `Universe` value itself.
         let mut capture_run =
-            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![]).expect("capture-run boot failed");
+            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None).expect("capture-run boot failed");
         let capture_tick_1 = capture_run
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
             .expect("capture run: first tick failed");
@@ -981,7 +1018,7 @@ mod tests {
         let mut page_store = PageStore::new();
         let universe = capture_run.snapshot(&mut page_store).expect("snapshot (capture at K) failed");
 
-        let mut restored = Multiverse::restore(&universe, vec![], WORK_CLOCK_K, false)
+        let mut restored = Multiverse::restore(&universe, vec![], WORK_CLOCK_K, false, None)
             .expect("restore from captured universe failed");
         let restored_tick_2 = restored
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
@@ -1030,7 +1067,7 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut boot = Multiverse::boot(&kernel, cmdline, 0, 1, vec![]).expect("boot failed");
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
         let mut page_store = PageStore::new();
         let mut universe = boot.snapshot(&mut page_store).expect("snapshot failed");
         let real_signature = universe.cpu_signature;
@@ -1038,14 +1075,14 @@ mod tests {
         // Positive control: restoring the real, unmodified universe onto this exact host succeeds
         // — proves the refusal below is about the forged signature, not some unrelated restore
         // failure.
-        Multiverse::restore(&universe, vec![], 1, false)
+        Multiverse::restore(&universe, vec![], 1, false, None)
             .expect("restoring a universe captured on this exact host must succeed");
 
         // Forge a mismatched CPU signature (flip the low bit — guaranteed to differ from the real
         // one `cpuid_leaf1_eax` reads back on this host).
         universe.cpu_signature = real_signature ^ 1;
 
-        match Multiverse::restore(&universe, vec![], 1, false) {
+        match Multiverse::restore(&universe, vec![], 1, false, None) {
             Err(RestoreError::Snapshot(baud_snapshot::linux::RestoreError::CpuMismatch {
                 captured,
                 current,
@@ -1064,7 +1101,105 @@ mod tests {
         }
 
         // An active CPUID template normalizes the mismatch and the restore proceeds.
-        Multiverse::restore(&universe, vec![], 1, true)
+        Multiverse::restore(&universe, vec![], 1, true, None)
             .expect("an active CPUID template must let a mismatched-signature restore proceed");
+    }
+
+    /// H5's `reset_cost_scales_with_write_set` (specs/baud-snapshot.md §5, todo.md §10, test-matrix
+    /// row for the dirty-ring "reset" guarantee), exercised for the first time against real KVM
+    /// hardware (todo.md §14 tracked this exact gap: `Multiverse`'s dirty-ring plumbing was
+    /// unit/type-checked but nothing had ever called it against a real, running guest). Writing
+    /// this test surfaced a real, previously-undiscovered production bug, now fixed in the same
+    /// change: `KVM_CAP_DIRTY_LOG_RING` cannot be negotiated on a `VmFd` once any vCPU already
+    /// exists (the kernel's own `kvm->created_vcpus` check, confirmed by this test's first run
+    /// failing `enable_cap` with `EINVAL`) — the old API's `enable_dirty_ring(&mut self, entries)`,
+    /// callable any time after `boot`, could therefore never actually succeed in this workspace,
+    /// since `boot` always already has a vCPU by the time it returns. Fixed by moving capability
+    /// negotiation into `boot`/`restore` themselves, before `create_vcpu`
+    /// (`create_vm_vcpu_shell`'s new `dirty_ring_entries` parameter) — see
+    /// `baud_snapshot::linux::DirtyRing`'s doc for the split `negotiate_capability`/`open` API this
+    /// forced. `Multiverse::snapshot`'s returned `Universe::ram` remains exactly the `base_ram:
+    /// &[PageRef]` shape `reset_dirty_pages` takes, so no other plumbing was needed.
+    ///
+    /// Reuses `timer-guest` (H4's fixture, above): its ISR (`payload.s`) pushes/pops `rax`/`rdx`
+    /// onto the boot stack (`layout::BOOT_STACK_POINTER`, page index 15) every time an injected
+    /// tick is delivered, on top of the CPU's own hardware-pushed interrupt frame at the same
+    /// address — the fixture's only *explicit* memory writes.
+    ///
+    /// **Real-hardware finding (accepted, not a bug)**: the dirtied-page count is small but not
+    /// exactly `1`. Beyond the ISR's stack writes, the guest's very first instructions after boot
+    /// also dirty a handful of the identity-mapped page-table pages themselves — translating any
+    /// linear address for the first time makes the CPU set each walked page-table entry's
+    /// `ACCESSED` bit if it was not already set, which is itself a real write the same EPT dirty-
+    /// tracking this ring relies on faithfully reports (this is genuinely correct behavior: from
+    /// the kernel's point of view a PTE's accessed bit is guest-owned state, no different from any
+    /// other guest write). This is bounded and expected, not a leak — `UPPER_BOUND` gives it
+    /// generous headroom while still proving the guarantee that actually matters: dozens of pages,
+    /// not `TOTAL_RAM_PAGES`'s tens of thousands.
+    ///
+    /// Sequence: boot with the dirty ring requested (negotiated/opened before any guest execution —
+    /// anything written before this point is part of the "base" itself, per `boot`'s own doc),
+    /// snapshot that pristine state as `base` and record its RAM hash, then deliver two ticks and
+    /// run to halt (dirtying a handful of pages, per the finding above). `reset_dirty_pages(&base.
+    /// ram)` must report a small, nonzero page count — far below total RAM — and rewinding must
+    /// make guest RAM byte-identical to the pristine base again, proving the reset actually
+    /// happened rather than just returned a plausible-looking number.
+    #[test]
+    fn reset_cost_scales_with_write_set() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const PERIOD_RCB: u64 = 100_000;
+        const WORK_CLOCK_K: u64 = 1;
+        const TOTAL_RAM_PAGES: usize = layout::GUEST_RAM_SIZE / baud_snapshot::PAGE_SIZE;
+        /// Generous headroom above the handful of pages this fixture's ISR-plus-page-table-
+        /// accessed-bit writes are expected to dirty (see this test's own doc) — still three
+        /// orders of magnitude below `TOTAL_RAM_PAGES`, so this remains a meaningful proof that
+        /// reset cost scales with the write set rather than total RAM.
+        const UPPER_BOUND: usize = 64;
+
+        let mut multiverse = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], Some(4096))
+            .expect("boot with dirty ring failed");
+
+        let mut page_store = PageStore::new();
+        let base = multiverse.snapshot(&mut page_store).expect("base snapshot (pristine, pre-run) failed");
+        let base_ram_hash = multiverse.ram_hash();
+
+        let (ticks, halt) = multiverse
+            .run_with_timer_ticks(PERIOD_RCB, TIMER_VECTOR, 2)
+            .expect("run with timer ticks failed");
+        assert_eq!(ticks.len(), 2, "both ticks must have been delivered");
+        assert_ne!(
+            halt.ram_hash, base_ram_hash,
+            "the run must actually dirty some RAM (the ISR's stack pushes/pops) or this test's \
+             reset-then-compare assertion below would be vacuous"
+        );
+
+        let reset_count =
+            multiverse.reset_dirty_pages(&base.ram).expect("reset_dirty_pages failed");
+
+        assert!(
+            reset_count > 0,
+            "the dirty ring must report at least one dirtied page (the boot-stack page the ISR \
+             pushed/popped onto) — got 0"
+        );
+        assert!(
+            reset_count < TOTAL_RAM_PAGES,
+            "reset cost must scale with the write set, not total RAM: got {reset_count} dirtied \
+             pages out of {TOTAL_RAM_PAGES} total RAM pages"
+        );
+        assert!(
+            reset_count <= UPPER_BOUND,
+            "expected at most {UPPER_BOUND} dirtied pages (the ISR's stack writes plus a handful \
+             of page-table ACCESSED-bit updates from the guest's first address translations, see \
+             this test's own doc) — got {reset_count}, suggesting something else is writing RAM too"
+        );
+
+        assert_eq!(
+            multiverse.ram_hash(),
+            base_ram_hash,
+            "after reset_dirty_pages, guest RAM must be byte-identical to the pristine base \
+             snapshot again — proving the reset genuinely rewound the dirtied pages' content, not \
+             just returned a plausible-looking count"
+        );
     }
 }

@@ -883,19 +883,59 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     a new H5.3 step running this test; H5.1/H5.2 and `drive/h0.sh`-`h4.sh` re-verified with zero
     regressions. `cargo build/test/clippy --workspace` all green, zero new warnings in any touched
     file.
+  - **`reset_cost_scales_with_write_set` now closed on real hardware — and closing it surfaced
+    three real, previously-undiscovered production bugs in code that had only ever been
+    type-checked, never run.** New test `linux::tests::reset_cost_scales_with_write_set`
+    (`crates/baud-multiverse/src/linux/mod.rs`): boots `timer-guest` with a dirty ring requested,
+    snapshots the pristine pre-run state as `base`, delivers two ticks and runs to halt (dirtying
+    a handful of pages), calls `Multiverse::reset_dirty_pages(&base.ram)`, and asserts the
+    returned page count is small and nonzero (a generous `<= 64` bound, documented as covering the
+    ISR's stack pushes/pops *plus* a few page-table `ACCESSED`-bit updates from the guest's first
+    address translations — a real, accepted, non-bug finding, not a leak) and far below total RAM
+    (65536 pages), then that guest RAM is byte-identical to the pristine base again after reset.
+    1. **`KVM_CAP_DIRTY_LOG_RING` cannot be negotiated once any vCPU already exists** (the kernel's
+       own `kvm->created_vcpus` check, `EINVAL`) — the old `Multiverse::enable_dirty_ring(&mut
+       self, entries)` API, documented as callable any time after `boot`, could therefore never
+       actually succeed in this workspace, since `boot` always already has a vCPU by the time it
+       returns; this test's first run failed immediately on `enable_cap`. Fixed by moving
+       negotiation into `create_vm_vcpu_shell` itself, between `create_vm` and `create_vcpu` —
+       `baud_snapshot::linux::DirtyRing::enable` (the old combined call) is now split into
+       `negotiate_capability(vm, entries)` (pre-`create_vcpu`) and `open(vcpu, entries)`
+       (post-`create_vcpu`, the mmap step); `Multiverse::boot`/`restore` gained a
+       `dirty_ring_entries: Option<u32>` parameter threading this through (`enable_dirty_ring` is
+       gone — there is no correct time to call it after construction, so the option moved to
+       construction time). `boot_guest`/`restore_guest`/`create_vm_vcpu_shell` all updated to
+       match (no external callers outside this file's own tests, confirmed by grep).
+    2. **The ring mmap was `PROT_READ`-only, but `DirtyRing::collect` writes the `RESET` flag bit
+       back into that same mapping** to mark harvested entries (the kernel's own
+       harvest/act/confirm protocol requires in-place mutation, the same way e.g. QEMU maps this
+       ring read-write) — a read-only mapping segfaulted (`SIGSEGV`) the instant `collect` was
+       first called for real, caught via `gdb --batch -ex run -ex bt` (`gdb` was not previously
+       installed on this dev machine; installed via `apt-get install gdb`) pointing at
+       `core::ptr::write_volatile` inside `DirtyRing::collect`. Fixed: `libc::PROT_READ` →
+       `libc::PROT_READ | libc::PROT_WRITE` in `DirtyRing::open`.
+    3. **The guest-RAM memory slot was registered with `flags: 0`**, so KVM was never tracking
+       dirty pages for it at all (neither the classic bitmap nor the ring mechanism logs a slot
+       without `KVM_MEM_LOG_DIRTY_PAGES` — the ring changes *how* dirty pages are reported, not
+       *whether* a slot opts in) — after fixing bugs 1-2 the test still got a hard `0` back from
+       `reset_dirty_pages` despite RAM visibly having changed (`ram_hash` differed). Fixed:
+       `allocate_and_register_guest_ram` gained a `log_dirty_pages: bool` parameter
+       (`create_vm_vcpu_shell` passes `dirty_ring_entries.is_some()`), setting
+       `KVM_MEM_LOG_DIRTY_PAGES` on the region only when a caller actually wants dirty tracking
+       (the flag has a real write-protection cost callers that never reset should not pay).
+    `cargo test -p baud-multiverse`: 58/58 (was 57/57). `drive/h5.sh` gained a new H5.4 step
+    running this test; H5.1-H5.3 and `drive/h0.sh`-`h4.sh` re-verified with zero regressions.
+    `cargo build/test/clippy --workspace` all green, zero new warnings in any touched file
+    (confirmed `cargo clippy -p baud-multiverse -p baud-snapshot --all-targets` specifically).
   - **Not yet done** (§10's remaining H5 guarantees): `Snapshot::branch` (userfaultfd CoW
     branching) is still blocked on a real architecture gap — guest RAM is a private anonymous
-    mapping today, but `UFFDIO_CONTINUE` needs a shared (memfd/hugetlbfs) backing;
-    `thousand_branches_are_independent_and_deterministic`, `reset_cost_scales_with_write_set` (the
-    dirty-ring machinery exists and is wired into `Multiverse` but no test calls
-    `enable_dirty_ring`/`reset_dirty_pages` on real hardware yet — `Multiverse::snapshot`'s
-    returned `Universe::ram` is already the exact `base_ram: &[PageRef]` shape `reset_dirty_pages`
-    needs, so this is a test-writing task, not new plumbing), and `shell_into_universe_resumes`
-    (materially larger: `Console` today wraps a fixed, non-generic `Serial<NoIrqTrigger, NoEvents,
-    Vec<u8>>` with no PTY/EventFd path at all and no CLI/server verb exists — needs a `Console`
-    API change, a new PTY dependency, real interrupt delivery into a live terminal reader, and a
-    new CLI/server surface, not incremental wiring) are all still open. H6 and the rest of the
-    M-series remain **not yet started**.
+    mapping today, but `UFFDIO_CONTINUE` needs a shared (memfd/hugetlbfs) backing, which also
+    blocks `thousand_branches_are_independent_and_deterministic` (needs real branching to exist
+    first). `shell_into_universe_resumes` is materially larger: `Console` today wraps a fixed,
+    non-generic `Serial<NoIrqTrigger, NoEvents, Vec<u8>>` with no PTY/EventFd path at all and no
+    CLI/server verb exists — needs a `Console` API change, a new PTY dependency, real interrupt
+    delivery into a live terminal reader, and a new CLI/server surface, not incremental wiring.
+    Both still open. H6 and the rest of the M-series remain **not yet started**.
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and
