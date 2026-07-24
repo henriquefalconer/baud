@@ -103,6 +103,104 @@ impl DrawSource for TapeDrawSource {
     }
 }
 
+/// A channel-backed draw source that implements the Hegel-like protocol inversion.
+///
+/// The supervisor's device models request draws by calling `draw_bits`/`draw_int`.
+/// These calls block until a `DrawResult` is received from `rx`.  The
+/// corresponding `DrawRequest` is sent on `req_tx` so the caller (e.g. the
+/// baud-tape-agent relay loop) can forward it to baud-server (baud-driver).
+///
+/// This implements the core protocol inversion:
+///   supervisor issues draw → `ChannelDrawSource` sends `DrawRequest` → server
+///   server responds with `DrawResult` → `ChannelDrawSource` returns bytes → supervisor
+///
+/// The channel pair is `(req_tx, result_rx)`.
+pub struct ChannelDrawSource {
+    /// Send draw requests to the relay (agent → server)
+    req_tx: std::sync::mpsc::Sender<baud_proto::DrawRequest>,
+    /// Receive draw results from the relay (server → agent → supervisor)
+    result_rx: std::sync::mpsc::Receiver<baud_proto::DrawResult>,
+    /// Track whether the channel has been closed (EOF)
+    exhausted: bool,
+}
+
+impl ChannelDrawSource {
+    /// Create a channel-backed draw source.
+    ///
+    /// Returns `(source, req_rx, result_tx)` — the source is passed to
+    /// `Multiverse::run()`; the relay loop reads requests from `req_rx` and
+    /// writes results to `result_tx`.
+    pub fn new() -> (
+        Self,
+        std::sync::mpsc::Receiver<baud_proto::DrawRequest>,
+        std::sync::mpsc::Sender<baud_proto::DrawResult>,
+    ) {
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        (
+            ChannelDrawSource { req_tx, result_rx, exhausted: false },
+            req_rx,
+            result_tx,
+        )
+    }
+}
+
+impl DrawSource for ChannelDrawSource {
+    fn draw_bits(&mut self, n: u32) -> Vec<u8> {
+        if self.exhausted {
+            return vec![0u8; ((n + 7) / 8) as usize];
+        }
+        let req = baud_proto::DrawRequest::Bits(n);
+        if self.req_tx.send(req).is_err() {
+            self.exhausted = true;
+            return vec![0u8; ((n + 7) / 8) as usize];
+        }
+        match self.result_rx.recv() {
+            Ok(result) => {
+                let nbytes = ((n + 7) / 8) as usize;
+                let mut out = vec![0u8; nbytes];
+                let take = result.bytes.len().min(nbytes);
+                out[..take].copy_from_slice(&result.bytes[..take]);
+                out
+            }
+            Err(_) => {
+                self.exhausted = true;
+                vec![0u8; ((n + 7) / 8) as usize]
+            }
+        }
+    }
+
+    fn draw_int(&mut self, lo: u64, hi: u64) -> u64 {
+        if lo >= hi {
+            return lo;
+        }
+        if self.exhausted {
+            return lo;
+        }
+        let req = baud_proto::DrawRequest::Int { lo: lo as i64, hi: hi as i64 };
+        if self.req_tx.send(req).is_err() {
+            self.exhausted = true;
+            return lo;
+        }
+        match self.result_rx.recv() {
+            Ok(result) => {
+                let bytes: [u8; 8] = result.bytes.try_into().unwrap_or([0u8; 8]);
+                let raw = u64::from_le_bytes(bytes);
+                let range = hi - lo + 1;
+                lo + (raw % range)
+            }
+            Err(_) => {
+                self.exhausted = true;
+                lo
+            }
+        }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Manifest
 // ---------------------------------------------------------------------------

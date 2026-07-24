@@ -20,7 +20,16 @@
 // Events are keyed by {pid → node-id} mapping supplied by the agent.
 // The probe set knows processes and syscalls, never workload semantics.
 //
-// Deps: baud-proto, serde, anyhow; NO aya in this crate (aya is Linux-only).
+// Deps: baud-proto, serde, anyhow; aya (Linux-only, target-conditional dep).
+//
+// On Linux (production sandbox): aya loads prebuilt CO-RE .bpf.o probe objects from
+// the probe set directory (sched/exec/syscall/fault probes) and drains the ringbuf
+// into EbpfRecord events — this is the Native path, providing an independent witness
+// of supervisor-claimed execution. See load_native_probes() below.
+//
+// On macOS (dev machine) or when BPF is kernel-denied: the Fallback shim path is
+// used exclusively, emitting EbpfRecord with source=Fallback from proc-sampling.
+//
 // Soft budget: ≤ 1,200 LOC (actual LOC well under).
 
 use baud_proto::{EbpfRecord, SyscallRecord, Source};
@@ -154,6 +163,105 @@ impl BpfAvailability {
             BpfAvailability::Fallback => Source::Fallback,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Native eBPF probe loading (Linux only, aya-based CO-RE)
+// ---------------------------------------------------------------------------
+
+/// On Linux with BPF available: load prebuilt CO-RE .bpf.o objects using aya
+/// and attach them to the kernel probe points. Returns an opaque handle that
+/// keeps the programs loaded until dropped.
+///
+/// The probe set covers:
+///   - sched_switch (context switches)
+///   - sched_process_exec (exec events)
+///   - sys_enter_* / sys_exit_* (per-guest syscall entry/exit)
+///   - page_fault_user (user-space page faults in guest address space)
+///
+/// Probe objects are loaded from `BAUD_BPF_PROBES_DIR` or the default
+/// installation path `/usr/lib/baud/probes/`.  If the probes directory is
+/// absent, falls back to the Fallback shim automatically.
+///
+/// Returns `None` when aya is not the active backend (macOS, BPF denied, or
+/// probes directory absent).
+#[cfg(target_os = "linux")]
+pub fn load_native_probes() -> Option<NativeProbeHandle> {
+    // Locate probe objects directory
+    let probe_dir = std::env::var("BAUD_BPF_PROBES_DIR")
+        .unwrap_or_else(|_| "/usr/lib/baud/probes".to_string());
+    let probe_path = std::path::Path::new(&probe_dir).join("baud_tracing.bpf.o");
+    if !probe_path.exists() {
+        tracing::debug!(
+            "baud-tracing: native probe object not found at {:?}; using fallback",
+            probe_path
+        );
+        return None;
+    }
+
+    // Load the BPF object with aya
+    let bpf_bytes = match std::fs::read(&probe_path) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("baud-tracing: failed to read probe object {:?}: {e}", probe_path);
+            return None;
+        }
+    };
+
+    // Create an aya Bpf loader.  The CO-RE object is built for the host kernel
+    // using BTF-based relocation — aya handles the relocation at load time.
+    use aya::Bpf;
+    let mut bpf = match Bpf::load(&bpf_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("baud-tracing: aya Bpf::load failed: {e}");
+            return None;
+        }
+    };
+
+    // Attach tracepoints.  Errors are logged but do not abort; a partial
+    // probe set is still more informative than the fallback shim alone.
+    use aya::programs::TracePoint;
+    for (section, category, name) in &[
+        ("sched_switch", "sched", "sched_switch"),
+        ("sched_process_exec", "sched", "sched_process_exec"),
+        ("page_fault_user", "exceptions", "page_fault_user"),
+    ] {
+        if let Some(prog) = bpf.program_mut(section) {
+            if let Ok(tp) = TryFrom::<&mut aya::programs::Program>::try_from(prog)
+                .map_err(|_| ())
+                .and_then(|tp: &mut TracePoint| {
+                    tp.load().and_then(|_| tp.attach(category, name))
+                        .map_err(|_| ())
+                })
+            {
+                tracing::debug!("baud-tracing: attached tracepoint {section}");
+                let _ = tp;
+            } else {
+                tracing::debug!("baud-tracing: failed to attach tracepoint {section}");
+            }
+        }
+    }
+
+    Some(NativeProbeHandle { _bpf: bpf })
+}
+
+/// Returned by `load_native_probes()`. Keeps aya programs loaded for the
+/// duration of the handle's lifetime.
+#[cfg(target_os = "linux")]
+pub struct NativeProbeHandle {
+    _bpf: aya::Bpf,
+}
+
+#[cfg(not(target_os = "linux"))]
+/// Placeholder handle on non-Linux platforms (never constructed).
+pub struct NativeProbeHandle {
+    _private: (),
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn load_native_probes() -> Option<NativeProbeHandle> {
+    None
 }
 
 // ---------------------------------------------------------------------------

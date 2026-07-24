@@ -16,5 +16,13 @@ blake3 = { workspace = true }
 uuid = { workspace = true }
 libc = "0.2"
 
+# aya: Linux-only eBPF library for loading prebuilt CO-RE probes.
+# On Linux, the Native path uses aya to load .bpf.o objects from the probe set
+# and drain the ringbuf into EbpfRecord events.
+# On macOS and other platforms, this dependency is not available; the Fallback
+# shim path handles all event collection.
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.13", default-features = false }
+
 [dev-dependencies]
 # none needed

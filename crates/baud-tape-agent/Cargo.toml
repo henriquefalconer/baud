@@ -28,6 +28,10 @@ uuid         = { workspace = true }
 blake3       = { workspace = true }
 tracing      = { workspace = true }
 tracing-subscriber = { workspace = true }
+# WebSocket transport (primary): streams CBOR observation batches to baud-server
+# over the Daytona preview URL. Fallback is exec+file polling via CBOR batch files.
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
 
 [dev-dependencies]
 # none needed — functional tests run the agent binary via drive scripts

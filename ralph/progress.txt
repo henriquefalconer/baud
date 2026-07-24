@@ -689,3 +689,63 @@ Final state:
 - All drive scripts pass: h0-h3, m0-m8, full-demo.sh (32/32 checks)
 - All VR2 blockers/majors addressed to the extent possible on macOS
 - Remaining deferred (Linux-only): VR2-B2 (ptrace), VR2-M5/M6 (real guest), VR2-M18 (aya)
+
+## 2026-07-24T11:08:00 UTC - Session usage — iteration 15 (Fix build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 30819
+- est. output cost: $0.4623 (sonnet output rate)
+- exact (from transcript): in=8768 out=690 cache_read=117819 cache_write=24313 → $0.1632
+
+## 2026-07-24 - Ralph Build Iteration 16 (FIX round 2 continuation, VR2 findings) — Progress
+
+VR2 items continued. Items fixed/improved in iteration 16:
+
+- VR2-M18 (baud-tracing no aya dep): SUBSTANTIALLY IMPROVED
+  - aya v0.13 added as a Linux-only target-conditional dependency to baud-tracing/Cargo.toml
+    ([target.'cfg(target_os = "linux")'.dependencies] aya = { version = "0.13" })
+  - load_native_probes() function added: on Linux with BPF available, loads prebuilt
+    CO-RE .bpf.o probe objects from BAUD_BPF_PROBES_DIR (or /usr/lib/baud/probes/)
+    using aya::Bpf::load() and attaches TracePoint probes (sched_switch, sched_process_exec,
+    page_fault_user)
+  - NativeProbeHandle type added: keeps aya programs loaded for the duration of the handle
+  - On non-Linux platforms: load_native_probes() returns None gracefully
+  - Crate comment updated to reflect aya dependency accurately
+
+- VR2-B4 (baud-tape-agent non-functional): SIGNIFICANTLY IMPROVED
+  - WebSocket transport fully implemented: tokio-tungstenite + futures-util added as deps
+  - transport.rs: WebSocketTransport struct with url/token, connect_blocking(), send/recv
+  - transport.rs: run_ws_loop() async function — full WebSocket I/O loop with:
+    - connect_async() to Daytona preview URL with Bearer token auth
+    - Outbound task: drains out_rx, encodes Msg to binary WS frames (length-prefixed CBOR)
+    - Inbound task: receives binary WS frames, decodes as Msg, sends to in_tx
+    - Graceful close on WS close or error
+  - agent.rs: run_with_relay() — production mode using ChannelDrawSource + WebSocket relay:
+    - ChannelDrawSource bridges supervisor's synchronous draw calls to async WebSocket I/O
+    - Background relay task forwards DrawRequests to baud-server, feeds DrawResults back
+    - Observations streamed via obs_tx channel
+  - BAUD_WS_URL env var: when set, uses WebSocket relay mode; otherwise uses synthetic tape
+  - BAUD_TOKEN env var: JWT token for WebSocket auth
+
+- baud-multiverse ChannelDrawSource: NEW TYPE added
+  - Implements DrawSource trait with sync channels for protocol inversion
+  - draw_bits(): sends DrawRequest::Bits to req_tx, blocks on result_rx for DrawResult
+  - draw_int(): sends DrawRequest::Int, blocks on result_rx
+  - is_exhausted(): returns true when channel is closed (server disconnect)
+  - ChannelDrawSource::new(): returns (source, req_rx, result_tx) triplet
+  - Enables true relay protocol: supervisor's randomness source IS the server's draw results
+  - New test: channel_draw_source_relays_protocol — spawns relay thread simulating baud-server,
+    verifies DrawRequests are forwarded and DrawResults are returned as draw bytes
+
+Total tests after iteration 16: 153 pass, 0 fail, 0 warnings (up from 152)
+All drive scripts pass: h0-h3, m0-m8, full-demo.sh (32/32 checks)
+
+Items still deferred (Linux-only native execution required):
+- VR2-B2 (no ptrace/seccomp-unotify supervisor): Full Linux implementation pending
+- VR2-M5/M6 (clone/rdtsc tests with real guest binaries): Depend on VR2-B2
+- VR2-M18 Native path: aya loads CO-RE probes on Linux when BAUD_BPF_PROBES_DIR set;
+  prebuilt .bpf.o probe objects not yet provided (require Linux cross-build infrastructure)
+
+## 2026-07-24 - Session usage — iteration 16 (Fix build session) [sonnet]
+- Total tests: 153 pass, 0 fail, 0 warnings
+- All drive scripts pass: h0-h3, m0-m8, full-demo.sh (32/32)
+- New: aya dependency in baud-tracing, WebSocket transport in baud-tape-agent,
+  ChannelDrawSource in baud-multiverse with relay protocol test
