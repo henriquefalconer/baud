@@ -86,7 +86,7 @@ pub fn to_rgba(buf: &[u8], format: &PixFmt) -> Vec<u8> {
 /// is primarily for the error case so that the supervisor can propagate the crash upward.
 pub fn ingest(
     node: u16,
-    step: u64,
+    _step: u64,
     width: u32,
     height: u32,
     format: &PixFmt,

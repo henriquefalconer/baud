@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Proprietary
 //
 // Transport layer: WebSocket (primary) with exec/file fallback.
+#![allow(dead_code)]
 
 use anyhow::Result;
 use baud_proto::Msg;

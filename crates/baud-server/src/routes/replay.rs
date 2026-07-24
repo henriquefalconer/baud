@@ -16,6 +16,7 @@ use baud_proto::{Observation, Value as ProbeValue};
 #[derive(Debug, Deserialize)]
 pub struct ReplayBody {
     /// Optional tape file contents (CBOR-encoded Tape); if absent, uses stored tape
+    #[allow(dead_code)]
     pub tape_bytes: Option<Vec<u8>>,
     /// Replay up to this step (inclusive); if absent, replay full run
     pub to_step: Option<u64>,

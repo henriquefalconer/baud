@@ -44,6 +44,7 @@ struct Resources {
 #[serde(rename_all = "camelCase")]
 struct WorkspaceResponse {
     id: String,
+    #[allow(dead_code)]
     name: Option<String>,
     state: Option<String>,
     #[serde(default)]

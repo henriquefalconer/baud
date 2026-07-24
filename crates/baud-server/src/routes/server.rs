@@ -53,6 +53,7 @@ pub struct LogEntry {
 }
 
 /// Push a log entry into the ring buffer (called by the tracing subscriber).
+#[allow(dead_code)]
 pub fn push_log(state: &AppState, level: &str, msg: &str) {
     let mut buf = state.log_buffer.write().unwrap();
     let seq = buf.last().map(|e| e.seq + 1).unwrap_or(1);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Proprietary
 //
 // Agent-side protocol types (thin wrappers over baud-proto).
+#![allow(dead_code)]
 
 use baud_proto::Msg;
 

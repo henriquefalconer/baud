@@ -151,6 +151,7 @@ pub struct TacticsSpec {
 pub struct Driver {
     seed: u64,
     strategy: StrategySpec,
+    #[allow(dead_code)]
     tactics: TacticsSpec,
     /// The current best tape (extends from this)
     best: Tape,
@@ -304,6 +305,7 @@ impl Driver {
     }
 
     /// Draw `n` bits as a raw u64 (legacy internal helper — use draw_bits for the spec API).
+    #[allow(dead_code)]
     fn draw_bits_u64(&mut self, n: u32) -> u64 {
         assert!(n <= 64, "draw_bits_u64: n must be <= 64");
         let raw = self.draw_u64();

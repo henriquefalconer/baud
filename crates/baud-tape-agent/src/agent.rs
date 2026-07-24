@@ -164,6 +164,7 @@ fn make_tape_from_seed(seed: u64, len: usize) -> Vec<u8> {
 ///
 /// In production this runs over WebSocket. In scaffold mode it returns
 /// a synthetic result from the tape.
+#[allow(dead_code)]
 pub fn relay_draw(transport: &mut dyn Transport, req: &DrawRequest) -> Result<DrawResult> {
     // Send the draw request to the server
     transport.send(&Msg::DrawRequest(req.clone()))

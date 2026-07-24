@@ -34,6 +34,7 @@ pub struct RunStartBody {
     pub budget_minutes: u64,
     /// Backend to use: "local" (default) or "daytona"
     #[serde(default = "default_backend")]
+    #[allow(dead_code)]
     pub backend: String,
 }
 

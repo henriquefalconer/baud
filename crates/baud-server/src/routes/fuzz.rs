@@ -221,6 +221,7 @@ fn default_iterations() -> u32 { 200 }
 fn default_true() -> bool { true }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 pub struct FuzzResult {
     pub session_id: String,
     pub run_id: String,

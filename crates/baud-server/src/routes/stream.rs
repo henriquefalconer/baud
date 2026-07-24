@@ -162,7 +162,7 @@ pub async fn render(
                 return Json(json!({ "error": "no frames found for this run/range" }));
             }
 
-            let frame_count = rows.len();
+            let _frame_count = rows.len();
             // The first frame gives us the dimensions/format
             let (_, _, width, height, _spec_fmt, _) = &rows[0];
             let w = *width as u32;
