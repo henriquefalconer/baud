@@ -13,3 +13,8 @@
 - baud-cli: full command surface (all subcommands per spec §8), stubs for future milestones
 - All 12 tests pass, workspace builds cleanly, workload-noun CI grep CLEAN
 - Next: add baud-keys tests, CI workload grep script, drive/m0.sh
+
+## 2026-07-24T05:15:32 UTC - M0 committed (948667a)
+- git commit 948667a: M0 milestone complete
+- drive/m0.sh passes: server start, status, logs, keys show, doctor, run ls, budget
+- NEXT iteration should implement M1 (Backend trait, local backend, Daytona client, identity)
