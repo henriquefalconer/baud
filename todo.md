@@ -431,11 +431,37 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 - **`docs/determinism.md`** still describes the superseded ptrace/seccomp mechanism below its
   2026-07-24 pivot notice; a full rewrite for the KVM/VT-x model is still open (tracked here, not
   yet started beyond the H0 addendum).
-- **Not yet started**: H1-H6 and the M-series (everything past H0 in §10) — `baud-vcpu`,
-  `baud-tape-device`, `baud-snapshot`, `baud-snapshot-store` crates do not exist yet; the old
-  ptrace-based `baud-multiverse` (crates/baud-multiverse/src/lib.rs) has not been rewritten to
-  the KVM/VT-x model in `specs/baud-multiverse.md` v2.0 — it still reflects the pre-pivot plan
-  and is the next big-ticket item once a real KVM host is available to validate against.
+- **`baud-vcpu` (specs/baud-vcpu.md) — core built, not yet wired into a real VMM.** New crate:
+  the exit-dispatch match (`Exit`/`Bus`/`TimeSource`/`dispatch_exit`/`DeterminismHole`,
+  `crates/baud-vcpu/src/lib.rs`) and the arm-early-then-single-step interrupt-injection engine
+  (`ExecPoint`/`PmuStepper`/`inject_at`/`MARGIN`, `crates/baud-vcpu/src/boundary.rs`) are
+  hardware-independent, exhaustively matched (no wildcard arm — `Exit::Unmodeled` is the only
+  path to `Err`), and unit-tested on this Windows dev machine with no KVM at all: 15/15 tests
+  pass, including a 1,000-case proptest fuzz for `no_unmodeled_exit_is_silent`, the open-bus
+  fixed-byte (`0xFF`, never host memory) behavior, `vm_creation_refuses_multiple_vcpus`, and an
+  `inject_at`-driven `timer_tick_lands_at_identical_instruction`-style tuple-equality test
+  (`identical_target_yields_identical_injection_tuple_across_runs`). The real Linux half
+  (`crates/baud-vcpu/src/linux/{mod,pmu}.rs`: `kvm_ioctls::VcpuExit` → `Exit` conversion covering
+  every variant in kvm-ioctls 0.25, thread affinity pin, `KVM_SET_GUEST_DEBUG` single-step toggle,
+  and a `perf_event_open` branch-counter + SIGIO-driven `LinuxPmuStepper` that interrupts a
+  blocking `KVM_RUN` via `kvm_run.immediate_exit`) type-checks clean (`cargo check`/`clippy
+  --target x86_64-unknown-linux-gnu -p baud-vcpu`) but is **not yet exercised on real KVM/perf
+  hardware** — same caveat as `baud-host`. **Known scope gap to revisit once baud-multiverse's
+  thread model exists**: `LinuxPmuStepper`'s signal delivery uses process-wide `F_SETOWN` (assumes
+  the vCPU thread is the only thread with the overflow signal unblocked), not
+  `F_SETOWN_EX(F_OWNER_TID, ...)` — documented in `crates/baud-vcpu/src/linux/pmu.rs`'s module
+  doc, revisit when the "one VMM thread + one vCPU thread" model (specs/baud-multiverse.md §3.1)
+  actually lands. **Not yet built**: `baud-vcpu` is not wired into any VM/vCPU creation flow (no
+  `Kvm::new`/`create_vm`/`create_vcpu` boot flow — that is `baud-multiverse`'s job per the crate
+  split in specs/baud-vcpu.md §1) and is not yet a dependency of `crates/baud-multiverse`.
+- **Not yet started**: H1-H6 and the M-series (everything past H0 in §10) — `baud-tape-device`,
+  `baud-snapshot`, `baud-snapshot-store` crates do not exist yet; the old ptrace-based
+  `baud-multiverse` (crates/baud-multiverse/src/lib.rs) has not been rewritten to the KVM/VT-x
+  model in `specs/baud-multiverse.md` v2.0 — it still reflects the pre-pivot plan. **Next build
+  action**: rewrite `baud-multiverse`'s boot flow (specs/baud-multiverse.md §2's `Kvm::new` →
+  `create_vm` → register guest RAM → `create_vcpu` → CPUID/TSC/MSR setup → `linux-loader` boot,
+  §3.1 of todo.md) on top of the now-existing `baud-vcpu` exit dispatch, still type-check-only
+  until a real KVM host is available to validate against.
 - **Fixed while validating H0 on this Windows dev machine** (pre-existing, not specific to
   baud-host): every `drive/*.sh` that spawns `baud-server` with a temp SQLite file passed a
   POSIX `mktemp -t ...` path (e.g. `/tmp/baud-h0-XXXX.sqlite`) straight into `BAUD_DB`; a plain

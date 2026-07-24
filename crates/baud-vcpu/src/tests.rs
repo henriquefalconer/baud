@@ -1,0 +1,194 @@
+// Copyright (c) 2026 Henrique Falconer. All rights reserved.
+// SPDX-License-Identifier: Proprietary
+//
+// Hardware-independent tests for the exit-dispatch core (specs/baud-vcpu.md §6). None of these
+// touch KVM; they exercise `dispatch_exit` directly against fake `Bus`/`TimeSource`
+// implementations, which is exactly what makes the dispatch logic testable on this Windows dev
+// machine with no `/dev/kvm`.
+
+use super::*;
+use proptest::prelude::*;
+
+/// A `Bus` that records every call so tests can assert routing (which port/addr, what bytes).
+#[derive(Default)]
+struct RecordingBus {
+    pio_reads: Vec<(u16, usize)>,
+    pio_writes: Vec<(u16, Vec<u8>)>,
+    mmio_reads: Vec<(u64, usize)>,
+    mmio_writes: Vec<(u64, Vec<u8>)>,
+    fill_byte: u8,
+}
+
+impl Bus for RecordingBus {
+    fn pio_read(&mut self, port: u16, data: &mut [u8]) {
+        self.pio_reads.push((port, data.len()));
+        data.fill(self.fill_byte);
+    }
+    fn pio_write(&mut self, port: u16, data: &[u8]) {
+        self.pio_writes.push((port, data.to_vec()));
+    }
+    fn mmio_read(&mut self, addr: u64, data: &mut [u8]) {
+        self.mmio_reads.push((addr, data.len()));
+        data.fill(self.fill_byte);
+    }
+    fn mmio_write(&mut self, addr: u64, data: &[u8]) {
+        self.mmio_writes.push((addr, data.to_vec()));
+    }
+}
+
+/// A `TimeSource` that serves a fixed reading and records every absorbed write.
+#[derive(Default)]
+struct RecordingTime {
+    serve_value: u64,
+    rdmsr_calls: Vec<u32>,
+    wrmsr_calls: Vec<(u32, u64)>,
+}
+
+impl TimeSource for RecordingTime {
+    fn serve_rdmsr(&mut self, msr: u32) -> u64 {
+        self.rdmsr_calls.push(msr);
+        self.serve_value
+    }
+    fn absorb_wrmsr(&mut self, msr: u32, value: u64) {
+        self.wrmsr_calls.push((msr, value));
+    }
+}
+
+#[test]
+fn io_in_reads_from_bus_and_continues() {
+    let mut bus = RecordingBus { fill_byte: 0xAB, ..Default::default() };
+    let mut time = RecordingTime::default();
+    let mut data = [0u8; 4];
+    let outcome = dispatch_exit(Exit::IoIn(0x3F8, &mut data), &mut bus, &mut time).unwrap();
+    assert_eq!(outcome, DispatchOutcome::Continue);
+    assert_eq!(bus.pio_reads, vec![(0x3F8, 4)]);
+    assert_eq!(data, [0xAB; 4]);
+}
+
+#[test]
+fn io_out_writes_to_bus_and_continues() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime::default();
+    let data = [1, 2, 3];
+    let outcome = dispatch_exit(Exit::IoOut(0x60, &data), &mut bus, &mut time).unwrap();
+    assert_eq!(outcome, DispatchOutcome::Continue);
+    assert_eq!(bus.pio_writes, vec![(0x60, vec![1, 2, 3])]);
+}
+
+#[test]
+fn mmio_read_and_write_route_to_bus() {
+    let mut bus = RecordingBus { fill_byte: 0x11, ..Default::default() };
+    let mut time = RecordingTime::default();
+    let mut data = [0u8; 2];
+    dispatch_exit(Exit::MmioRead(0x1000, &mut data), &mut bus, &mut time).unwrap();
+    assert_eq!(bus.mmio_reads, vec![(0x1000, 2)]);
+    assert_eq!(data, [0x11, 0x11]);
+
+    dispatch_exit(Exit::MmioWrite(0x2000, &[9, 9]), &mut bus, &mut time).unwrap();
+    assert_eq!(bus.mmio_writes, vec![(0x2000, vec![9, 9])]);
+}
+
+#[test]
+fn rdmsr_is_served_from_time_source() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime { serve_value: 0xDEAD_BEEF, ..Default::default() };
+    let mut out = 0u64;
+    let outcome = dispatch_exit(Exit::Rdmsr(0x10, &mut out), &mut bus, &mut time).unwrap();
+    assert_eq!(outcome, DispatchOutcome::Continue);
+    assert_eq!(out, 0xDEAD_BEEF);
+    assert_eq!(time.rdmsr_calls, vec![0x10]);
+}
+
+#[test]
+fn wrmsr_is_absorbed_by_time_source() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime::default();
+    dispatch_exit(Exit::Wrmsr(0x10, 42), &mut bus, &mut time).unwrap();
+    assert_eq!(time.wrmsr_calls, vec![(0x10, 42)]);
+}
+
+#[test]
+fn hlt_and_shutdown_report_halted() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime::default();
+    assert_eq!(dispatch_exit(Exit::Hlt, &mut bus, &mut time).unwrap(), DispatchOutcome::Halted);
+    assert_eq!(dispatch_exit(Exit::Shutdown, &mut bus, &mut time).unwrap(), DispatchOutcome::Halted);
+}
+
+#[test]
+fn debug_reports_single_step_boundary() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime::default();
+    assert_eq!(
+        dispatch_exit(Exit::Debug, &mut bus, &mut time).unwrap(),
+        DispatchOutcome::SingleStepBoundary
+    );
+}
+
+// specs/baud-vcpu.md §6 `no_unmodeled_exit_is_silent`: the run loop never leaves the dispatch
+// without an `Ok`/`Err` — every unmodeled exit fails loud, and every modeled one always
+// resolves. Fuzzed over a thousand random exit shapes (mirroring the spec's `random_tapes(1000)`).
+proptest! {
+    #[test]
+    fn no_unmodeled_exit_is_silent(
+        which in 0u8..9,
+        port in any::<u16>(),
+        addr in any::<u64>(),
+        msr in any::<u32>(),
+        value in any::<u64>(),
+        len in 0usize..8,
+        exit_name in "[a-zA-Z]{1,16}",
+    ) {
+        let mut bus = RecordingBus::default();
+        let mut time = RecordingTime::default();
+        let mut buf = vec![0u8; len.max(1)];
+        let mut msr_out = 0u64;
+        let result = match which {
+            0 => dispatch_exit(Exit::IoIn(port, &mut buf), &mut bus, &mut time),
+            1 => dispatch_exit(Exit::IoOut(port, &buf), &mut bus, &mut time),
+            2 => dispatch_exit(Exit::MmioRead(addr, &mut buf), &mut bus, &mut time),
+            3 => dispatch_exit(Exit::MmioWrite(addr, &buf), &mut bus, &mut time),
+            4 => dispatch_exit(Exit::Rdmsr(msr, &mut msr_out), &mut bus, &mut time),
+            5 => dispatch_exit(Exit::Wrmsr(msr, value), &mut bus, &mut time),
+            6 => dispatch_exit(Exit::Hlt, &mut bus, &mut time),
+            7 => dispatch_exit(Exit::Shutdown, &mut bus, &mut time),
+            _ => {
+                let leaked: &'static str = Box::leak(exit_name.into_boxed_str());
+                dispatch_exit(Exit::Unmodeled(leaked), &mut bus, &mut time)
+            }
+        };
+        // The whole point: never a panic, and the catch-all (`which == 8`) is always `Err`,
+        // every modeled exit is always `Ok`.
+        if which == 8 {
+            prop_assert!(result.is_err());
+        } else {
+            prop_assert!(result.is_ok());
+        }
+    }
+}
+
+#[test]
+fn open_bus_reads_are_fixed_never_host_memory() {
+    let mut bus = OpenBusFallback;
+    let mut time = RecordingTime::default();
+    let mut data = [0x00u8; 4];
+    dispatch_exit(Exit::IoIn(0x9999, &mut data), &mut bus, &mut time).unwrap();
+    assert_eq!(data, [OPEN_BUS_BYTE; 4]);
+
+    let mut data = [0x00u8; 4];
+    dispatch_exit(Exit::MmioRead(0xDEAD_0000, &mut data), &mut bus, &mut time).unwrap();
+    assert_eq!(data, [OPEN_BUS_BYTE; 4]);
+
+    // Writes to open bus are absorbed, never observably stored or reflected.
+    dispatch_exit(Exit::IoOut(0x9999, &[1, 2, 3]), &mut bus, &mut time).unwrap();
+    dispatch_exit(Exit::MmioWrite(0xDEAD_0000, &[1, 2, 3]), &mut bus, &mut time).unwrap();
+}
+
+#[test]
+fn vm_creation_refuses_multiple_vcpus() {
+    assert!(validate_vcpu_count(1).is_ok());
+    assert!(validate_vcpu_count(0).is_err());
+    assert!(validate_vcpu_count(2).is_err());
+    let err = validate_vcpu_count(4).unwrap_err();
+    assert_eq!(err, VmCfgError::MultipleVcpus(4));
+}

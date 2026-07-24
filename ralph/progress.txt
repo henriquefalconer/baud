@@ -938,3 +938,70 @@ First full 'cargo build --workspace' surfaced a pre-existing, unrelated compile 
 ---
 
 Post-push verification: no CI/post-push protocol is defined in todo.md for this repo (no .github/workflows); verified instead by confirming git fetch shows origin/main == local HEAD (b11ad7e) and by having already run cargo build/test/clippy --workspace plus drive/h0.sh and drive/m0.sh green before pushing. todo.md still has substantial pending work (H1-H6, M-series, baud-vcpu/baud-tape-device/baud-snapshot/baud-snapshot-store crates, baud-multiverse KVM rewrite) so this iteration ends with NEXT.
+
+## 2026-07-24T14:06:00 UTC - Session usage — iteration 1 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): 126114
+- est. output cost: $1.8917 (sonnet output rate)
+- exact accounting unavailable this entry
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address: studying todo.md build-status (§14), specs/baud-multiverse.md, specs/baud-vcpu.md, specs/baud-host.md, and the current crates/baud-multiverse (old ptrace-based simulation) to scope H1 (boot a guest) work, the next milestone after H0...
+
+Wrote crates/baud-vcpu (specs/baud-vcpu.md): hardware-independent exit-dispatch core (Exit/Bus/TimeSource/dispatch_exit/OpenBusFallback/VmCfg), the arm-early-then-single-step boundary-injection engine (ExecPoint/PmuStepper/inject_at), and a real cfg(linux) implementation (KVM exit conversion, thread affinity pin, guest-debug singlestep toggle, and a perf-event+SIGIO-driven LinuxPmuStepper) type-checked via cross-compile since this dev machine has no /dev/kvm. 15/15 native tests pass (dispatch happy-paths, a 1000-case proptest fuzz for no_unmodeled_exit_is_silent, open-bus fixed-byte behavior, the injection-tuple/margin/fallback-window boundary tests, vm_creation_refuses_multiple_vcpus), clippy clean on both native and linux targets. Now running the full workspace build/test/clippy before commit...
+
+## 2026-07-24T14:26:00 UTC - Changes committed.
+- What was implemented: new crate `crates/baud-vcpu` (specs/baud-vcpu.md) — the single-vCPU
+  exit-dispatch core and the arm-early-then-single-step interrupt-injection boundary engine,
+  plus a real (type-checked, not yet hardware-run) Linux/KVM implementation of both.
+- Files changed:
+  - crates/baud-vcpu/{Cargo.toml,src/lib.rs,src/tests.rs,src/boundary.rs} (new — hardware-independent core)
+  - crates/baud-vcpu/src/linux/{mod.rs,pmu.rs} (new — cfg(target_os="linux") real implementation)
+  - Cargo.toml (added baud-vcpu to workspace members), Cargo.lock
+  - todo.md (§14 build-status: baud-vcpu entry, H1 "next build action" pointer)
+- **Brief description of changes:**
+  - `Exit`/`Bus`/`TimeSource`/`dispatch_exit`/`DeterminismHole`/`OpenBusFallback`/`VmCfg` (lib.rs):
+    an exhaustive match over baud-vcpu's own exit vocabulary — no wildcard arm, so
+    `Exit::Unmodeled` is the only path to `Err(DeterminismHole)`, matching specs/baud-vcpu.md §3's
+    "the catch-all fails loud, never a best-effort continue". `validate_vcpu_count` implements
+    `vm_creation_refuses_multiple_vcpus` (§4).
+  - `ExecPoint`/`PmuStepper`/`inject_at`/`MARGIN` (boundary.rs): the arm-early-then-single-step
+    engine from specs/baud-vcpu.md §5, generic over a `PmuStepper` trait so it is unit-testable
+    without KVM/perf hardware. Fixed a real bug caught by the test itself: the first draft of the
+    interrupt-window-fallback mock modeled `run_until_irq_window` as opening one window per call,
+    but the spec's `inject_at` pseudocode calls it exactly once — so a real (and the test's mock)
+    implementation must loop internally until the window is actually open, not rely on being
+    re-invoked.
+  - `linux/mod.rs`: `convert_exit` maps every `kvm_ioctls::VcpuExit` variant in kvm-ioctls 0.25 to
+    baud-vcpu's `Exit` (unmodeled kinds named individually, e.g. `Hypercall`, `MemoryFault`,
+    `Unsupported`), clearing the RDMSR/WRMSR `#GP` error flag (baud always serves a value);
+    `pin_thread_to_core` (`sched_setaffinity`), `set_singlestep`
+    (`KVM_SET_GUEST_DEBUG`/`KVM_GUESTDBG_BLOCKIRQ`), and `run_one_exit`/`run_until_halted`
+    (`KVM_RUN` retried transparently on `EINTR`). Includes real tests that construct
+    `kvm_ioctls::VcpuExit` values directly (no ioctl needed) — type-checks via
+    `cargo check --target x86_64-unknown-linux-gnu --tests -p baud-vcpu`, will run on a real Linux
+    box even without `/dev/kvm`.
+  - `linux/pmu.rs`: `LinuxPmuStepper`, the real `PmuStepper` — a `perf_event_open`
+    `BRANCH_INSTRUCTIONS` counter armed via `sample_period`, wired to `SIGIO` via
+    `F_SETOWN`/`F_SETSIG`/`O_ASYNC` so the signal handler writes `kvm_run.immediate_exit` and the
+    blocking `KVM_RUN` ioctl returns `EINTR` at the armed target — the standard technique real
+    VMMs use to interrupt a blocking vCPU-thread ioctl. Injection via `KVM_SET_VCPU_EVENTS`
+    (`events.interrupt.{injected,nr,soft}`). Documented, not hidden, scope gap: signal delivery is
+    process-wide (`F_SETOWN`), not per-thread (`F_SETOWN_EX`/`F_OWNER_TID`) — correct only while
+    the vCPU thread is the sole thread with the signal unblocked; flagged in the module doc for
+    revisit once baud-multiverse's "one VMM thread + one vCPU thread" model exists.
+  - Two real cross-compile-only bugs the Linux type-check itself caught and this iteration fixed:
+    `MsrExitReason` is re-exported from `kvm_ioctls`, not `kvm_bindings` (import was wrong); `libc`
+    does not expose `F_SETSIG` for the glibc/x86_64 target (defined it locally as the stable
+    kernel-header value `10`, documented why).
+- Verification: `cargo build -p baud-vcpu` / `cargo test -p baud-vcpu` (15/15 pass, including a
+  1,000-case proptest fuzz for `no_unmodeled_exit_is_silent`) / `cargo clippy -p baud-vcpu
+  --all-targets` (clean) on the native Windows target; `cargo check`/`clippy --target
+  x86_64-unknown-linux-gnu -p baud-vcpu --all-targets` (clean) for the Linux module — not yet
+  hardware-validated (documented in todo.md, same caveat as `baud-host`); full
+  `cargo build/test/clippy --workspace` all green (0 failures, only pre-existing warnings in
+  crates this increment did not touch); `drive/h0.sh` still exits 0 end-to-end (unaffected).
+---

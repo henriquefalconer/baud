@@ -1,0 +1,19 @@
+[package]
+name = "baud-vcpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-vCPU state machine and deterministic VM-exit dispatch (specs/baud-vcpu.md)"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.25"
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+vmm-sys-util = "0.15"
+perf-event = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"

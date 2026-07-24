@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/baud-multiverse",
     "crates/baud-host",
+    "crates/baud-vcpu",
     "crates/baud-proto",
     "crates/baud-secret",
     "crates/baud-keys",
