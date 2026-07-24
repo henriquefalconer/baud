@@ -49,6 +49,12 @@ shows the feature enabled but `wsl -l -v` lists nothing). `baud host probe` corr
 Real KVM-hardware validation of `crates/baud-host/src/linux.rs`, and all of H1+ (booting a real
 guest), needs an actual Linux/KVM host — bare-metal or a WSL2 distro with nested virt enabled.
 
+**Bare-metal check + WSL2 setup (one-liner):** if `Get-CimInstance Win32_ComputerSystem` shows a real
+vendor/model (e.g. `Dell Inc. / XPS 13 9310`, not "Virtual Machine" — a "hypervisor detected" line is just
+VBS/Hyper-V on real hardware, not a guest), it *is* a valid KVM host, so enable Intel VT-x in BIOS, then from
+an **elevated PowerShell** run `wsl --install -d Ubuntu`, set `nestedVirtualization=true` under `[wsl2]` in
+`%UserProfile%\.wslconfig`, `wsl --shutdown`, and confirm `ls /dev/kvm` inside WSL2.
+
 ## Building / testing
 
 ```
