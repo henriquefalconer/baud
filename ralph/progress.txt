@@ -1450,3 +1450,12 @@ Full verification green: cargo build/test/clippy --workspace all pass (0 regress
   - Carried forward a prior interrupted session's fix (baud-tracing/Cargo.toml missing the tracing dependency) and cleaned up ~146 files of CRLF/LF line-ending-only churn left over from a prior Windows-side session
   - Updated todo.md's build-status section to reflect all of the above
 ---
+
+Post-push verification: git push initially failed ('could not read Username for https://github.com' -- no credential helper configured for WSL2's native git). Found gh.exe (Windows GitHub CLI, on PATH via WSL interop) already authenticated; bridged git's credential helper to it ('git config credential.helper "!gh.exe auth git-credential"'), which resolved it. Re-ran git push -- succeeded (def2e2f..c71da29 main -> main). git fetch confirms origin/main == local HEAD (c71da29). Recorded the credential-helper fix in CLAUDE.md (operational, brief) since every future WSL2 session in a fresh clone will hit the same issue.
+
+## 2026-07-24T18:45:30 UTC - Changes committed.
+- Documented the WSL2 git-push credential fix
+- Files changed: CLAUDE.md, ralph/progress.txt
+- **Brief description of changes:**
+  - CLAUDE.md: brief note on bridging WSL2's git to gh.exe's credential helper for push
+---

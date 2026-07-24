@@ -43,6 +43,16 @@ cargo run -p baud-cli -- host probe --json        # regime must NOT be "rejected
 H1+ (booting a real guest) runs here directly, e.g. `bash drive/h1.sh`. If `/dev/kvm` is ever missing,
 VT-x is off in firmware — everything else is already in place.
 
+## Git push from WSL2
+
+WSL2's native Linux `git` has no credential helper configured, so a plain `git push` fails with
+"could not read Username". The Windows side's `gh.exe` (on `PATH` via WSL interop) is already
+authenticated, so bridge to it once per clone:
+```
+git config credential.helper "!gh.exe auth git-credential"
+```
+then `git push` works normally.
+
 ## Building / testing
 
 ```
