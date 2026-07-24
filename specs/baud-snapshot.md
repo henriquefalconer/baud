@@ -5,7 +5,7 @@
 
 # Baud Snapshot Specification
 
-**Status:** Planned\
+**Status:** Planned (capture/restore/reset built, unexercised on real hardware; branching open — see §10)\
 **Version:** 1.0\
 **Last Updated:** 2026-07-24
 
@@ -162,3 +162,34 @@ impl Snapshot {
 | Incremental snapshots | CoW-remap a base to store only the delta at each branch point |
 | CPUID templates    | Normalize leaves so universes restore across CPU models |
 | Live migration     | Move a universe between hosts of the same class |
+
+---
+
+## 10. Implementation status
+
+- **Capture/restore (§3, §6) — built.** `crates/baud-snapshot/src/universe.rs` (enumerated capture
+  set, ordered restore plan, CPU-model guard, the pure write-set diff) + `src/linux.rs`'s real
+  `capture`/`restore` walking every `KVM_GET_*`/`KVM_SET_*` the table above lists, in the plan's
+  exact order. Type-checked cross-target, unexercised on real hardware (no KVM host on the
+  reference dev machine — this applies to every claim in this section).
+- **Reset (§5) — built.** `KVM_CAP_DIRTY_LOG_RING` is real: `crates/baud-snapshot/src/dirty_ring.rs`
+  is the hardware-independent ring-scan protocol (decode a `kvm_dirty_gfn` ring into harvested
+  `(slot, offset)` pairs, unit- and property-tested with no KVM involved), driven by
+  `src/linux.rs`'s `DirtyRing` (`KVM_ENABLE_CAP(KVM_CAP_DIRTY_LOG_RING, ...)`, an mmap of the
+  per-vCPU ring at `KVM_DIRTY_LOG_PAGE_OFFSET`, and `KVM_RESET_DIRTY_RINGS` to reclaim harvested
+  pages). Because §1's hard constraint (one vCPU per VM) holds workspace-wide, a per-vCPU ring is a
+  whole VM's dirty-page record with no cross-vCPU merge to do. `KVM_RESET_DIRTY_RINGS`'s ioctl
+  number is not in the pinned `kvm-ioctls` 0.25 — it is derived from the same `ioctl_expr` helper
+  `kvm-ioctls` itself is built from (`vmm_sys_util::ioctl`), not hand-encoded, to minimize the risk
+  of an unverifiable-on-this-machine mistake.
+- **Branching (§4) — not built; a real blocker found, not just a missing wrapper.** The spec's
+  `UFFDIO_CONTINUE`-based sharing requires the kernel's *minor-fault* mechanism, which only exists
+  for shared (memfd/hugetlbfs/shmem) mappings — but `baud-multiverse`'s guest RAM
+  (`GuestMemoryMmap::from_ranges`) is a private anonymous mapping. Wiring `UFFDIO_CONTINUE` today
+  would need switching guest-RAM backing to a shared memfd first, an architecture change to
+  `baud-multiverse`, not something this crate can absorb alone. The spec's own "small-N fallback",
+  `fork()`, is not a safe drop-in either: once specs/baud-multiverse.md §3.1's "one VMM thread + one
+  vCPU thread" model is live, `fork()`ing that process only leaves the calling thread in the child —
+  any lock the other thread held at fork time is frozen forever, a real hazard for this specific
+  threading model. Both findings are tracked in `crates/baud-snapshot/src/lib.rs`'s module doc and
+  todo.md §14; neither is fixed here.

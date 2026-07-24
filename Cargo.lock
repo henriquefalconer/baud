@@ -561,6 +561,7 @@ dependencies = [
  "blake3",
  "kvm-bindings",
  "kvm-ioctls",
+ "libc",
  "proptest",
  "thiserror 2.0.19",
  "vm-memory",

@@ -25,11 +25,14 @@
 // (specs/baud-snapshot.md §5) without needing either path; only the real page-fault-driven sharing
 // and the real in-kernel dirty bitmap are what's missing.
 
+use crate::dirty_ring::{self, RawDirtyGfn};
 use crate::page_store::{PageRef, PageStore, PAGE_SIZE};
 use crate::universe::{order_msrs_tsc_first, restore_plan, model_matches, ClockState, DeviceState, MsrWrite, RestoreStep, Universe, VcpuState};
-use kvm_bindings::{kvm_msr_entry, Msrs, KVM_MAX_CPUID_ENTRIES};
+use kvm_bindings::{kvm_dirty_gfn, kvm_enable_cap, kvm_msr_entry, Msrs, KVM_CAP_DIRTY_LOG_RING, KVM_DIRTY_LOG_PAGE_OFFSET, KVM_MAX_CPUID_ENTRIES};
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
+use std::os::fd::AsRawFd;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use vmm_sys_util::ioctl::{ioctl_expr, _IOC_NONE};
 
 /// The guest-RAM backend type this module reads/writes — matches
 /// `baud_multiverse::linux::GuestMemory` (a single anonymous-mmap region, no built-in dirty-page
@@ -262,4 +265,169 @@ pub fn restore(
         }
     }
     Ok(())
+}
+
+/// `/dev/kvm`'s ioctl type character (`include/uapi/linux/kvm.h`'s `KVMIO`, `0xAE`) — every
+/// `kvm-ioctls`-defined ioctl in this crate's dependency tree is built from the same constant
+/// (confirmed against `vmm_sys_util::ioctl::ioctl_expr`'s own doctest, which uses this exact
+/// value), so this is not a guess specific to this module.
+const KVMIO: std::os::raw::c_uint = 0xAE;
+
+/// `KVM_RESET_DIRTY_RINGS` — `_IO(KVMIO, 0xc7)`, a VM-scoped ioctl with no argument struct (the
+/// kernel walks every dirty ring itself and returns the harvested-page count as the ioctl's own
+/// return value, the same "`_IO()`, no payload" shape `kvm-ioctls` already uses for `KVM_RUN`/
+/// `KVM_CREATE_VM`). Not defined by `kvm-ioctls` 0.25 (added to the kernel alongside
+/// `KVM_CAP_DIRTY_LOG_RING`, which this crate's pinned `kvm-bindings` 0.14 *does* expose the
+/// capability constant and `kvm_dirty_gfn` struct for — only the ioctl number itself is missing
+/// from the pinned crate versions), hand-derived here from the same `ioctl_expr` helper
+/// `kvm-ioctls` itself is built on (`0xc7` immediately follows `KVM_SET_MSR_FILTER`'s `0xc6`,
+/// already defined one line away in `kvm_ioctls.rs` — see this module's doc for the general
+/// "type-checked, not exercised on real hardware" caveat that applies to every ioctl number below
+/// exactly as it does to every `KVM_GET_*`/`KVM_SET_*` call above).
+fn kvm_reset_dirty_rings_nr() -> std::os::raw::c_ulong {
+    ioctl_expr(_IOC_NONE, KVMIO, 0xc7, 0)
+}
+
+/// The host's page size, used both as the `KVM_DIRTY_LOG_PAGE_OFFSET` mmap-offset multiplier and
+/// as the minimum/step granularity the kernel requires the dirty-ring's byte size to be a
+/// power-of-two multiple of.
+const HOST_PAGE_SIZE: usize = 4096;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DirtyRingError {
+    #[error("KVM ioctl failed while configuring the dirty ring: {0}")]
+    Kvm(#[from] kvm_ioctls::Error),
+    #[error("dirty-ring entry count must be a power of two (got {0})")]
+    NotPowerOfTwo(u32),
+    #[error("mmap of the dirty-ring buffer failed: {0}")]
+    Mmap(std::io::Error),
+    #[error("KVM_RESET_DIRTY_RINGS ioctl failed: {0}")]
+    ResetIoctl(std::io::Error),
+}
+
+/// A live `KVM_CAP_DIRTY_LOG_RING` ring buffer for one vCPU (specs/baud-snapshot.md §5's "reset"
+/// guarantee: "rewind copies back only dirtied pages ... cost ∝ change, not machine size").
+/// Because this workspace enforces exactly one vCPU per VM (todo.md §1's hard constraint), a
+/// per-vCPU ring *is* the whole VM's dirty-page record — there is no cross-vCPU ring to merge.
+///
+/// Usage: [`DirtyRing::enable`] once, right after `create_vcpu` and before the guest starts
+/// running (the capability must be negotiated before any dirty page could occur);
+/// [`DirtyRing::collect`] after a run segment to get every page the guest touched since the last
+/// collect, in the order the kernel published them; [`DirtyRing::confirm_reset`] once the caller
+/// has restored/rewound those exact pages, telling the kernel it may resume tracking from a clean
+/// slate for that set — the classic "harvest, act, confirm" three-step the kernel's own
+/// `KVM_CAP_DIRTY_LOG_RING` documentation describes, factored here into three explicit calls so a
+/// caller can (for example) crash between harvest and confirm without silently losing dirty pages
+/// (an un-confirmed entry stays `DIRTY` and is re-harvested next time).
+pub struct DirtyRing {
+    ptr: *mut kvm_dirty_gfn,
+    entries: usize,
+    cursor: usize,
+}
+
+// SAFETY-relevant: the mmap'd ring is process-private (MAP_SHARED with the kernel, not with any
+// other userspace mapping) and this crate's threading model gives exactly one owner at a time
+// (specs/baud-multiverse.md §3.1's one vCPU thread) — `Send` is sound because nothing here is
+// `!Send` except the raw pointer, and ownership transfer (not concurrent access) is the only thing
+// `Send` needs to guarantee.
+unsafe impl Send for DirtyRing {}
+
+impl DirtyRing {
+    /// Negotiate `KVM_CAP_DIRTY_LOG_RING` on `vm` for `entries` `kvm_dirty_gfn` slots and mmap the
+    /// resulting per-vCPU ring off `vcpu`'s file descriptor at `KVM_DIRTY_LOG_PAGE_OFFSET` pages
+    /// in (the kernel's documented convention for this specific ring: read-only, `MAP_SHARED` so
+    /// writes the kernel makes to publish new entries are visible without a re-mmap).
+    pub fn enable(vm: &VmFd, vcpu: &VcpuFd, entries: u32) -> Result<Self, DirtyRingError> {
+        if entries == 0 || !entries.is_power_of_two() {
+            return Err(DirtyRingError::NotPowerOfTwo(entries));
+        }
+        let bytes = dirty_ring::ring_bytes(entries);
+
+        let mut cap = kvm_enable_cap { cap: KVM_CAP_DIRTY_LOG_RING, ..Default::default() };
+        cap.args[0] = bytes as u64;
+        vm.enable_cap(&cap)?;
+
+        // SAFETY: `vcpu.as_raw_fd()` is a live vCPU fd for the duration of this call;
+        // `KVM_DIRTY_LOG_PAGE_OFFSET * HOST_PAGE_SIZE` is the kernel-documented mmap offset for
+        // this exact ring (distinct from the vCPU's own `kvm_run` mmap at offset 0); `bytes` was
+        // just accepted by `KVM_ENABLE_CAP` above, so the kernel has sized this mapping already.
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                vcpu.as_raw_fd(),
+                (KVM_DIRTY_LOG_PAGE_OFFSET as libc::off_t) * (HOST_PAGE_SIZE as libc::off_t),
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return Err(DirtyRingError::Mmap(std::io::Error::last_os_error()));
+        }
+        Ok(DirtyRing { ptr: addr as *mut kvm_dirty_gfn, entries: entries as usize, cursor: 0 })
+    }
+
+    /// Copy every ring slot's current bytes into a portable [`RawDirtyGfn`] buffer, run
+    /// [`dirty_ring::harvest`] (the hardware-independent protocol logic) over it, then write the
+    /// (possibly `RESET`-flag-updated) slots back. The kernel only ever *appends* new entries at
+    /// its own write position and never rewrites a slot userspace has already harvested, so a
+    /// plain volatile copy in each direction — rather than an atomic per-field exchange — is
+    /// sufficient: the two writers (kernel appending, userspace marking `RESET`) never touch the
+    /// same slot in the same window this crate calls `collect` from (guest is not running between
+    /// a snapshot's `collect`/`confirm_reset` pair, specs/baud-snapshot.md §5's rewind boundary).
+    pub fn collect(&mut self) -> Vec<(u32, u64)> {
+        // SAFETY: `self.ptr` was mmap'd for exactly `self.entries * size_of::<kvm_dirty_gfn>()`
+        // bytes by `enable` and lives until `Drop::drop` below unmaps it; `self` is borrowed
+        // mutably for this call's duration so no other access races it.
+        let raw = unsafe { std::slice::from_raw_parts(self.ptr, self.entries) };
+        let mut mirrored: Vec<RawDirtyGfn> = raw
+            .iter()
+            .map(|g| {
+                // SAFETY: `g` points into the live mmap `raw` was built from above; a volatile
+                // read is used because the kernel may concurrently publish new entries elsewhere
+                // in this same mapping (only `g.flags` needs the volatile guarantee — see the
+                // write-back loop below for why `slot`/`offset` do not).
+                let flags = unsafe { std::ptr::read_volatile(&g.flags) };
+                RawDirtyGfn { flags, slot: g.slot, offset: g.offset }
+            })
+            .collect();
+        let harvested = dirty_ring::harvest(&mut mirrored, &mut self.cursor);
+        // SAFETY: same mapping/lifetime/exclusivity argument as the read above; only `flags` may
+        // have changed (harvest only ever sets RESET_BIT on entries it returns), so only that
+        // field is written back, leaving `slot`/`offset` — which the kernel owns — untouched.
+        unsafe {
+            let raw_mut = std::slice::from_raw_parts_mut(self.ptr, self.entries);
+            for (slot, mirror) in raw_mut.iter_mut().zip(mirrored.iter()) {
+                std::ptr::write_volatile(&mut slot.flags, mirror.flags);
+            }
+        }
+        harvested
+    }
+
+    /// `KVM_RESET_DIRTY_RINGS`: tell the kernel every slot this ring (across every vCPU, but with
+    /// one vCPU per VM that is just this one) marked `RESET` in a prior [`DirtyRing::collect`] may
+    /// now be reclaimed and its backing page re-armed for the next write-fault. Returns the number
+    /// of pages the kernel actually reset — specs/baud-snapshot.md §5's "reset cost scales with
+    /// write-set, not total RAM" is this return value being bounded by what was harvested, never
+    /// by total guest-RAM page count.
+    pub fn confirm_reset(&mut self, vm: &VmFd) -> Result<u32, DirtyRingError> {
+        // SAFETY: `KVM_RESET_DIRTY_RINGS` takes no argument struct (`_IO`, size 0) and only reads
+        // process-owned KVM state; `vm.as_raw_fd()` is a live VM fd for the call's duration.
+        let ret = unsafe { libc::ioctl(vm.as_raw_fd(), kvm_reset_dirty_rings_nr(), 0) };
+        if ret < 0 {
+            return Err(DirtyRingError::ResetIoctl(std::io::Error::last_os_error()));
+        }
+        Ok(ret as u32)
+    }
+}
+
+impl Drop for DirtyRing {
+    fn drop(&mut self) {
+        // SAFETY: `self.ptr`/`self.entries` are exactly the address/length `enable`'s `mmap` call
+        // returned and reserved; nothing else in this process holds a reference to this mapping
+        // (it is private to this `DirtyRing`, never exposed by any public API here).
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.entries * std::mem::size_of::<kvm_dirty_gfn>());
+        }
+    }
 }

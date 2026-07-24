@@ -23,6 +23,7 @@ kvm-ioctls = "0.25"
 kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
 vm-memory = { version = "0.18", features = ["backend-mmap", "rawfd"] }
 vmm-sys-util = "0.15"
+libc = "0.2"
 
 [dev-dependencies]
 proptest = "1"

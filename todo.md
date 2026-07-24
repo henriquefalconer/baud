@@ -456,21 +456,39 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   **Not yet done**: no real guest ever writes to this port range (no in-guest driver/shim built in
   `baud-packages` yet — the manifest/lint half now exists, see the guest-image entry below, but not
   the actual driver code); wiring is type-check-only pending real hardware.
-- **`baud-snapshot` (specs/baud-snapshot.md) — hardware-independent core built + real Linux
-  capture/restore backend; branch/reset (userfaultfd/dirty-ring) not yet built.** `page_store.rs`
+- **`baud-snapshot` (specs/baud-snapshot.md) — hardware-independent core + real Linux
+  capture/restore/reset built; branch (userfaultfd) still open, real blocker found.** `page_store.rs`
   (content-addressed `PageStore`, blake3-hashed, dedup proven via `Arc::ptr_eq`), `universe.rs`
   (`Universe`/`VcpuState`/`ClockState`/`DeviceState` enumerated capture set, `order_msrs_tsc_first`,
-  `restore_plan`, `model_matches`, `dirty_pages`), `tree.rs` (branch-point bookkeeping,
-  `nearest_ancestor_at_or_before` for shrink-from-nearest), `msr.rs` (MSR constants, single source
-  of truth — `baud-multiverse::timesource` re-exports them), `linux.rs` (real `capture`/`restore`
-  walking every `KVM_GET_*`/`KVM_SET_*` the spec enumerates; uses `KVM_GET_XSAVE` not `XSAVE2` —
-  sufficient for minimal guest images through H5, a bounded follow-up if a guest needs AVX-512/AMX).
-  **Deliberately not built**: userfaultfd-based `Snapshot::branch` and
-  `KVM_CAP_DIRTY_LOG_RING`-based `Snapshot::reset` — the `userfaultfd` crate's `bindgen`/`libclang`
-  build-script requirement fails on this Windows box even for cross-target `cargo check` (build
-  scripts run on the host, not the target); two ways forward documented in `linux.rs`'s module doc
-  (install LLVM/libclang here, or hand-roll the `UFFDIO_*` ioctls the way `baud-vcpu::linux::pmu`
-  hand-rolls `F_SETSIG`). 15/15 tests pass.
+  `restore_plan`, `model_matches`, `dirty_pages`), `dirty_ring.rs` (new this iteration — the pure
+  `KVM_CAP_DIRTY_LOG_RING` ring-scan protocol: `harvest()` decodes a `kvm_dirty_gfn` ring into
+  harvested `(slot, offset)` pairs and marks them, hardware-independent, 8 tests incl. a proptest
+  fuzz), `tree.rs` (branch-point bookkeeping, `nearest_ancestor_at_or_before` for shrink-from-nearest),
+  `msr.rs` (MSR constants, single source of truth — `baud-multiverse::timesource` re-exports them),
+  `linux.rs` (real `capture`/`restore` walking every `KVM_GET_*`/`KVM_SET_*` the spec enumerates —
+  uses `KVM_GET_XSAVE` not `XSAVE2`, sufficient through H5, a bounded follow-up if a guest needs
+  AVX-512/AMX — plus new `DirtyRing`: real `KVM_ENABLE_CAP(KVM_CAP_DIRTY_LOG_RING)` + mmap of the
+  per-vCPU ring at `KVM_DIRTY_LOG_PAGE_OFFSET` + `KVM_RESET_DIRTY_RINGS`, specs/baud-snapshot.md §5's
+  "reset" guarantee). `KVM_RESET_DIRTY_RINGS`'s ioctl number isn't in pinned `kvm-ioctls` 0.25;
+  derived via `vmm_sys_util::ioctl::ioctl_expr` (the same helper `kvm-ioctls` itself is built from,
+  `KVMIO=0xAE` corroborated from that crate's own doctest) rather than hand-encoded, to bound the
+  risk of an unverifiable-on-this-machine mistake. 23/23 tests pass (was 15/15).
+  - **`Snapshot::branch` (userfaultfd) still not built — found a real architecture blocker, not
+    just a missing ioctl wrapper**: the spec's `UFFDIO_CONTINUE` page-sharing needs the kernel's
+    *minor-fault* mechanism, which requires guest RAM backed by a shared (memfd/hugetlbfs) mapping —
+    but `baud-multiverse`'s guest RAM (`GuestMemoryMmap::from_ranges`) is a private anonymous
+    mapping today. Wiring `UFFDIO_CONTINUE` needs a `baud-multiverse` guest-RAM backing change
+    first, not something this crate can absorb alone. The spec's own "small-N fallback" (`fork()`)
+    isn't a safe drop-in either: once specs/baud-multiverse.md §3.1's "one VMM thread + one vCPU
+    thread" model is live, forking that process only carries the calling thread into the child —
+    any lock the other thread held at fork time is frozen forever. Both findings documented in
+    `lib.rs`'s module doc and specs/baud-snapshot.md §10 (new); the `bindgen`/`libclang` build-script
+    obstacle from prior iterations is now moot either way (blocked upstream of that on the memfd
+    question). Two ways forward for whoever picks this up: switch guest RAM to a memfd-backed shared
+    mapping and hand-roll the `UFFDIO_*` ioctls (the way `baud-vcpu::linux::pmu` hand-rolls
+    `F_SETSIG` — `dirty_ring.rs`'s "derive don't hand-encode" ioctl-number approach applies there
+    too), or implement `fork()` as the small-N path with a documented single-threaded-at-fork-time
+    contract (e.g. only fork before the vCPU thread is spawned, or STW-pause it first).
   - **Wired into `baud-multiverse`**: `Multiverse::snapshot()`/`Multiverse::restore()`
     (specs/baud-multiverse.md §6). `create_vm_vcpu_shell()` extracted as the shared boot/restore
     prefix; `restore_guest` walks `restore_plan` onto it. **Correctness gap found and fixed**:
@@ -480,9 +498,12 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     list (documented inline, `ClockState::tsc_deadline`'s doc). `DeviceBus::restore`/
     `Console::with_output`/`TapeDevice::restore_cursor`/`WorkClock::restore` reassemble the
     device/clock layer snapshot deliberately leaves to the caller. 70/70 tests pass across
-    `baud-tape-device`/`baud-snapshot`/`baud-multiverse`.
-  - **Not yet done**: branch/reset (see above); nothing calls `snapshot`/`restore` on real KVM
-    hardware yet (needs H1 — a real halted guest to snapshot from — first).
+    `baud-tape-device`/`baud-snapshot`/`baud-multiverse` (pre-`dirty_ring` count; now 78/78).
+  - **Not yet done**: `Snapshot::branch` (see above); `DirtyRing` is not yet wired into
+    `baud-multiverse`'s `Multiverse` (a `Multiverse::reset_dirty_pages()`-style entry point calling
+    `DirtyRing::enable` once at guest creation and `collect`/`confirm_reset` around a rewind is the
+    natural next step, mirroring how `snapshot`/`restore` were wired); nothing calls
+    `snapshot`/`restore`/`DirtyRing` on real KVM hardware yet (needs H1 — a real halted guest — first).
 - **`baud-snapshot-store` (specs/baud-snapshot-store.md) — built and unit-tested, fully
   hardware-independent** (no `cfg(target_os = "linux")` half at all — never touches a guest/vCPU).
   `types.rs` (`Sha`/`RunId`/`NodeId`/`Node`/`RunManifest`/`PageRef`; three documented departures
