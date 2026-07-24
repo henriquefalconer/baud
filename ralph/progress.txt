@@ -53,3 +53,18 @@
 ## 2026-07-24T06:00:00 UTC - Ralph Build Iteration 3 Start
 - Resuming from M1 (committed at a689bb9)
 - Plan: M2 — baud-init (spec YAML parser + adapter schema) + baud-packages (spec.toml → closure hash) + run routes in server + CLI spec commands + drive/m2.sh
+
+## 2026-07-24T06:15:00 UTC - M2 complete (5eeba7f)
+- baud-init: YAML spec parser, 5 directives (nix/files/env/nodes/adapters), closed adapter set (9 adapters), 9 tests
+- baud-packages: spec.toml → pinned flake → blake3 closure hash, stub + real nix build, 6 tests
+- baud-server: /spec/lint, /spec/show, /runs (start/list/status/abort), /runs/:id/obs stub, migration 0003_runs.sql
+- baud-cli: baud spec new/lint/show, baud run start/ls/status/abort, baud obs ls/get/tail
+- examples/hello-deterministic/spec.yaml + spec.toml
+- drive/m2.sh: ALL 11 CHECKS PASSED
+- Total tests: 45 pass, 0 fail across all crates
+- workload-noun CI grep CLEAN
+- NEXT iteration should implement M3 (journal + replay, verify determinism, driver determinism property test)
+
+## 2026-07-24T06:16:00 UTC - Session usage — iteration 3 (Build build session) [sonnet]
+- output tokens (orchestrator-measured, covers all sessions since previous usage entry incl. prior logger): TBD
+- est. output cost: TBD
