@@ -13,6 +13,7 @@ members = [
     "crates/baud-packages",
     "crates/baud-driver",
     "crates/baud-journal",
+    "crates/baud-stream",
 ]
 
 [workspace.package]

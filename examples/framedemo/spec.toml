@@ -1,0 +1,36 @@
+# framedemo — TOML spec for baud-packages
+# M5 display-adapter validation workload
+
+[workload]
+name = "framedemo"
+nix = "github:nixos/nixpkgs/nixos-24.05#framedemo"
+description = "Moving gradient frame demo: 32x32 indexed8, 50 steps"
+
+[[nodes]]
+name = "n0"
+argv = ["/bin/framedemo", "--width=32", "--height=32", "--steps=50"]
+
+[[nodes.inputs]]
+type = "stdin"
+
+[[nodes.probes]]
+name = "step"
+[nodes.probes.adapter]
+type = "stdout-kv"
+prefix = "baud:"
+
+[[nodes.probes]]
+name = "frame_hash"
+[nodes.probes.adapter]
+type = "vfs-file"
+path = "/tmp/framedemo.fifo"
+mode = "hash"
+
+[[adapters]]
+type = "frame"
+node = "n0"
+width = 32
+height = 32
+format = "indexed8"
+transport = "fifo"
+path = "/tmp/framedemo.fifo"

@@ -335,6 +335,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "baud-stream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "baud-proto",
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "baud-tape"
 version = "0.1.0"
 dependencies = [

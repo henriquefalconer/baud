@@ -1,0 +1,28 @@
+# framedemo — M5 display-adapter validation workload
+#
+# A moving gradient frame demo: 32x32 indexed8 pixels, 50 virtual steps.
+# The guest writes raw indexed8 frame buffers (32*32=1024 bytes per frame)
+# to its frame adapter transport (fifo), and emits step counts via stdout-kv.
+#
+# This spec validates:
+#   - baud-stream frame ingestion and fingerprinting
+#   - double-run determinism with frame-hash streams
+#   - stream frames / stream render / stream tail commands
+#   - verify determinism including frame-hash equality
+
+nix: "github:nixos/nixpkgs/nixos-24.05#framedemo"
+
+nodes:
+  - name: n0
+    argv: ["/bin/framedemo", "--width=32", "--height=32", "--steps=50"]
+    adapters:
+      input: stdin
+      probes:
+        - stdout-kv:
+            prefix: "baud:"
+      display:
+        frame:
+          width: 32
+          height: 32
+          format: indexed8
+          transport: fifo

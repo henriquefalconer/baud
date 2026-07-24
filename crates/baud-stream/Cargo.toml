@@ -1,0 +1,15 @@
+[package]
+name = "baud-stream"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Graphical-surface capture, fingerprinting, and streaming for baud"
+
+[dependencies]
+baud-proto = { path = "../baud-proto" }
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
