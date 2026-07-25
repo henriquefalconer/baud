@@ -2770,3 +2770,7 @@ todo.md updated with the twelfth-brick entry. Appending final progress block and
   - todo.md: documented both fixes as the M-series twelfth brick, including the "not yet done" note that the consensus-cluster fuzz loop has the same latent coupling but no drive script asserts a plateau property for it today.
   - Verification: cargo build/clippy/test --workspace all green (only the already-documented timer_tick_lands_at_identical_instruction hardware-timing flake, confirmed transient by isolated re-run). All 18 drive/*.sh scripts (h0-h6, m0-m9, full-demo.sh) re-run individually end-to-end on real /dev/kvm, zero regressions — m4.sh's M4.2 and m8.sh's M8.3 (both random-tactics plateau checks) explicitly re-verified passing, full-demo.sh 32/32 CHECKS PASSED.
 ---
+
+Pushed b96325d to origin/main. Verifying push (git fetch + confirm HEAD matches origin, working tree clean)...
+
+Verified: local HEAD (b96325d) == origin/main, working tree clean apart from this progress note. Re-reading todo.md: still many pending items (Driver state persistence across requests, POST /run/kvm/resume's branch-point persist_run_id toggle, enforced-regime KVM module, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface, framebuffer stream, consensus-loop random-tactics/Driver-scheduler coupling noted as a non-blocking follow-up). This iteration's step (fixing the Tape.choices draw_bits(n) recording bug and the fuzz.rs random-tactics coupling it exposed) is closed, committed, pushed, and verified green. Emitting NEXT.
