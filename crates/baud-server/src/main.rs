@@ -120,7 +120,9 @@ fn build_router(state: AppState) -> Router {
 // it calls (`baud_multiverse::linux` is itself `#[cfg(target_os = "linux")]`).
 #[cfg(target_os = "linux")]
 fn add_run_kvm_route(router: Router<AppState>) -> Router<AppState> {
-    router.route("/run/kvm", axum::routing::post(routes::run_kvm::run))
+    router
+        .route("/run/kvm", axum::routing::post(routes::run_kvm::run))
+        .route("/run/kvm/branch", axum::routing::post(routes::run_kvm::branch))
 }
 
 #[cfg(not(target_os = "linux"))]

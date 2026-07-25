@@ -533,6 +533,7 @@ dependencies = [
  "baud-proto",
  "baud-raftlet",
  "baud-secret",
+ "baud-snapshot",
  "baud-stream",
  "baud-tape",
  "baud-tape-local",

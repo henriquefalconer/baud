@@ -1217,3 +1217,72 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     wrapping `Multiverse::branch` for real snapshot-tree exploration; (3) wiring `baud-driver`'s
     tape generation into this route instead of a caller-supplied fixed `tape_hex`. The M-series is
     no longer "not started" but the bulk of it (driver/store/stream wiring) remains open.
+- **M-series — second brick: `baud-server` gained its first real snapshot-tree-exploration route,
+  `POST /run/kvm/branch`, closing "Natural next steps" bullet (2) from the `/run/kvm` entry above.**
+  Before starting, two Sonnet explore agents confirmed the actual gap: `baud-server` had zero
+  dependency on/usage of `baud-snapshot` or `baud-snapshot-store` (confirmed by grep — no
+  `SnapshotStore`/`put_universe`/`get_universe`/`Universe` reference anywhere in
+  `crates/baud-server/src`), and `baud_snapshot::Universe` has no `Serialize`/`Deserialize` impl
+  anywhere in the codebase (no `serde` dep in `baud-snapshot/Cargo.toml` at all) — so wiring bullet
+  (1) ("resume from a `SnapshotStore`-persisted `Universe`") is blocked on writing that serializer
+  first, a real prerequisite, not yet done. Bullet (2) (a `/branch` route wrapping
+  `Multiverse::branch`) has no such blocker: `Multiverse::snapshot`/`Multiverse::branch` are already
+  proven correct by `thousand_branches_are_independent_and_deterministic` (H5) and only need a
+  `Universe` that lives for the duration of one request, never crossing a request boundary — no
+  `SnapshotStore` involvement required for a same-request fork-and-score primitive.
+  - New handler `crates/baud-server/src/routes/run_kvm.rs::branch` (`POST /run/kvm/branch`,
+    registered in `main.rs`'s `add_run_kvm_route` alongside the existing `/run/kvm`, same
+    Linux-only cfg gate): takes `{kernel_path, cmdline, branch_tapes_hex: Vec<String>}`, boots the
+    kernel once with an empty tape, calls `Multiverse::snapshot` immediately after boot (before any
+    guest instruction runs — the same branch-point convention
+    `thousand_branches_are_independent_and_deterministic` established) to capture the shared
+    `Universe`, then calls `Multiverse::branch(&universe, suffix, WORK_CLOCK_K, None)` once per
+    `branch_tapes_hex` entry and runs each to its first halt, returning
+    `{ok, branches: [{console_output_hex, ram_hash}, ...]}` or `{error}`. Capped at
+    `MAX_BRANCHES_PER_REQUEST = 256` (real per-branch cost is a full `KVM_CREATE_VM`/vCPU/RAM
+    lifecycle, ~200ms on this dev host per H5's own measurement — an unbounded list turns one HTTP
+    request into an arbitrarily long blocking call); empty/invalid-hex `branch_tapes_hex` are
+    rejected with a clear `{error}`, never a false pass. `crates/baud-server/Cargo.toml` gained a
+    `baud-snapshot` path dependency (needed for `PageStore::new()`, the interning store `snapshot`
+    requires — no other part of that crate is touched, `Universe` itself is only ever passed by
+    reference within the one blocking closure, never serialized).
+  - New CLI surface `baud run kvm-branch --kernel <path> [--cmdline] --branch-tape-hex <hex>...`
+    (`crates/baud-cli/src/cmds/run.rs`, new `RunAction::KvmBranch` variant, `branch_tapes_hex:
+    Vec<String>` — clap derive's default repeated-flag collection, the same pattern already used
+    elsewhere in this crate) — posts straight through to `/run/kvm/branch`, exits 1 on `{error}`,
+    matching `RunAction::Kvm`'s existing convention exactly.
+  - New tests in `run_kvm.rs`: `run_kvm_branch_produces_independent_and_deterministic_branches`
+    (boots `tape-echo-guest` — H2's fixture — snapshots, forks 6 branches on unique 4-byte suffixes
+    via this route's own `boot_snapshot_and_branch` — the exact function the HTTP handler calls,
+    minus only axum/JSON plumbing — asserts each branch's console output equals exactly its own
+    suffix, then re-runs the whole thing a second time and asserts the two full result sets are
+    byte-identical, the server-level analogue of H5's `thousand_branches_are_independent_and_
+    deterministic`). `cargo test -p baud-server`: 3/3 (was 2/2), all passing against real
+    `/dev/kvm`.
+  - **Manually verified end-to-end against a live server, not just unit tests**: `baud run
+    kvm-branch --kernel <tape-echo-guest bzImage> --branch-tape-hex 11223344 --branch-tape-hex
+    aabbccdd --branch-tape-hex 00010203 --json` returned three branches, each `console_output_hex`
+    decoding to exactly its own suffix, all three sharing one `ram_hash` (expected — this fixture's
+    tape bytes only ever pass through registers/UART, never touch guest RAM, so RAM state is
+    identical regardless of which 4 bytes were echoed). Direct `curl` against the route confirmed
+    both validation paths: an empty `branch_tapes_hex` and a non-hex entry both return a clean
+    `{error}`, never a panic or false pass.
+  - **Verification**: `cargo build --workspace` clean (no new warnings). `cargo test --workspace`
+    100% green across every crate (`baud-multiverse` still 64/64, `baud-server` 3/3, everything
+    else unchanged — zero regressions). `cargo clippy --workspace --all-targets` — zero new
+    warnings in any touched file (`run_kvm.rs`, `main.rs`, `cmds/run.rs`, both `Cargo.toml`s),
+    confirmed via targeted `cargo clippy -p baud-server -p baud-cli --all-targets`; every reported
+    warning remains pre-existing in unrelated files. All 16 `drive/*.sh` scripts (`h0.sh`-`h6.sh`,
+    `m0.sh`-`m8.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero
+    regressions, including h5's ~220s 1000-branch stress test and full-demo's "32/32 CHECKS
+    PASSED".
+  - **Not yet done**: this is still a same-request-only primitive — nothing persists the branch
+    point's `Universe` across requests (bullet (1) above, blocked on writing a `Universe`
+    serializer, a real prerequisite for any `SnapshotStore`-backed resume/persist route). No caller
+    scores branches or feeds results back into any exploration/strategy loop (bullet (3),
+    `baud-driver`'s tape generation — confirmed by a second explore agent to be fully
+    hardware-independent already and structurally ready to wire in: `Driver::draw_bits(n)` already
+    produces exactly the byte stream `Multiverse::boot`/`branch`'s `tape` argument wants, and
+    `baud-server`'s existing `fuzz.rs` already demonstrates the `Driver`-drives-a-generation-loop
+    shape for two non-KVM simulated workloads — parser and raftlet — just never yet pointed at
+    `Multiverse`). Both remain open, natural next M-series increments.

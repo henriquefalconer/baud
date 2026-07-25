@@ -23,6 +23,7 @@ baud-journal = { path = "../baud-journal" }
 baud-tracing = { path = "../baud-tracing" }
 baud-stream = { path = "../baud-stream" }
 baud-multiverse = { path = "../baud-multiverse" }
+baud-snapshot = { path = "../baud-snapshot" }
 baud-raftlet = { path = "../baud-raftlet" }
 baud-host = { path = "../baud-host" }
 serde_yaml = { workspace = true }

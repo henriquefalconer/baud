@@ -77,6 +77,20 @@ pub enum RunAction {
         #[arg(long, default_value = "")]
         tape_hex: String,
     },
+    /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
+    /// independent continuation per `--branch-tape-hex` (repeatable) and run each to its first
+    /// halt — the KVM-era snapshot-tree exploration primitive (todo.md §5/§6).
+    KvmBranch {
+        /// Path to a bzImage kernel on the server host's filesystem.
+        #[arg(long)]
+        kernel: String,
+        /// Kernel command line.
+        #[arg(long, default_value = "console=ttyS0")]
+        cmdline: String,
+        /// A hex-encoded tape suffix for one branch. Repeat for multiple branches.
+        #[arg(long = "branch-tape-hex", required = true)]
+        branch_tapes_hex: Vec<String>,
+    },
 }
 
 pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
@@ -143,6 +157,18 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                 "tape_hex": tape_hex,
             });
             let v = c.post("/run/kvm", &body).await?;
+            fmt::print(&v, json);
+            if v.get("error").is_some() {
+                std::process::exit(1);
+            }
+        }
+        RunAction::KvmBranch { kernel, cmdline, branch_tapes_hex } => {
+            let body = json!({
+                "kernel_path": kernel,
+                "cmdline": cmdline,
+                "branch_tapes_hex": branch_tapes_hex,
+            });
+            let v = c.post("/run/kvm/branch", &body).await?;
             fmt::print(&v, json);
             if v.get("error").is_some() {
                 std::process::exit(1);

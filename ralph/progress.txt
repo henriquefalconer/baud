@@ -2109,3 +2109,57 @@ Manually verified 'baud run kvm' end-to-end against a live server: hello-guest b
   - Manually verified end-to-end against a live server: hello-guest boots with correct marker + hash; bad kernel path errors cleanly with exit 1.
   - Re-verified zero regressions: cargo build/test/clippy --workspace all green (one new lint fixed inline, no others introduced); all 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) re-run individually, all still pass on real /dev/kvm.
 ---
+
+Pushed to origin/main (3f52bfc). Post-push verification: local HEAD == origin/main, working tree clean, build/test/clippy/all-drive-scripts already green pre-push against this exact commit. Re-reading todo.md to check for remaining pending items before emitting promise...
+
+todo.md still has many pending items (M-series driver/store/stream wiring, enforced-regime KVM module, AMD phase-2, UFFDIO_CONTINUE branching, shell-into surface, etc.). This iteration's step is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T01:19:58 UTC - Session usage — build-8 [sonnet]
+- cost $5.659427199999998 (exact, from claude -p)
+- context 162,057 tok peak of 1M (16%) across 78 inference calls, monotonic
+- models sonnet-5 $5.6564 (in 254 / out 55,120 / cache-read 11,858,319) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/010-build-8.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 9
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where the last iteration left off.
+
+Reviewed todo.md fully (1220 lines). H0-H6 all closed on real KVM hardware; M-series just started with baud-server's first route (/run/kvm) calling into the real KVM core. Explicit 'natural next steps' listed: (1) accept a captured Universe as alternative to kernel_path to resume instead of cold-boot, (2) a POST /branch route wrapping Multiverse::branch, (3) wire baud-driver tape generation into the route. Spawning explore agents to scope the smallest correct next increment before picking.
+
+Two explore agents launched in parallel: one mapping baud-server/SnapshotStore wiring, one mapping baud-driver's tape-generation maturity. Waiting on both before picking the concrete next increment.
+
+baud-driver explore agent back: it's fully hardware-independent (no KVM deps), already wired into baud-server's fuzz.rs for two non-KVM simulated workloads (parser, raftlet), never wired to Multiverse/KVM at all. draw_bits() already produces exactly the byte stream Multiverse::boot's tape arg wants -- the seam is real and narrow. Smallest real increment: a generation loop mirroring fuzz.rs's shape onto boot_and_run, plus a trivial probe (console-length or ram_hash-derived) fed back via driver.end_run(). Waiting on the second agent (server/SnapshotStore wiring) before deciding.
+
+Both explore agents back. Key finding: baud-server has zero wiring to baud-snapshot/baud-snapshot-store, and Universe has no serialize/deserialize impl anywhere -- persisting a real snapshot across requests is a bigger prerequisite. But Multiverse::branch/snapshot are proven, static-ish methods on baud_multiverse::linux::Multiverse taking &Universe -- a same-request snapshot+branch route (boot, snapshot at a point, fork N branches on N tape suffixes, return each outcome) needs no SnapshotStore wiring at all. Picking this as the increment: a POST /run/kvm/branch route mirroring run_kvm.rs's boot_and_run pattern plus the branch loop thousand_branches_are_independent_and_deterministic already proves correct.
+
+Implemented POST /run/kvm/branch (crates/baud-server/src/routes/run_kvm.rs): boots once, snapshots immediately post-boot as the branch point, forks one independent Multiverse::branch per hex tape suffix (capped 256/request), returns per-branch console+RAM outcomes. Wired into main.rs's add_run_kvm_route and a new baud run kvm-branch CLI subcommand. Added baud-snapshot as a baud-server dependency for PageStore. Building now...
+
+cargo build --workspace: green, no new warnings. Running the new run_kvm tests against real /dev/kvm...
+
+New route's tests pass on real /dev/kvm (3/3): run_kvm_branch_produces_independent_and_deterministic_branches confirms each of 6 branches echoes exactly its own suffix and a full re-run reproduces byte-identically. Running cargo test --workspace next...
+
+cargo test --workspace: all green, zero failures (baud-server 3/3 incl. new branch test, baud-multiverse 64/64, everything else unchanged). Running cargo clippy --workspace --all-targets next...
+
+cargo clippy --workspace --all-targets: zero new warnings in any touched file (run_kvm.rs, main.rs, cmds/run.rs, Cargo.toml) -- confirmed via targeted grep and cargo clippy -p baud-server -p baud-cli --all-targets. All pre-existing warnings remain in unrelated files. Now manually verifying end-to-end against a live server (not just unit tests)...
+
+Manually verified end-to-end against a live server (not just unit tests): baud run kvm-branch with 3 unique tape suffixes correctly forks 3 independent branches, each echoing exactly its own suffix, all sharing the same RAM hash (expected -- tape bytes only pass through registers/UART, never touch guest RAM in this fixture). Validation paths confirmed via curl: empty branch_tapes_hex and invalid hex both error cleanly. Stopping the verify server, now running the full pre-push validation suite (build/clippy/test already green above; running each drive/*.sh individually per CLAUDE.md's rule against chaining)...
+
+drive/h0.sh through drive/h5.sh all re-verified passing on real /dev/kvm with zero regressions (including h5's ~220s 1000-branch stress test). Continuing through h6 and the m-series scripts...
+
+h6 and m0-m8 all re-verified passing with zero regressions. Running drive/full-demo.sh (the last one, chains M0-M8) now...
+
+All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end with zero regressions. Full pre-push validation is green: cargo build/test/clippy --workspace clean, every drive script individually green. Updating todo.md's build-status section with this iteration's findings, then committing and pushing.
+
+## 2026-07-25T01:45:10 UTC - Changes committed.
+- Implemented POST /run/kvm/branch: baud-server's first real snapshot-tree-exploration route, wrapping Multiverse::snapshot + Multiverse::branch (proven correct by H5's thousand_branches_are_independent_and_deterministic).
+- Files changed: crates/baud-server/src/routes/run_kvm.rs (new branch handler + boot_snapshot_and_branch + test), crates/baud-server/src/main.rs (route registration), crates/baud-server/Cargo.toml (baud-snapshot dep), crates/baud-cli/src/cmds/run.rs (baud run kvm-branch subcommand), todo.md (build-status entry).
+- Brief description of changes:
+  - Boots a kernel once, snapshots immediately post-boot as the shared branch point, forks one independent Multiverse::branch per caller-supplied hex tape suffix (capped 256/request), runs each to first halt, returns per-branch console output + RAM hash.
+  - New CLI surface: baud run kvm-branch --kernel <path> --branch-tape-hex <hex>... (repeatable flag).
+  - New test run_kvm_branch_produces_independent_and_deterministic_branches (real /dev/kvm, tape-echo-guest fixture, 6 branches, plus a full re-run byte-identity check).
+  - Manually verified end-to-end against a live server (CLI + curl for validation-error paths), not just unit tests.
+  - Re-verified zero regressions: cargo build/test/clippy --workspace all green, all 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) re-run individually, all still pass on real /dev/kvm.
+---
