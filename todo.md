@@ -1172,3 +1172,48 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     `baud-driver`'s job, still part of the not-yet-started M-series rebuild). `run_fleet` always
     boots fresh (no `restore`-based fleet-of-branches variant yet) — a natural follow-up once
     `baud-driver`'s snapshot-tree exploration exists to actually want one.
+- **M-series rebuild — first brick laid: `baud-server` now has its first route that calls into the
+  real, H0-H6-proven KVM core instead of the pre-pivot `Multiverse`.** With H0-H6 all closed,
+  this iteration picked up the M-series ("rebuild server/CLI/driver/store/stream on this core",
+  todo.md §10) — before touching anything, confirmed by grep that it was still true: every
+  existing `baud-server` route (`/runs`, `/verify/determinism`, `/replay/:id`, etc.) only ever
+  imports the old pre-pivot `Multiverse` from `crates/baud-multiverse/src/lib.rs`; nothing
+  anywhere in `baud-server` called `baud_multiverse::linux::Multiverse` at all. New route
+  `POST /run/kvm` (`crates/baud-server/src/routes/run_kvm.rs`, new file, `#[cfg(target_os =
+  "linux")]`-gated in `routes/mod.rs` and via a new `add_run_kvm_route` helper in `main.rs`'s
+  `build_router` — a `#[cfg(not(target_os = "linux"))]` no-op variant keeps the workspace
+  buildable on a hypothetical non-Linux host, though CLAUDE.md confirms this workspace only ever
+  builds/runs on real Linux+KVM) takes `{kernel_path, cmdline (default "console=ttyS0"),
+  tape_hex (default empty)}`, calls `Multiverse::boot(...)` + `.run_to_first_halt()` inside
+  `tokio::task::spawn_blocking` (real ioctls block — the same pattern `routes/host.rs::probe`
+  already established), and returns `{ok, console_output_hex, ram_hash}` or `{error}`. New CLI
+  surface `baud run kvm --kernel <path> [--cmdline] [--tape-hex]`
+  (`crates/baud-cli/src/cmds/run.rs`, new `RunAction::Kvm` variant) posts to it and exits 1 on
+  `{error}`, matching every other command's convention. New tests in `run_kvm.rs`:
+  `run_kvm_boot_is_deterministic` (boots `tests/fixtures/hello-guest/bzImage` twice through the
+  route's own `boot_and_run` — the exact function the HTTP handler calls, minus only axum/JSON
+  plumbing — asserting identical console output + RAM hash, the server-level analogue of
+  `baud-multiverse`'s own `double_boot_memory_identical`) and `hex_roundtrip`; `cargo test -p
+  baud-server run_kvm`: 2/2. Manually verified end-to-end against a live `baud-server` + `baud`
+  binary too, not just unit tests: `baud run kvm --kernel <hello-guest bzImage> --json` returned
+  `console_output_hex` decoding to the exact `BAUD_HELLO_GUEST\n` marker and a `blake3:...`
+  `ram_hash` with `ok:true`; a nonexistent kernel path returned a clean `{"error": "boot error:
+  failed to open kernel image ... No such file or directory"}` and exit 1. Full re-verification,
+  zero regressions: `cargo build/test/clippy --workspace` all green (one new lint on this file,
+  `manual_is_multiple_of`, fixed inline; every other reported warning is pre-existing in
+  unrelated files, confirmed via targeted `cargo clippy -p baud-server -p baud-cli
+  --all-targets`); all 16 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`,
+  `full-demo.sh`) re-run individually and still pass end-to-end on real `/dev/kvm`, including
+  h5's ~230s 1000-branch test and h6's fleet test.
+  - **Not yet done**: this is a raw boot-and-run-to-halt primitive only, the first brick, not the
+    M-series rebuild itself — no snapshot/branch/rewind/shell-into surface on this route, no
+    `SnapshotStore` wiring (`put_universe`/`get_universe`/`nearest`/`reconstruct` are still never
+    called from `baud-server`), no tape-tree exploration or strategy/tactics (`baud-driver`'s
+    snapshot-tree exploration is untouched), no framebuffer stream. The pre-pivot `/runs`,
+    `/verify/determinism`, `/replay/:id` routes are completely unchanged and still import the old
+    `Multiverse` — `/run/kvm` is additive, sitting alongside them, not a replacement. Natural next
+    steps: (1) accept an already-captured `Universe` (from `SnapshotStore`) as an alternative to
+    `kernel_path` so a run can resume instead of always cold-booting; (2) a `POST /branch` route
+    wrapping `Multiverse::branch` for real snapshot-tree exploration; (3) wiring `baud-driver`'s
+    tape generation into this route instead of a caller-supplied fixed `tape_hex`. The M-series is
+    no longer "not started" but the bulk of it (driver/store/stream wiring) remains open.

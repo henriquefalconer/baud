@@ -64,6 +64,19 @@ pub enum RunAction {
         /// Run ID
         run: String,
     },
+    /// Boot a guest image directly on the real KVM Multiverse and run it to its first halt
+    /// (H0-H6's post-pivot core — bypasses the sandbox/spec/tape machinery above entirely).
+    Kvm {
+        /// Path to a bzImage kernel on the server host's filesystem.
+        #[arg(long)]
+        kernel: String,
+        /// Kernel command line.
+        #[arg(long, default_value = "console=ttyS0")]
+        cmdline: String,
+        /// The run's whole tape, hex-encoded.
+        #[arg(long, default_value = "")]
+        tape_hex: String,
+    },
 }
 
 pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
@@ -122,6 +135,18 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
         }
         RunAction::Resume { run: id } => {
             eprintln!("run resume {id}: not yet implemented (M4+)");
+        }
+        RunAction::Kvm { kernel, cmdline, tape_hex } => {
+            let body = json!({
+                "kernel_path": kernel,
+                "cmdline": cmdline,
+                "tape_hex": tape_hex,
+            });
+            let v = c.post("/run/kvm", &body).await?;
+            fmt::print(&v, json);
+            if v.get("error").is_some() {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

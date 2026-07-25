@@ -2069,3 +2069,43 @@ ALL 17 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end with zero re
   - todo.md §14 updated with the new H6 build-status entry and a correction to the stale 'H6 not yet started' note in the H5 entry
   - Full verification: cargo build/test/clippy --workspace all green (baud-multiverse 64/64, was 63/63), zero regressions, zero new clippy warnings in any touched file; all 17 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end on real /dev/kvm hardware in one sitting
 ---
+
+Committed f72e272. Pushing to origin/main...
+
+Post-push verification GREEN: local HEAD (f72e272) == origin/main via git fetch + rev-parse comparison. This tip already passed cargo build/test/clippy --workspace plus all 17 drive/*.sh scripts (h0-h6, m0-m8, full-demo) before commit, zero regressions. H6 (multi-VM fleet) is now closed for real on real KVM hardware. todo.md still has many pending items (the rest of the M-series: baud-driver/baud-server rebuild on the KVM core, Snapshot::branch's real UFFDIO_CONTINUE/memfd CoW work, baud shell-into CLI/server verb needing WebSocket infra, the enforced-regime custom KVM module, H3's RDTSC-adversarial-guest gap, CONFIG_PIT/PM-timer image-lint gating, a real Nix guest-image build pipeline, snapshot-store GC/remote-store), so this iteration ends with NEXT.
+
+## 2026-07-25T00:47:57 UTC - Session usage — build-7 [sonnet]
+- cost $4.9163204500000015 (exact, from claude -p)
+- context 188,019 tok peak of 1M (19%) across 73 inference calls, monotonic
+- models sonnet-5 $4.9133 (in 166 / out 39,181 / cache-read 10,449,424) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/009-build-7.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 8
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and specs/*...
+
+Read todo.md build-status log: H0-H6 all closed for real on KVM hardware; every drive/*.sh (h0-h6, m0-m8, full-demo) passes. Key open gap: baud-server/baud-cli still route through the OLD pre-pivot Multiverse in baud-multiverse::lib.rs, never the new KVM-real linux::Multiverse -- M-series rebuild (driver/server/store/stream on the KVM core) is 'not yet started'. Dispatching Sonnet subagents to study specs/baud-driver.md, specs/baud-server.md, current baud-server routes, and baud-cli to scope the smallest real M-series forward step.
+
+Wrote a new POST /run/kvm route (crates/baud-server/src/routes/run_kvm.rs) that boots a real guest via baud_multiverse::linux::Multiverse (the H0-H6 KVM core) instead of the pre-pivot Multiverse every other route uses -- the first server route to call into the real KVM VMM. Wired into main.rs (linux-gated) and a new 'baud run kvm' CLI subcommand. Building now...
+
+cargo build/test/clippy all green, 0 new warnings (new run_kvm.rs manual_is_multiple_of lint fixed). Re-verifying every drive/*.sh script one at a time to confirm zero regressions before committing...
+
+drive/h0.sh through h6.sh all re-verified passing with zero regressions after the new run/kvm route. Now running drive/m0.sh-m8.sh and full-demo.sh...
+
+All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) re-verified green with zero regressions. Now manually verifying the new 'baud run kvm' CLI end-to-end against a live baud-server (boot hello-guest fixture, confirm marker + ram_hash, and confirm a bad kernel path errors cleanly)...
+
+Manually verified 'baud run kvm' end-to-end against a live server: hello-guest boots, marker+ram_hash returned correctly; bad kernel path errors cleanly with exit 1. A todo.md-update subagent got stuck re-running verification instead of just editing the file, so writing the todo.md progress entry directly instead.
+
+## 2026-07-25T01:18:59 UTC - Changes committed.
+- Implemented: first M-series brick — baud-server's first route/CLI path that calls into the real, H0-H6-proven KVM Multiverse (baud_multiverse::linux::Multiverse) instead of the pre-pivot ptrace-era one every existing route still used.
+- Files changed: crates/baud-server/src/routes/run_kvm.rs (new), routes/mod.rs, main.rs (linux-gated route registration), crates/baud-cli/src/cmds/run.rs (new `run kvm` subcommand), todo.md (build-status entry).
+- **Brief description of changes:**
+  - New `POST /run/kvm`: boots a real guest kernel via `Multiverse::boot` + `run_to_first_halt` inside `spawn_blocking`, returns console output + RAM hash as JSON.
+  - New `baud run kvm --kernel <path> [--cmdline] [--tape-hex]` CLI subcommand wired to it, exit 1 on error.
+  - New tests `run_kvm_boot_is_deterministic` (real double-boot determinism through the route's own boot_and_run) and `hex_roundtrip`; both pass.
+  - Manually verified end-to-end against a live server: hello-guest boots with correct marker + hash; bad kernel path errors cleanly with exit 1.
+  - Re-verified zero regressions: cargo build/test/clippy --workspace all green (one new lint fixed inline, no others introduced); all 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) re-run individually, all still pass on real /dev/kvm.
+---

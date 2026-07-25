@@ -12,6 +12,8 @@ pub mod net;
 pub mod obs;
 pub mod replay;
 pub mod runs;
+#[cfg(target_os = "linux")]
+pub mod run_kvm;
 pub mod server;
 pub mod shrink;
 pub mod spec;

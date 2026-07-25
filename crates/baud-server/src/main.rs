@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
 
 fn build_router(state: AppState) -> Router {
     use axum::routing::{delete, post};
-    Router::new()
+    let router = Router::new()
         // Health / status
         .route("/health", get(routes::health::health))
         // Server
@@ -111,8 +111,21 @@ fn build_router(state: AppState) -> Router {
         .route("/budget/record", post(routes::budget::record))
         // Shrink (M9)
         .route("/runs/{id}/shrink", post(routes::shrink::shrink))
-        .route("/runs/{id}/shrink", get(routes::shrink::get_shrink))
-        .with_state(state)
+        .route("/runs/{id}/shrink", get(routes::shrink::get_shrink));
+    add_run_kvm_route(router).with_state(state)
+}
+
+// Run/kvm — boot a guest on the real post-pivot KVM Multiverse (H0-H6, todo.md §14's "every
+// existing route still imports the old pre-pivot Multiverse" gap). Linux-only, like the module
+// it calls (`baud_multiverse::linux` is itself `#[cfg(target_os = "linux")]`).
+#[cfg(target_os = "linux")]
+fn add_run_kvm_route(router: Router<AppState>) -> Router<AppState> {
+    router.route("/run/kvm", axum::routing::post(routes::run_kvm::run))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn add_run_kvm_route(router: Router<AppState>) -> Router<AppState> {
+    router
 }
 
 pub fn router_for_tests(state: AppState) -> Router {
