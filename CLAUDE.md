@@ -50,6 +50,11 @@ missing by default. To build one (needed for `kernel-module/baud-enforced/`, and
 out-of-tree KVM module work):
 
 ```
+sudo apt-get install -y dwarves   # pahole — MUST be installed before olddefconfig below, or
+                                  # CONFIG_DEBUG_INFO_BTF_MODULES silently drops out of
+                                  # .config and insmod later fails on a struct-module-size
+                                  # mismatch (24 bytes / 4 fields short) — see
+                                  # kernel-module/baud-enforced/BUILD.md for the full diagnosis
 mkdir -p ~/wsl-kernel-src && cd ~/wsl-kernel-src
 git clone --depth 1 --branch linux-msft-wsl-$(uname -r | sed 's/-microsoft-standard-WSL2//') \
     https://github.com/microsoft/WSL2-Linux-Kernel.git src
@@ -66,10 +71,11 @@ sudo ln -sfn "$PWD" "/lib/modules/$(uname -r)/build"
 Build modules with `KBUILD_MODPOST_WARN=1 make CC=gcc-13` (a headers-only tree has no
 `Module.symvers`, so modpost can't resolve ordinary exported symbols like `printk` at build
 time — this is expected, not a real error; resolution happens correctly at `insmod` time).
-As of this writing `insmod` still fails with a struct-module-size ABI mismatch even with a
-matching-major-version gcc, because Microsoft's exact build toolchain (gcc 13.2.0 + binutils
-2.41) differs from any Ubuntu-packaged substitute — see `kernel-module/baud-enforced/BUILD.md`
-for the full diagnosis.
+With `dwarves` installed before `olddefconfig`, `insmod` succeeds — an exact toolchain-version
+match (e.g. Microsoft's vendor gcc 13.2.0 + binutils 2.41) was tried and confirmed **not**
+necessary; the struct-module-size mismatch was `CONFIG_DEBUG_INFO_BTF_MODULES` silently
+dropping out of `.config` for want of `pahole`, not a compiler-codegen divergence. Full
+diagnosis in `kernel-module/baud-enforced/BUILD.md`.
 
 ## Git push from WSL2
 

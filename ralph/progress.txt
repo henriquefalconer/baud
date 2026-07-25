@@ -3331,3 +3331,63 @@ All 20 individual drive scripts (h0-h6, m0-m11) PASSED. Running full-demo.sh (th
   - enforced_module_present() deliberately still returns false — no overclaiming
   - cargo build/clippy/test --workspace clean; all 20 drive/*.sh green; full-demo.sh 32/32
 ---
+
+Post-push verification: local HEAD (cf6fe34) matches origin/main, working tree clean. todo.md's enforced-regime KVM module item is still open (insmod not yet succeeding — a real toolchain-matching problem, precisely diagnosed and documented) but real, verified forward progress landed this iteration: build pipeline works, real probe module written and build-tested. This iteration ends with NEXT — the item remains pending, not fully closed.
+
+## 2026-07-25T12:34:21 UTC - Session usage — build-27 [sonnet]
+- cost $5.239688599999998 (exact, from claude -p)
+- context 162,998 tok peak of 1M (16%) across 94 inference calls, monotonic
+- models sonnet-5 $5.2366 (in 194 / out 54,919 / cache-read 11,433,262) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/030-build-27.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 28
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Chose enforced-regime KVM module: the sole remaining open item in todo.md — insmod is blocked on a toolchain-generation gap (need exact vendor gcc 13.2.0 + binutils 2.41). Investigating whether old-releases.ubuntu.com has matching .deb packages we can extract locally (no system repo changes) to close this without a from-source GCC build.
+
+Found exact-version .deb packages on old-releases.ubuntu.com: gcc-13 13.2.0-4ubuntu3 and binutils 2.41-5ubuntu1, matching the running WSL2 kernel's real build toolchain exactly (not just major-version). Downloading + extracting into a local prefix (no system install) to retry insmod.
+
+Confirmed via /proc/version and dmesg: the real running WSL2 kernel was built with 'gcc (GCC) 13.2.0, GNU ld (GNU Binutils) 2.41' — exactly matching the .deb packages just extracted from old-releases.ubuntu.com (gcc-13 13.2.0-4ubuntu3, binutils 2.41-5ubuntu1). Re-running modules_prepare with this exact toolchain, then retrying insmod.
+
+modules_prepare succeeded with the exact-version toolchain (host tools still built with system gcc/binutils via -B-scoped invocation, avoiding the .base64 pseudo-op mismatch from mixing old as with new gcc). Rebuilding kernel-module/baud-enforced with this exact gcc-13.2.0 and retrying insmod.
+
+Ruled out CONFIG_RANDSTRUCT (=NONE, off) as the cause. .config's MODVERSIONS/MODULE_SIG/LOCALVERSION all match the real running kernel (captured fresh from /proc/config.gz). Digging for the exact struct-module size mismatch via BTF/pahole to pinpoint which field differs, rather than guessing further blindly.
+
+pahole against /sys/kernel/btf/vmlinux gives ground truth: real struct module = 1280 bytes; our compiled module's .gnu.linkonce.this_module section = 0x4c0 = 1216 bytes, a 64-byte gap -- exactly one cacheline, and NOT explained by toolchain (already exact-matched) or by .config (captured verbatim from the real /proc/config.gz, so every CONFIG_* macro gating a struct-module field should already agree). Checking whether include/linux/module.h in the cloned public WSL2-Linux-Kernel tag differs from what actually produced this BTF -- i.e. whether Microsoft's shipped kernel carries an out-of-tree patch to struct module not present in the public linux-msft-wsl-6.18.33.2 tag.
+
+ROOT CAUSE FOUND via pahole struct diff: our compiled struct module was missing btf_data_size/btf_base_data_size/btf_data/btf_base_data (24 bytes, 4 members) present in the real kernel's struct (BTF via /sys/kernel/btf/vmlinux: 1280B/71 members vs ours 1216B/67 members). Cause: CONFIG_DEBUG_INFO_BTF_MODULES's Kconfig dependency silently failed during our earlier olddefconfig because pahole wasn't installed yet on this machine -- the real running kernel's own /proc/config.gz shows CONFIG_DEBUG_INFO_BTF=y CONFIG_DEBUG_INFO_BTF_MODULES=y CONFIG_PAHOLE_VERSION=125, silently downgraded to unset since PAHOLE_VERSION=0 was detected. Now that pahole is installed, redoing olddefconfig should restore these and close the size gap for real.
+
+insmod SUCCEEDED (exit 0) -- first-ever successful out-of-tree module load in this project's history. Root cause was CONFIG_DEBUG_INFO_BTF_MODULES silently disabled by a missing pahole at .config-generation time, not a toolchain mismatch. Module ran its real VMX probe: RDTSC-exiting=yes, secondary-controls=yes, RDRAND-exiting=yes, but RDSEED-exiting=NO on this CPU's microcode -- so 'enforced regime hardware-feasible on this CPU: no'. A genuine, previously-unknown hardware finding. Unloaded cleanly. Now updating BUILD.md/CLAUDE.md/todo.md and looking at whether the probe module's output should get wired into baud-host.
+
+Confirmed the exact-toolchain download was a red herring: rebuilding the module with the plain SYSTEM gcc-13 (13.4.0) after fixing CONFIG_DEBUG_INFO_BTF_MODULES also produces a correctly-sized (1280B) struct module and insmod succeeds. Updated BUILD.md and CLAUDE.md with the real, simpler fix (install dwarves/pahole before olddefconfig). Now doing a clean from-scratch reproduction to confirm the documented procedure is exactly correct end-to-end.
+
+Clean-tree reproduction (fresh git clone, no leftover state) confirms the documented procedure in BUILD.md/CLAUDE.md works end-to-end: insmod exit 0 both times. Now updating todo.md's 'enforced-regime KVM module' entry with this milestone + the RDSEED-exiting hardware finding, then running the standard verification suite (cargo build/clippy/test + all drive/*.sh, unaffected by this out-of-tree kernel work).
+
+Running standard verification: cargo build --workspace.
+
+cargo build clean (only pre-existing baud-tracing aya::Bpf deprecation warnings). Running cargo clippy --workspace --all-targets.
+
+cargo clippy clean (exit 0, only pre-existing warnings in files this iteration never touched: fuzz.rs, replay.rs, tracing.rs, transport.rs, baud-tracing). Running cargo test --workspace.
+
+cargo test --workspace: 100% green, 0 failed across every crate. Now running each drive/*.sh script individually against real /dev/kvm, one Bash call per script.
+
+h0-h3 all PASS (h3's first run hit a transient flake on H3.3's second check, confirmed transient by immediate clean re-run, no regression). Continuing h4-h6.
+
+h4/h5/h6 all PASS. Continuing m0-m11.
+
+All 19 h*/m*.sh drive scripts PASS individually. Running full-demo.sh.
+
+## 2026-07-25T13:12:14 UTC - Changes committed.
+- Fixed the enforced-regime KVM module's insmod blocker: first successful out-of-tree module load in this project's history
+- Files changed: crates/baud-host/src/linux.rs, kernel-module/baud-enforced/BUILD.md, CLAUDE.md, todo.md
+- **Brief description of changes:**
+  - Root-caused the struct-module-size mismatch that had blocked insmod: NOT a toolchain-version gap (that hypothesis was tried with the exact vendor gcc 13.2.0 + binutils 2.41, extracted from old-releases.ubuntu.com .debs, and the mismatch persisted) but CONFIG_DEBUG_INFO_BTF_MODULES silently dropping out of .config because pahole wasn't installed before olddefconfig ran
+  - Fix: install dwarves (pahole) before generating .config; verified twice, including a full clean re-clone, that plain system gcc-13 (no special toolchain) then produces a correctly-sized struct module and insmod succeeds (exit 0), lsmod shows it loaded, rmmod unloads cleanly
+  - Real hardware finding from the now-working probe: this dev host's VMX microcode supports RDTSC-exiting/secondary-controls/RDRAND-exiting but NOT RDSEED-exiting, so the enforced regime is not hardware-feasible on this exact machine regardless of future module code
+  - Updated BUILD.md/CLAUDE.md with the corrected, verified procedure; updated todo.md's enforced-regime entry and baud-host's enforced_module_present() doc comment to reflect insmod now working (enforcement itself is still not implemented, so the function correctly still returns false)
+  - Verification: cargo build/clippy/test --workspace all clean; all 19 individual drive/*.sh scripts pass; full-demo.sh 32/32 CHECKS PASSED
+---
