@@ -443,9 +443,12 @@ fn boot_snapshot_and_generate(
 }
 
 /// The snapshot-tree exploration loop (todo.md §6: "expand a branch point, fork N continuations,
-/// score, keep interesting ones") applied to one shared branch point — the entry point every
-/// caller that never persists (a bare `/run/kvm/branch` or any `/run/kvm/resume` generate call)
-/// uses.
+/// score, keep interesting ones") applied to one shared branch point, with persistence off — no
+/// production route calls this directly any more (`/run/kvm/branch`'s bare, unpersisted case goes
+/// through `run_driver_generated_branches_with_persist(.., None, None)` inline, and
+/// `/run/kvm/resume`'s generate mode always persists via `resume_and_generate`), so this is now a
+/// test-only convenience for exercising the no-persist path directly against an in-memory universe.
+#[cfg(test)]
 fn run_driver_generated_branches(
     universe: &baud_snapshot::Universe,
     spec: DriverGenerateSpec,
@@ -699,8 +702,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
             }));
         }
         let result = tokio::task::spawn_blocking(move || {
-            let universe = reconstruct_universe(store.as_ref(), &run_id, &node_id_hex)?;
-            run_driver_generated_branches(&universe, spec)
+            resume_and_generate(store.as_ref(), &run_id, &node_id_hex, spec)
         })
         .await
         .expect("run/kvm/resume (generate) task panicked");
@@ -812,6 +814,25 @@ fn resume_and_branch(
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
     let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
     run_branches(&universe, tape_suffixes, Some((store, run_id, Some(parent))))
+}
+
+/// Generate-mode analogue of `resume_and_branch`: resuming from a persisted node always has a
+/// `store`/`run_id` to persist deeper into, exactly as `resume_and_branch`'s own doc explains for
+/// the fixed-tape path — so this mirrors it instead of `run_driver_generated_branches`'s bare,
+/// non-persisting form (`boot_snapshot_and_generate`'s opt-in `persist_run_id`, which makes sense
+/// for a *fresh* `/run/kvm/branch` boot, does not apply here: a resumed node already has a home to
+/// persist into, so there is nothing to opt into). Closes the real gap `/run/kvm/resume`'s generate
+/// mode used to have: every interesting branch it found was silently dropped on the floor, unlike
+/// its own fixed-tape sibling and unlike `/run/kvm/branch`'s own generate mode when persisted.
+fn resume_and_generate(
+    store: &SnapshotStore,
+    run_id: &str,
+    node_id_hex: &str,
+    spec: DriverGenerateSpec,
+) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
+    let universe = reconstruct_universe(store, run_id, node_id_hex)?;
+    let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
+    run_driver_generated_branches_with_persist(&universe, spec, Some((store, run_id)), Some(parent))
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
@@ -1327,6 +1348,66 @@ mod tests {
             Some(node_id_hex.as_str()),
             "resuming must chain the new node onto the resumed-from node, not the original branch point"
         );
+    }
+
+    /// The generate-mode analogue of `fixed_tape_branch_hitting_mark_branch_persists_and_resumes_further`,
+    /// proving the real gap `resume_and_generate` closes: before this fix, `/run/kvm/resume`'s
+    /// generate mode called the bare `run_driver_generated_branches` (no `persist`/`parent`
+    /// arguments at all), so every interesting branch it found — even a `MARK_BRANCH` stop, always
+    /// `interesting` unconditionally — was silently dropped instead of persisted, unlike its own
+    /// fixed-tape sibling `resume_and_branch` (persists unconditionally, no opt-in needed) and
+    /// unlike `/run/kvm/branch`'s own generate mode when `persist_run_id` is set. Asserts every
+    /// `MARK_BRANCH` stop reached via `resume_and_generate` gets a real, distinct `node_id`,
+    /// correctly parented on the *resumed-from* node (not the original root), via
+    /// `SnapshotStore::read_node` — the same check the fixed-tape sibling test performs.
+    #[test]
+    fn resumed_generate_persists_mark_branch_children() {
+        let kernel = mark_branch_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "mark-branch-resume-generate-test";
+
+        // First branch point: boot + persist (no generate here — just get a root node to resume
+        // from), mirroring boot_snapshot_and_branch's own root-then-children shape.
+        let (outcomes, persisted) =
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)))
+                .expect("boot_snapshot_and_branch failed");
+        let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
+        assert_eq!(root_run_id, run_id);
+        let (_console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
+        assert_eq!(*mark_branch_step, Some(1));
+        let node_id_hex = node_id.as_ref().expect("first MARK_BRANCH stop must persist").clone();
+
+        // Resume that checkpoint in generate mode — this is the path that used to drop everything.
+        let spec = DriverGenerateSpec {
+            seed: 21,
+            count: 3,
+            tape_len_bytes: 2,
+            strategy: baud_driver::StrategySpec::default(),
+        };
+        let (outcomes, _summary) = resume_and_generate(&store, run_id, &node_id_hex, spec)
+            .expect("resume_and_generate failed");
+
+        assert_eq!(outcomes.len(), 3);
+        let run = baud_snapshot_store::RunId::new(run_id.to_owned());
+        let mut seen_node_ids = std::collections::HashSet::new();
+        for outcome in &outcomes {
+            assert_eq!(outcome.mark_branch_step, Some(2), "must stop at the guest's next MARK_BRANCH");
+            assert!(outcome.interesting, "a MARK_BRANCH stop must always be reported interesting");
+            let child_node_id_hex = outcome
+                .node_id
+                .as_ref()
+                .expect("resume_and_generate must persist every MARK_BRANCH stop, not drop it");
+            assert!(seen_node_ids.insert(child_node_id_hex.clone()), "every branch must get a distinct node_id");
+            let child_node = store
+                .read_node(&run, baud_snapshot_store::NodeId::from_hex(child_node_id_hex).expect("valid node_id"))
+                .expect("read_node failed");
+            assert_eq!(
+                child_node.parent.as_deref(),
+                Some(node_id_hex.as_str()),
+                "a resumed generate branch must be parented on the resumed-from node, not the original root"
+            );
+        }
     }
 
     #[test]

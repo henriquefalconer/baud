@@ -195,8 +195,9 @@ branches = d['branches']
 assert len(branches) == 2, f'expected 2 generated branches, got {len(branches)}'
 for b in branches:
     assert b['mark_branch_step'] == 2, f'expected mark_branch_step=2 (guests second checkpoint), got {b.get(\"mark_branch_step\")}'
+    assert b.get('node_id'), 'resume (generate mode) must persist a node_id for every MARK_BRANCH stop, same as branch (generate mode)'
 "
-pass "M9.6: resumed generate-mode branch point with no kernel_path, reached the guest's second MARK_BRANCH"
+pass "M9.6: resumed generate-mode branch point with no kernel_path, reached the guest's second MARK_BRANCH, persisted node_id per branch"
 
 # ---------------------------------------------------------------------------
 # M9.7 — Error handling: mutually-exclusive fields, invalid hex, unknown run/node

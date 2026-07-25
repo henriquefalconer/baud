@@ -1888,7 +1888,57 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     to have — but no drive script asserts a plateau/negative-control property for the consensus
     workload's `"random"`/default tactics today (`drive/m6.sh`'s M6.2 only asserts the random-tactics
     run *completes*, not that it plateaus), so this was left as-is rather than changed speculatively;
-    worth revisiting if a future consensus-workload plateau test is added. `POST /run/kvm/resume`'s
-    own *branch-point* persist_run_id toggle, `Driver` state persistence across requests, the
-    enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface,
-    and the framebuffer stream remain open (see above).
+    worth revisiting if a future consensus-workload plateau test is added. `Driver` state
+    persistence across requests, the enforced-regime KVM module, RDTSC-compliant-guest testing,
+    `baud shell-into` CLI/server surface, and the framebuffer stream remain open (see above).
+- **M-series — thirteenth brick: `/run/kvm/resume`'s generate mode now persists interesting
+  branches, closing a real gap the "eleventh brick" entry's own follow-up note had actually
+  mis-scoped.** That note asked for "a `persist_run_id` toggle for resume's own branch-point
+  persistence" — a Sonnet subagent scoping pass (`crates/baud-server/src/routes/run_kvm.rs`) found
+  that framing moot: `/run/kvm/resume` never establishes a *new* branch point the way
+  `/run/kvm/branch` does (it only reconstructs an already-persisted node), so there is no
+  branch-point persistence step to gate, and its fixed-tape path (`resume_and_branch`) already
+  persists unconditionally by design (its own doc comment: resuming always already has a
+  `store`/`run_id` in hand, so there is nothing to opt into) — no toggle needed there either.
+  - **The real, previously-undocumented gap the scoping pass found instead**: `/run/kvm/resume`'s
+    *generate* mode called the bare `run_driver_generated_branches(&universe, spec)` — no
+    `persist`/`parent` arguments at all — so every interesting branch it found (including a
+    `MARK_BRANCH` stop, always `interesting` unconditionally per `GeneratedBranchOutcome`'s own
+    doc) was silently dropped on the floor instead of persisted, unlike its own fixed-tape sibling
+    `resume_and_branch` (persists unconditionally) and unlike `/run/kvm/branch`'s own generate mode
+    (`boot_snapshot_and_generate`, persists when `persist_run_id` is set). `drive/m9.sh`'s M9.6 and
+    the unit test `resumed_universe_generates_reproducible_branches` both deliberately never
+    asserted a `node_id` on resume-generate output — confirmed known, current (if undocumented)
+    behavior, not a test gap that was overlooked.
+  - **Fix** (`crates/baud-server/src/routes/run_kvm.rs`): new `resume_and_generate` function,
+    mirroring `resume_and_branch`'s existing shape exactly — `reconstruct_universe` then
+    `run_driver_generated_branches_with_persist(&universe, spec, Some((store, run_id)),
+    Some(parent))`, unconditional, no new request field on `RunKvmResumeBody` needed (same reasoning
+    as the fixed-tape path: a resumed node always already has a `store`/`run_id`). The `resume()`
+    handler's generate branch now calls this instead of the bare, non-persisting
+    `run_driver_generated_branches`, which is now `#[cfg(test)]`-only (its own doc comment updated:
+    no production route calls it directly any more) since it would otherwise report a `dead_code`
+    warning under `cargo clippy --all-targets` on the non-test build.
+  - **New test** (`resumed_generate_persists_mark_branch_children`, `crates/baud-server/src/routes/
+    run_kvm.rs`): boots+persists a `mark-branch-guest` branch point, calls `resume_and_generate`
+    directly, and asserts every `MARK_BRANCH` stop gets a real, distinct `node_id` correctly
+    parented on the *resumed-from* node (via `SnapshotStore::read_node`), not the original root —
+    the same check `fixed_tape_branch_hitting_mark_branch_persists_and_resumes_further` already does
+    for the fixed-tape sibling. `cargo test -p baud-server run_kvm`: 13/13. `drive/m9.sh`'s M9.6
+    gained a `node_id` assertion on every resumed generate branch, confirming the fix at the real
+    HTTP level too.
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` zero warnings/errors
+    referencing `run_kvm.rs`. `cargo test --workspace` surfaced only the already-documented
+    hardware-timing-sensitive `linux::tests::timer_tick_lands_at_identical_instruction` flake
+    (jitter 26 vs. tolerance 8), confirmed transient by an isolated re-run (1/1 pass) and by that
+    same test passing cleanly inside `drive/h4.sh`'s and `drive/h5.sh`'s own runs later in this
+    iteration; every other crate passed 100%. All 18 `drive/*.sh` scripts (`h0.sh`-`h6.sh`,
+    `m0.sh`-`m9.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero
+    regressions, `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: every other previously-open item remains untouched and still open: the
+    consensus-cluster fuzz loop's random-tactics/`Driver`-scheduler coupling (see above, non-blocking,
+    no drive script depends on it), `Driver` state persistence across requests, the enforced-regime
+    KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface (needs new
+    WebSocket infra this codebase does not have — see the H5 entry above), and the framebuffer
+    stream.
