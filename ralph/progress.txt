@@ -3680,3 +3680,5 @@ Normalized stray CRLF line-ending churn in .gitignore/ralph/.gitignore/todo.md b
   - Normalized incidental CRLF line-ending churn in .gitignore/ralph/.gitignore back to LF; kept todo.md's
     real §14 build-status update describing this pass and the still-open rdseed serve-path kernel work.
 ---
+
+Post-push verification: origin/main == local HEAD (e006b31), working tree clean. todo.md still has pending items (rdseed serve-path kernel patch, OS-entropy determinism, Regime-enum cleanup, Mario rebuild) -- emitting NEXT.
