@@ -2329,3 +2329,72 @@ todo.md updated by subagent with the fifth-brick entry documenting this closure.
   - Full re-verification: cargo build/test/clippy --workspace all green, zero new warnings in any touched file, zero regressions. All 16 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32.
   - todo.md's §14 build-status log gained a new "M-series — fifth brick" entry (via subagent) documenting this closure and the still-open follow-ups (Driver-state persistence across requests, no probe-emitting guest fixture yet, multi-level branch-tree growth chaining `interesting` branches into further generate calls, Tape.choices truncation issue).
 ---
+
+Post-push verification: local HEAD == origin/main (5160919, git fetch confirmed), working tree clean, build/test/clippy/all-16-drive-scripts already green pre-push against this exact commit. Re-reading todo.md: still many pending items (AMD phase-2, enforced-regime custom KVM module, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface, framebuffer stream, Driver-state persistence across requests, multi-level branch-tree growth, real UFFDIO_CONTINUE memory-efficient branching, Tape.choices truncation follow-up). This iteration's step (wiring baud-driver's generate mode into POST /run/kvm/resume) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T03:49:33 UTC - Session usage — build-12 [sonnet]
+- cost $4.0966083 (exact, from claude -p)
+- context 168,808 tok peak of 1M (17%) across 63 inference calls, monotonic
+- models sonnet-5 $4.0935 (in 134 / out 30,381 / cache-read 8,834,161) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/014-build-12.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 13
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Read todo.md end-of-file build status. Candidate items: (1) multi-level branch-tree growth chaining interesting branches into further generate calls (todo.md flags this as 'the clearer natural next increment'), (2) Driver-state persistence across requests, (3) Tape.choices truncation follow-up, (4) enforced-regime rdrand Crash test. Investigating codebase with subagents before picking.
+
+Chose multi-level branch-tree growth (chaining 'interesting' branches from /run/kvm/branch or /run/kvm/resume into further generate calls) — todo.md flags this 3x as 'the natural next increment', and it's the core §6 tree-search loop ('expand a branch point, fork N, score, keep interesting ones as new branch points') still only one level deep. Studying run_kvm.rs, baud-driver, baud-snapshot-store with subagents...
+
+Two Sonnet subagents launched in parallel: one studying run_kvm.rs route/persistence internals, one studying baud-driver's Driver/StrategySpec/Tape internals. Waiting on both before designing multi-level tree growth.
+
+run_kvm.rs research back: generated branches today are run-and-return only, never persisted to the snapshot-store tree (no universe capture, no mark_branch/put_universe call, no node_id in response). persist_universe is hardcoded parent=None/at_step=0/tape_range=(0,0) — only usable for the root branch point today, not a deeper node. Building multi-level growth needs: (1) capture each interesting branch's post-run Universe via branch.snapshot(), (2) persist it as a child node (parent=branch-point node_id, real at_step/tape_range), (3) surface that node_id in the response, (4) an automatic loop chaining generate calls across levels. Waiting on baud-driver internals agent before designing.
+
+baud-driver research back: Driver has no serialize/persist state (separate open item, not this iteration); StrategySpec.goal||crash defines 'interesting'; confirmed Tape.choices truncation bug is real and live in the mutate path (separate item). Design: add DriverGenerateSpec.levels (depth), recursively expand 'interesting' branches into further generate calls in-memory (the core §6 tree-search loop), persist each level's branch point as a real parent-chained snapshot-store node when persist_run_id is set, surface node_id per branch in the response. Reading run_kvm.rs directly to implement.
+
+Implemented: DriverGenerateSpec.levels field, expand_generate_level recursive tree expansion with shared branch budget, persist_universe_as for real parent-chained node persistence, node_id+children in GeneratedBranchOutcome/JSON response, CLI --generate-levels flag for kvm-branch/kvm-resume, 2 new tests (multi_level_generate_persists_a_real_parent_chain, expand_generate_level_respects_branch_budget). Running cargo build --workspace now.
+
+cargo build --workspace: clean, only pre-existing baud-tracing deprecation warnings (aya::Bpf), zero new warnings. Running cargo clippy --workspace --all-targets now.
+
+cargo clippy --workspace --all-targets: zero warnings referencing run_kvm.rs or cmds/run.rs (confirmed via targeted grep) — all warnings shown are pre-existing in unrelated files. Running cargo test -p baud-server run_kvm now to check the new multi-level tests against real KVM.
+
+FINDING: the multi_level_generate test failed for a real architectural reason, not a code bug — every guest fixture (hello-guest, tape-echo-guest) halts immediately after consuming its full given tape. Snapshotting a Multiverse AFTER run_to_first_halt() and forking it with a brand-new tape is a no-op: the vCPU is already halted, so the new tape is never read and the branch reproduces the FROZEN prior console output regardless of the new suffix (confirmed: got [208,86,249,80], not the given [1,2,3,4]). Real multi-level tree growth needs a MARK_BRANCH-checkpointing guest fixture + a run-until-branch-or-halt primitive (neither exists yet) — recording this in todo.md. Rescoping this iteration to the honest achievable slice: persist every 'interesting' generated branch as a real child node of the branch point (useful for later crash-state inspection/replay), dropping the recursive levels/children chaining.
+
+Rescoped implementation: dropped levels/recursive-expansion entirely, kept honest single-level 'persist every interesting branch as a real parent-chained child node' feature. Rewrote the broken test into interesting_generated_branches_persist_as_child_nodes (verifies real Node.parent chaining via read_node, plus that resuming reproduces the branch's own frozen output regardless of new tape — an honest, testable property). Reverted CLI --generate-levels flags. Rebuilding.
+
+Found a SECOND real bug via this same test: SnapshotStore::put_universe's NodeId is content-addressed purely by (parent, at_step, tape_range) — not by actual universe content. All sibling branches in one generate call shared the same at_step=tape_len_bytes/tape_range=(0,tape_len_bytes), so every interesting branch silently collided onto the SAME node id, overwriting each other in the store. Fixing by giving each branch's tape_range/at_step a distinct, deterministic, reproducible position (branch index i within the call) so siblings no longer collide.
+
+Fixed sibling node-id collision by folding branch index i into tape_range=(i*tape_len_bytes, (i+1)*tape_len_bytes), giving every sibling a distinct, deterministic, reproducible node identity. Rebuilding and rerunning tests.
+
+All run_kvm tests green (10/10) including the fixed interesting_generated_branches_persist_as_child_nodes test. Running full cargo build --workspace as part of pre-push verification.
+
+cargo build --workspace: clean (only pre-existing baud-tracing warnings). Running cargo clippy --workspace --all-targets.
+
+cargo clippy --workspace --all-targets: zero warnings in run_kvm.rs or cmds/run.rs, all shown warnings pre-existing elsewhere. Running cargo test --workspace (full suite) now — this is real KVM hardware so it will take a while.
+
+cargo test --workspace: 100% green across every crate, zero failures (baud-multiverse 64/64 unchanged, baud-server includes the new/fixed run_kvm tests). Running each drive/*.sh script individually now per CLAUDE.md's verification protocol.
+
+drive/h0.sh through h5.sh all PASSED (h5's ~232s 1000-branch test included). Continuing with h6 and the M-series.
+
+h6, m0, m1, m2 all PASS. Continuing with m3-m8 and full-demo.sh.
+
+m3-m8 all PASS. Running full-demo.sh (the comprehensive final check, includes h5's 1000-branch test) now — last drive script.
+
+ALL 17 drive scripts (h0-h6, m0-m8, full-demo.sh) PASS, full-demo 32/32 CHECKS PASSED, zero regressions. Updating todo.md with a subagent now to document: the shipped feature (interesting-branch persistence + real parent chaining), the sibling-node-id-collision bug found+fixed in SnapshotStore usage, and the real architectural blocker discovered for genuine multi-level tree growth (needs a MARK_BRANCH-checkpointing guest fixture + run-until-branch primitive).
+
+todo.md updated with the sixth-brick entry documenting the shipped feature, the sibling-node-id-collision bug fix, and the real architectural finding blocking genuine multi-level growth. Appending final progress block and committing now.
+
+## 2026-07-25T04:28:57 UTC - Changes committed.
+- Implemented: interesting-branch persistence for POST /run/kvm/branch's driver-generate mode — every branch marked `interesting` (goal reached or a real guest crash) is now snapshotted and persisted as a real child node of the branch point in SnapshotStore, not just the branch point itself, and its node_id is surfaced in the response.
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New `persist_universe_as(store, run_id, universe, parent, at_step, tape_range)` generalizes the existing `persist_universe` (root case, now a thin wrapper) to persist any captured Universe with a real parent link.
+  - `run_driver_generated_branches_with_persist` (used by `/run/kvm/branch`'s generate mode) snapshots and persists each `interesting` branch, parented on the branch point's own node id; `GeneratedBranchOutcome` gained `node_id: Option<String>`, surfaced in the JSON response.
+  - Found and fixed a real bug in the same increment: `SnapshotStore::put_universe`'s node identity is a function of tree position (parent, at_step, tape_range), not content — sibling branches sharing the same tape_range collapsed onto the same node id and silently overwrote each other. Fixed by folding each branch's own index into its tape_range.
+  - Found and documented a real architectural blocker for genuine multi-level branch-tree growth (todo.md's own repeatedly-flagged "natural next increment"): every guest fixture in this workspace halts immediately after consuming its given tape, so forking an already-halted branch's snapshot with a new tape suffix is a no-op (proven live by a failing test before this was understood — the resumed branch reproduced its OWN frozen output, not the new tape's). Real chaining needs a MARK_BRANCH-checkpointing guest fixture plus a run-until-branch-or-halt primitive, neither of which exists yet — recorded as the concrete next step in todo.md's new "M-series — sixth brick" entry.
+  - New test `interesting_generated_branches_persist_as_child_nodes` in run_kvm.rs (cargo test -p baud-server run_kvm: 10/10, was 9/9): verifies distinct node_ids per branch, correct real parent chaining via `SnapshotStore::read_node`, and that resuming a persisted interesting branch reproduces its own frozen output.
+  - Full re-verification: cargo build/test/clippy --workspace all green, zero new warnings in any touched file, zero regressions. All 16 drive/*.sh scripts (h0-h6, m0-m8) plus full-demo.sh re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh "32/32 CHECKS PASSED" (h5's ~225s 1000-branch test included).
+---

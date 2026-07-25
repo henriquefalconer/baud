@@ -287,13 +287,34 @@ fn boot_snapshot_and_branch(
 
 /// One driver-generated branch's result: the tape `Driver::draw_bits` produced for it, its
 /// outcome, the observations scored back into the driver, and whether it was "interesting"
-/// (goal reached or a real guest-reported crash).
+/// (goal reached or a real guest-reported crash). `node_id` is set only when this branch was
+/// `interesting` *and* the call persisted (a `persist_run_id`'d `/run/kvm/branch` request) — a real
+/// child node of the branch point a caller can hand to `POST /run/kvm/resume` or
+/// `reconstruct_universe` later to re-inspect exactly this branch's final state (e.g. the guest
+/// memory a crash left behind), without re-running anything.
+///
+/// This does **not** let a caller keep *exploring further* from an interesting branch by handing
+/// it a fresh tape suffix: every guest fixture in this workspace (`hello-guest`, `tape-echo-guest`)
+/// halts as soon as it has consumed its given tape (todo.md §3.6's subtractive rule — a minimal
+/// guest with no reason to read more), so the persisted node's vCPU is already in `Hlt`. Forking it
+/// with a new suffix and running to first halt is provably a no-op today: found live while building
+/// this feature — a first attempt tried to snapshot a branch *after* `run_to_first_halt()` and
+/// recursively generate further branches from that post-halt state, and a test proved the resumed
+/// branch reproduced the **original** branch's frozen console output, completely independent of the
+/// brand-new suffix handed to it (a guest that is already halted never reads anything further).
+/// Real multi-level tree growth (todo.md §6's "expand a branch point ... keep interesting ones as
+/// new branch points", chained automatically) needs a guest that calls the tape device's
+/// `MARK_BRANCH` control op mid-execution (`observations_from_records` already ignores
+/// `Msg::MarkBranch` for scoring, but nothing anywhere in this route or `Multiverse` runs-until-a-
+/// branch-marker instead of run-until-halt) — no such fixture or run primitive exists yet; tracked
+/// as the real remaining blocker in todo.md rather than papered over here.
 struct GeneratedBranchOutcome {
     tape_hex: String,
     console_output: Vec<u8>,
     ram_hash: String,
     observations: Vec<(String, f64)>,
     interesting: bool,
+    node_id: Option<String>,
 }
 
 struct DriverRunSummary {
@@ -313,18 +334,43 @@ fn boot_snapshot_and_generate(
         Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
         None => None,
     };
-    let (outcomes, summary) = run_driver_generated_branches(&universe, spec)?;
+    // The branch point itself was just persisted (if `persist` is set) as a fresh root node
+    // (`parent: None, at_step: 0`, `persist_universe`'s own contract) — that's the parent every
+    // interesting generated branch chains onto.
+    let root_parent = match (&persisted, persist) {
+        (Some((_, node_id_hex)), Some(_)) => {
+            let id = baud_snapshot_store::NodeId::from_hex(node_id_hex)
+                .map_err(|e| format!("bad persisted node_id: {e}"))?;
+            Some(id)
+        }
+        _ => None,
+    };
+    let (outcomes, summary) = run_driver_generated_branches_with_persist(&universe, spec, persist, root_parent)?;
     Ok((outcomes, summary, persisted))
 }
 
 /// The snapshot-tree exploration loop (todo.md §6: "expand a branch point, fork N continuations,
-/// score, keep interesting ones") applied to one shared branch point: draw a tape with
-/// `Driver::draw_bits`, fork+run it, score it from its drained tape-device records
-/// (`observations_from_records`), and feed the score back via `Driver::end_run` before drawing the
-/// next tape.
+/// score, keep interesting ones") applied to one shared branch point — the entry point every
+/// caller that never persists (a bare `/run/kvm/branch` or any `/run/kvm/resume` generate call)
+/// uses.
 fn run_driver_generated_branches(
     universe: &baud_snapshot::Universe,
     spec: DriverGenerateSpec,
+) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
+    run_driver_generated_branches_with_persist(universe, spec, None, None)
+}
+
+/// Draws a tape with `Driver::draw_bits`, fork+runs it, scores it from its drained tape-device
+/// records (`observations_from_records`), and feeds the score back via `Driver::end_run` before
+/// drawing the next tape. When `persist` is set, every `interesting` branch's resulting state
+/// (`Multiverse::snapshot`, taken right after that branch halts) is additionally persisted as a
+/// real child node of `parent` (`GeneratedBranchOutcome`'s own doc explains why this doesn't
+/// support chaining a *further* generate call from it today).
+fn run_driver_generated_branches_with_persist(
+    universe: &baud_snapshot::Universe,
+    spec: DriverGenerateSpec,
+    persist: Option<(&SnapshotStore, &str)>,
+    parent: Option<baud_snapshot_store::NodeId>,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
     let mut driver = baud_driver::Driver::new(spec.seed, spec.strategy, baud_driver::TacticsSpec::default());
     let mut outcomes = Vec::with_capacity(spec.count);
@@ -344,13 +390,46 @@ fn run_driver_generated_branches(
         let (observations, crashed) = observations_from_records(&records, outcome.console_output.len());
         driver.end_run(&observations);
         let branch_goal = driver.is_goal_reached(&observations);
+        let interesting = branch_goal || crashed;
         goal_reached |= branch_goal;
+
+        let node_id = if interesting {
+            match persist {
+                Some((store, run_id)) => {
+                    let mut page_store = baud_snapshot::PageStore::new();
+                    let branch_universe = branch
+                        .snapshot(&mut page_store)
+                        .map_err(|e| format!("branch {i} snapshot error: {e}"))?;
+                    // `SnapshotStore::put_universe`'s node identity is `Sha::of_node_identity(parent,
+                    // at_step, tape_range)` — a function of *position*, not content (todo.md §14's
+                    // "Not yet done": this store was only ever exercised with one root node per run
+                    // before this feature). Every sibling branch of one generate call shares the same
+                    // `parent` and the same `tape_len_bytes`, so a shared, index-independent
+                    // `(0, tape_len_bytes)` `tape_range` for all of them collapses every sibling onto
+                    // the *same* node id — confirmed live: a test asserting distinct node ids per
+                    // branch failed until each branch's own index `i` was folded into its
+                    // `tape_range`, giving every sibling a distinct, deterministic, reproducible
+                    // position instead of silently overwriting one another in the store.
+                    let tape_range = (
+                        i as u64 * spec.tape_len_bytes as u64,
+                        (i as u64 + 1) * spec.tape_len_bytes as u64,
+                    );
+                    let nid = persist_universe_as(store, run_id, &branch_universe, parent, tape_range.1, tape_range)?;
+                    Some(nid.to_hex())
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         outcomes.push(GeneratedBranchOutcome {
             tape_hex: hex_encode(&suffix),
             console_output: outcome.console_output,
             ram_hash: outcome.ram_hash,
             observations,
-            interesting: branch_goal || crashed,
+            interesting,
+            node_id,
         });
     }
     let summary = DriverRunSummary {
@@ -395,7 +474,7 @@ fn probe_value_as_f64(value: &baud_proto::Value) -> Option<f64> {
 }
 
 fn generated_outcome_to_json(outcome: GeneratedBranchOutcome) -> Value {
-    json!({
+    let mut value = json!({
         "tape_hex": outcome.tape_hex,
         "console_output_hex": hex_encode(&outcome.console_output),
         "ram_hash": outcome.ram_hash,
@@ -403,7 +482,11 @@ fn generated_outcome_to_json(outcome: GeneratedBranchOutcome) -> Value {
             .map(|(probe, value)| json!({ "probe": probe, "value": value }))
             .collect::<Vec<_>>(),
         "interesting": outcome.interesting,
-    })
+    });
+    if let Some(node_id) = outcome.node_id {
+        value["node_id"] = json!(node_id);
+    }
+    value
 }
 
 /// Persist a captured branch-point [`baud_snapshot::Universe`] into `store` under `run_id`: every
@@ -426,6 +509,25 @@ fn persist_universe(
     run_id: &str,
     universe: &baud_snapshot::Universe,
 ) -> Result<PersistedRef, String> {
+    let node_id = persist_universe_as(store, run_id, universe, None, 0, (0, 0))?;
+    Ok((run_id.to_owned(), node_id.to_hex()))
+}
+
+/// Persist any captured [`baud_snapshot::Universe`] as a node in `store`, optionally parented on an
+/// already-persisted node — the general form `persist_universe` (the branch-point/root case,
+/// `parent: None, at_step: 0, tape_range: (0, 0)`) and `expand_generate_level` (a deeper generated
+/// branch, real `parent`/`at_step`/`tape_range`) both share. Same per-call page-dedup as
+/// `persist_universe`'s own doc explains (`SnapshotStore::put_page` already skips a hash it has
+/// already written this store's lifetime, but `seen` avoids even trying for a mostly-shared-RAM
+/// guest's repeat page slots).
+fn persist_universe_as(
+    store: &SnapshotStore,
+    run_id: &str,
+    universe: &baud_snapshot::Universe,
+    parent: Option<baud_snapshot_store::NodeId>,
+    at_step: u64,
+    tape_range: (u64, u64),
+) -> Result<baud_snapshot_store::NodeId, String> {
     let run = baud_snapshot_store::RunId::new(run_id.to_owned());
     let mut seen = std::collections::HashSet::new();
     for (hash, bytes) in universe.ram_pages() {
@@ -436,10 +538,9 @@ fn persist_universe(
     }
     let encoded = baud_snapshot::encode_universe_body(&universe.to_body())
         .map_err(|e| format!("encode universe body error: {e}"))?;
-    let node_id = store
-        .put_universe(&run, None, 0, (0, 0), &encoded)
-        .map_err(|e| format!("persist universe error: {e}"))?;
-    Ok((run_id.to_owned(), node_id.to_hex()))
+    store
+        .put_universe(&run, parent, at_step, tape_range, &encoded)
+        .map_err(|e| format!("persist universe error: {e}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -881,6 +982,82 @@ mod tests {
             assert_eq!(r.ram_hash, d.ram_hash);
         }
         assert_eq!(resumed_summary.best_tape_hex, direct_summary.best_tape_hex);
+    }
+
+    /// Every `interesting` generated branch (not just the branch point itself) must persist as a
+    /// real child node of the branch point — `node_id` set, parented correctly (`Node::parent` in
+    /// the store matches the branch point's own node id, confirmed via `SnapshotStore::read_node`,
+    /// not just "some node_id came back"), and independently reconstructible/resumable afterward
+    /// with no kernel and no re-boot. A `goal` strategy `tape-echo-guest` satisfies on every branch
+    /// (`console_len == tape_len_bytes`, since it always echoes exactly what it's given) makes every
+    /// branch `interesting`, so every one of `count` branches must come back with a distinct
+    /// `node_id`.
+    ///
+    /// This is deliberately *not* a "resume this node with a fresh tape and it explores further"
+    /// test — `GeneratedBranchOutcome`'s own doc explains why that is a no-op for every guest fixture
+    /// in this workspace today (each halts as soon as it consumes its given tape). What this proves
+    /// instead — the property that *is* real and useful — is that a persisted interesting branch's
+    /// exact final state round-trips: resuming it with *any* tape reproduces that branch's own
+    /// frozen output byte-for-byte, so a caller can persist a crash and inspect that exact state
+    /// later without re-running anything.
+    #[test]
+    fn interesting_generated_branches_persist_as_child_nodes() {
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "interesting-branch-persist-test";
+
+        let spec = DriverGenerateSpec {
+            seed: 5,
+            count: 4,
+            tape_len_bytes: 4,
+            strategy: baud_driver::StrategySpec {
+                goal: Some(baud_proto::Predicate {
+                    probe: "console_len".into(),
+                    value: baud_proto::Value::U64(4),
+                }),
+                ..Default::default()
+            },
+        };
+
+        let (outcomes, summary, persisted) =
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)))
+                .expect("boot_snapshot_and_generate failed");
+        let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
+        assert_eq!(root_run_id, run_id);
+        assert!(summary.goal_reached, "tape-echo-guest always reaches the console_len goal");
+
+        assert_eq!(outcomes.len(), 4);
+        let root_node_id =
+            baud_snapshot_store::NodeId::from_hex(&root_node_id_hex).expect("valid root node_id");
+        let run = baud_snapshot_store::RunId::new(run_id.to_owned());
+        let mut seen_node_ids = std::collections::HashSet::new();
+
+        for outcome in &outcomes {
+            assert!(outcome.interesting, "every branch must reach the console_len goal");
+            let node_id_hex = outcome.node_id.as_ref().expect("interesting branch must persist a node_id");
+            assert!(seen_node_ids.insert(node_id_hex.clone()), "every branch must get a distinct node_id");
+            assert_ne!(node_id_hex, &root_node_id_hex, "a branch's node must differ from the branch point's");
+
+            let node_id = baud_snapshot_store::NodeId::from_hex(node_id_hex).expect("valid node_id");
+            let node = store.read_node(&run, node_id).expect("read_node failed");
+            assert_eq!(
+                node.parent.as_deref(),
+                Some(root_node_id_hex.as_str()),
+                "a generated branch's node must be parented on the branch point, not a root itself"
+            );
+            let _ = root_node_id; // the parent hex string above is the real assertion; keep the typed id in scope for clarity
+
+            // Resuming this exact node — with *any* tape, since the guest is already halted —
+            // must reproduce this branch's own frozen output, proving the persisted state really
+            // is this specific branch's final state, not some other one's.
+            let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![vec![0xAB, 0xCD]])
+                .expect("resuming a generated branch's node failed");
+            assert_eq!(
+                resumed[0].0, outcome.console_output,
+                "resuming a persisted interesting branch must reproduce its own frozen output"
+            );
+        }
     }
 
     #[test]

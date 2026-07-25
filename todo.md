@@ -1494,3 +1494,81 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     next increment, since both the branch and resume entry points support generate mode
     symmetrically. The `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)` follow-up (flagged
     in the "fourth brick" entry) is untouched, still open.
+- **M-series — sixth brick: generated branches persist as real child nodes, plus the concrete
+  reason multi-level branch-tree growth (flagged as "the natural next increment" in both the
+  "fourth brick" and "fifth brick" entries above) is not simply a wiring exercise.**
+  - `run_driver_generated_branches_with_persist` (`crates/baud-server/src/routes/run_kvm.rs`, the
+    shared engine behind both `POST /run/kvm/branch`'s generate mode and, via the unchanged
+    `run_driver_generated_branches` wrapper, `/run/kvm/resume`'s generate mode) now persists every
+    `interesting` branch (goal reached, or a real guest crash) as a genuine child node of the
+    branch point in `SnapshotStore` — not just the branch point itself, which was all prior
+    iterations persisted. New helper `persist_universe_as(store, run_id, universe, parent:
+    Option<NodeId>, at_step, tape_range)` generalizes the pre-existing `persist_universe`, which
+    now just calls it with `parent=None, at_step=0, tape_range=(0,0)` for the root case — no
+    behavior change to root persistence. `GeneratedBranchOutcome` gained a `node_id: Option<String>`
+    field, set only when a branch is both interesting and persistence is active (`persist_run_id`
+    supplied), surfaced through to the JSON response by `generated_outcome_to_json`. A caller can
+    now `POST /run/kvm/resume` against an interesting generated branch's own `node_id` to
+    re-fetch/re-verify its exact final state later (e.g. a crash's guest memory) without re-running
+    anything.
+  - **A real bug found and fixed in the same increment**: `SnapshotStore::put_universe`'s node
+    identity (`crates/baud-snapshot-store/src/types.rs`'s `Sha::of_node_identity(parent, at_step,
+    tape_range)`) is a function of tree *position*, not content — and until this iteration the
+    store had only ever been exercised with a single root node per run. When multiple sibling
+    interesting branches from one generate call were first persisted with a shared,
+    index-independent `tape_range=(0, tape_len_bytes)`, every sibling collapsed onto the *same*
+    node id and silently overwrote one another in the store (caught by a test asserting distinct
+    node ids per branch, which failed until fixed). Fixed by folding each branch's own index `i`
+    (within the generate call) into its `tape_range = (i * tape_len_bytes, (i+1) * tape_len_bytes)`,
+    giving every sibling a distinct, deterministic, reproducible position.
+  - **A real architectural finding — the actual reason multi-level branch-tree growth is not done,
+    and can't be done cheaply today.** A first attempt this iteration tried to snapshot a generated
+    branch's Multiverse *after* `run_to_first_halt()` and recursively generate further branches
+    from that resulting universe — literally chaining generate calls the way the "fourth brick" and
+    "fifth brick" entries' "natural next increment" language suggested. A test proved this is
+    semantically broken: every guest fixture in this workspace (`hello-guest`, `tape-echo-guest`,
+    `timer-guest`, `shell-guest`, `rdrand-guest`) halts as soon as it consumes the tape it's given
+    (§3.6's subtractive rule — minimal guests with no reason to read more). Forking an
+    already-halted universe with a brand-new tape suffix is a no-op: the vCPU is stuck at `Hlt` and
+    never reads the new tape, so `run_to_first_halt()` on it just returns the *original* branch's
+    frozen console output, completely independent of the new suffix (confirmed live: asked for
+    suffix `[1,2,3,4]`, got back `[208,86,249,80]` — the frozen bytes from the branch's own original
+    tape, not the new one). Real multi-level tree growth therefore needs a guest that calls the
+    tape device's `MARK_BRANCH` control op mid-execution and *keeps running* afterward (reads more
+    tape, does more work) — `observations_from_records` in `run_kvm.rs` already ignores
+    `Msg::MarkBranch` for scoring purposes, and nothing anywhere in `baud-multiverse::linux::
+    Multiverse` runs "until a branch marker or halt" instead of "until halt" — no such guest
+    fixture or run primitive exists yet. This is the concrete, specific blocker (not vague "not yet
+    done") for real snapshot-tree exploration (§6's "expand a branch point, fork N continuations,
+    score, keep interesting ones as new branch points", chained automatically across multiple
+    rounds) — readers should treat this entry, not the "natural next increment" phrasing in the
+    fourth/fifth-brick entries above, as current truth on this topic.
+  - **Verification**: `cargo build --workspace` clean (zero new warnings). `cargo clippy
+    --workspace --all-targets` zero new warnings in `run_kvm.rs` or `crates/baud-cli/src/cmds/
+    run.rs` (confirmed via targeted grep against the full clippy output — all shown warnings
+    pre-existing in unrelated files: `baud-tracing`'s deprecated `aya::Bpf`, `baud-driver`/
+    `baud-proto`/`baud-secret`/`baud-stream` test-only lints, `baud-server/src/routes/{fuzz,replay,
+    tracing}.rs`). `cargo test --workspace` 100% green across every crate (`baud-multiverse` 64/64
+    unchanged). `cargo test -p baud-server run_kvm`: 10/10 (was 9/9 pre-iteration; one test
+    replaced — see below). New test `interesting_generated_branches_persist_as_child_nodes` (real
+    KVM, `tape-echo-guest`, a `goal` strategy that's always satisfied so every branch is
+    interesting): asserts every branch gets a distinct `node_id`, that `SnapshotStore::read_node`
+    reports the correct real parent (the branch point's own node id, not itself a root), and that
+    resuming that node with any tape reproduces exactly that branch's own frozen console output
+    (the honest property, given the no-op finding above). All 17 `drive/*.sh` scripts
+    (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`, `full-demo.sh`) re-run individually end-to-end on real
+    `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS PASSED" (h5's ~225s 1000-branch test
+    included).
+  - **Not yet done**: real multi-level branch-tree growth needs (1) a new guest fixture that calls
+    `MARK_BRANCH` mid-execution and continues reading tape/doing work afterward (the existing
+    fixtures are deliberately minimal and halt immediately — building this fixture is real,
+    non-trivial work, similar in kind to how `hello-guest`/`tape-echo-guest` were hand-assembled,
+    see their `BUILD.md` files for the pattern), and (2) a `Multiverse` run primitive that stops at
+    a branch marker instead of only at halt (`run_to_first_halt` has no sibling today). `POST
+    /run/kvm/resume` still has no `persist_run_id`/persistence mechanism at all (pre-existing gap,
+    unrelated to this iteration — only `/run/kvm/branch` can persist anything). Driver-state
+    persistence across requests (seed/best/reservoir) is still not built — still flagged from prior
+    iterations, untouched. The `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)` follow-up
+    (flagged in the "fourth brick" entry) is untouched, still open — confirmed still real and live
+    in the mutate scheduling path (`generation % 3 == 1` in `baud-driver/src/lib.rs`'s `begin_run`)
+    by a research pass this iteration, but not fixed (out of scope for this increment).
