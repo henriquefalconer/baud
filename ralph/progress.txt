@@ -3875,3 +3875,19 @@ drive/h4.sh: ALL CHECKS PASSED. Running drive/h5.sh (snapshot/branch/restore) ne
 Chose to finish and land the already-implemented 'RdseedRewriteReport -> boot wiring' (todo.md §14), it's the last missing piece of item 15 in the problem/spec/test matrix (§12) and was left uncommitted by a prior session that appears to have been cut off right before 'git commit'.
 
 drive/h5.sh: ALL CHECKS PASSED (real hardware, ~4min incl. the 1000-branch fork test) -- this exercises boot_and_snapshot, the other production call site now threading rdseed sidecar sites through Multiverse::boot_with_rdseed_sites. Verification protocol (cargo build/clippy/test workspace-wide + drive/h1-h5.sh on real /dev/kvm) is green. Committing now.
+
+git push origin main succeeded: 855e573..3b88ce4 main -> main. Verifying remote tip matches local HEAD...
+
+Post-push verification: git fetch + rev-parse confirms origin/main HEAD (3b88ce4) matches local HEAD exactly. Push is green.
+
+## 2026-07-25T22:49:00 UTC - Changes committed.
+- What was implemented: closed todo.md §14's last open item, "RdseedRewriteReport -> boot wiring" (also §12 item 15). This was uncommitted work already sitting in the working tree from a prior session that appears to have been cut off right before `git commit`; this iteration verified it (full build/clippy/test + drive/h1.sh-h5.sh on real /dev/kvm) and landed it.
+- Files changed: crates/baud-cli/src/cmds/image.rs, crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/rdseed-guest/BUILD.md, crates/baud-packages/src/rdseed.rs, crates/baud-server/src/main.rs, crates/baud-server/src/rdseed_sites.rs (new), crates/baud-server/src/routes/run_kvm.rs, todo.md
+- **Brief description of changes:**
+  - `RdseedSite` (crates/baud-packages/src/rdseed.rs) now decodes a real `gpr_index` from each rdseed site's ModRM byte (+ REX.B), instead of assuming `eax`
+  - `baud image rewrite-rdseed` (crates/baud-cli/src/cmds/image.rs) writes a `<output>.rdseed-sites.json` sidecar next to the patched image
+  - `baud-server`'s new `rdseed_sites` module (crates/baud-server/src/rdseed_sites.rs) loads that sidecar, converting it into the table `Multiverse::boot_with_rdseed_sites` wants; missing sidecar -> empty (no-op) table, malformed sidecar -> loud error
+  - Both production boot call sites in `crates/baud-server/src/routes/run_kvm.rs` (`boot_run_and_drain`, `boot_and_snapshot`) now call `Multiverse::boot_with_rdseed_sites` with the loaded sidecar instead of the old empty-table `Multiverse::boot`
+  - todo.md §14 updated: folds this item into "Built and hardware-tested", leaving OS-entropy determinism, Regime-enum cleanup, and the Mario validation as the remaining open items
+- Verified: `cargo build/clippy/test --workspace` clean; `drive/h1.sh` through `drive/h5.sh` all green against real `/dev/kvm` (regime=cooperative), exercising both modified boot call sites end-to-end; pushed to `origin/main` (855e573..3b88ce4) and confirmed the remote tip matches local HEAD.
+---
