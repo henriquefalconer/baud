@@ -24,6 +24,9 @@
 //     records/<node id hex>.age    -- the guest's tape-device Msg records observed up to this
 //                                      node, age-encrypted (CBOR via baud_proto::encode per Msg,
 //                                      length-prefixed)
+//     driver_state.age             -- the run's latest baud_driver::DriverState, age-encrypted,
+//                                      caller-serialized JSON (this crate does not depend on
+//                                      baud-driver — same opaque-blob pattern as universes/pages)
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -86,6 +89,9 @@ impl SnapshotStore {
     }
     fn records_path(&self, run: &RunId, node: NodeId) -> PathBuf {
         self.run_dir(run).join("records").join(format!("{}.age", node.to_hex()))
+    }
+    fn driver_state_path(&self, run: &RunId) -> PathBuf {
+        self.run_dir(run).join("driver_state.age")
     }
 
     // -- low-level encrypted-body helpers -------------------------------------------------------
@@ -305,6 +311,37 @@ impl SnapshotStore {
         }
         fs::write(path, ciphertext)?;
         Ok(())
+    }
+
+    // -- baud-driver exploration state -------------------------------------------------------------
+
+    /// Persist a caller-opaque, serialized `baud_driver::DriverState` blob for `run` — one per run,
+    /// overwritten on every call (like `put_tape`: the latest state supersedes the last, there is
+    /// no history of intermediate driver states to keep). This crate does not depend on
+    /// `baud-driver` and does not parse the bytes (this crate's own "does not know the caller's
+    /// serialization" pattern — see `put_universe`'s doc); the caller (`baud-server`) is
+    /// responsible for `serde_json::to_vec`/`from_slice` on `baud_driver::DriverState`.
+    /// Age-encrypted like the tape: `best`/`reservoir` are recorded draw bytes, which may embed
+    /// guest-influenced data the same way a tape does.
+    pub fn put_driver_state(&self, run: &RunId, state: &[u8]) -> Result<(), StoreError> {
+        let path = self.driver_state_path(run);
+        let ciphertext = baud_keys::age_encrypt(&self.recipient, state)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, ciphertext)?;
+        Ok(())
+    }
+
+    /// Whether `run` has a persisted driver state yet — callers use this to decide between a
+    /// fresh `Driver::new` and `Driver::new` + `apply_state` without treating "no state yet" (the
+    /// first generate call for a run) as an error the way a missing tape/universe would be.
+    pub fn has_driver_state(&self, run: &RunId) -> bool {
+        self.driver_state_path(run).exists()
+    }
+
+    pub fn get_driver_state(&self, run: &RunId) -> Result<Vec<u8>, StoreError> {
+        self.read_and_decrypt(&self.driver_state_path(run))
     }
 
     pub fn get_records(&self, run: &RunId, node: NodeId) -> Result<Vec<baud_proto::Msg>, StoreError> {

@@ -103,7 +103,7 @@ impl StrategySpecExt for StrategySpec {
 }
 
 /// Score derived from probe observations (higher is better)
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub struct Score(pub Vec<f64>);
 
 impl Score {
@@ -145,6 +145,33 @@ pub enum WeatherTactic {
 pub struct TacticsSpec {
     pub input: Vec<InputTactic>,
     pub weather: Vec<WeatherTactic>,
+}
+
+/// Everything a `Driver` accumulates across generations that a caller needs to resume
+/// exploration in a later process/request instead of starting `generation` back at 0 with an
+/// empty `best`/`reservoir` every time (todo.md §14's "`Driver` state persistence across
+/// requests" gap: every HTTP route that runs an exploration loop built a fresh `Driver` per
+/// request, so a `resume`d generate call had no memory of an earlier generate call's progress).
+/// Deliberately excludes `seed`/`strategy`/`tactics` — a caller reconstructs `Driver::new` with
+/// those (its own request already carries them) and applies this on top via
+/// [`Driver::apply_state`], the same way `replay_tape`/`live_tape`/`rng`/`run_cursor` stay
+/// request-scoped and are never part of what's exported.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DriverState {
+    pub best: Tape,
+    pub best_score: Vec<f64>,
+    pub reservoir: Vec<Tape>,
+    pub generation: u64,
+    pub partition_state: bool,
+    /// `ChaCha20Rng::get_word_pos()` — the *unrecorded* internal scheduling draws
+    /// (`draw_raw_u64`/`draw_raw_f64`, used to pick mutate/splice indices and reservoir
+    /// replacement) advance `rng` without writing anything to any `Tape`, so a resumed driver
+    /// whose `rng` restarts at word 0 diverges from one that kept running in-process the moment
+    /// its first mutate/splice decision draws a different index. Restoring this exact stream
+    /// position (not just re-seeding) is what makes `apply_state` reproduce the *same* schedule,
+    /// not merely a plausible one — `ChaCha20Rng::set_word_pos` is built for exactly this
+    /// save/resume use (rand_chacha's own round-trip tests assert it).
+    pub rng_word_pos: u128,
 }
 
 /// The main driver struct.
@@ -286,6 +313,35 @@ impl Driver {
     /// Returns the live tape recorded so far in the current run.
     pub fn live_tape(&self) -> &Tape {
         &self.live_tape
+    }
+
+    /// Export everything needed to resume exploration later ([`DriverState`]'s own doc explains
+    /// what's excluded and why). Call after `end_run` (or before any `begin_run` at all, for a
+    /// still-fresh driver) — never mid-run, since `live_tape`/`run_cursor` are not captured.
+    pub fn export_state(&self) -> DriverState {
+        DriverState {
+            best: self.best.clone(),
+            best_score: self.best_score.0.clone(),
+            reservoir: self.reservoir.clone(),
+            generation: self.generation,
+            partition_state: self.partition_state,
+            rng_word_pos: self.rng.get_word_pos(),
+        }
+    }
+
+    /// Apply a previously exported [`DriverState`] onto a freshly constructed `Driver` (same
+    /// seed/strategy/tactics as the run being resumed), so the next `begin_run` schedules
+    /// splice/mutate/extend exactly as if this were the same `Driver` continuing in the same
+    /// process — `generation` is what `begin_run` gates its `use_replay` decision on, so a
+    /// resumed driver with `generation > 0` and a non-empty `best` behaves identically to one
+    /// that never stopped.
+    pub fn apply_state(&mut self, state: DriverState) {
+        self.best = state.best;
+        self.best_score = Score(state.best_score);
+        self.reservoir = state.reservoir;
+        self.generation = state.generation;
+        self.partition_state = state.partition_state;
+        self.rng.set_word_pos(state.rng_word_pos);
     }
 
     // -----------------------------------------------------------------------
@@ -510,6 +566,14 @@ impl Driver {
 
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// The generation counter `begin_run` advances on every call — exposed so a caller that
+    /// persists/resumes `DriverState` across requests can report whether progress is actually
+    /// accumulating (e.g. over HTTP) without needing a full `export_state()` just to read one
+    /// field.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -808,6 +872,53 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(d.draw_weather(0.0, 0.0), 0, "p_start=0.0: partition must remain OFF");
         }
+    }
+
+    /// Regression test for todo.md §14's "Driver state persistence across requests" gap: a driver
+    /// that exports its state after a few generations and a *fresh* `Driver` that applies that
+    /// state must schedule the next generation identically to the original driver continuing
+    /// in-process — proving `export_state`/`apply_state` actually carry enough to resume, not
+    /// just enough to look non-empty.
+    #[test]
+    fn exported_state_resumes_scheduling_identically_to_continuing_in_process() {
+        let seed = 4242u64;
+        let strategy = StrategySpec { maximize: vec!["depth".into()], ..Default::default() };
+
+        // Baseline: one driver runs 4 generations uninterrupted.
+        let mut baseline = Driver::new(seed, strategy.clone(), TacticsSpec::default());
+        for gen in 0..4u64 {
+            baseline.begin_run();
+            let _ = baseline.draw_bits(8);
+            let _ = baseline.draw_bits(8);
+            baseline.end_run(&[("depth".into(), gen as f64)]);
+        }
+
+        // Split: a second driver runs the same first 2 generations, exports state, and a brand
+        // new driver (never saw generations 0-1) applies it and runs generations 2-3.
+        let mut first_half = Driver::new(seed, strategy.clone(), TacticsSpec::default());
+        for gen in 0..2u64 {
+            first_half.begin_run();
+            let _ = first_half.draw_bits(8);
+            let _ = first_half.draw_bits(8);
+            first_half.end_run(&[("depth".into(), gen as f64)]);
+        }
+        let exported = first_half.export_state();
+
+        let mut resumed = Driver::new(seed, strategy, TacticsSpec::default());
+        resumed.apply_state(exported);
+        for gen in 2..4u64 {
+            resumed.begin_run();
+            let _ = resumed.draw_bits(8);
+            let _ = resumed.draw_bits(8);
+            resumed.end_run(&[("depth".into(), gen as f64)]);
+        }
+
+        assert_eq!(
+            resumed.best_tape().tape_bytes(),
+            baseline.best_tape().tape_bytes(),
+            "resuming from exported state must schedule identically to an uninterrupted driver"
+        );
+        assert_eq!(resumed.best_score, baseline.best_score);
     }
 
     /// driver_new_accepts_tactics: Driver::new must accept TacticsSpec parameter.

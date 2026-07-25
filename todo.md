@@ -1942,3 +1942,63 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface (needs new
     WebSocket infra this codebase does not have — see the H5 entry above), and the framebuffer
     stream.
+- **M-series — fourteenth brick: `Driver` exploration state (best/reservoir/generation/rng stream
+  position) now persists across HTTP requests, closing the "Driver state persistence across
+  requests" gap that was open since the eleventh brick and re-flagged in every "Not yet done" list
+  since.** Two scoping subagents confirmed this was well-scoped before starting: every route that
+  ran an exploration loop (`run_driver_generated_branches_with_persist`, called by both
+  `/run/kvm/branch`'s and `/run/kvm/resume`'s generate modes) built `Driver::new` from scratch every
+  call, so a second `resume`-generate call against an already-explored `run_id` re-explored with an
+  empty `best`/`reservoir` and `generation` reset to 0 — the fuzzing loop never actually accumulated
+  progress across requests, only within one.
+  - **`crates/baud-driver/src/lib.rs`**: new `DriverState` (`best`, `best_score`, `reservoir`,
+    `generation`, `partition_state`, plus `rng_word_pos: u128` — `ChaCha20Rng::get_word_pos()`/
+    `set_word_pos()`, required because `begin_run`'s mutate/splice scheduling draws unrecorded "raw"
+    rng values that never land on any `Tape`, so restoring only the recorded fields without the rng
+    stream position diverges from an in-process-continued driver the moment the first mutate/splice
+    decision is made — confirmed live: the first version of the round-trip test failed until this
+    field was added). `Driver::export_state()`/`Driver::apply_state()`/`Driver::generation()` (a
+    cheap public accessor alongside the full export, for callers that just want to report progress).
+    New test `exported_state_resumes_scheduling_identically_to_continuing_in_process` proves a fresh
+    `Driver` that applies exported state schedules byte-identically to one that never stopped, not
+    just that it looks non-empty. `Score` gained `Serialize`/`Deserialize`. 18/18 tests (was 16).
+  - **`crates/baud-snapshot-store/src/store.rs`**: new `put_driver_state`/`get_driver_state`/
+    `has_driver_state`, one age-encrypted `driver_state.age` blob per run (same opaque-bytes pattern
+    as `put_tape`/`get_tape` — this crate still does not depend on `baud-driver` or parse the bytes,
+    per its own Non-Goal). New test `driver_state_roundtrips_and_is_ciphertext_on_disk`. 20/20 tests
+    (was 19).
+  - **`crates/baud-server/src/routes/run_kvm.rs`**: `run_driver_generated_branches_with_persist`
+    now loads `DriverState` from the store before the generate loop (when `persist` is set and a
+    state already exists) and writes it back after — `spec.seed`/`spec.strategy` still come from
+    each request (a resumed call can change strategy mid-exploration), only accumulated progress
+    persists. `DriverRunSummary` gained `cumulative_generation` (the `Driver`'s real generation
+    counter after this call, distinct from `generations` which is just this call's `spec.count`),
+    surfaced in both `/run/kvm/branch` and `/run/kvm/resume`'s `driver_summary` JSON so an HTTP
+    caller can confirm persistence actually accumulated. New test
+    `resume_and_generate_persists_and_resumes_driver_state_across_calls` (two sequential
+    `resume_and_generate` calls, 3 generations each, same seed/run_id/node_id: asserts persisted
+    `generation` goes 3 -> 6 and `reservoir.len()` goes 3 -> 6, not reset each time).
+    `cargo test -p baud-server run_kvm`: 14/14 (was 13).
+  - **`drive/m9.sh`**: M9.5/M9.6 gained `cumulative_generation` assertions (3, then 5); new **M9.6b**
+    step makes a third `/run/kvm/resume` generate-mode call and asserts `cumulative_generation == 6`,
+    proving accumulation compounds across three separate real HTTP requests against real `/dev/kvm`,
+    not just carrying over once by accident.
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` zero new
+    warnings/errors in any touched file (`baud-driver/src/lib.rs`, `baud-snapshot-store/src/
+    store.rs`, `baud-snapshot-store/src/tests.rs`, `baud-server/src/routes/run_kvm.rs`,
+    `drive/m9.sh`) — every warning shown is pre-existing, on lines this iteration never touched.
+    `cargo test --workspace --no-fail-fast` surfaced only the already-documented
+    hardware-timing-sensitive `linux::tests::timer_tick_lands_at_identical_instruction` flake,
+    confirmed transient by an isolated re-run (1/1 pass) and by that same test passing cleanly
+    inside `drive/h4.sh`'s own run later in this iteration; every other crate passed 100%. All 18
+    `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m9.sh`, `full-demo.sh`) re-run individually
+    end-to-end on real `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: every other previously-open item remains untouched and still open: the
+    consensus-cluster fuzz loop's random-tactics/`Driver`-scheduler coupling (non-blocking, no drive
+    script depends on it), the enforced-regime KVM module, RDTSC-compliant-guest testing, `baud
+    shell-into` CLI/server surface (needs new WebSocket infra this codebase does not have), and the
+    framebuffer stream. `/runs/fuzz`'s own aspirational `/runs/fuzz/:id/step` continuation endpoint
+    (mentioned in `fuzz.rs`'s header comment) still does not exist — only `/run/kvm/branch`'s and
+    `/run/kvm/resume`'s generate modes gained persistence this iteration, not the older ptrace-era
+    `/runs/fuzz` route, which has no continuation route to wire it into yet.

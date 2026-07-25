@@ -207,6 +207,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         "generations": summary.generations,
                         "goal_reached": summary.goal_reached,
                         "best_tape_hex": summary.best_tape_hex,
+                        "cumulative_generation": summary.cumulative_generation,
                     },
                 });
                 if let Some((run_id, node_id)) = persisted {
@@ -421,6 +422,12 @@ struct DriverRunSummary {
     generations: u64,
     goal_reached: bool,
     best_tape_hex: String,
+    /// `Driver::generation()` after this call — the *cumulative* counter (carries over from a
+    /// prior call's persisted `DriverState` when `persist` is set), distinct from `generations`
+    /// above (how many generations *this* call ran). Lets an HTTP caller confirm driver-state
+    /// persistence actually accumulated across requests instead of resetting every time (e.g.
+    /// `drive/m9.sh`'s M9.6b).
+    cumulative_generation: u64,
 }
 
 fn boot_snapshot_and_generate(
@@ -462,6 +469,16 @@ fn run_driver_generated_branches(
 /// (`Multiverse::snapshot`, taken right after that branch halts) is additionally persisted as a
 /// real child node of `parent` (`GeneratedBranchOutcome`'s own doc explains why this doesn't
 /// support chaining a *further* generate call from it today).
+///
+/// When `persist` is set, the `Driver`'s own exploration state (`best`/`reservoir`/`generation`/
+/// rng stream position — `baud_driver::DriverState`) is loaded from the store before the first
+/// generation and written back after the last, closing todo.md §14's "Driver state persistence
+/// across requests" gap: before this, every call — including a `resume`d one continuing an
+/// already-persisted branch point — built `Driver::new` from scratch, so a second generate call
+/// against the same `run_id` re-explored with an empty `best`/`reservoir` and `generation` reset
+/// to 0, discarding everything the first call learned. `spec.seed`/`spec.strategy` still come
+/// from the request every time (a resumed call can change strategy mid-exploration); only the
+/// accumulated progress persists.
 fn run_driver_generated_branches_with_persist(
     universe: &baud_snapshot::Universe,
     spec: DriverGenerateSpec,
@@ -469,6 +486,15 @@ fn run_driver_generated_branches_with_persist(
     parent: Option<baud_snapshot_store::NodeId>,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
     let mut driver = baud_driver::Driver::new(spec.seed, spec.strategy, baud_driver::TacticsSpec::default());
+    if let Some((store, run_id)) = persist {
+        let run = baud_snapshot_store::RunId::new(run_id.to_owned());
+        if store.has_driver_state(&run) {
+            let bytes = store.get_driver_state(&run).map_err(|e| format!("get_driver_state error: {e}"))?;
+            let state: baud_driver::DriverState =
+                serde_json::from_slice(&bytes).map_err(|e| format!("decode driver state error: {e}"))?;
+            driver.apply_state(state);
+        }
+    }
     let mut outcomes = Vec::with_capacity(spec.count);
     let mut goal_reached = false;
     for i in 0..spec.count {
@@ -541,7 +567,14 @@ fn run_driver_generated_branches_with_persist(
         generations: spec.count as u64,
         goal_reached,
         best_tape_hex: hex_encode(&driver.best_tape().tape_bytes()),
+        cumulative_generation: driver.generation(),
     };
+    if let Some((store, run_id)) = persist {
+        let run = baud_snapshot_store::RunId::new(run_id.to_owned());
+        let encoded = serde_json::to_vec(&driver.export_state())
+            .map_err(|e| format!("encode driver state error: {e}"))?;
+        store.put_driver_state(&run, &encoded).map_err(|e| format!("put_driver_state error: {e}"))?;
+    }
     Ok((outcomes, summary))
 }
 
@@ -717,6 +750,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                         "generations": summary.generations,
                         "goal_reached": summary.goal_reached,
                         "best_tape_hex": summary.best_tape_hex,
+                        "cumulative_generation": summary.cumulative_generation,
                     },
                 }))
             }
@@ -1408,6 +1442,58 @@ mod tests {
                 "a resumed generate branch must be parented on the resumed-from node, not the original root"
             );
         }
+    }
+
+    /// Regression test for todo.md §14's "Driver state persistence across requests" gap: two
+    /// sequential `resume_and_generate` calls against the same `run_id`/`node_id`/seed must
+    /// accumulate one `Driver`'s `generation`/`reservoir`, not each start a fresh `Driver` that
+    /// discards what the previous call learned. Before the fix, the second call's persisted
+    /// `DriverState` would show `generation == spec.count` (reset), not `2 * spec.count`.
+    #[test]
+    fn resume_and_generate_persists_and_resumes_driver_state_across_calls() {
+        let kernel = mark_branch_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "driver-state-resume-test";
+
+        let (outcomes, persisted) =
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)))
+                .expect("boot_snapshot_and_branch failed");
+        let (_root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
+        let (_console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
+        assert_eq!(*mark_branch_step, Some(1));
+        let node_id_hex = node_id.as_ref().expect("first MARK_BRANCH stop must persist").clone();
+
+        let make_spec = || DriverGenerateSpec {
+            seed: 99,
+            count: 3,
+            tape_len_bytes: 2,
+            strategy: baud_driver::StrategySpec::default(),
+        };
+
+        resume_and_generate(&store, run_id, &node_id_hex, make_spec())
+            .expect("first resume_and_generate failed");
+        let run = baud_snapshot_store::RunId::new(run_id.to_owned());
+        assert!(store.has_driver_state(&run), "generate mode must persist driver state when it persists at all");
+        let state_after_first: baud_driver::DriverState =
+            serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state")).expect("decode state");
+        assert_eq!(state_after_first.generation, 3, "generation must advance by spec.count on the first call");
+        assert_eq!(state_after_first.reservoir.len(), 3, "every generation's tape should join the reservoir");
+
+        resume_and_generate(&store, run_id, &node_id_hex, make_spec())
+            .expect("second resume_and_generate failed");
+        let state_after_second: baud_driver::DriverState =
+            serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state")).expect("decode state");
+        assert_eq!(
+            state_after_second.generation, 6,
+            "a second resume_and_generate call must continue the same Driver's generation counter \
+             (3 + 3), not reset it back to 3 with a fresh Driver"
+        );
+        assert_eq!(
+            state_after_second.reservoir.len(),
+            6,
+            "the reservoir from the first call must carry over, not be discarded"
+        );
     }
 
     #[test]

@@ -170,6 +170,7 @@ for b in branches:
     assert b.get('interesting') is True, 'a MARK_BRANCH stop must be reported interesting'
     assert b.get('node_id'), 'a MARK_BRANCH stop with persist_run_id set must persist a node_id'
 assert d['driver_summary']['generations'] == 3
+assert d['driver_summary']['cumulative_generation'] == 3, f\"expected cumulative_generation=3 on the first generate call, got {d['driver_summary']['cumulative_generation']}\"
 assert d['persisted']['run_id'] == '$GEN_RUN_ID'
 "
 GEN_ROOT_NODE_ID=$(echo "$BRANCH_GEN" | python3 -c "import sys,json; print(json.load(sys.stdin)['persisted']['node_id'])")
@@ -196,8 +197,26 @@ assert len(branches) == 2, f'expected 2 generated branches, got {len(branches)}'
 for b in branches:
     assert b['mark_branch_step'] == 2, f'expected mark_branch_step=2 (guests second checkpoint), got {b.get(\"mark_branch_step\")}'
     assert b.get('node_id'), 'resume (generate mode) must persist a node_id for every MARK_BRANCH stop, same as branch (generate mode)'
+assert d['driver_summary']['cumulative_generation'] == 5, f\"expected cumulative_generation=5 (3 from M9.5 + 2 here), got {d['driver_summary']['cumulative_generation']} — Driver state did not resume across requests\"
 "
 pass "M9.6: resumed generate-mode branch point with no kernel_path, reached the guest's second MARK_BRANCH, persisted node_id per branch"
+
+# ---------------------------------------------------------------------------
+# M9.6b — a further resume (generate mode) call must keep accumulating the same Driver's
+# generation counter, not just carry over once by accident — closes todo.md §14's "Driver state
+# persistence across requests" gap end to end over real HTTP.
+# ---------------------------------------------------------------------------
+log "--- M9.6b: POST /run/kvm/resume — generate mode again, driver state keeps accumulating ---"
+RESUME_GEN2=$(curl -sf -X POST "$SRV/run/kvm/resume" -H "Content-Type: application/json" \
+    -d "{\"run_id\": \"$GEN_RUN_ID\", \"node_id\": \"$GEN_BRANCH_NODE_ID\", \"generate\": {\"seed\": 21, \"count\": 1, \"tape_len_bytes\": 2}}")
+RESUME_GEN2_OK=$(echo "$RESUME_GEN2" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))")
+[[ "$RESUME_GEN2_OK" == "True" ]] || fail "M9.6b: /run/kvm/resume (generate) returned ok!=true: $RESUME_GEN2"
+echo "$RESUME_GEN2" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['driver_summary']['cumulative_generation'] == 6, f\"expected cumulative_generation=6 (5 + 1 more), got {d['driver_summary']['cumulative_generation']}\"
+"
+pass "M9.6b: a third resume (generate mode) call continued accumulating driver state (cumulative_generation=6)"
 
 # ---------------------------------------------------------------------------
 # M9.7 — Error handling: mutually-exclusive fields, invalid hex, unknown run/node

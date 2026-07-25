@@ -264,6 +264,28 @@ fn records_roundtrip_through_baud_proto_encoding() {
 }
 
 #[test]
+fn driver_state_roundtrips_and_is_ciphertext_on_disk() {
+    let (root, _identity_dir, store) = open_test_store();
+    let run = RunId::new("run-n");
+    assert!(!store.has_driver_state(&run), "no state persisted yet");
+
+    let state = br#"{"generation":3,"best":{"seed":1,"choices":[]}}"#;
+    store.put_driver_state(&run, state).expect("put_driver_state");
+    assert!(store.has_driver_state(&run));
+
+    let raw = std::fs::read(root.path().join("runs").join("run-n").join("driver_state.age")).unwrap();
+    assert_ne!(raw, state, "driver state body must be encrypted on disk");
+
+    let read_back = store.get_driver_state(&run).expect("get_driver_state");
+    assert_eq!(read_back, state);
+
+    // A second put overwrites — only the latest state is kept, like put_tape.
+    let newer = br#"{"generation":4,"best":{"seed":1,"choices":[]}}"#;
+    store.put_driver_state(&run, newer).expect("put_driver_state overwrite");
+    assert_eq!(store.get_driver_state(&run).expect("get_driver_state"), newer);
+}
+
+#[test]
 fn run_id_sanitization_prevents_path_escape() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("../../evil");
