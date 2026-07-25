@@ -3891,3 +3891,18 @@ Post-push verification: git fetch + rev-parse confirms origin/main HEAD (3b88ce4
   - todo.md §14 updated: folds this item into "Built and hardware-tested", leaving OS-entropy determinism, Regime-enum cleanup, and the Mario validation as the remaining open items
 - Verified: `cargo build/clippy/test --workspace` clean; `drive/h1.sh` through `drive/h5.sh` all green against real `/dev/kvm` (regime=cooperative), exercising both modified boot call sites end-to-end; pushed to `origin/main` (855e573..3b88ce4) and confirmed the remote tip matches local HEAD.
 ---
+
+## 2026-07-25T22:50:04 UTC (19min) - Session usage — build-1 [sonnet]
+- cost $1.7179 (from claude -p)
+- context 115,651 tok peak of 1M (12%) across 33 inference calls, monotonic
+- models sonnet-5 $1.7147 (in 66 / out 15,717 / cache-read 3,090,084) · haiku-4-5 $0.0031
+- transcript: ralph/.run/20260725T223103Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+
+Finding most important item to address against todo.md — reviewing build-status next-actions list and scoping the Regime-enum cleanup vs. the entropy/Mario prerequisite gap...
+
+Chose the Regime-enum → capabilities-only cleanup (todo.md build-status item 2): a scoped, self-contained item — items 1 (OS-entropy) and 3 (Mario) are explicitly multi-day efforts blocked on a shared prerequisite (no real-Linux-kernel guest boot pipeline yet), so this is the only immediately tractable forward step. Surveyed actual code (crates/baud-host, baud-server, baud-cli, baud-multiverse's one test assertion, baud-snapshot-store, 7 drive/h*.sh scripts) to confirm scope before touching anything.
