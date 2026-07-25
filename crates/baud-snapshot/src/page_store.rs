@@ -32,6 +32,17 @@ impl PageHash {
     pub fn to_hex(self) -> String {
         blake3::Hash::from(self.0).to_hex().to_string()
     }
+
+    /// The raw 32 hash bytes — `wire.rs`'s [`crate::wire::UniverseBody`] stores RAM as exactly
+    /// these (never inline page bytes), so a caller reconstructing a [`Universe`](crate::Universe)
+    /// needs the inverse, [`PageHash::from_bytes`].
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        PageHash(bytes)
+    }
 }
 
 /// A shared handle to one page's content. Cloning is cheap (`Arc::clone`) and two `PageRef`s

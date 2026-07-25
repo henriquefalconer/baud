@@ -2163,3 +2163,61 @@ All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end with zero re
   - Manually verified end-to-end against a live server (CLI + curl for validation-error paths), not just unit tests.
   - Re-verified zero regressions: cargo build/test/clippy --workspace all green, all 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) re-run individually, all still pass on real /dev/kvm.
 ---
+
+Pushed to origin/main (c789621). Post-push verification: local HEAD == origin/main, working tree clean, build/test/clippy/all-drive-scripts already green pre-push against this exact commit. Re-reading todo.md to check for remaining pending items before emitting promise...
+
+todo.md still has many pending items (Universe serialization + SnapshotStore persistence wiring, baud-driver KVM generation loop, enforced-regime custom KVM module, AMD phase-2, RDTSC-compliant-guest test, baud shell-into CLI/server surface, framebuffer stream). This iteration's step (POST /run/kvm/branch) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T01:45:59 UTC - Session usage — build-9 [sonnet]
+- cost $5.460022799999999 (exact, from claude -p)
+- context 179,560 tok peak of 1M (18%) across 81 inference calls, monotonic
+- models sonnet-5 $5.4569 (in 188 / out 51,026 / cache-read 11,499,346) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/011-build-9.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 10
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose: add Serialize/Deserialize for baud_snapshot::Universe and wire it through baud-snapshot-store's put_universe/get_universe, then use it in baud-server's /run/kvm/branch route to persist the branch-point Universe across requests. This is the explicit blocker todo.md's last two M-series entries call out ("a real prerequisite for any SnapshotStore-backed resume/persist route") and unblocks the natural next M-series increment.
+
+Design settled after reading baud-snapshot/universe.rs, page_store.rs, baud-snapshot-store/store.rs+types.rs, baud-keys/lib.rs, baud-server/run_kvm.rs+state.rs+main.rs, baud-cli/cmds/run.rs. Plan: (1) baud-snapshot gets a new wire.rs module (UniverseBody + CBOR encode/decode + Universe::to_body/ram_pages + universe_from_body reconstruction, ram encoded as page-hashes-only per the store's own content-addressed-pages design, not inline bytes); (2) baud-keys gets a small generate_identity_file()/parse_public_key() pair so baud-server can bootstrap its own self-contained age identity (this dev host has no sops/age installed — doctor already reports age.ok=false — so the server must not depend on external key tooling to persist snapshots); (3) baud-server AppState gains a SnapshotStore opened against that self-generated identity; (4) POST /run/kvm/branch gains an optional persist_run_id to persist the branch-point universe (pages + body) into the store; (5) new POST /run/kvm/resume reconstructs a Universe from the store and forks fresh branches from it with no re-boot required, closing the exact gap todo.md's build-status flags as the real blocker. Starting implementation now.
+
+baud-snapshot::wire is built and green: 31/31 (was 23/23) — UniverseBody CBOR roundtrip, page-hash-based ram encoding, reconstruction with fetch-error/wrong-length/content-mismatch cases all covered, hardware-independent. Moving to baud-keys: adding a self-contained ephemeral age-identity generator so baud-server can persist snapshots without needing sops/age installed on this dev host (doctor already reports age.ok=false here).
+
+baud-keys: 12/12 pass — generate_identity_file()/parse_public_key() confirmed usable end-to-end (encrypt to the generated recipient, decrypt against the written identity file). Now wiring an Arc<SnapshotStore> into baud-server's AppState, self-bootstrapping its own age identity on first run under BAUD_SNAPSHOT_STORE (default ./baud-snapshots).
+
+Real-hardware win: persisted_universe_resumes_and_branches_without_reboot passes against real /dev/kvm — persisting a branch-point Universe (pages + CBOR body) into a SnapshotStore, then reconstructing it in a completely separate call with zero kernel re-boot, produces byte-identical branch outcomes to branching directly from the in-memory universe. All 5 baud-server run_kvm tests green (83s, dominated by real KVM boot/branch cost). Adding the CLI surface (baud run kvm-branch --persist-run-id, new baud run kvm-resume) next.
+
+cargo clippy --workspace clean of new warnings (fixed one type_complexity lint on boot_snapshot_and_branch's return type via BranchOutcome/PersistedRef aliases; every other reported warning is pre-existing in unrelated files, confirmed by targeted -p baud-server -p baud-cli -p baud-snapshot -p baud-snapshot-store -p baud-keys clippy run). Added baud run kvm-branch --persist-run-id and new baud run kvm-resume CLI subcommand + /run/kvm/resume server route registration. Now running the full workspace test suite.
+
+Full cargo test --workspace surfaced one failure: linux::tests::fleet_of_vms_run_in_parallel_without_interference (H6's real-hardware throughput-margin test, todo.md's own '~160-210ms parallel vs ~260-310ms threshold' — untouched by this iteration's work). Re-ran it alone immediately after: passes clean (193ms vs 302ms threshold) — a transient flake from system load during the full-suite run, not a regression from this change. Re-running the full workspace suite now with the machine quieter to confirm.
+
+Full cargo test --workspace: 100% green (0 failed) on re-run — the fleet timing flake above was confirmed transient (system load during the earlier concurrent run). Now running every drive/*.sh script individually per CLAUDE.md's pre-push protocol, starting with h0-h6.
+
+drive/h0.sh through h6.sh all PASS end-to-end on real /dev/kvm, zero regressions. Continuing with m0.sh through m8.sh and full-demo.sh.
+
+drive/m0.sh through m8.sh all PASS. Running full-demo.sh (chains M0-M8, FD.1-FD.10) last.
+
+All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) PASS end-to-end on real /dev/kvm, full-demo reports 32/32. Doing one more manual end-to-end check: live server + CLI round trip of the new persist_run_id/kvm-resume flow (not just the automated test) before committing.
+
+Manual live-server verification surfaced a real performance bug (not a correctness bug — the automated test happened to only exercise a fixture small enough to hide it): universe.ram_pages() yields one entry per RAM page SLOT (256MiB / 4KiB = 65536 entries for this workspace's fixed GUEST_RAM_SIZE), not one per distinct content — by design, so wire.rs's UniverseBody round-trips exactly. But resume_and_branch's fetch_page closure called SnapshotStore::get_page (a full ChaCha20Poly1305 age-decrypt + disk read) once per RAM SLOT with no memoization, so a guest that only ever touches a handful of distinct pages (the overwhelming majority share one all-zero page) still paid 65536 redundant decrypts — confirmed via gdb attached to a live hung baud-server process, caught mid-decrypt inside SnapshotStore::get_page called from resume_and_branch. Root-caused via gdb thread backtraces (real thread, not a deadlock). Fixing with per-call memoization in both persist_universe and resume_and_branch's page loops.
+
+Fix confirmed: cargo test -p baud-server run_kvm dropped from 83-90s to 4.52s after adding per-call page-dedup/memoization to persist_universe and resume_and_branch. Re-running the manual live-server check to confirm the real hang is gone.
+
+Manual live-server verification now confirms the fix: kvm-branch --persist-run-id (1.4s) and kvm-resume (1.6s, no re-boot, byte-identical suffix outputs) both complete fast; bad node_id correctly returns a clean error, exit 1. Real bug found and fixed via this manual check that the automated test alone didn't force under low contention. Re-running full cargo build/test/clippy --workspace once more before drive scripts, since run_kvm.rs changed again.
+
+cargo clippy --workspace re-confirmed: zero new warnings anywhere touched by this iteration (spot-checked PathBuf/complex-type warnings — both pre-existing in untouched baud-tape/src/lib.rs, clean git status). Re-running cargo test --workspace and all 16 drive scripts one more time since run_kvm.rs changed again after the manual-verification bug fix.
+
+## 2026-07-25T02:56:07 UTC - Changes committed.
+- Implemented Universe<->bytes serialization (baud-snapshot::wire) and wired real persist/resume of KVM branch-point universes through baud-server's SnapshotStore, closing todo.md's "a real prerequisite for any SnapshotStore-backed resume/persist route" gap.
+- Files changed: crates/baud-snapshot/src/wire.rs (new), src/{lib,page_store,universe}.rs, Cargo.toml; crates/baud-keys/src/lib.rs (generate_identity_file/parse_public_key); crates/baud-server/src/{state,main}.rs, src/routes/run_kvm.rs, Cargo.toml; crates/baud-cli/src/cmds/run.rs; .gitignore; todo.md.
+- **Brief description of changes:**
+  - baud-snapshot::wire: UniverseBody (RAM as page hashes only, per specs/baud-snapshot-store.md §3) + CBOR encode/decode + universe_from_body reconstruction with page-fetch-error/wrong-length/content-mismatch handling. 31/31 baud-snapshot tests (was 23/23), hardware-independent.
+  - baud-keys: generate_identity_file()/parse_public_key() let baud-server bootstrap its own self-contained age identity with no external sops/age tooling (this dev host has neither installed). 12/12 baud-keys tests (was 9/9).
+  - baud-server: AppState gained an Arc<SnapshotStore> opened against $BAUD_SNAPSHOT_STORE (default ./baud-snapshots, gitignored like *.sqlite). POST /run/kvm/branch gained optional persist_run_id; new POST /run/kvm/resume reconstructs a persisted Universe and forks fresh branches with NO kernel re-boot. New CLI: baud run kvm-branch --persist-run-id, baud run kvm-resume.
+  - Manual live-server verification (not just unit tests) found and fixed a real bug the automated tests didn't force: Universe::ram_pages() yields one entry per RAM page slot (65536 for this workspace's fixed 256MiB), not per distinct content, but neither persist_universe nor resume_and_branch deduplicated by hash, so a mostly-zero-filled guest paid up to 65536 redundant disk-read+age-decrypt round trips per resume. Root-caused live via gdb thread backtraces on an actually-hung baud-server process. Fixed with per-call memoization (HashSet in persist, HashMap cache in resume) — cargo test -p baud-server run_kvm dropped from 83-90s to 4.52s; live manual repro dropped from an unbounded multi-minute hang to 1.4s/1.6s round trips.
+  - Full re-verification: cargo build/test/clippy --workspace all green, zero regressions, zero new warnings in any touched file. All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) re-run individually end-to-end on real /dev/kvm, full-demo reports 32/32.
+---

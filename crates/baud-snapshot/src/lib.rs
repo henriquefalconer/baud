@@ -33,6 +33,11 @@
 //     this tree is `baud-snapshot-store`'s job (not this crate, per the architecture diagram).
 //   - `msr` — the three TSC-family MSR numbers both this crate's restore-ordering logic and
 //     `baud-multiverse`'s work-clock need to agree on.
+//   - `wire` — `Universe <-> bytes` (CBOR via ciborium): `Universe::to_body`/`ram_pages` project a
+//     captured universe into a `UniverseBody` (RAM as page hashes only) plus its page bytes for a
+//     caller's own store, `universe_from_body` reverses it given a page fetcher. Closes todo.md
+//     §14's "a real prerequisite for any SnapshotStore-backed resume/persist route" gap —
+//     hardware-independent (no KVM/perf involved, just serde + blake3-hash comparison).
 //   - `linux` (cfg(target_os = "linux")) — the real `KVM_GET_*`/`KVM_SET_*` capture/restore calls
 //     enumerated in specs/baud-snapshot.md §3, walking the `universe::restore_plan` in order, plus
 //     `DirtyRing` (real `KVM_CAP_DIRTY_LOG_RING` enable/mmap/harvest/`KVM_RESET_DIRTY_RINGS`,
@@ -67,6 +72,7 @@ pub mod msr;
 pub mod page_store;
 pub mod tree;
 pub mod universe;
+pub mod wire;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -75,3 +81,4 @@ pub use dirty_ring::{harvest, RawDirtyGfn, DIRTY_BIT, RESET_BIT};
 pub use page_store::{PageHash, PageRef, PageStore, PAGE_SIZE};
 pub use tree::{NodeId, Tree};
 pub use universe::{ClockState, DeviceState, MsrWrite, Universe, VcpuState};
+pub use wire::{decode_universe_body, encode_universe_body, universe_from_body, UniverseBody, WireError};

@@ -104,6 +104,19 @@ pub fn secrets_file() -> PathBuf {
 // API" takes a concrete recipient/identity and a byte slice, returns
 // `EncryptError`/`DecryptError` which both implement `std::error::Error + Display`).
 
+/// Extract the age public key (`age1...`) from an `age-keygen`-formatted identity file's already-
+/// read contents — the `# public key: age1...` comment line `age-keygen` writes above the secret
+/// key line. Factored out of [`age_public_key`] so a caller holding an explicit identity-file path
+/// (not one resolved via [`age_key_path`]'s OS-standard search, e.g. a self-generated identity
+/// file under an app-chosen directory) can parse the matching recipient the same way.
+pub fn parse_public_key(identity_file_contents: &str) -> Option<String> {
+    identity_file_contents
+        .lines()
+        .find(|l| l.starts_with("# public key:"))
+        .and_then(|l| l.strip_prefix("# public key:"))
+        .map(|s| s.trim().to_owned())
+}
+
 /// Extract the age public key (`age1...`) from an `age-keygen`-formatted identity file — the
 /// `# public key: age1...` comment line `age-keygen` writes above the secret key line (the same
 /// line [`check_is_recipient`] already parses to check sops-recipient membership). Returns
@@ -111,11 +124,22 @@ pub fn secrets_file() -> PathBuf {
 pub fn age_public_key() -> Option<String> {
     let path = age_key_path()?;
     let contents = std::fs::read_to_string(path).ok()?;
-    contents
-        .lines()
-        .find(|l| l.starts_with("# public key:"))
-        .and_then(|l| l.strip_prefix("# public key:"))
-        .map(|s| s.trim().to_owned())
+    parse_public_key(&contents)
+}
+
+/// Generate a fresh, throwaway age-x25519 keypair and format it exactly like `age-keygen`'s own
+/// output (`# public key: age1...\nAGE-SECRET-KEY-1...\n`, [`parse_public_key`]-compatible) — for
+/// a caller that needs a self-contained encryption identity with no external `sops`/`age` binary
+/// and no pre-configured `$SOPS_AGE_KEY_FILE` (e.g. `baud-server` persisting
+/// `baud-snapshot-store` bodies on a host where [`age_key_path`] resolves to nothing at all —
+/// this lets that caller bootstrap and persist its own identity file once, on first use, rather
+/// than requiring `baud keys init` to have already run).
+pub fn generate_identity_file() -> String {
+    use age::secrecy::ExposeSecret;
+    let identity = age::x25519::Identity::generate();
+    let recipient = identity.to_public();
+    let secret = identity.to_string();
+    format!("# public key: {recipient}\n{}\n", secret.expose_secret())
 }
 
 /// Encrypt `plaintext` to a single age recipient (e.g. from [`age_public_key`]). One-shot,
@@ -686,5 +710,41 @@ mod tests {
             after_new.status.success(),
             "NEW age key must successfully decrypt the file after rotation"
         );
+    }
+
+    /// [`generate_identity_file`]'s output must be a real, usable identity file: its embedded
+    /// public key parses back out ([`parse_public_key`]), and encrypting to that recipient then
+    /// decrypting against the generated identity file round-trips — the exact self-bootstrap flow
+    /// a caller with no `sops`/`age` binary and no pre-configured key (e.g. `baud-server` on this
+    /// dev host, where `doctor` reports `age.ok=false`) needs to work end to end.
+    #[test]
+    fn generated_identity_file_is_usable_end_to_end() {
+        let contents = generate_identity_file();
+        assert!(contents.starts_with("# public key: age1"), "contents: {contents:?}");
+        assert!(contents.contains("AGE-SECRET-KEY-1"), "contents: {contents:?}");
+
+        let recipient = parse_public_key(&contents).expect("recipient must parse out");
+
+        let tmp = tempfile::NamedTempFile::new().expect("tmp identity file");
+        std::fs::write(tmp.path(), &contents).expect("write identity file");
+
+        let plaintext = b"self-generated identity round trip";
+        let ciphertext = age_encrypt(&recipient, plaintext).expect("encrypt");
+        let decrypted = age_decrypt(tmp.path(), &ciphertext).expect("decrypt");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    /// Two calls must never produce the same secret key — a shared/predictable identity would let
+    /// one caller decrypt another's supposedly-independent store.
+    #[test]
+    fn generate_identity_file_produces_distinct_keys_each_call() {
+        let a = generate_identity_file();
+        let b = generate_identity_file();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn parse_public_key_returns_none_without_the_comment_line() {
+        assert_eq!(parse_public_key("AGE-SECRET-KEY-1SOMETHING\n"), None);
     }
 }

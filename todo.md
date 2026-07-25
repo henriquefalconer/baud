@@ -1276,13 +1276,89 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     `m0.sh`-`m8.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero
     regressions, including h5's ~220s 1000-branch stress test and full-demo's "32/32 CHECKS
     PASSED".
-  - **Not yet done**: this is still a same-request-only primitive — nothing persists the branch
-    point's `Universe` across requests (bullet (1) above, blocked on writing a `Universe`
-    serializer, a real prerequisite for any `SnapshotStore`-backed resume/persist route). No caller
-    scores branches or feeds results back into any exploration/strategy loop (bullet (3),
-    `baud-driver`'s tape generation — confirmed by a second explore agent to be fully
-    hardware-independent already and structurally ready to wire in: `Driver::draw_bits(n)` already
-    produces exactly the byte stream `Multiverse::boot`/`branch`'s `tape` argument wants, and
-    `baud-server`'s existing `fuzz.rs` already demonstrates the `Driver`-drives-a-generation-loop
-    shape for two non-KVM simulated workloads — parser and raftlet — just never yet pointed at
-    `Multiverse`). Both remain open, natural next M-series increments.
+  - **Bullet (1) is now closed — see the "M-series — third brick" entry directly below.** Bullet
+    (3) (`baud-driver`'s tape generation feeding branch scoring) remains open: confirmed by a
+    second explore agent to be fully hardware-independent already and structurally ready to wire
+    in — `Driver::draw_bits(n)` already produces exactly the byte stream `Multiverse::boot`/
+    `branch`'s `tape` argument wants, and `baud-server`'s existing `fuzz.rs` already demonstrates
+    the `Driver`-drives-a-generation-loop shape for two non-KVM simulated workloads — parser and
+    raftlet — just never yet pointed at `Multiverse`. Natural next M-series increment.
+- **M-series — third brick: `Universe <-> bytes` serialization built, and `baud-server` now
+  persists/resumes real branch-point universes across requests, closing bullet (1) above** ("a
+  real prerequisite for any `SnapshotStore`-backed resume/persist route").
+  - New `crates/baud-snapshot/src/wire.rs` (`baud-snapshot` gained `serde`+`ciborium` deps,
+    workspace-pinned): `Universe::to_body()`/`Universe::ram_pages()` project a captured `Universe`
+    into a CBOR-serializable `UniverseBody` — `ram` becomes page **hashes only**
+    (`[[u8;32]; N]`), never inline bytes, matching specs/baud-snapshot-store.md §3's "split into
+    content-addressed pages" — plus the actual page bytes for a caller's own store;
+    `universe_from_body(body, page_store, fetch_page)` reverses it, re-interning every fetched
+    page through a `PageStore` (so a reconstructed universe keeps the same content-addressed
+    sharing a freshly captured one has) and rejecting a fetched page whose content doesn't hash to
+    the address the body claims. `MsrWrite`/`VcpuState`/`ClockState`/`DeviceState` gained
+    `Serialize`/`Deserialize` derives (every field was already a plain value type — no projection
+    needed there); `PageHash` gained `to_bytes`/`from_bytes`. 31/31 `baud-snapshot` tests (was
+    23/23), fully hardware-independent (no KVM/perf involved, just serde + blake3 comparison).
+  - `crates/baud-keys` gained `generate_identity_file()`/`parse_public_key()` (refactored out of
+    the existing `age_public_key()`): a caller can now bootstrap and persist its own self-contained
+    age identity with no external `sops`/`age` binary and no pre-configured
+    `$SOPS_AGE_KEY_FILE` — needed because this dev host has neither installed (`baud doctor --json`
+    reports `age.ok=false`/`sops.ok=false`) and requiring `baud keys init` before `baud-server`
+    could even boot would make every persist/resume call depend on unrelated external setup.
+    12/12 `baud-keys` tests (was 9/9).
+  - `baud-server`'s `AppState` gained `snapshot_store: Arc<SnapshotStore>` (new
+    `baud-snapshot-store` dependency), opened at startup against `$BAUD_SNAPSHOT_STORE` (default
+    `baud-snapshots`, mirroring `BAUD_DB`'s own env-override convention; gitignored, same treatment
+    as `*.sqlite`) — self-bootstraps `.age-identity.txt` under that root on first run via the new
+    `baud-keys` helpers, stable across restarts of the same root.
+  - `POST /run/kvm/branch` gained an optional `persist_run_id`: when set, the shared branch-point
+    universe's distinct RAM pages (`SnapshotStore::put_page`) plus its CBOR-encoded body
+    (`SnapshotStore::put_universe`, `parent: None`, fresh root node) are persisted before forking,
+    and the response gains `persisted: {run_id, node_id}`. New `POST /run/kvm/resume` (`{run_id,
+    node_id, branch_tapes_hex}`) reconstructs the `Universe` from the store
+    (`get_universe`+`decode_universe_body`+`get_page`-per-hash+`universe_from_body`) and forks
+    fresh `Multiverse::branch` continuations from it — **no kernel image, no re-boot required at
+    all**. New CLI: `baud run kvm-branch --persist-run-id <id>`, `baud run kvm-resume --run-id
+    --node-id --branch-tape-hex...`. New tests in `run_kvm.rs`:
+    `persisted_universe_resumes_and_branches_without_reboot` (persist via `boot_snapshot_and_branch`,
+    resume via `resume_and_branch` in a separate call against a temp `SnapshotStore`, assert
+    byte-identical outcomes to branching directly from the in-memory universe) and
+    `resume_rejects_unknown_run`. `cargo test -p baud-server run_kvm`: 5/5 (was 3/3), ~4.5s.
+  - **Manually verified end-to-end against a live server, not just unit tests — and this manual
+    check found and fixed a real bug the automated tests did not force.** `baud run kvm-branch
+    --persist-run-id` then a separate-process `baud run kvm-resume` genuinely hung (minutes, not
+    seconds) the first two times this was tried live. Root-caused with `gdb -p <pid> -batch -ex
+    'thread apply all bt'` against the live, actually-stuck process (not a deadlock — a real
+    worker thread, caught mid-`age::primitives::stream::Stream::decrypt_chunk`, called from
+    `SnapshotStore::get_page` via `resume_and_branch`'s `fetch_page` closure): `Universe::
+    ram_pages()`/`universe_from_body` deliberately iterate one entry per RAM page **slot** — 65536
+    for this workspace's fixed 256 MiB `GUEST_RAM_SIZE`, not one per distinct content (`wire.rs`'s
+    own module doc) — but neither `persist_universe`'s `put_page` loop nor `resume_and_branch`'s
+    `fetch_page` closure deduplicated by hash, so a guest whose RAM is mostly one shared zero page
+    (the common case for a boot-time snapshot before any instruction runs) still paid up to 65536
+    real disk-read+age-decrypt round trips per resume. Fixed with per-call memoization: a
+    `HashSet<PageHash>` short-circuits repeat `put_page` calls in `persist_universe`, a
+    `HashMap<PageHash, Vec<u8>>` cache short-circuits repeat `get_page` calls in
+    `resume_and_branch`. Effect measured directly: `cargo test -p baud-server run_kvm` dropped from
+    83-90s to 4.52s; the live manual repro dropped from an unbounded multi-minute hang to
+    `kvm-branch --persist-run-id` in 1.4s and `kvm-resume` in 1.6s, byte-identical output, no
+    kernel re-boot. A bad `node_id` still returns a clean `{"error": ...}`, exit 1, confirmed live.
+  - **Verification**: `cargo build --workspace` clean. `cargo test --workspace` 100% green (0
+    failures across every crate — one `baud-multiverse::linux::tests::
+    fleet_of_vms_run_in_parallel_without_interference` failure seen mid-iteration during a
+    heavily-loaded concurrent run was confirmed transient by an immediate isolated re-run, unrelated
+    to this change, H6's own real-hardware throughput-margin test). `cargo clippy --workspace
+    --all-targets` — zero new warnings in any touched file (confirmed via targeted `-p baud-server
+    -p baud-cli -p baud-snapshot -p baud-snapshot-store -p baud-keys`; fixed one new
+    `type_complexity` lint on `boot_snapshot_and_branch`'s return type via `BranchOutcome`/
+    `PersistedRef` type aliases). All 16 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`,
+    `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero regressions,
+    `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: `Sha::from_hex(&hash.to_hex())` in `resume_and_branch`'s fetch closure is a
+    correct but wasteful bridge between `baud_snapshot::PageHash` and `baud_snapshot_store::Sha`
+    (both blake3-hex, deliberately not unified into one type across the two crates —
+    `baud-snapshot-store`'s own module doc: "this crate's job is archival, not interpretation"); a
+    future iteration could add a direct `Sha::from_bytes([u8;32])` if this bridging pattern
+    recurs elsewhere. Bullet (3) above (`baud-driver` wiring) is the natural next M-series
+    increment; no caller yet chains a `/run/kvm/branch { persist_run_id }` → score → `/run/kvm/
+    resume` exploration loop — this iteration only proves the primitive round-trips correctly and
+    fast.

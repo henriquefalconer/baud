@@ -9,6 +9,11 @@ description = "Universe capture/restore, content-addressed CoW branching, the sn
 baud-proto = { path = "../baud-proto" }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
+# `wire.rs`'s Universe <-> bytes serializer (todo.md §14: "a real prerequisite for any
+# SnapshotStore-backed resume/persist route") — CBOR via ciborium, mirroring baud-proto's own
+# established wire-format choice (store.rs's put_records doc) rather than inventing a second one.
+serde = { workspace = true }
+ciborium = { workspace = true }
 
 # specs/baud-snapshot.md §2's pinned skeleton deps ("Deps = {kvm-ioctls, vm-memory, userfaultfd,
 # baud-proto}"). Real KVM state-capture code (`src/linux.rs`) is cfg(target_os = "linux")-gated,

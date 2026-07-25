@@ -90,6 +90,25 @@ pub enum RunAction {
         /// A hex-encoded tape suffix for one branch. Repeat for multiple branches.
         #[arg(long = "branch-tape-hex", required = true)]
         branch_tapes_hex: Vec<String>,
+        /// Persist the branch-point universe into the server's SnapshotStore under this run id —
+        /// the response's `persisted.node_id` can later be handed to `kvm-resume` to fork more
+        /// branches from the same point with no re-boot.
+        #[arg(long)]
+        persist_run_id: Option<String>,
+    },
+    /// Fork more branches from a universe a prior `kvm-branch --persist-run-id` call persisted —
+    /// no kernel image, no re-boot: reconstructs the universe from the server's SnapshotStore and
+    /// runs each new branch to its first halt from there.
+    KvmResume {
+        /// The `run_id` a prior `kvm-branch --persist-run-id` call persisted under.
+        #[arg(long)]
+        run_id: String,
+        /// The `node_id` that same call returned in its `persisted.node_id` field.
+        #[arg(long)]
+        node_id: String,
+        /// A hex-encoded tape suffix for one branch. Repeat for multiple branches.
+        #[arg(long = "branch-tape-hex", required = true)]
+        branch_tapes_hex: Vec<String>,
     },
 }
 
@@ -162,13 +181,26 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                 std::process::exit(1);
             }
         }
-        RunAction::KvmBranch { kernel, cmdline, branch_tapes_hex } => {
+        RunAction::KvmBranch { kernel, cmdline, branch_tapes_hex, persist_run_id } => {
             let body = json!({
                 "kernel_path": kernel,
                 "cmdline": cmdline,
                 "branch_tapes_hex": branch_tapes_hex,
+                "persist_run_id": persist_run_id,
             });
             let v = c.post("/run/kvm/branch", &body).await?;
+            fmt::print(&v, json);
+            if v.get("error").is_some() {
+                std::process::exit(1);
+            }
+        }
+        RunAction::KvmResume { run_id, node_id, branch_tapes_hex } => {
+            let body = json!({
+                "run_id": run_id,
+                "node_id": node_id,
+                "branch_tapes_hex": branch_tapes_hex,
+            });
+            let v = c.post("/run/kvm/resume", &body).await?;
             fmt::print(&v, json);
             if v.get("error").is_some() {
                 std::process::exit(1);

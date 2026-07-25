@@ -9,6 +9,8 @@
 // are unit-tested here without any KVM/perf hardware (same split as `baud-vcpu::boundary` /
 // `baud-multiverse::timesource`).
 
+use serde::{Deserialize, Serialize};
+
 use crate::msr::{MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE};
 use crate::page_store::PageRef;
 
@@ -16,8 +18,9 @@ use crate::page_store::PageRef;
 /// data }`, reserved/pad fields omitted since KVM never reads them back). A portable mirror of
 /// `kvm_bindings::kvm_msr_entry` — same rationale as `cpuid::CpuidEntry`'s portable `CpuidLeaf` in
 /// `baud-multiverse`: lets the ordering logic below be tested on this Windows dev machine with no
-/// `kvm-bindings` linux-only type involved at all.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `kvm-bindings` linux-only type involved at all. `Serialize`/`Deserialize` back `wire.rs`'s
+/// `UniverseBody` (every field here is already a plain value type, nothing to project away).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MsrWrite {
     pub index: u32,
     pub data: u64,
@@ -54,8 +57,8 @@ pub fn order_msrs_tsc_first(msrs: &mut [MsrWrite]) {
 /// direct-injection needs to preserve across a restore (e.g. a still-pending vector) is already
 /// covered by `events` (`KVM_GET_VCPU_EVENTS`, which mirrors `KVM_INTERRUPT`'s own injected-
 /// interrupt bookkeeping) — omitting LAPIC is not a missing field, it names a field this VMM's
-/// architecture has no analogue for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// architecture has no analogue for. `Serialize`/`Deserialize` back `wire.rs`'s `UniverseBody`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VcpuState {
     /// `KVM_GET_REGS` (`kvm_regs`, raw bytes).
     pub regs: Vec<u8>,
@@ -77,8 +80,9 @@ pub struct VcpuState {
 /// The capture set's clock row (specs/baud-snapshot.md §3): `KVM_GET_CLOCK` + `KVM_GET_TSC_KHZ`
 /// plus the work-clock anchor (todo.md §5: "capture the work-clock anchor" — restoring a timer
 /// guest without this would resume its virtual TSC from the wrong base, per
-/// `baud-multiverse::timesource::WorkClock`'s `base + k * rcb` formula).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `baud-multiverse::timesource::WorkClock`'s `base + k * rcb` formula). `Serialize`/
+/// `Deserialize` back `wire.rs`'s `UniverseBody`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockState {
     /// `KVM_GET_CLOCK` (`kvm_clock_data`, raw bytes).
     pub kvm_clock: Vec<u8>,
@@ -111,8 +115,8 @@ pub struct ClockState {
 /// know how to serialize `baud-multiverse`'s `Console`/`TapeBus` types (that would make this a
 /// dependency of the crate that is meant to depend on *it*, specs/baud-snapshot.md §2's diagram)
 /// — callers hand in whatever bytes their own device model produces and are responsible for
-/// deserializing them back on restore.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// deserializing them back on restore. `Serialize`/`Deserialize` back `wire.rs`'s `UniverseBody`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceState {
     pub tape_cursor: u64,
     pub console: Vec<u8>,

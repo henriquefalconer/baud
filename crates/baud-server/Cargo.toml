@@ -24,6 +24,7 @@ baud-tracing = { path = "../baud-tracing" }
 baud-stream = { path = "../baud-stream" }
 baud-multiverse = { path = "../baud-multiverse" }
 baud-snapshot = { path = "../baud-snapshot" }
+baud-snapshot-store = { path = "../baud-snapshot-store" }
 baud-raftlet = { path = "../baud-raftlet" }
 baud-host = { path = "../baud-host" }
 serde_yaml = { workspace = true }
@@ -42,3 +43,6 @@ uuid = { workspace = true }
 blake3 = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

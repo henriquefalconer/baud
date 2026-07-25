@@ -38,6 +38,10 @@ keys.txt
 *.sqlite-shm
 *.sqlite-wal
 
+# ─── baud-server's default SnapshotStore root (BAUD_SNAPSHOT_STORE unset) — contains a
+# self-generated age identity (secret key material) plus encrypted universe/page/tape bodies ───
+/baud-snapshots/
+
 # ─── OS / editors ───
 .DS_Store
 *.swp
