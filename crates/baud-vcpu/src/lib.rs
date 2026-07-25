@@ -45,6 +45,13 @@ pub enum Exit<'a> {
     /// A single-step / breakpoint debug exit — the boundary-walk driver (`boundary`) owns what
     /// happens next; the dispatcher just reports that a step boundary was reached.
     Debug,
+    /// `RDTSC` trapped by the enforced-regime KVM module (`KVM_EXIT_BAUD_DETERMINISM`,
+    /// kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md) instead of executing natively — the
+    /// served value must be written into EDX:EAX before the guest resumes. Unlike `Rdmsr`, the
+    /// destination is a GPR pair, not a field inside the mmap'd `kvm_run`, so this variant carries
+    /// no data pointer; `linux::run_one_exit` performs the `KVM_SET_REGS` write itself once
+    /// `dispatch_exit` reports the value via [`DispatchOutcome::ServeEnforcedRdtsc`].
+    RdtscEnforced,
     /// Any exit kind `dispatch_exit`'s caller does not recognize or does not yet model. Carries
     /// the KVM exit's name so a `DeterminismHole` names what leaked. This is the one arm that
     /// exists specifically so nothing new can silently "just continue" (specs/baud-vcpu.md §3).
@@ -67,6 +74,10 @@ pub enum DispatchOutcome {
     Halted,
     /// A debug/single-step exit; ownership passes to the boundary-walk driver.
     SingleStepBoundary,
+    /// `Exit::RdtscEnforced` resolved to this work-clock value; `linux::run_one_exit` writes it
+    /// into EDX:EAX via `KVM_SET_REGS` and re-enters `KVM_RUN` — never surfaced past that one call
+    /// site (specs/baud-vcpu.md §3.3).
+    ServeEnforcedRdtsc(u64),
 }
 
 /// The paravirtual bus every `IoIn`/`IoOut`/`MmioRead`/`MmioWrite` exit is routed through
@@ -83,6 +94,10 @@ pub trait Bus {
 pub trait TimeSource {
     fn serve_rdmsr(&mut self, msr: u32) -> u64;
     fn absorb_wrmsr(&mut self, msr: u32, value: u64);
+    /// The enforced-regime work-clock value for a trapped `RDTSC` (todo.md §3.3: "enforced = force
+    /// RDTSC-exiting and return the work-clock value (bit-exact...)") — the same formula
+    /// `serve_rdmsr(MSR_IA32_TSC)` already computes, since both must agree bit-for-bit.
+    fn serve_enforced_rdtsc(&mut self) -> u64;
 }
 
 /// Resolve one exit deterministically (specs/baud-vcpu.md §3's match). Exhaustive over `Exit` —
@@ -120,6 +135,7 @@ pub fn dispatch_exit(
         }
         Exit::Hlt | Exit::Shutdown => Ok(DispatchOutcome::Halted),
         Exit::Debug => Ok(DispatchOutcome::SingleStepBoundary),
+        Exit::RdtscEnforced => Ok(DispatchOutcome::ServeEnforcedRdtsc(time.serve_enforced_rdtsc())),
         Exit::Unmodeled(name) => Err(DeterminismHole(name.to_string())),
     }
 }

@@ -1,0 +1,81 @@
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index c084f48..7be0e65 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -4439,9 +4439,13 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
+ 	/*
+ 	 * Not used by KVM, but fully supported for nesting, i.e. are allowed in
+ 	 * vmcs12 and propagated to vmcs02 when set in vmcs12.
++	 *
++	 * baud: CPU_BASED_RDTSC_EXITING is deliberately left set (removed from
++	 * this clear-mask) so every RDTSC traps to handle_baud_rdtsc_exit below
++	 * instead of executing natively -- the enforced-determinism regime
++	 * (todo.md §3.8, kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md).
+ 	 */
+-	exec_control &= ~(CPU_BASED_RDTSC_EXITING |
+-			  CPU_BASED_USE_IO_BITMAPS |
++	exec_control &= ~(CPU_BASED_USE_IO_BITMAPS |
+ 			  CPU_BASED_MONITOR_TRAP_FLAG |
+ 			  CPU_BASED_PAUSE_EXITING);
+ 
+@@ -6105,6 +6109,35 @@ static int handle_wrmsr_imm(struct kvm_vcpu *vcpu)
+ 				     vmx_get_msr_imm_reg(vcpu));
+ }
+ 
++/*
++ * baud: RDTSC is forced to exit (vmx_exec_control above) so a deterministic
++ * work-clock value can be served by userspace instead of the raw hardware
++ * counter. This handler does not emulate RDTSC itself -- it advances RIP
++ * past the trapping instruction, then hands off to userspace exactly the
++ * way IoIn/MmioRead already do: userspace fills in EDX:EAX (via a normal
++ * KVM_SET_REGS before the next KVM_RUN) and this vcpu never re-traps on the
++ * same instruction since RIP has already moved past it.
++ *
++ * KVM_EXIT_BAUD_DETERMINISM's payload is carried in the existing
++ * kvm_run.hw.hardware_exit_reason scratch u64 (the same field
++ * KVM_EXIT_UNKNOWN uses) -- already a named field in pinned kvm-bindings
++ * 0.14, so no uapi/kvm.h struct addition is needed beyond the bare exit
++ * reason constant. 0 == RDTSC; a future RDRAND/RDSEED increment would use a
++ * different value here (see kernel-module/baud-enforced/
++ * ENFORCEMENT_DESIGN.md in the baud source tree for that follow-up scope).
++ */
++static int handle_baud_rdtsc_exit(struct kvm_vcpu *vcpu)
++{
++	int r = kvm_skip_emulated_instruction(vcpu);
++
++	if (r <= 0)
++		return r;
++
++	vcpu->run->exit_reason = KVM_EXIT_BAUD_DETERMINISM;
++	vcpu->run->hw.hardware_exit_reason = 0; /* 0 == RDTSC */
++	return 0;
++}
++
+ /*
+  * The exit handlers return 1 if the exit was handled fully and guest execution
+  * may resume.  Otherwise they set the kvm_run parameter to indicate what needs
+@@ -6167,6 +6200,7 @@ static int (*kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+ 	[EXIT_REASON_TDCALL]		      = handle_tdx_instruction,
+ 	[EXIT_REASON_MSR_READ_IMM]            = handle_rdmsr_imm,
+ 	[EXIT_REASON_MSR_WRITE_IMM]           = handle_wrmsr_imm,
++	[EXIT_REASON_RDTSC]                   = handle_baud_rdtsc_exit,
+ };
+ 
+ static const int kvm_vmx_max_exit_handlers =
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 954e051..7be761e 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -184,6 +184,12 @@ struct kvm_xen_exit {
+ #define KVM_EXIT_LOONGARCH_IOCSR  38
+ #define KVM_EXIT_MEMORY_FAULT     39
+ #define KVM_EXIT_TDX              40
++/*
++ * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason
++ * (0 == RDTSC). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit and
++ * kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
++ */
++#define KVM_EXIT_BAUD_DETERMINISM 41
+ 
+ /* For KVM_EXIT_INTERNAL_ERROR */
+ /* Emulate instruction failed. */

@@ -3459,3 +3459,59 @@ full-demo.sh 32/32 CHECKS PASSED. All 20 drive scripts + cargo build/clippy/test
     hardware-timing jitter under concurrent load by isolated re-runs (1/1 pass each),
     matching the same pattern documented in prior iterations.
 ---
+
+Push verified: origin/main == local HEAD (5e64d36), working tree clean. todo.md still has one pending item (the enforced-regime hook build+test itself, now concretely scoped but not yet built) so this iteration closes with NEXT.
+
+## 2026-07-25T13:40:24 UTC - Session usage — build-29 [sonnet]
+- cost $3.5981400999999993 (exact, from claude -p)
+- context 163,325 tok peak of 1M (16%) across 52 inference calls, monotonic
+- models sonnet-5 $3.5951 (in 104 / out 46,350 / cache-read 6,872,427) · haiku-4-5 $0.0031
+- transcript: ralph/.run/032-build-29.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 30
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where iteration 29 left off.
+
+Chose the enforced-regime KVM module RDTSC-exiting patch — the sole pending item in todo.md, now scoped down to three named source locations per ENFORCEMENT_DESIGN.md. Checking current host state (kvm_intel loaded? kernel source tree present?) before touching anything live.
+
+Kernel source read confirmed the design doc's plan is accurate but needs refinement: baud's own CPUID mask already causes RDRAND_EXITING to be set by stock KVM (guest feature not exposed -> opt-out control stays on), so only the handler-table swap is needed there -- deferred to a future iteration to keep this one bounded. Writing the RDTSC-only patch now: force CPU_BASED_RDTSC_EXITING, add a new handle_baud_rdtsc_exit handler + EXIT_REASON_RDTSC table slot + KVM_EXIT_BAUD_DETERMINISM=41 uapi constant, reusing kvm_run's existing hw.hardware_exit_reason scratch field (already bound in kvm-bindings 0.14, confirmed by source read -- zero pinned-crate changes needed).
+
+vmx.c and kvm.h patched (handle_baud_rdtsc_exit, EXIT_REASON_RDTSC table slot, CPU_BASED_RDTSC_EXITING left set, KVM_EXIT_BAUD_DETERMINISM=41). Building kvm.ko + kvm-intel.ko now via make M=arch/x86/kvm modules...
+
+insmod of the patched kvm.ko/kvm-intel.ko succeeded (exit 0) on this live host, dmesg clean (no errors attributable to the patch), and drive/h1.sh (real KVM boot of hello-guest) passed end-to-end with the patched module loaded -- proves the patch does not break existing guests that never execute rdtsc. Moving to wiring baud-vcpu's dispatch_exit for the new exit reason before building a guest fixture that actually exercises it.
+
+baud-vcpu wired: new Exit::RdtscEnforced + DispatchOutcome::ServeEnforcedRdtsc variants, TimeSource::serve_enforced_rdtsc, convert_exit maps Unsupported(41)->RdtscEnforced, run_one_exit performs the KVM_SET_REGS EDX:EAX write (RDTSC's full-64-bit-clear semantics) and never leaks ServeEnforcedRdtsc past that call. baud-multiverse's WorkClock implements it by reusing virtual_tsc() so the MSR and trapped-instruction paths agree bit-for-bit. Building workspace now to check it compiles...
+
+Workspace builds clean with the new Exit::RdtscEnforced wiring (also had to fix baud-vcpu::linux::pmu's three direct dispatch_exit call sites -- run_until_exit/step/run_until_irq_window -- which bypass run_one_exit during interrupt-injection single-stepping and needed the same EDX:EAX register-write handling). Running baud-vcpu + baud-multiverse test suites now...
+
+cargo test -p baud-vcpu -p baud-multiverse: 70+21 passed, 0 failed. Discovered tests/fixtures/rdtsc-guest/ already exists from a prior iteration (marker byte + raw rdtsc + 8-byte echo) -- reusing it instead of building a new fixture, saving real work. Saved the kernel patch as kernel-module/baud-enforced/rdtsc-enforce.patch (verified it reverse-applies cleanly against the patched tree, confirming it forward-applies cleanly to a fresh clone). Now adding an #[ignore]'d enforced-regime test that boots rdtsc-guest twice and asserts full bit-exact reproducibility (stronger than the existing high-bits-only cooperative assertion), plus the drive script that swaps the kernel module and runs it.
+
+MILESTONE: rdtsc_enforced_regime_is_bit_exact_across_boots PASSED against real KVM hardware -- the enforced-regime RDTSC trap-and-serve path works end to end for the first time in this project's history: patched kvm_intel.ko traps RDTSC, baud-vcpu resolves KVM_EXIT_BAUD_DETERMINISM via the work-clock, and two boots of tests/fixtures/rdtsc-guest/ produce bit-exact identical 64-bit values (not just high-bits-tolerant like the cooperative-regime test). Restoring stock kvm_intel/kvm modules now before writing the drive script that automates this swap reproducibly.
+
+drive/h3-enforced-rdtsc.sh written and passes end-to-end for real: builds the patched module (idempotent, skips re-patching), swaps it in via sudo rmmod/insmod, runs the ignored real-hardware test, and unconditionally restores the stock kvm_intel/kvm modules in a trap on EXIT -- verified stock module byte-size and dmesg clean afterward, no holders on /dev/kvm. This closes the sole pending item in todo.md: the enforced-regime KVM module now has a real, working, boot-tested RDTSC enforcement path (RDRAND/RDSEED still open, documented as follow-up). Starting the mandatory full verification suite (cargo build/clippy/test --workspace, then each drive/*.sh individually, including the new one) before committing.
+
+cargo build/clippy clean (only pre-existing warnings, none in touched files). cargo test --workspace: 2 pre-existing-pattern transient failures (rdtsc_guest_reproduces_high_bits_across_boots, timer_tick_lands_at_identical_instruction) under concurrent load, both confirmed passing in isolated re-run (1/1 each) -- same documented flakiness pattern as prior iterations, not a regression from this iteration's changes. Now running each drive/*.sh individually per CLAUDE.md's verification protocol.
+
+drive/h0-h3.sh + the new drive/h3-enforced-rdtsc.sh (run a second time for good measure) all pass. Continuing through h4-h6, m0-m11, full-demo.sh...
+
+h4/h5/h6 all pass. Continuing through m0-m11...
+
+m0-m8 all pass. Continuing m9-m11, full-demo.sh...
+
+Full verification suite is green: cargo build/clippy clean, cargo test --workspace 2 known-transient failures confirmed passing in isolation, and all 21 drive/*.sh scripts (h0-h6, the new h3-enforced-rdtsc, m0-m11, full-demo 32/32) pass individually with the host left on the stock kvm module throughout. Updating todo.md and CLAUDE.md now before committing.
+
+## 2026-07-25T14:21:30 UTC - Changes committed.
+- Implemented and boot-tested the enforced-regime KVM module's RDTSC enforcement for real (todo.md's sole pending item)
+- Files changed: CLAUDE.md, todo.md, crates/baud-vcpu/{src/lib.rs,src/linux/mod.rs,src/linux/pmu.rs,src/tests.rs}, crates/baud-multiverse/{src/linux/mod.rs,src/timesource.rs}, drive/h3-enforced-rdtsc.sh (new), kernel-module/baud-enforced/rdtsc-enforce.patch (new)
+- **Brief description of changes:**
+  - Patched arch/x86/kvm/vmx/vmx.c (in ~/wsl-kernel-src/src, saved as a unified diff in-repo): forces CPU_BASED_RDTSC_EXITING on, adds handle_baud_rdtsc_exit filling the empty EXIT_REASON_RDTSC table slot, new KVM_EXIT_BAUD_DETERMINISM=41 uapi constant
+  - Built + insmod-verified the patched kvm.ko/kvm-intel.ko on this live host (no other /dev/kvm holder, dmesg clean)
+  - Wired baud-vcpu end-to-end: Exit::RdtscEnforced, DispatchOutcome::ServeEnforcedRdtsc, TimeSource::serve_enforced_rdtsc, convert_exit maps Unsupported(41), run_one_exit performs the KVM_SET_REGS EDX:EAX write (full 64-bit clear per the SDM) plus the same handling in pmu.rs's three direct dispatch_exit call sites used during interrupt injection
+  - baud-multiverse's WorkClock::serve_enforced_rdtsc reuses virtual_tsc() so the MSR and trapped-instruction paths agree bit-for-bit
+  - Reused the existing tests/fixtures/rdtsc-guest/ fixture (no new guest image needed); new #[ignore]'d test rdtsc_enforced_regime_is_bit_exact_across_boots asserts full 64-bit reproducibility across two boots under the patched module
+  - New drive/h3-enforced-rdtsc.sh: idempotently builds the patched module, swaps it in, runs the ignored test, and unconditionally restores the stock module via a trap on EXIT — ran green twice
+  - Scoped RDRAND enforcement out to a follow-up (source reading found baud's own CPUID mask already makes stock KVM set RDRAND_EXITING, so only the handler-table swap remains there); RDSEED stays hardware-infeasible on this host
+  - Full verification: cargo build/clippy clean, cargo test --workspace (2 known-transient jitter failures confirmed passing in isolated re-run), all 21 drive/*.sh (h0-h6, h3-enforced-rdtsc, m0-m11, full-demo 32/32) pass individually with the host left on the stock module throughout
+---

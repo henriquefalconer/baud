@@ -77,6 +77,38 @@ necessary; the struct-module-size mismatch was `CONFIG_DEBUG_INFO_BTF_MODULES` s
 dropping out of `.config` for want of `pahole`, not a compiler-codegen divergence. Full
 diagnosis in `kernel-module/baud-enforced/BUILD.md`.
 
+### Rebuilding `kvm_intel.ko` itself (enforced-regime RDTSC patch)
+
+`kernel-module/baud-enforced/rdtsc-enforce.patch` patches `arch/x86/kvm/vmx/vmx.c` +
+`include/uapi/linux/kvm.h` **in the `~/wsl-kernel-src/src` tree above**, not a new sibling module —
+see `kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md`. Apply once (idempotent — re-running is a
+no-op if already applied) and build the whole in-tree KVM module directory, not just one file:
+
+```
+grep -q handle_baud_rdtsc_exit ~/wsl-kernel-src/src/arch/x86/kvm/vmx/vmx.c || \
+    patch -p1 -d ~/wsl-kernel-src/src < kernel-module/baud-enforced/rdtsc-enforce.patch
+cd ~/wsl-kernel-src/src && KBUILD_MODPOST_WARN=1 make CC=gcc-13 M=arch/x86/kvm modules -j$(nproc)
+```
+
+This produces `arch/x86/kvm/{kvm.ko,kvm-intel.ko}` (module names `kvm`/`kvm_intel`). **Never**
+`insmod` these over the stock `/lib/modules/$(uname -r)/kernel/arch/x86/kvm/*.ko` files — swap them
+in live instead, and always swap back:
+
+```
+fuser /dev/kvm && echo "REFUSE — a guest is using /dev/kvm" # must print nothing
+echo baud | sudo -S rmmod kvm_intel && echo baud | sudo -S rmmod kvm
+echo baud | sudo -S insmod ~/wsl-kernel-src/src/arch/x86/kvm/kvm.ko
+echo baud | sudo -S insmod ~/wsl-kernel-src/src/arch/x86/kvm/kvm-intel.ko
+# ... run whatever needs the patched module ...
+echo baud | sudo -S rmmod kvm_intel && echo baud | sudo -S rmmod kvm
+echo baud | sudo -S modprobe kvm_intel   # restores the stock module + its kvm.ko dependency
+```
+
+`drive/h3-enforced-rdtsc.sh` does exactly this dance (build → swap → run the `#[ignore]`d
+`rdtsc_enforced_regime_is_bit_exact_across_boots` test → swap back, unconditionally via a
+`trap ... EXIT`) — every other `drive/*.sh`/`cargo test --workspace` assumes the **stock** module,
+so this is the only script that should ever touch the live `kvm_intel`/`kvm` modules.
+
 ## Git push from WSL2
 
 WSL2's native Linux `git` has no credential helper configured, so a plain `git push` fails with

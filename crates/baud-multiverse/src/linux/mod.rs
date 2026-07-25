@@ -1269,6 +1269,55 @@ mod tests {
         );
     }
 
+    /// Enforced-regime counterpart to `rdtsc_guest_reproduces_high_bits_across_boots`, reusing the
+    /// exact same `rdtsc-guest` fixture. Requires the patched `kvm_intel.ko` (this crate's own
+    /// `handle_baud_rdtsc_exit`, `kernel-module/baud-enforced/rdtsc-enforce.patch`) to already be
+    /// loaded in place of the stock module — `#[ignore]`d so a normal `cargo test --workspace`
+    /// (stock module, todo.md's mandatory green-build protocol) never runs it; only
+    /// `drive/h3-enforced-rdtsc.sh` invokes it by name, after swapping the module in and before
+    /// swapping the stock one back.
+    ///
+    /// Under the *stock* module RDTSC never traps, so a raw `rdtsc` read still reflects real
+    /// (pinned, but only jitter-tolerant) hardware state — the same "high bits only" ceiling
+    /// `rdtsc_guest_reproduces_high_bits_across_boots` documents. Under the *patched* module every
+    /// `rdtsc` traps to `handle_baud_rdtsc_exit` and is served `WorkClock::serve_enforced_rdtsc()`
+    /// — a pure function of the branch counter, not real time — so this asserts full 64-bit
+    /// equality across two boots, not just the high bits: the enforced regime's actual promise
+    /// (todo.md §3.8, test-matrix row 1).
+    #[test]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdtsc.sh"]
+    fn rdtsc_enforced_regime_is_bit_exact_across_boots() {
+        let kernel = rdtsc_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        // Same warm-up rationale as rdtsc_guest_reproduces_high_bits_across_boots (todo.md §14):
+        // isolate steady-state behavior from one-time first-boot costs in this process.
+        Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None)
+            .expect("warm-up boot failed")
+            .run_to_first_halt()
+            .expect("warm-up run failed");
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_outcome =
+            first.run_to_first_halt().expect("first run failed (enforced RDTSC exit not served?)");
+        assert_eq!(first_outcome.console_output.len(), 9);
+        assert_eq!(first_outcome.console_output[0], RDTSC_GUEST_MARKER);
+        let first_tsc = u64::from_le_bytes(first_outcome.console_output[1..9].try_into().unwrap());
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_outcome = second.run_to_first_halt().expect("second run failed");
+        assert_eq!(second_outcome.console_output.len(), 9);
+        assert_eq!(second_outcome.console_output[0], RDTSC_GUEST_MARKER);
+        let second_tsc = u64::from_le_bytes(second_outcome.console_output[1..9].try_into().unwrap());
+
+        assert_eq!(
+            first_tsc, second_tsc,
+            "enforced-regime RDTSC is served entirely from the work-clock (a pure function of the \
+             branch counter), so it must reproduce bit-for-bit across two boots, not just in its \
+             high bits — first={first_tsc:#x} second={second_tsc:#x}"
+        );
+    }
+
     /// `tests/fixtures/framebuffer-guest/`'s payload: writes one marker byte (`'F'`) to COM1,
     /// then writes a 2x2 `Indexed8` frame (pixels `10, 20, 30, 40`) to the tape device and
     /// finalizes it with the `FRAME` control opcode, then halts. See that directory's `BUILD.md`

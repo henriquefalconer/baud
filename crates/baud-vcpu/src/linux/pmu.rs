@@ -25,7 +25,7 @@
 // a periodic real exit, e.g. a harmless forced PIO write — see
 // `crates/baud-multiverse/tests/fixtures/timer-guest/BUILD.md`).
 
-use super::convert_exit;
+use super::{convert_exit, write_enforced_rdtsc_result};
 use crate::boundary::{ExecPoint, PmuStepper};
 use crate::{dispatch_exit, Bus, DispatchOutcome, TimeSource};
 use kvm_bindings::kvm_regs;
@@ -145,6 +145,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                 Ok(exit) => match dispatch_exit(convert_exit(exit), self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => continue,
                     Ok(DispatchOutcome::SingleStepBoundary) => continue,
+                    Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
+                        match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
                     Ok(DispatchOutcome::Halted) => {
                         return Err(io::Error::other("guest halted while armed for interrupt injection"))
                     }
@@ -177,6 +183,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                 Ok(exit) => match dispatch_exit(convert_exit(exit), self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => continue,
                     Ok(DispatchOutcome::SingleStepBoundary) => break Ok(()),
+                    Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
+                        match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => break Err(e),
+                        }
+                    }
                     Ok(DispatchOutcome::Halted) => {
                         break Err(io::Error::other("guest halted mid single-step boundary walk"))
                     }
@@ -221,6 +233,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                         continue;
                     }
                     Ok(DispatchOutcome::SingleStepBoundary) => continue,
+                    Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
+                        match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
                     Ok(DispatchOutcome::Halted) => {
                         return Err(io::Error::other("guest halted waiting for an interrupt window"))
                     }

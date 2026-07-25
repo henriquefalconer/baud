@@ -2350,13 +2350,73 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     own `dmesg` report, see the prior entry) — the design targets RDTSC+RDRAND enforcement here;
     full three-instruction enforcement needs a host whose microcode exposes
     `SECONDARY_EXEC_RDSEED_EXITING`.
-  - **Not yet done**: the patch itself is still unwritten, `kvm_intel.ko` still unpatched and
-    unrebuilt, no boot has been attempted against a forced RDTSC/RDRAND-exiting vcpu. This is the
-    concrete next step, now scoped down from "materially larger, separate task" to three named
-    source locations (`vmx.c:4443`, `vmx.c:6157-6158`, the missing `RDTSC` table slot) plus one
-    new `include/uapi/linux/kvm.h` constant plus one new `baud-vcpu` match arm — still real kernel
-    work, not attempted this iteration because it needs a dedicated increment of its own (write
-    patch → rebuild → `rmmod`/`insmod` the live `kvm_intel.ko` → boot a real guest against it →
-    observe whether `KVM_EXIT_BAUD_DETERMINISM` actually reaches userspace) rather than being
-    rushed alongside the research pass that produced the design. This remains the sole open item
-    in this file.
+  - **Not yet done (at the time this entry was written — closed by the next entry below)**: the
+    patch itself is still unwritten, `kvm_intel.ko` still unpatched and unrebuilt, no boot has been
+    attempted against a forced RDTSC/RDRAND-exiting vcpu.
+- **Enforced-regime KVM module — twenty-first entry: RDTSC enforcement is now REAL, BUILT, and
+  BOOT-TESTED on real KVM hardware for the first time in this project's history.** The prior
+  entry's three named source locations are now an actual patch,
+  `kernel-module/baud-enforced/rdtsc-enforce.patch` (new, committed to the repo — a unified diff
+  against `~/wsl-kernel-src/src`, since that kernel source tree itself is outside git per CLAUDE.md;
+  verified to reverse-apply cleanly, so it forward-applies cleanly to a fresh matching clone).
+  Scope was narrowed from the prior entry's RDTSC+RDRAND design to **RDTSC only** this iteration —
+  reading `vmx_secondary_exec_control`'s `vmx_adjust_sec_exec_exiting` macro found that baud's own
+  CPUID mask (RDRAND feature bit cleared, §3.2) already makes stock KVM set `RDRAND_EXITING` on its
+  own (the control is opt-out: "clear if the feature *is* exposed", and it never is here) — so
+  RDRAND's own remaining work is purely the handler-table swap, not the execution-control bit the
+  prior entry worried about, and was deliberately deferred to its own increment to keep this one
+  bounded and independently verifiable. RDSEED-exiting remains hardware-infeasible on this host
+  regardless (unchanged from the prior entry).
+  - **The patch** (`arch/x86/kvm/vmx/vmx.c`, `include/uapi/linux/kvm.h`): `vmx_exec_control` no
+    longer clears `CPU_BASED_RDTSC_EXITING`; a new `handle_baud_rdtsc_exit` fills the previously-
+    empty `EXIT_REASON_RDTSC` table slot — it calls `kvm_skip_emulated_instruction` (advancing RIP
+    past the trap) then sets `KVM_EXIT_BAUD_DETERMINISM` (`=41`, the next free slot after
+    `KVM_EXIT_TDX=40`) and returns `0` so KVM exits to userspace, exactly the `IoIn`/`MmioRead`
+    contract `baud-vcpu` already knows. The payload reuses `kvm_run.hw.hardware_exit_reason` (the
+    same scratch `u64` `KVM_EXIT_UNKNOWN` uses) — confirmed already a named field in pinned
+    `kvm-bindings` 0.14 (`src/x86_64/bindings.rs`), so no uapi struct addition, no crate fork.
+  - **Built and `insmod`-verified on this live host**: `make CC=gcc-13 M=arch/x86/kvm modules` in
+    `~/wsl-kernel-src/src` (the same prepared tree `baud_enforced_probe` already builds against)
+    produces `kvm.ko`/`kvm-intel.ko`; `rmmod kvm_intel && rmmod kvm && insmod <patched kvm.ko> &&
+    insmod <patched kvm-intel.ko>` succeeded (exit 0, dmesg clean) with **no other process holding
+    `/dev/kvm`** — confirmed safe to swap live (`fuser /dev/kvm` checked first).
+  - **`baud-vcpu` wired end-to-end** (`crates/baud-vcpu/src/lib.rs`,`src/linux/mod.rs`,
+    `src/linux/pmu.rs`): new `Exit::RdtscEnforced` / `DispatchOutcome::ServeEnforcedRdtsc(u64)` /
+    `TimeSource::serve_enforced_rdtsc()`; `convert_exit` maps `VcpuExit::Unsupported(41)` to the new
+    exit (not the generic `Unmodeled` fallback); `linux::run_one_exit` is the one place that
+    performs the actual `KVM_GET_REGS`/`KVM_SET_REGS` round trip (RDTSC clears the *full* 64 bits of
+    RAX/RDX per the SDM, not just the low 32) — `dispatch_exit` itself still has zero ioctl access,
+    by design, so it stays hardware-independent and unit-testable. `baud-vcpu::linux::pmu`'s three
+    *other* direct-`dispatch_exit` call sites (`run_until_exit`/`step`/`run_until_irq_window`, used
+    during arm-early-then-single-step interrupt injection, H4) needed the identical handling added
+    — they bypass `run_one_exit` entirely, a real second call site the first pass would have missed.
+    `baud-multiverse::timesource::WorkClock::serve_enforced_rdtsc` reuses `virtual_tsc()` verbatim
+    (new test `serve_enforced_rdtsc_matches_the_tsc_msr_at_the_same_rcb` pins that the MSR path and
+    the trapped-instruction path must never disagree).
+  - **Boot-tested for real, twice, via a new drive script**: reused `tests/fixtures/rdtsc-guest/`
+    (already existed, built for H3.4's cooperative-regime test — no new guest fixture needed, since
+    that fixture's raw `rdtsc` + marker-byte-echo payload has no dependency on which module serves
+    it). New test `rdtsc_enforced_regime_is_bit_exact_across_boots`
+    (`crates/baud-multiverse/src/linux/mod.rs`, `#[ignore]`d so a normal `cargo test --workspace`
+    against the *stock* module never runs it) boots the fixture twice under the patched module and
+    asserts **full 64-bit equality** — not just the high-bits tolerance H3.4's cooperative
+    counterpart needs, since the enforced value is a pure function of the branch counter, never
+    real hardware time. New `drive/h3-enforced-rdtsc.sh` (idempotently builds the patched modules,
+    checks `/dev/kvm` has no other holder, `rmmod`/`insmod`s the patched pair, runs the ignored test
+    by name, then *unconditionally* — success or failure, via a `trap ... EXIT` — restores the
+    stock modules via `modprobe kvm_intel`) ran green twice in a row on this host; `lsmod` byte
+    sizes and `dmesg` confirmed the stock module was back to its exact original state afterward,
+    and the rest of the full verification suite (`cargo test --workspace`, all 20 pre-existing
+    `drive/*.sh`) was re-run against the *restored stock* module with zero regressions.
+  - **Still overclaims nothing**: `crates/baud-host/src/linux.rs`'s `enforced_module_present()` is
+    untouched, still unconditionally `false` — this milestone proves the mechanism works when the
+    patched module is manually swapped in for a dedicated test, not that any ordinary `baud` run on
+    this host is enforced-regime by default (`regime_is_recorded_and_not_overclaimed` still holds).
+  - **Not yet done — the only remaining item in this file**: RDRAND enforcement (the handler-table
+    swap only — `vmx.c`'s `[EXIT_REASON_RDRAND] = kvm_handle_invalid_op` → a shared or sibling
+    handler, decoding the destination GPR via `vmx_get_instr_info_reg`/`VMX_INSTRUCTION_INFO` the
+    way `handle_invpcid`/`handle_rdmsr_imm` already do, since RDRAND's result register is
+    instruction-encoded unlike RDTSC's fixed EDX:EAX) — RDSEED stays permanently out of reach on
+    this host's VMX microcode regardless. `enforced_module_present()` should stay `false` until
+    that lands too (or a decision is made that RDTSC-only enforcement is its own shippable regime
+    tier, worth raising with the user rather than assuming).

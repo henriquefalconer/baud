@@ -146,6 +146,12 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
             _ => {}
         }
     }
+
+    fn serve_enforced_rdtsc(&mut self) -> u64 {
+        // Must agree bit-for-bit with `serve_rdmsr(MSR_IA32_TSC)` — a guest that reads the clock
+        // via the trapped instruction and one that reads it via the MSR are the same work-clock.
+        self.virtual_tsc()
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +280,16 @@ mod tests {
             "current_rcb after restore must continue from the captured anchor plus the new \
              counter's own delta, not reset to the new counter's raw (small) reading"
         );
+    }
+
+    /// todo.md §3.3: the enforced-regime trapped-`RDTSC` path and the cooperative `IA32_TSC` MSR
+    /// path must serve the identical work-clock value at the same RCB — this is the invariant
+    /// `handle_baud_rdtsc_exit`'s served value depends on when a guest mixes the two.
+    #[test]
+    fn serve_enforced_rdtsc_matches_the_tsc_msr_at_the_same_rcb() {
+        let mut clock = WorkClock::new(1_000, 3, ConstantCounter(12));
+        assert_eq!(clock.serve_enforced_rdtsc(), clock.serve_rdmsr(MSR_IA32_TSC));
+        assert_eq!(clock.serve_enforced_rdtsc(), 1_000 + 3 * 12);
     }
 
     #[test]

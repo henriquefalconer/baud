@@ -18,6 +18,13 @@ use kvm_bindings::{kvm_guest_debug, KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, 
 use kvm_ioctls::{VcpuExit, VcpuFd};
 use std::io;
 
+/// Not in pinned `kvm-bindings` 0.14 (invented after that crate was bindgen'd) — the out-of-tree
+/// enforced-regime KVM module's own exit reason for a trapped `RDTSC`
+/// (`kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md`, `include/uapi/linux/kvm.h`'s
+/// `KVM_EXIT_BAUD_DETERMINISM` in that patched tree). Surfaces here via `kvm-ioctls`'s existing
+/// `VcpuExit::Unsupported(u32)` catch-all — no crate fork needed.
+const KVM_EXIT_BAUD_DETERMINISM: u32 = 41;
+
 /// Convert a real KVM exit into baud-vcpu's own vocabulary (specs/baud-vcpu.md §3). This is the
 /// one place a KVM exit kind can enter the system; anything this match does not model becomes
 /// `Exit::Unmodeled(name)`, which `dispatch_exit`'s catch-all always turns into
@@ -66,6 +73,7 @@ pub fn convert_exit(exit: VcpuExit<'_>) -> Exit<'_> {
         VcpuExit::IoapicEoi(_) => Exit::Unmodeled("IoapicEoi"),
         VcpuExit::Hyperv => Exit::Unmodeled("Hyperv"),
         VcpuExit::MemoryFault { .. } => Exit::Unmodeled("MemoryFault"),
+        VcpuExit::Unsupported(KVM_EXIT_BAUD_DETERMINISM) => Exit::RdtscEnforced,
         VcpuExit::Unsupported(_) => Exit::Unmodeled("Unsupported"),
     }
 }
@@ -111,11 +119,22 @@ pub fn run_until_halted(
             DispatchOutcome::Continue => continue,
             DispatchOutcome::Halted => return Ok(()),
             DispatchOutcome::SingleStepBoundary => continue, // no boundary walk in progress here
+            DispatchOutcome::ServeEnforcedRdtsc(_) => {
+                unreachable!("run_one_exit always resolves this to Continue before returning")
+            }
         }
     }
 }
 
 /// Drive exactly one `KVM_RUN` call to completion (retrying on `EINTR`) and dispatch its exit.
+///
+/// `DispatchOutcome::ServeEnforcedRdtsc` never escapes this function: unlike every other exit,
+/// its destination (EDX:EAX) is not a field inside the mmap'd `kvm_run` `dispatch_exit` already
+/// has a pointer into, but a GPR pair reachable only via a separate `KVM_GET_REGS`/`KVM_SET_REGS`
+/// round trip — the one piece of real hardware work `dispatch_exit` itself cannot do (it has no
+/// ioctl access at all, by design, so it stays testable without KVM). This is that round trip;
+/// callers (`run_until_halted`, `Multiverse::step_exit`) only ever see `Continue`/`Halted`/
+/// `SingleStepBoundary`.
 pub fn run_one_exit(
     vcpu: &mut VcpuFd,
     bus: &mut dyn Bus,
@@ -123,7 +142,16 @@ pub fn run_one_exit(
 ) -> Result<DispatchOutcome, DeterminismHole> {
     loop {
         match vcpu.run() {
-            Ok(exit) => return dispatch_exit(convert_exit(exit), bus, time),
+            Ok(exit) => {
+                return match dispatch_exit(convert_exit(exit), bus, time)? {
+                    DispatchOutcome::ServeEnforcedRdtsc(value) => {
+                        write_enforced_rdtsc_result(vcpu, value)
+                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDTSC result: {e}")))?;
+                        Ok(DispatchOutcome::Continue)
+                    }
+                    other => Ok(other),
+                };
+            }
             Err(e) if e.errno() == libc::EINTR => continue,
             Err(e) => {
                 // An ioctl failure that is not a benign signal interruption is itself a
@@ -133,6 +161,16 @@ pub fn run_one_exit(
             }
         }
     }
+}
+
+/// Real `RDTSC` (Intel SDM Vol. 2B): the high-order 32 bits of both RAX and RDX are cleared,
+/// regardless of operating mode — so this overwrites the full 64-bit registers, not just their
+/// low halves, matching what a guest that just executed the (now-trapped) instruction expects.
+fn write_enforced_rdtsc_result(vcpu: &VcpuFd, value: u64) -> io::Result<()> {
+    let mut regs = vcpu.get_regs().map_err(io::Error::from)?;
+    regs.rax = value & 0xFFFF_FFFF;
+    regs.rdx = value >> 32;
+    vcpu.set_regs(&regs).map_err(io::Error::from)
 }
 
 #[cfg(test)]
@@ -190,6 +228,15 @@ mod tests {
             convert_exit(VcpuExit::MemoryFault { flags: 0, gpa: 0, size: 0 }),
             Exit::Unmodeled("MemoryFault")
         ));
+    }
+
+    /// The enforced-regime KVM module's trapped `RDTSC` (`KVM_EXIT_BAUD_DETERMINISM = 41`)
+    /// surfaces through `kvm-ioctls`' generic `Unsupported(u32)` catch-all — this is the one
+    /// reason number that must convert to a modeled exit, not `Unmodeled`, unlike every other
+    /// `Unsupported` value (the test above covers 999 falling through as expected).
+    #[test]
+    fn baud_determinism_reason_converts_to_rdtsc_enforced() {
+        assert!(matches!(convert_exit(VcpuExit::Unsupported(41)), Exit::RdtscEnforced));
     }
 
     #[test]

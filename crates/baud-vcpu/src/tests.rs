@@ -42,6 +42,7 @@ struct RecordingTime {
     serve_value: u64,
     rdmsr_calls: Vec<u32>,
     wrmsr_calls: Vec<(u32, u64)>,
+    enforced_rdtsc_calls: u32,
 }
 
 impl TimeSource for RecordingTime {
@@ -51,6 +52,10 @@ impl TimeSource for RecordingTime {
     }
     fn absorb_wrmsr(&mut self, msr: u32, value: u64) {
         self.wrmsr_calls.push((msr, value));
+    }
+    fn serve_enforced_rdtsc(&mut self) -> u64 {
+        self.enforced_rdtsc_calls += 1;
+        self.serve_value
     }
 }
 
@@ -125,13 +130,25 @@ fn debug_reports_single_step_boundary() {
     );
 }
 
+/// todo.md §3.3's enforced regime: a trapped `RDTSC` resolves to the work-clock's own value
+/// (`serve_enforced_rdtsc`), reported back for `linux::run_one_exit` to write into EDX:EAX —
+/// never resolved silently or left for a generic catch-all.
+#[test]
+fn rdtsc_enforced_is_served_from_time_source() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime { serve_value: 0x1234_5678_9ABC, ..Default::default() };
+    let outcome = dispatch_exit(Exit::RdtscEnforced, &mut bus, &mut time).unwrap();
+    assert_eq!(outcome, DispatchOutcome::ServeEnforcedRdtsc(0x1234_5678_9ABC));
+    assert_eq!(time.enforced_rdtsc_calls, 1);
+}
+
 // specs/baud-vcpu.md §6 `no_unmodeled_exit_is_silent`: the run loop never leaves the dispatch
 // without an `Ok`/`Err` — every unmodeled exit fails loud, and every modeled one always
 // resolves. Fuzzed over a thousand random exit shapes (mirroring the spec's `random_tapes(1000)`).
 proptest! {
     #[test]
     fn no_unmodeled_exit_is_silent(
-        which in 0u8..9,
+        which in 0u8..10,
         port in any::<u16>(),
         addr in any::<u64>(),
         msr in any::<u32>(),
@@ -152,14 +169,15 @@ proptest! {
             5 => dispatch_exit(Exit::Wrmsr(msr, value), &mut bus, &mut time),
             6 => dispatch_exit(Exit::Hlt, &mut bus, &mut time),
             7 => dispatch_exit(Exit::Shutdown, &mut bus, &mut time),
+            8 => dispatch_exit(Exit::RdtscEnforced, &mut bus, &mut time),
             _ => {
                 let leaked: &'static str = Box::leak(exit_name.into_boxed_str());
                 dispatch_exit(Exit::Unmodeled(leaked), &mut bus, &mut time)
             }
         };
-        // The whole point: never a panic, and the catch-all (`which == 8`) is always `Err`,
+        // The whole point: never a panic, and the catch-all (`which == 9`) is always `Err`,
         // every modeled exit is always `Ok`.
-        if which == 8 {
+        if which == 9 {
             prop_assert!(result.is_err());
         } else {
             prop_assert!(result.is_ok());
