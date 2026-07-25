@@ -1437,3 +1437,60 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     points" tree-growth loop (todo.md §6) is still one level deep (one shared branch point per
     request) — chaining `interesting` branches into further generate calls is the natural next
     increment.
+- **M-series — fifth brick: `POST /run/kvm/resume` gained the same driver-generate mode
+  `/run/kvm/branch` already had, closing the "fourth brick" entry's first "Not yet done" bullet**
+  ("`POST /run/kvm/resume` still only accepts fixed `branch_tapes_hex` ... a natural, symmetric
+  follow-up").
+  - `RunKvmResumeBody` (`crates/baud-server/src/routes/run_kvm.rs`) gained an optional `generate:
+    Option<DriverGenerateSpec>` field — the same `DriverGenerateSpec` `/run/kvm/branch` already
+    accepts — mutually exclusive with `branch_tapes_hex` (same guard pattern as `branch`). The
+    `resume()` handler now mirrors `branch()`'s dual-mode dispatch exactly: when `generate` is
+    set, it validates `count >= 1` and `count <= MAX_BRANCHES_PER_REQUEST` (256), then calls the
+    existing `run_driver_generated_branches(&universe, spec)` — already shared/reused, not
+    duplicated — against a reconstructed universe instead of a freshly booted one.
+  - New shared helper `reconstruct_universe(store, run_id, node_id_hex) -> Result<baud_snapshot::
+    Universe, String>` extracted from the old `resume_and_branch` (which now just calls it, then
+    `run_branches`), houses the existing page-fetch memoization (`page_cache: HashMap<PageHash,
+    Vec<u8>>`, the O(distinct pages) fix from the "third brick" entry above) — no behavior change
+    to that memoization, just extracted so both the fixed-tape and generate paths share it.
+  - New CLI flags on `baud run kvm-resume` (`crates/baud-cli/src/cmds/run.rs`): `--generate-seed`,
+    `--generate-count`, `--generate-tape-len-bytes` (default 4), `--maximize <probe>` (repeatable)
+    — the exact same flag set and dispatch logic `kvm-branch` already has;
+    `branch_tapes_hex` changed from `required = true` to `required_unless_present =
+    "generate_seed"`.
+  - New test `resumed_universe_generates_reproducible_branches` in `run_kvm.rs`: persists a branch
+    point, generates from the in-memory universe directly via `run_driver_generated_branches`, and
+    separately via `reconstruct_universe` + `run_driver_generated_branches`, then asserts identical
+    tapes/console output/`ram_hash`/`best_tape_hex` between the two. `cargo test -p baud-server
+    run_kvm`: 9/9 (was 5/5), verified by counting `#[test]` functions directly in the file.
+  - Manual live-server end-to-end verification (not just unit tests): started a real `baud-server`
+    against a temp DB/snapshot-store, ran `baud run kvm-branch --persist-run-id` against
+    `tape-echo-guest`'s bzImage to get a real `node_id`, then `baud run kvm-resume --run-id ...
+    --node-id ... --generate-seed 42 --generate-count 3 --maximize console_len` against that
+    persisted universe with **no kernel path in the request at all** — got back real per-branch
+    `tape_hex`/`observations`/`interesting` plus `driver_summary`, and confirmed byte-identical
+    tapes across two separate CLI invocations with the same seed (reproducibility). Confirmed
+    clean `{error}` (never a false pass) for: `generate.count=0`, an unknown `node_id`, and (via a
+    direct `curl` — the CLI itself never sends both fields, so this required bypassing the CLI to
+    actually hit the server-side guard) mixing `branch_tapes_hex` + `generate` in one request.
+    Confirmed the pre-existing fixed-tape `branch_tapes_hex` resume path is byte-for-byte
+    unchanged.
+  - **Verification**: `cargo build --workspace` clean (zero new warnings). `cargo clippy
+    --workspace --all-targets` zero new warnings in any touched file (confirmed via targeted
+    `cargo clippy -p baud-server -p baud-cli --all-targets` — no output referencing
+    `run_kvm.rs`/`cmds/run.rs`). `cargo test --workspace` 100% green across every crate, zero
+    failures (`baud-multiverse` 64/64 unchanged). All 16 `drive/*.sh` scripts (`h0.sh`-`h6.sh`,
+    `m0.sh`-`m8.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero
+    regressions, `full-demo.sh` "32/32 CHECKS PASSED" (h5's ~232s 1000-branch test included).
+  - **Not yet done**: nothing yet persists a `Driver`'s own state (seed/best/reservoir) across
+    requests — a caller resuming exploration today always starts a **fresh** `Driver` on each
+    `/run/kvm/branch` or `/run/kvm/resume { generate }` call, never continuing an interrupted
+    one's corpus/schedule (flagged before this iteration, still open — this iteration did not
+    touch it). No probe-emitting guest fixture exists yet to exercise the real `Msg::Observe` path
+    (still synthetic-record-tested only). The "expand a branch point, fork N, score, keep
+    interesting ones as new branch points" tree-growth loop (todo.md §6) is still one level deep —
+    chaining `interesting` branches from a `/run/kvm/branch` or `/run/kvm/resume` response into a
+    further generate call (multi-level tree growth) is still open and is now the clearer natural
+    next increment, since both the branch and resume entry points support generate mode
+    symmetrically. The `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)` follow-up (flagged
+    in the "fourth brick" entry) is untouched, still open.

@@ -449,21 +449,75 @@ pub struct RunKvmResumeBody {
     /// The `node_id` that same call returned in `persisted.node_id`.
     pub node_id: String,
     /// One hex-encoded tape suffix per branch, forked from the reconstructed universe — same
-    /// semantics as `RunKvmBranchBody::branch_tapes_hex`.
+    /// semantics as `RunKvmBranchBody::branch_tapes_hex`. Ignored (and may be omitted) when
+    /// `generate` is set instead.
+    #[serde(default)]
     pub branch_tapes_hex: Vec<String>,
+    /// Generate branch tapes with `baud_driver::Driver` instead of the caller supplying them
+    /// directly — the same `DriverGenerateSpec` `/run/kvm/branch` accepts, applied to a
+    /// reconstructed universe instead of a freshly booted one, so an in-flight exploration can
+    /// keep generating from a persisted point without re-booting the kernel. Mutually exclusive
+    /// with `branch_tapes_hex`.
+    #[serde(default)]
+    pub generate: Option<DriverGenerateSpec>,
 }
 
 /// POST /run/kvm/resume — reconstruct a [`baud_snapshot::Universe`] previously persisted by
 /// `POST /run/kvm/branch { persist_run_id: ... }` (`SnapshotStore::get_universe` +
 /// `baud_snapshot::decode_universe_body` + `universe_from_body`, fetching each referenced page via
-/// `SnapshotStore::get_page`), then fork one independent `Multiverse::branch` continuation per
-/// `branch_tapes_hex` entry and run each to its first halt — **no kernel image, no re-boot**: the
-/// reconstructed universe alone is enough, closing todo.md §14's "Natural next step (1)" for
-/// `/run/kvm/branch` ("accept an already-captured Universe ... as an alternative to kernel_path so
-/// a run can resume instead of always cold-booting").
+/// `SnapshotStore::get_page`), then either fork one independent `Multiverse::branch` continuation
+/// per `branch_tapes_hex` entry, or drive `baud_driver::Driver` to generate `generate.count` of
+/// them, and run each to its first halt — **no kernel image, no re-boot**: the reconstructed
+/// universe alone is enough, closing todo.md §14's "Natural next step (1)" for `/run/kvm/branch`
+/// ("accept an already-captured Universe ... as an alternative to kernel_path so a run can resume
+/// instead of always cold-booting") and the twice-flagged follow-up ("`/run/kvm/resume` still only
+/// accepts fixed `branch_tapes_hex`") symmetrically with `/run/kvm/branch`'s own generate mode.
 pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResumeBody>) -> Json<Value> {
+    if body.generate.is_some() && !body.branch_tapes_hex.is_empty() {
+        return Json(json!({ "error": "specify either branch_tapes_hex or generate, not both" }));
+    }
+    let store = state.snapshot_store.clone();
+    let run_id = body.run_id;
+    let node_id_hex = body.node_id;
+
+    if let Some(spec) = body.generate {
+        if spec.count == 0 {
+            return Json(json!({ "error": "generate.count must be at least 1" }));
+        }
+        if spec.count > MAX_BRANCHES_PER_REQUEST {
+            return Json(json!({
+                "error": format!(
+                    "too many branches requested ({}) — max {MAX_BRANCHES_PER_REQUEST} per call",
+                    spec.count
+                )
+            }));
+        }
+        let result = tokio::task::spawn_blocking(move || {
+            let universe = reconstruct_universe(store.as_ref(), &run_id, &node_id_hex)?;
+            run_driver_generated_branches(&universe, spec)
+        })
+        .await
+        .expect("run/kvm/resume (generate) task panicked");
+
+        return match result {
+            Ok((outcomes, summary)) => {
+                let branches: Vec<Value> = outcomes.into_iter().map(generated_outcome_to_json).collect();
+                Json(json!({
+                    "ok": true,
+                    "branches": branches,
+                    "driver_summary": {
+                        "generations": summary.generations,
+                        "goal_reached": summary.goal_reached,
+                        "best_tape_hex": summary.best_tape_hex,
+                    },
+                }))
+            }
+            Err(e) => Json(json!({ "error": e })),
+        };
+    }
+
     if body.branch_tapes_hex.is_empty() {
-        return Json(json!({ "error": "branch_tapes_hex must contain at least one tape" }));
+        return Json(json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }));
     }
     if body.branch_tapes_hex.len() > MAX_BRANCHES_PER_REQUEST {
         return Json(json!({
@@ -480,9 +534,6 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
             None => return Json(json!({ "error": "branch_tapes_hex must contain only valid hex strings" })),
         }
     }
-    let store = state.snapshot_store.clone();
-    let run_id = body.run_id;
-    let node_id_hex = body.node_id;
 
     let result = tokio::task::spawn_blocking(move || {
         resume_and_branch(store.as_ref(), &run_id, &node_id_hex, tape_suffixes)
@@ -504,12 +555,24 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
     }
 }
 
-fn resume_and_branch(
+/// Reconstruct a persisted [`baud_snapshot::Universe`] from the store — the shared first half of
+/// both `resume_and_branch` and `/run/kvm/resume`'s generate mode.
+///
+/// `universe_from_body` calls its `fetch_page` closure once per RAM page *slot* in the body
+/// (`persist_universe`'s doc: 65536 for this workspace's fixed 256 MiB RAM), not once per distinct
+/// hash — the overwhelming majority typically repeat (e.g. one shared zero page). Each
+/// `SnapshotStore::get_page` is a real disk read + age/ChaCha20Poly1305 decrypt, with no fast path
+/// for a repeat like `put_page` has (`write_body_if_absent`'s "already on disk" check) — without
+/// this cache a mostly-zero-filled guest would pay tens of thousands of redundant decrypts per
+/// resume (found live: a real `baud-server` process spent minutes and multiple full CPU cores
+/// stuck exactly here, `age::primitives::stream::Stream::decrypt_chunk`, confirmed via `gdb -p
+/// <pid> -batch -ex 'thread apply all bt'` on an actually-hung manual end-to-end check — not a
+/// deadlock, a real O(total pages) instead of O(distinct pages) cost).
+fn reconstruct_universe(
     store: &SnapshotStore,
     run_id: &str,
     node_id_hex: &str,
-    tape_suffixes: Vec<Vec<u8>>,
-) -> Result<Vec<BranchOutcome>, String> {
+) -> Result<baud_snapshot::Universe, String> {
     let run = baud_snapshot_store::RunId::new(run_id.to_owned());
     let node_id =
         baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
@@ -517,20 +580,10 @@ fn resume_and_branch(
     let body =
         baud_snapshot::decode_universe_body(&body_bytes).map_err(|e| format!("decode error: {e}"))?;
 
-    // `universe_from_body` calls this once per RAM page *slot* in the body (persist_universe's
-    // doc: 65536 for this workspace's fixed 256 MiB RAM), not once per distinct hash — the
-    // overwhelming majority typically repeat (e.g. one shared zero page). Each `SnapshotStore::
-    // get_page` is a real disk read + age/ChaCha20Poly1305 decrypt, with no fast path for a
-    // repeat like `put_page` has (`write_body_if_absent`'s "already on disk" check) — without this
-    // cache a mostly-zero-filled guest would pay tens of thousands of redundant decrypts per
-    // resume (found live: a real `baud-server` process spent minutes and multiple full CPU cores
-    // stuck exactly here, `age::primitives::stream::Stream::decrypt_chunk`, confirmed via `gdb -p
-    // <pid> -batch -ex 'thread apply all bt'` on an actually-hung manual end-to-end check — not a
-    // deadlock, a real O(total pages) instead of O(distinct pages) cost).
     let mut page_cache: std::collections::HashMap<baud_snapshot::PageHash, Vec<u8>> =
         std::collections::HashMap::new();
     let mut page_store = baud_snapshot::PageStore::new();
-    let universe = baud_snapshot::universe_from_body(body, &mut page_store, |hash| {
+    baud_snapshot::universe_from_body(body, &mut page_store, |hash| {
         if let Some(cached) = page_cache.get(&hash) {
             return Ok(cached.clone());
         }
@@ -541,8 +594,16 @@ fn resume_and_branch(
         page_cache.insert(hash, bytes.clone());
         Ok(bytes)
     })
-    .map_err(|e| format!("reconstruct error: {e}"))?;
+    .map_err(|e| format!("reconstruct error: {e}"))
+}
 
+fn resume_and_branch(
+    store: &SnapshotStore,
+    run_id: &str,
+    node_id_hex: &str,
+    tape_suffixes: Vec<Vec<u8>>,
+) -> Result<Vec<BranchOutcome>, String> {
+    let universe = reconstruct_universe(store, run_id, node_id_hex)?;
     run_branches(&universe, tape_suffixes)
 }
 
@@ -782,6 +843,44 @@ mod tests {
             vec![9, 8, 7, 6],
             "resumed branch must echo exactly its own suffix"
         );
+    }
+
+    /// `/run/kvm/resume`'s generate mode (`RunKvmResumeBody::generate`) — the symmetric follow-up
+    /// todo.md §14 flagged twice ("`/run/kvm/resume` still only accepts fixed `branch_tapes_hex`").
+    /// A persisted branch point must let a caller keep driving `baud_driver::Driver` generation
+    /// against it with no kernel image and no re-boot, reproducing the same tapes/outcomes a
+    /// direct `run_driver_generated_branches` call against the in-memory universe would.
+    #[test]
+    fn resumed_universe_generates_reproducible_branches() {
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "generate-resume-test";
+        let spec = || DriverGenerateSpec {
+            seed: 99,
+            count: 4,
+            tape_len_bytes: 4,
+            strategy: baud_driver::StrategySpec { maximize: vec!["console_len".into()], ..Default::default() },
+        };
+
+        let universe = boot_and_snapshot(&kernel, cmdline).expect("boot");
+        let persisted = persist_universe(&store, run_id, &universe).expect("persist");
+        let (direct_outcomes, direct_summary) =
+            run_driver_generated_branches(&universe, spec()).expect("direct generate");
+
+        let (returned_run_id, node_id_hex) = persisted;
+        assert_eq!(returned_run_id, run_id);
+        let reconstructed = reconstruct_universe(&store, run_id, &node_id_hex).expect("reconstruct");
+        let (resumed_outcomes, resumed_summary) =
+            run_driver_generated_branches(&reconstructed, spec()).expect("resumed generate");
+
+        assert_eq!(resumed_outcomes.len(), direct_outcomes.len());
+        for (r, d) in resumed_outcomes.iter().zip(direct_outcomes.iter()) {
+            assert_eq!(r.tape_hex, d.tape_hex, "same seed must generate identical tape suffixes");
+            assert_eq!(r.console_output, d.console_output, "resumed branch must reproduce the direct one");
+            assert_eq!(r.ram_hash, d.ram_hash);
+        }
+        assert_eq!(resumed_summary.best_tape_hex, direct_summary.best_tape_hex);
     }
 
     #[test]

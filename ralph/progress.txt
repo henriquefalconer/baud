@@ -2277,3 +2277,55 @@ All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end on real /dev
 ---
 
 Post-push verification: local HEAD == origin/main (458503d, git fetch confirmed), working tree clean, build/test/clippy/all-16-drive-scripts already green pre-push against this exact commit. Re-reading todo.md: still many pending items (enforced-regime custom KVM module, AMD phase-2, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface, framebuffer stream, /run/kvm/resume's own generate mode, Driver-state persistence across requests, multi-level branch-tree growth, real UFFDIO_CONTINUE memory-efficient branching). This iteration's step (wiring baud-driver's tape generation into POST /run/kvm/branch's scoring loop) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T03:26:32 UTC - Session usage — build-11 [sonnet]
+- cost $5.5943230999999995 (exact, from claude -p)
+- context 210,602 tok peak of 1M (21%) across 58 inference calls, monotonic
+- models sonnet-5 $5.5912 (in 154 / out 68,604 / cache-read 10,062,847) · haiku-4-5 $0.0031
+- subagents (3) sonnet-5 x3
+- transcript: ralph/.run/013-build-11.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 12
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and progress.txt to understand current state.
+
+Chose 'wire baud-driver generate mode into POST /run/kvm/resume', the natural next M-series increment flagged twice in todo.md (symmetric with the just-shipped /run/kvm/branch generate support).
+
+Read run_kvm.rs (795 lines) and cmds/run.rs — /run/kvm/branch already supports generate mode via DriverGenerateSpec (run_driver_generated_branches takes a &Universe, already decoupled from boot). Implementing the same generate mode on /run/kvm/resume now, sharing that function.
+
+Implemented: RunKvmResumeBody gained an optional generate field (DriverGenerateSpec), resume() handler now mirrors branch()'s dual-mode dispatch, extracted reconstruct_universe() shared by both fixed-tape and generate paths. Added CLI flags --generate-seed/--generate-count/--generate-tape-len-bytes/--maximize to kvm-resume. Added test resumed_universe_generates_reproducible_branches. Building now...
+
+Build clean, only pre-existing baud-tracing warnings. Running cargo test -p baud-server run_kvm now (real KVM tests, expect ~1-2 min)...
+
+9/9 run_kvm tests pass including the new resumed_universe_generates_reproducible_branches. Running cargo clippy --workspace now...
+
+Clippy clean — zero new warnings in run_kvm.rs or cmds/run.rs, all reported warnings pre-existing in unrelated files. Running cargo test --workspace now (full suite, real KVM, expect several minutes)...
+
+cargo test --workspace: 100%% green, zero failures across every crate (baud-multiverse 64/64, baud-server 9/9 with the new resume-generate test, everything else unchanged). Running all 16 drive/*.sh scripts individually now, per CLAUDE.md protocol...
+
+h0-h5 all PASS individually (h5's 1000-branch test took ~232s, expected). Continuing with h6, m0-m8, full-demo...
+
+h0-h6 and m0-m8 all PASS individually (15/16 so far). Running drive/full-demo.sh now (M9, chains M0-M8, expect ~1-2 min)...
+
+All 16 drive/*.sh scripts pass individually, full-demo.sh 32/32. Now manually verifying the new /run/kvm/resume generate mode end-to-end against a live server before committing...
+
+Manual live-server end-to-end verification all passed: /run/kvm/resume generate mode reconstructs a persisted universe with NO kernel image and NO re-boot, driver-generated tapes are reproducible across two calls with the same seed, generate.count=0 and an unknown node_id both return clean {error} (never a false pass), server-side mutual-exclusion guard (branch_tapes_hex + generate together) correctly rejects via direct curl — the CLI itself never sends both, mirroring the existing kvm-branch precedent exactly. Existing fixed-tape resume path re-verified byte-for-byte unchanged. All good — proceeding to commit.
+
+Dispatched a subagent to update todo.md's §14 build-status log documenting the /run/kvm/resume generate-mode closure. Waiting for it to finish before committing.
+
+todo.md updated by subagent with the fifth-brick entry documenting this closure. Appending final progress block and committing now.
+
+## 2026-07-25T03:48:59 UTC - Changes committed.
+- Wired baud-driver's generate mode into POST /run/kvm/resume, symmetric with the existing /run/kvm/branch generate support (todo.md's twice-flagged "natural next M-series increment").
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-cli/src/cmds/run.rs, todo.md.
+- **Brief description of changes:**
+  - RunKvmResumeBody gained an optional `generate: DriverGenerateSpec` field, mutually exclusive with branch_tapes_hex (same guard pattern as /run/kvm/branch). The resume() handler now mirrors branch()'s dual-mode dispatch: when generate is set, it validates count bounds then calls the existing run_driver_generated_branches(&universe, spec) against a *reconstructed* universe instead of a freshly booted one — no kernel image, no re-boot, driver-generated tapes forked straight from a persisted SnapshotStore universe.
+  - New shared helper reconstruct_universe(store, run_id, node_id_hex) extracted from the old resume_and_branch (which now just calls it + run_branches) — carries the existing page-fetch memoization forward unchanged, now shared by both the fixed-tape and generate resume paths.
+  - New CLI flags on `baud run kvm-resume`: --generate-seed, --generate-count, --generate-tape-len-bytes, --maximize (repeatable) — same set kvm-branch already has.
+  - New test resumed_universe_generates_reproducible_branches in run_kvm.rs (cargo test -p baud-server run_kvm: 9/9, was 5/5): a persisted branch point's generate-mode output via reconstruct_universe matches byte-for-byte the same spec run directly against the in-memory universe.
+  - Manual live-server end-to-end verification: baud run kvm-branch --persist-run-id then a separate baud run kvm-resume --generate-seed/--generate-count against a live server (real tape-echo-guest, no kernel path in the resume request at all) returned real observations/driver_summary; same seed across two separate CLI invocations produced byte-identical tapes; generate.count=0, an unknown node_id, and (via direct curl, bypassing the CLI which never sends both fields) mixing branch_tapes_hex+generate all returned clean {error}, never a false pass; the pre-existing fixed-tape resume path re-verified byte-for-byte unchanged.
+  - Full re-verification: cargo build/test/clippy --workspace all green, zero new warnings in any touched file, zero regressions. All 16 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32.
+  - todo.md's §14 build-status log gained a new "M-series — fifth brick" entry (via subagent) documenting this closure and the still-open follow-ups (Driver-state persistence across requests, no probe-emitting guest fixture yet, multi-level branch-tree growth chaining `interesting` branches into further generate calls, Tape.choices truncation issue).
+---

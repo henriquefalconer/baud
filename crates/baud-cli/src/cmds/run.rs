@@ -113,7 +113,9 @@ pub enum RunAction {
     },
     /// Fork more branches from a universe a prior `kvm-branch --persist-run-id` call persisted —
     /// no kernel image, no re-boot: reconstructs the universe from the server's SnapshotStore and
-    /// runs each new branch to its first halt from there.
+    /// runs each new branch to its first halt from there. `--generate-seed`/`--generate-count`
+    /// drive `baud-driver` against the resumed universe instead of `--branch-tape-hex`, the
+    /// symmetric follow-up to `kvm-branch`'s own generate mode.
     KvmResume {
         /// The `run_id` a prior `kvm-branch --persist-run-id` call persisted under.
         #[arg(long)]
@@ -121,9 +123,23 @@ pub enum RunAction {
         /// The `node_id` that same call returned in its `persisted.node_id` field.
         #[arg(long)]
         node_id: String,
-        /// A hex-encoded tape suffix for one branch. Repeat for multiple branches.
-        #[arg(long = "branch-tape-hex", required = true)]
+        /// A hex-encoded tape suffix for one branch. Repeat for multiple branches. Ignored when
+        /// `--generate-seed`/`--generate-count` are set instead.
+        #[arg(long = "branch-tape-hex", required_unless_present = "generate_seed")]
         branch_tapes_hex: Vec<String>,
+        /// Generate branch tapes with `baud-driver` (seeded, reproducible) instead of supplying
+        /// them via `--branch-tape-hex`. Requires `--generate-count`.
+        #[arg(long, requires = "generate_count")]
+        generate_seed: Option<u64>,
+        /// Number of driver-generated branches to run.
+        #[arg(long)]
+        generate_count: Option<usize>,
+        /// Bytes drawn per generated tape suffix.
+        #[arg(long, default_value_t = 4)]
+        generate_tape_len_bytes: u32,
+        /// Probe name to maximize (`StrategySpec.maximize`), in priority order. Repeatable.
+        #[arg(long = "maximize")]
+        maximize: Vec<String>,
     },
 }
 
@@ -227,12 +243,29 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                 std::process::exit(1);
             }
         }
-        RunAction::KvmResume { run_id, node_id, branch_tapes_hex } => {
-            let body = json!({
+        RunAction::KvmResume {
+            run_id,
+            node_id,
+            branch_tapes_hex,
+            generate_seed,
+            generate_count,
+            generate_tape_len_bytes,
+            maximize,
+        } => {
+            let mut body = json!({
                 "run_id": run_id,
                 "node_id": node_id,
-                "branch_tapes_hex": branch_tapes_hex,
             });
+            if let (Some(seed), Some(count)) = (generate_seed, generate_count) {
+                body["generate"] = json!({
+                    "seed": seed,
+                    "count": count,
+                    "tape_len_bytes": generate_tape_len_bytes,
+                    "strategy": { "maximize": maximize },
+                });
+            } else {
+                body["branch_tapes_hex"] = json!(branch_tapes_hex);
+            }
             let v = c.post("/run/kvm/resume", &body).await?;
             fmt::print(&v, json);
             if v.get("error").is_some() {
