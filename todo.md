@@ -1690,10 +1690,11 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     passed 100% both times. All 17 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`,
     `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero regressions,
     `full-demo.sh` "32/32 CHECKS PASSED" (h5's ~233s 1000-branch test included).
-  - **Not yet done**: `resume_and_branch`/`run_branches` (the fixed-`branch_tapes_hex` path, as
-    opposed to `generate`) still always calls `run_to_first_halt` — a caller resuming a
-    `MARK_BRANCH`-persisted node with `branch_tapes_hex` today must supply a full tape long enough
-    to carry the guest all the way to its next real `Hlt`; there is no way yet to ask a
+  - **Not yet done (at the time this entry was written — closed by the ninth brick below)**:
+    `resume_and_branch`/`run_branches` (the fixed-`branch_tapes_hex` path, as opposed to
+    `generate`) still always called `run_to_first_halt` — a caller resuming a
+    `MARK_BRANCH`-persisted node with `branch_tapes_hex` had to supply a full tape long enough
+    to carry the guest all the way to its next real `Hlt`; there was no way to ask a
     `branch_tapes_hex` resume to itself stop at the *next* `MARK_BRANCH` rather than running to
     completion (this iteration's scope was specifically `run_driver_generated_branches_with_persist`
     and its generate-mode callers, per the seventh brick entry's own wording — the fixed-tape path
@@ -1701,10 +1702,51 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     needs to know to pad its tape suffix so real indices land at the right cursor offset
     (`Multiverse::branch`'s own doc: the suffix becomes the fork's *entire* new tape array, and
     the restored cursor is fast-forwarded past indices already consumed) — undocumented at the
-    HTTP API level today, only at the `Multiverse` crate level. Every other previously-open item
-    remains untouched and still open: `POST /run/kvm/resume` still has no
-    `persist_run_id`/persistence mechanism at all; no `Driver`'s own state (seed/best/reservoir)
-    persists across requests; the `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)`
-    follow-up (fourth brick entry) is unfixed; the enforced-regime KVM module, RDTSC-compliant-
-    guest testing, `baud shell-into` CLI/server surface, and the framebuffer stream (all
-    documented earlier in this file) are all still open.
+    HTTP API level today, only at the `Multiverse` crate level.
+- **M-series — ninth brick: `run_branches` (the shared fork loop behind both `POST /run/kvm/branch`'s
+  and `POST /run/kvm/resume`'s fixed-`branch_tapes_hex` mode) now calls
+  `Multiverse::run_until_branch_or_halt` instead of `run_to_first_halt`, closing the eighth brick
+  entry's own named next step — the fixed-tape path's sibling of what the seventh/eighth bricks did
+  for the driver-generated path.**
+  - `crates/baud-server/src/routes/run_kvm.rs`: `run_branches` (shared by `boot_snapshot_and_branch`
+    and `resume_and_branch`) now calls `Multiverse::run_until_branch_or_halt` (the
+    `GENERATE_BRANCH_MAX_EXITS` constant was renamed to `BRANCH_MAX_EXITS` since both the
+    driver-generated and fixed-tape paths now share it) instead of `run_to_first_halt`, so a fork
+    that hits a `MARK_BRANCH` checkpoint stops there instead of requiring a tape long enough to
+    reach the guest's eventual `Hlt`. `BranchOutcome` gained a third field, `mark_branch_step:
+    Option<u64>`, surfaced in both `/run/kvm/branch`'s and `/run/kvm/resume`'s fixed-tape JSON
+    response bodies via a new shared `branch_outcome_to_json` helper (replacing two duplicated
+    inline closures). `boot_and_run` (`POST /run/kvm`'s plain boot-to-first-halt, not a fork) is
+    unaffected in behavior — it still always calls `run_to_first_halt` and just always reports
+    `mark_branch_step: None`.
+  - **Existing test fixed to match the corrected contract**:
+    `generated_branch_hitting_mark_branch_persists_and_resumes_further` used to resume a
+    `MARK_BRANCH`-persisted node via `resume_and_branch` with a 4-byte suffix and assert the guest
+    ran all the way to `Hlt` (echoing all 4 bytes) — that assumed the old, now-fixed
+    `run_to_first_halt` behavior. It now supplies only the one real byte needed for the guest's next
+    loop iteration and asserts `resume_and_branch` correctly reports `mark_branch_step: Some(2)`
+    (the guest's second `MARK_BRANCH`), not a full halt — the fixed-tape analogue of
+    `two_level_mark_branch_checkpoints_chain` (`crates/baud-multiverse/src/linux/mod.rs`), now
+    proven at the HTTP-route level. `cargo test -p baud-server run_kvm`: 11/11 (one test's
+    assertions rewritten, no new/removed test — the property this iteration's own new coverage would
+    have added was already covered once the existing test's expectation was corrected).
+  - **Verification**: `cargo build --workspace` clean. `cargo clippy --workspace --all-targets` zero
+    new warnings (confirmed no output referencing `run_kvm.rs`; every warning shown is pre-existing
+    and unrelated, e.g. `baud-tracing`'s deprecated `aya::Bpf`, `baud-driver`'s `manual_div_ceil`).
+    `cargo test --workspace` (`--no-fail-fast`) surfaced exactly the one already-documented,
+    hardware-timing-sensitive `linux::tests::timer_tick_lands_at_identical_instruction` flake
+    (`RCB_HARDWARE_JITTER_TOLERANCE`), confirmed transient by an isolated re-run passing 1/1 —
+    every other crate in the workspace, including `baud-server`, passed 100%. All 17 `drive/*.sh`
+    scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`, `full-demo.sh`) re-run individually end-to-end on real
+    `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS PASSED" (h5's ~233s 1000-branch test
+    and h4's timer-tick test both passed clean in this run too).
+  - **Not yet done**: every other previously-open item remains untouched and still open: neither
+    `boot_snapshot_and_branch` nor `resume_and_branch` persists a per-branch node when a fixed-tape
+    fork stops at `MARK_BRANCH` the way the generate path's `persist_universe_as` does — a caller
+    can now *detect* a fixed-tape `MARK_BRANCH` stop but still cannot persist-and-resume-further from
+    that exact intermediate point without going through `generate` mode instead; `POST
+    /run/kvm/resume` still has no `persist_run_id`/persistence mechanism at all; no `Driver`'s own
+    state (seed/best/reservoir) persists across requests; the `Tape.choices`
+    full-8-byte-vs-truncated-`draw_bits(n)` follow-up (fourth brick entry) is unfixed; the
+    enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface,
+    and the framebuffer stream (all documented earlier in this file) are all still open.

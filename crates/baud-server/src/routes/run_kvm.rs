@@ -53,7 +53,7 @@ pub async fn run(Json(body): Json<RunKvmBody>) -> Json<Value> {
         .expect("run/kvm task panicked");
 
     match result {
-        Ok((console_output, ram_hash)) => Json(json!({
+        Ok((console_output, ram_hash, _mark_branch_step)) => Json(json!({
             "ok": true,
             "console_output_hex": hex_encode(&console_output),
             "ram_hash": ram_hash,
@@ -62,8 +62,12 @@ pub async fn run(Json(body): Json<RunKvmBody>) -> Json<Value> {
     }
 }
 
-/// One branch/boot's result: `(console_output, ram_hash)`.
-type BranchOutcome = (Vec<u8>, String);
+/// One branch/boot's result: `(console_output, ram_hash, mark_branch_step)`. `mark_branch_step` is
+/// `Some(step)` when the branch stopped at a `MARK_BRANCH` checkpoint (the tape cursor it stopped
+/// at) instead of running to `Hlt` — see [`GeneratedBranchOutcome::mark_branch_step`]'s doc for why
+/// this distinction matters. `boot_and_run` (a plain boot-to-first-halt, never a branch fork) always
+/// leaves this `None`.
+type BranchOutcome = (Vec<u8>, String, Option<u64>);
 /// `(run_id, node_id_hex)` — what a caller hands to `POST /run/kvm/resume` to fork more branches
 /// from a persisted universe later.
 type PersistedRef = (String, String);
@@ -72,7 +76,7 @@ fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<Bran
     let mut mv = baud_multiverse::linux::Multiverse::boot(kernel_path, cmdline, 0, 1, tape, None)
         .map_err(|e| format!("boot error: {e}"))?;
     let outcome = mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?;
-    Ok((outcome.console_output, outcome.ram_hash))
+    Ok((outcome.console_output, outcome.ram_hash, None))
 }
 
 /// The work-clock constant this route uses for every boot/branch — a run-level constant
@@ -89,13 +93,15 @@ const WORK_CLOCK_K: u64 = 1;
 const MAX_BRANCHES_PER_REQUEST: usize = 256;
 
 /// Bound for `Multiverse::run_until_branch_or_halt`'s own `max_exits` parameter, used by every
-/// driver-generated branch (`run_driver_generated_branches_with_persist`). Every guest fixture this
-/// route's tests use today halts within a few dozen host-side exits at most (`mark-branch-guest`'s
-/// own tests bound it at 16), so this is deliberately generous headroom for a real guest, not a
-/// tuned value — it exists so a guest that never calls `MARK_BRANCH` and never halts fails loud
-/// (`DeterminismHole`, the same "no silent non-termination" convention `run_until_branch_or_halt`
-/// itself follows) instead of blocking an HTTP request forever.
-const GENERATE_BRANCH_MAX_EXITS: u32 = 65536;
+/// branch this route forks — both a driver-generated branch
+/// (`run_driver_generated_branches_with_persist`) and a fixed-tape `branch_tapes_hex` one
+/// (`run_branches`). Every guest fixture this route's tests use today halts within a few dozen
+/// host-side exits at most (`mark-branch-guest`'s own tests bound it at 16), so this is
+/// deliberately generous headroom for a real guest, not a tuned value — it exists so a guest that
+/// never calls `MARK_BRANCH` and never halts fails loud (`DeterminismHole`, the same "no silent
+/// non-termination" convention `run_until_branch_or_halt` itself follows) instead of blocking an
+/// HTTP request forever.
+const BRANCH_MAX_EXITS: u32 = 65536;
 
 #[derive(Debug, Deserialize)]
 pub struct RunKvmBranchBody {
@@ -236,12 +242,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
 
     match result {
         Ok((outcomes, persisted)) => {
-            let branches: Vec<Value> = outcomes
-                .into_iter()
-                .map(|(console_output, ram_hash)| {
-                    json!({ "console_output_hex": hex_encode(&console_output), "ram_hash": ram_hash })
-                })
-                .collect();
+            let branches: Vec<Value> = outcomes.into_iter().map(branch_outcome_to_json).collect();
             let mut response = json!({ "ok": true, "branches": branches });
             if let Some((run_id, node_id)) = persisted {
                 response["persisted"] = json!({ "run_id": run_id, "node_id": node_id });
@@ -250,6 +251,17 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
         }
         Err(e) => Json(json!({ "error": e })),
     }
+}
+
+/// `BranchOutcome` → JSON, shared by `/run/kvm/branch` and `/run/kvm/resume`'s fixed-tape
+/// (`branch_tapes_hex`) response bodies. Mirrors `generated_outcome_to_json`'s `mark_branch_step`
+/// handling for the generate-mode response.
+fn branch_outcome_to_json((console_output, ram_hash, mark_branch_step): BranchOutcome) -> Value {
+    let mut value = json!({ "console_output_hex": hex_encode(&console_output), "ram_hash": ram_hash });
+    if let Some(step) = mark_branch_step {
+        value["mark_branch_step"] = json!(step);
+    }
+    value
 }
 
 /// Boot + snapshot the shared branch point, shared by every `/run/kvm/branch` flavor (fixed-tape
@@ -261,8 +273,19 @@ fn boot_and_snapshot(kernel_path: &Path, cmdline: &str) -> Result<baud_snapshot:
     boot.snapshot(&mut page_store).map_err(|e| format!("snapshot error: {e}"))
 }
 
-/// Fork one independent `Multiverse::branch` continuation per tape suffix and run each to its
-/// first halt. Shared by `boot_snapshot_and_branch` and `resume_and_branch`.
+/// Fork one independent `Multiverse::branch` continuation per tape suffix and run each until it
+/// either halts or hits a `MARK_BRANCH` checkpoint (`Multiverse::run_until_branch_or_halt`, the
+/// fixed-tape analogue of `run_driver_generated_branches_with_persist`'s own use of the same
+/// primitive). Shared by `boot_snapshot_and_branch` (`POST /run/kvm/branch`'s fixed-tape mode) and
+/// `resume_and_branch` (`POST /run/kvm/resume`'s fixed-tape mode).
+///
+/// Before this, both callers ran every branch with `run_to_first_halt`, so a caller resuming a
+/// `MARK_BRANCH`-persisted checkpoint (persisted via the generate path's `persist_universe_as`) had
+/// to supply a tape suffix long enough to carry the guest all the way to its next real `Hlt` — there
+/// was no way to ask a `branch_tapes_hex` fork/resume to itself stop at the guest's *next*
+/// `MARK_BRANCH` (todo.md §14's own "Not yet done" for this function). Now it stops there instead,
+/// reporting `mark_branch_step` just like the generate path does, so a caller can advance a
+/// checkpoint one `MARK_BRANCH` at a time with `branch_tapes_hex` too.
 fn run_branches(
     universe: &baud_snapshot::Universe,
     tape_suffixes: Vec<Vec<u8>>,
@@ -271,10 +294,18 @@ fn run_branches(
     for (i, suffix) in tape_suffixes.into_iter().enumerate() {
         let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix, WORK_CLOCK_K, None)
             .map_err(|e| format!("branch {i} error: {e}"))?;
-        let outcome = branch
-            .run_to_first_halt()
+        let (run_outcome, _records) = branch
+            .run_until_branch_or_halt(BRANCH_MAX_EXITS)
             .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
-        outcomes.push((outcome.console_output, outcome.ram_hash));
+        let (console_output, ram_hash, mark_branch_step) = match &run_outcome {
+            baud_multiverse::linux::RunUntilBranchOutcome::Halted(halt) => {
+                (halt.console_output.clone(), halt.ram_hash.clone(), None)
+            }
+            baud_multiverse::linux::RunUntilBranchOutcome::MarkBranch { step } => {
+                (branch.console_output().to_vec(), branch.ram_hash(), Some(*step))
+            }
+        };
+        outcomes.push((console_output, ram_hash, mark_branch_step));
     }
     Ok(outcomes)
 }
@@ -400,7 +431,7 @@ fn run_driver_generated_branches_with_persist(
         let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix.clone(), WORK_CLOCK_K, None)
             .map_err(|e| format!("branch {i} error: {e}"))?;
         let (run_outcome, mut records) = branch
-            .run_until_branch_or_halt(GENERATE_BRANCH_MAX_EXITS)
+            .run_until_branch_or_halt(BRANCH_MAX_EXITS)
             .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
         records.extend(branch.drain_tape_records());
         let (console_output, ram_hash, mark_branch_step) = match &run_outcome {
@@ -672,12 +703,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
 
     match result {
         Ok(outcomes) => {
-            let branches: Vec<Value> = outcomes
-                .into_iter()
-                .map(|(console_output, ram_hash)| {
-                    json!({ "console_output_hex": hex_encode(&console_output), "ram_hash": ram_hash })
-                })
-                .collect();
+            let branches: Vec<Value> = outcomes.into_iter().map(branch_outcome_to_json).collect();
             Json(json!({ "ok": true, "branches": branches }))
         }
         Err(e) => Json(json!({ "error": e })),
@@ -782,9 +808,9 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let (first_console, first_hash) =
+        let (first_console, first_hash, _) =
             boot_and_run(&kernel, cmdline, vec![]).expect("first boot failed");
-        let (second_console, second_hash) =
+        let (second_console, second_hash, _) =
             boot_and_run(&kernel, cmdline, vec![]).expect("second boot failed");
 
         assert_eq!(first_console, second_console, "console output must be identical across two boots");
@@ -805,11 +831,12 @@ mod tests {
         let (first_run, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None)
             .expect("boot_snapshot_and_branch failed");
         assert_eq!(first_run.len(), suffixes.len());
-        for (i, (console_output, _ram_hash)) in first_run.iter().enumerate() {
+        for (i, (console_output, _ram_hash, mark_branch_step)) in first_run.iter().enumerate() {
             assert_eq!(
                 console_output, &suffixes[i],
                 "branch {i} must echo exactly its own tape suffix, not another branch's state"
             );
+            assert_eq!(*mark_branch_step, None, "tape-echo-guest never calls MARK_BRANCH, only halts");
         }
 
         // Re-forking from a fresh branch point with the same suffixes must be byte-identical —
@@ -1100,9 +1127,17 @@ mod tests {
     /// when `persist_run_id` is set, and (3) — the property that actually matters, unlike
     /// `interesting_generated_branches_persist_as_child_nodes`'s already-halted case — genuinely
     /// keep exploring further when resumed: handing that persisted node a *fresh* tape suffix
-    /// through `resume_and_branch` must make the guest read/echo/`MARK_BRANCH` three more times
-    /// with the new bytes, not replay a frozen final output (the server-route-level analogue of
-    /// `baud-multiverse`'s own `branch_from_mark_branch_checkpoint_diverges_on_new_tape_suffix`).
+    /// through `resume_and_branch` must make the guest read/echo the new byte and land on the
+    /// guest's *next* `MARK_BRANCH`, not replay a frozen final output (the server-route-level
+    /// analogue of `baud-multiverse`'s own
+    /// `branch_from_mark_branch_checkpoint_diverges_on_new_tape_suffix`).
+    ///
+    /// `resume_and_branch` used to always call `run_to_first_halt`, so resuming here required a tape
+    /// long enough to carry the guest all the way to its final `Hlt`; now that it too calls
+    /// `run_until_branch_or_halt` (this iteration's own fix, mirroring what the seventh/eighth
+    /// bricks did for the driver-generated path), it correctly stops at the guest's *second*
+    /// `MARK_BRANCH` instead — the fixed-tape analogue of `two_level_mark_branch_checkpoints_chain`
+    /// (`crates/baud-multiverse/src/linux/mod.rs`) proven here at the HTTP-route level.
     #[test]
     fn generated_branch_hitting_mark_branch_persists_and_resumes_further() {
         let kernel = mark_branch_guest_kernel_path();
@@ -1140,15 +1175,23 @@ mod tests {
             let node_id_hex = outcome.node_id.as_ref().expect("a MARK_BRANCH stop must persist a node_id");
             assert!(seen_node_ids.insert(node_id_hex.clone()), "every branch must get a distinct node_id");
 
-            // Resume this exact checkpoint with fresh tape for the remaining 3 iterations
-            // (mark-branch-guest loops 4 times total) and run to completion. Index 0 is never
-            // re-read (the restored cursor is already past it, `Multiverse::branch`'s doc) so it
-            // can be anything; indices 1..4 are the three real new bytes.
-            let fresh_suffix: Vec<u8> = vec![outcome.console_output[0], 0xAA, 0xBB, 0xCC];
+            // Resume this exact checkpoint with fresh tape for the guest's next iteration. Index 0
+            // is never re-read (the restored cursor is already past it, `Multiverse::branch`'s
+            // doc) so it can be anything; index 1 is the one real new byte for the guest's second
+            // loop iteration — `run_until_branch_or_halt` stops the instant it hits the guest's own
+            // next MARK_BRANCH, so extra trailing bytes beyond that aren't needed or consumed.
+            let fresh_suffix: Vec<u8> = vec![outcome.console_output[0], 0xAA];
             let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()])
                 .expect("resuming a MARK_BRANCH-persisted node failed");
+            let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step) = &resumed[0];
             assert_eq!(
-                resumed[0].0, fresh_suffix,
+                *resumed_mark_branch_step,
+                Some(2),
+                "resuming a branch_tapes_hex fork of a MARK_BRANCH-persisted node must stop at the \
+                 guest's next MARK_BRANCH, not silently require a full tape to Hlt"
+            );
+            assert_eq!(
+                resumed_console, &fresh_suffix,
                 "resuming past a MARK_BRANCH checkpoint with fresh tape must genuinely consume and \
                  echo it, not replay a frozen halt"
             );

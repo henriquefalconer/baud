@@ -2502,3 +2502,53 @@ ALL 17 drive scripts (h0-h6, m0-m8, full-demo.sh) PASS end-to-end on real /dev/k
   - New test generated_branch_hitting_mark_branch_persists_and_resumes_further (real KVM, mark-branch-guest fixture): proves every generated branch that hits its first MARK_BRANCH persists a distinct node_id, and — the property that matters — resuming that node with a fresh tape suffix makes the guest genuinely read/echo/MARK_BRANCH three more times, not replay a frozen halt. cargo test -p baud-server run_kvm: 12/12 (was 11/11).
   - Full re-verification: cargo build/clippy/test --workspace all green (only the already-documented, unrelated timer_tick_lands_at_identical_instruction hardware-timing flake seen, confirmed transient by isolated re-run). All 17 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
 ---
+
+Post-push verification: local HEAD == origin/main (1c4e7f5, git fetch confirmed), working tree clean, build/test/clippy/all-17-drive-scripts already green pre-push against this exact commit. Re-reading todo.md: still many pending items (fixed-tape branch_tapes_hex path still not wired to run_until_branch_or_halt, POST /run/kvm/resume's missing persist_run_id, Driver-state persistence across requests, Tape.choices truncation follow-up, AMD phase-2, enforced-regime custom KVM module, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface, framebuffer stream). This iteration's step (wiring run_until_branch_or_halt into the generate-mode branch route, closing the seventh brick's own named next step) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T05:28:36 UTC - Session usage — build-15 [sonnet]
+- cost $4.3225329 (exact, from claude -p)
+- context 182,286 tok peak of 1M (18%) across 71 inference calls, monotonic
+- models sonnet-5 $4.3195 (in 142 / out 35,932 / cache-read 9,428,353) · haiku-4-5 $0.0031
+- transcript: ralph/.run/017-build-15.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 16
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and recent git history...
+
+Chose to wire run_until_branch_or_halt into the fixed-tape branch_tapes_hex path (resume_and_branch/run_branches), the ninth-brick item explicitly named as still-open at todo.md's tail — direct sibling to last iteration's generate-mode fix.
+
+Wired run_until_branch_or_halt into run_branches (shared by boot_snapshot_and_branch and resume_and_branch), added branch_outcome_to_json helper, and a new test resume_fixed_tape_branch_stops_at_next_mark_branch_not_full_halt. Building now...
+
+Build clean. Running cargo test -p baud-server run_kvm now (real /dev/kvm tests)...
+
+run_kvm: 11/11 tests pass (was 12/12 — removed a redundant new test, fixed the pre-existing MARK_BRANCH-resume test's now-outdated full-halt expectation to match the corrected stop-at-next-checkpoint behavior). Running clippy --workspace now...
+
+Clippy clean (zero warnings referencing run_kvm.rs; all output is pre-existing, unrelated). Running cargo test --workspace now...
+
+cargo test --workspace surfaced the already-documented timer_tick_lands_at_identical_instruction hardware-timing flake (RCB_HARDWARE_JITTER_TOLERANCE), matching prior iterations' notes. Confirming it's transient with an isolated re-run, then continuing with --no-fail-fast for the rest of the workspace...
+
+Confirmed transient: isolated re-run of timer_tick_lands_at_identical_instruction passed 1/1. Running the full workspace suite with --no-fail-fast to see every crate's result in one pass...
+
+Full workspace test run confirms only the pre-existing timer_tick_lands_at_identical_instruction flake, already isolated-reran green. Every other crate (baud-server 11/11, baud-multiverse 66/67 minus the flake, all others) passed 100%. Now running drive/*.sh scripts one at a time to verify end-to-end...
+
+h0.sh PASS. Continuing through drive scripts h1-h6, m0-m8, full-demo.sh one at a time...
+
+h1-h5 all PASS (h5's 1000-branch test ~233s included). Continuing with h6...
+
+m0-m4 all PASS. Continuing with m5-m8...
+
+m5-m8 all PASS. Running full-demo.sh (the last, comprehensive script, ~4min) now...
+
+ALL 17 drive scripts (h0-h6, m0-m8, full-demo.sh) PASS end-to-end on real /dev/kvm, full-demo 32/32 CHECKS PASSED, zero regressions. Updating todo.md's M-series log with a ninth-brick entry now, then committing.
+
+
+## 2026-07-25T05:59:08 UTC - Changes committed.
+- Implemented: wired run_branches (shared by POST /run/kvm/branch's and POST /run/kvm/resume's fixed branch_tapes_hex mode) to call Multiverse::run_until_branch_or_halt instead of run_to_first_halt, so a fixed-tape branch that hits a MARK_BRANCH checkpoint stops there and reports mark_branch_step, instead of requiring the caller to supply a tape long enough to reach the guest's eventual Hlt — closing the eighth brick entry's own named next step (todo.md's ninth brick).
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - run_kvm.rs: run_branches now calls Multiverse::run_until_branch_or_halt (shared BRANCH_MAX_EXITS constant, renamed from GENERATE_BRANCH_MAX_EXITS) instead of run_to_first_halt. BranchOutcome gained a third field mark_branch_step: Option<u64>. New shared branch_outcome_to_json helper replaces two duplicated inline JSON-building closures and surfaces mark_branch_step in both /run/kvm/branch's and /run/kvm/resume's fixed-tape response bodies.
+  - Fixed one pre-existing test (generated_branch_hitting_mark_branch_persists_and_resumes_further) whose assertion assumed the old run-to-completion behavior of resume_and_branch; it now correctly asserts the corrected stop-at-next-MARK_BRANCH behavior (mark_branch_step: Some(2)), the fixed-tape analogue of baud-multiverse's own two_level_mark_branch_checkpoints_chain. cargo test -p baud-server run_kvm: 11/11.
+  - Full re-verification: cargo build/clippy/test --workspace all green (only the already-documented, unrelated timer_tick_lands_at_identical_instruction hardware-timing flake seen once, confirmed transient by isolated re-run and also passed clean during the drive/h4.sh re-run). All 17 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
+---
