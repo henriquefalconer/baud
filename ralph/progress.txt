@@ -2901,3 +2901,54 @@ Committed f9f9e98. Pushing to origin/main...
 Pushed f9f9e98 to origin/main. Verifying push (git fetch + confirm HEAD matches origin, working tree clean)...
 
 Verified: local HEAD (f9f9e98) == origin/main, working tree clean apart from this progress note. Re-reading todo.md: still pending — enforced-regime KVM module, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface (needs new WebSocket infra), framebuffer stream, consensus-cluster fuzz loop random-tactics/Driver-scheduler coupling (non-blocking follow-up). This iteration's step (persisting Driver exploration state — best/reservoir/generation/rng position — across HTTP requests, closing a gap flagged since the eleventh brick) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T08:43:43 UTC - Session usage — build-21 [sonnet]
+- cost $7.320250950000003 (exact, from claude -p)
+- context 206,060 tok peak of 1M (21%) across 101 inference calls, monotonic
+- models sonnet-5 $7.3172 (in 244 / out 55,075 / cache-read 16,115,284) · haiku-4-5 $0.0031
+- subagents (3) sonnet-5 x3
+- transcript: ralph/.run/023-build-21.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 22
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and recent progress history...
+
+Investigating two candidate next items via parallel research subagents: (1) RDTSC-compliant-guest adversarial test gap (H3, real guest issuing raw rdtsc under cooperative regime), (2) baud shell-into CLI/server surface (H5, needs WebSocket infra). Will pick whichever is better-scoped for one iteration.
+
+Research done: no real RDTSC-guest test exists (only a pre-pivot pure-simulation test in baud-multiverse/src/lib.rs). Cooperative regime's raw rdtsc instruction is NOT yet pinned deterministically — boot_guest only calls set_tsc_khz (frequency), no KVM_SET_MSRS(IA32_TSC=0) or explicit TSC offset, so a guest's raw rdtsc reads a host-wall-clock-derived value today, not reproducible across boots. Chose this as the item to close: it's well-scoped (VMM TSC-pinning plumbing + new rdtsc-guest fixture + reproducibility test), closes H3's other named guarantee area (todo.md 3.3/3.8), open since the H3 iteration.
+
+Added pin_tsc_value() to boot_guest (crates/baud-multiverse/src/linux/mod.rs) — pins raw rdtsc via KVM_SET_MSRS(IA32_TSC=0) right after set_tsc_khz, before page-table/kernel-load I/O jitter. Building baud-multiverse to check it compiles before writing the guest fixture...
+
+Wrote tests/fixtures/rdtsc-guest/{payload.s,build.py,BUILD.md,bzImage} and a new test rdtsc_guest_reproduces_high_bits_across_boots in crates/baud-multiverse/src/linux/mod.rs. Building and running it against real /dev/kvm...
+
+Test rdtsc_guest_reproduces_high_bits_across_boots passes stably (5/5 back-to-back) after two real-hardware fixes: moved pin_tsc_value to the end of boot_guest (not right after set_tsc_khz) to avoid page-table/kernel-load I/O jitter, and added a discarded warm-up boot to avoid first-boot cold-cache skew. Running full baud-multiverse test suite for regressions...
+
+baud-multiverse 68/68 tests pass (was 67, +1 rdtsc test), zero regressions. Running cargo build --workspace...
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets...
+
+cargo clippy --workspace --all-targets: zero errors, only pre-existing warnings unrelated to touched files. Running cargo test --workspace...
+
+cargo test --workspace: only linux::tests::fleet_of_vms_run_in_parallel_without_interference failed — this is a pre-documented transient timing flake under load (todo.md line ~1347), unrelated to this iteration's rdtsc change. Re-running it isolated to confirm transient.
+
+Confirmed transient (1/1 pass isolated). Running drive/*.sh scripts individually against real /dev/kvm, starting with h0-h3 (boot flow, most relevant to the TSC-pinning change)...
+
+drive/h3.sh updated with H3.4 (rdtsc_guest_reproduces_high_bits_across_boots) — ALL CHECKS PASSED end-to-end on real /dev/kvm. Running remaining drive scripts h4-h6 individually...
+
+H4/H5/H6 all pass end-to-end, zero regressions. Running M-series drive scripts m0-m9...
+
+m0-m8 all exit 0. Running m9 and full-demo.sh...
+
+All 18 drive/*.sh scripts (h0-h6, m0-m9, full-demo) pass end-to-end on real /dev/kvm, full-demo.sh 32/32 CHECKS PASSED. Updating todo.md with the new brick entry, then committing and pushing.
+
+## 2026-07-25T09:14:04 UTC - Changes committed.
+- Closed the RDTSC-compliance half of H3's "randomness + time control" (todo.md §3.3/§3.8): a real guest's raw `rdtsc` instruction now reproduces deterministically (high bits) across boots under the cooperative regime, where before only the frequency (`KVM_SET_TSC_KHZ`) was pinned, not the starting value — an unpinned raw `rdtsc` read implicit host-wall-clock-derived state, diverging by tens of millions of virtual-TSC counts between separate boots.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/rdtsc-guest/{payload.s,build.py,BUILD.md,bzImage} (new), drive/h3.sh, todo.md
+- **Brief description of changes:**
+  - crates/baud-multiverse/src/linux/mod.rs: new `pin_tsc_value(vcpu, value)` calls `KVM_SET_MSRS(IA32_TSC=0)` — bypasses the MSR-exit filter entirely (same fact baud-snapshot's restore path already relies on), pinning the vCPU's raw TSC offset. Two real-hardware findings during verification: (1) pinning right after `set_tsc_khz` left variable-duration page-table writes/kernel loading between the pin and first `rdtsc`, dominating observed jitter — moved to the last step of `boot_guest`, right before returning to the caller who enters `KVM_RUN`. (2) a fixture's first boot in a fresh process reads several million counts higher than subsequent boots (cold page-cache/first-syscall costs) — the new test discards a warm-up boot before comparing two warm ones.
+  - New fixture `tests/fixtures/rdtsc-guest/`: writes marker 'T' to COM1, executes raw `rdtsc`, packs edx:eax into 64 bits, echoes 8 bytes low-byte-first, halts. New test `rdtsc_guest_reproduces_high_bits_across_boots` masks the low 20 bits (generous vs. observed jitter, nowhere near large enough to mask an unpinned TSC's billions-of-counts divergence) before asserting two boots agree — matches todo.md §3.3's test spec verbatim ("cooperative asserts the high bits ... not full equality"). cargo test -p baud-multiverse: 68/68 (was 67), new test stable 5/5 on manual re-run.
+  - drive/h3.sh: new H3.4 step runs the test against real /dev/kvm.
+  - **Verification**: cargo build/clippy --workspace clean (zero new warnings, only pre-existing baud-tracing aya::Bpf deprecations). cargo test --workspace: only the already-documented `fleet_of_vms_run_in_parallel_without_interference` timing flake under load, confirmed transient by isolated re-run (1/1 pass). All 18 drive/*.sh scripts (h0-h6, m0-m9, full-demo) re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
+---

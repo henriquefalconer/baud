@@ -2002,3 +2002,65 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     (mentioned in `fuzz.rs`'s header comment) still does not exist — only `/run/kvm/branch`'s and
     `/run/kvm/resume`'s generate modes gained persistence this iteration, not the older ptrace-era
     `/runs/fuzz` route, which has no continuation route to wire it into yet.
+- **M-series — fifteenth brick: the RDTSC-compliance half of H3's "randomness + time control"
+  (todo.md §3.3/§3.8) is closed — a real guest's raw `rdtsc` instruction now reproduces
+  deterministically across boots under the cooperative regime, not just its frequency.** A
+  research subagent confirmed the exact gap before any code changed: `rdrand_guest_is_flagged`
+  (H3's other named test) only covers the *random*-instruction half; RDTSC has no CPUID feature
+  gate to hardware-block it the way RDRAND is blocked, so a *compliant* guest reading the raw
+  timestamp directly still needs the VMM itself to serve a reproducible value. `boot_guest`
+  (`crates/baud-multiverse/src/linux/mod.rs`) called `set_tsc_khz` (frequency only) but never
+  anchored the counter's actual *value* — confirmed live: an unpinned raw `rdtsc` read reflected
+  implicit host-wall-clock-derived state, diverging by tens of millions of virtual-TSC counts
+  (tens of milliseconds at `VIRTUAL_TSC_KHZ` == 1 GHz) between two separate boots, not mere
+  scheduling jitter.
+  - **Fix**: new `pin_tsc_value(vcpu, value)` in `linux/mod.rs` calls
+    `KVM_SET_MSRS(IA32_TSC=0)` — KVM's own documented mechanism for setting the vCPU's raw TSC
+    offset directly; unlike a guest's own RDMSR/WRMSR, this ioctl does not round-trip through
+    `KVM_X86_SET_MSR_FILTER`'s exit-to-userspace path at all (the filter only gates
+    *guest-instruction-triggered* MSR access — `baud-snapshot::linux::restore`'s existing
+    `SetVcpuMsrs` step already relies on the same fact to restore a captured TSC value onto a
+    vCPU with an identical filter active, so this was a known-safe pattern, not a new risk).
+    **Two real-hardware findings during verification, both now documented at their fix sites**:
+    (1) pinning right after `set_tsc_khz` (the natural first attempt) left the page-table writes
+    and kernel-image load — both I/O-bound and run-to-run-variable — between the pin and the
+    guest's first `rdtsc`, which dominated the observed jitter far more than genuine
+    host-scheduling jitter; moved to the very last step of `boot_guest`, immediately before
+    returning to the caller (who enters `KVM_RUN` right after), cutting the disagreement from
+    tens of millions of counts to single-digit millions. (2) a fixture's *first* boot in a fresh
+    test process still reads several million counts higher than every boot after it (cold
+    page-cache fill for the bzImage file, first-ever KVM/`perf_event` syscalls in that process) —
+    the new test discards a warm-up boot before comparing two already-warm ones, isolating the
+    steady-state jitter the test actually cares about.
+  - **New fixture** `crates/baud-multiverse/tests/fixtures/rdtsc-guest/` (`payload.s`/`build.py`/
+    `BUILD.md`, same hand-assembled-bzImage mechanics as `rdrand-guest`): writes marker byte `'T'`
+    to COM1, executes raw `rdtsc`, packs `edx:eax` into one 64-bit value, echoes its 8 bytes
+    low-byte-first, halts. New test `rdtsc_guest_reproduces_high_bits_across_boots`
+    (`crates/baud-multiverse/src/linux/mod.rs`) masks off the low 20 bits (`RDTSC_JITTER_MASK`,
+    generous relative to the few-hundred-thousand-count jitter actually observed, nowhere near
+    large enough to mask an unpinned TSC's billions-of-counts divergence) before asserting two
+    boots' values agree — matching todo.md §3.3's own test spec verbatim ("cooperative asserts
+    the high bits / work-derived field, not full equality"; enforced regime would need the
+    not-yet-built custom KVM module for bit-exactness). Full provenance in that fixture's
+    `BUILD.md`. `cargo test -p baud-multiverse`: 68/68 (was 67), the new test stable 5/5 on a
+    manual back-to-back re-run.
+  - **`drive/h3.sh`** gained **H3.4**, running the new test against real `/dev/kvm` and asserting
+    `test result: ok`; the summary block documents the new guarantee alongside H3.2/H3.3's.
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` — zero
+    warnings/errors referencing `linux/mod.rs` or the new fixture files (every warning shown is
+    pre-existing, in files this iteration never touched). `cargo test --workspace` surfaced only
+    the already-documented `linux::tests::fleet_of_vms_run_in_parallel_without_interference`
+    timing flake under heavy concurrent load (todo.md's own prior note on this exact test),
+    confirmed transient by an isolated re-run (1/1 pass); every other crate passed 100%. All 18
+    `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m9.sh`, `full-demo.sh`) re-run individually
+    end-to-end on real `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: every other previously-open item remains untouched and still open: the
+    consensus-cluster fuzz loop's random-tactics/`Driver`-scheduler coupling (non-blocking, no
+    drive script depends on it), the enforced-regime KVM module (RDTSC-compliance under
+    *enforced* regime — bit-exact, forced-exiting — still needs it; only the cooperative-regime
+    half closed this iteration), `baud shell-into` CLI/server surface (needs new WebSocket infra
+    this codebase does not have — the crate-level `shell_into_universe_resumes` test already
+    passes, see the H5 entry above), the framebuffer stream, and `/runs/fuzz`'s aspirational
+    `/runs/fuzz/:id/step` continuation endpoint (the older ptrace-era route, distinct from
+    `/run/kvm/branch`'s and `/run/kvm/resume`'s generate-mode persistence).

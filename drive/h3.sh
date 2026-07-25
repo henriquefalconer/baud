@@ -19,6 +19,12 @@
 #   H3.3  regime_is_recorded_and_not_overclaimed: `baud host probe --require enforced` on this
 #         cooperative-only host (no custom KVM module exists yet) exits 1 with a clear message,
 #         never a false pass; `--require cooperative` passes
+#   H3.4  rdtsc_guest_reproduces_high_bits_across_boots: RDTSC has no CPUID gate (unlike RDRAND),
+#         so a *compliant* guest reading the raw timestamp instruction directly still needs the
+#         VMM to serve it a reproducible value — `boot_guest` now pins the vCPU's raw TSC via
+#         `KVM_SET_MSRS(IA32_TSC=0)` right before entry; this asserts a real guest's `rdtsc` reads
+#         reproduce in their high bits across two boots (see
+#         crates/baud-multiverse/tests/fixtures/rdtsc-guest/BUILD.md for the full finding)
 
 set -euo pipefail
 
@@ -102,6 +108,15 @@ log "Checking 'baud host probe --require cooperative' passes on this host..."
 pass "H3.3: 'baud host probe --require cooperative' exits 0 on regime='$REGIME'"
 
 # ---------------------------------------------------------------------------
+# H3.4 — rdtsc_guest_reproduces_high_bits_across_boots
+# ---------------------------------------------------------------------------
+log "Running rdtsc_guest_reproduces_high_bits_across_boots against real /dev/kvm (rdtsc-guest fixture)..."
+RDTSC_OUT=$(cargo test -q -p baud-multiverse rdtsc_guest_reproduces_high_bits_across_boots -- --test-threads=1 2>&1)
+echo "$RDTSC_OUT"
+echo "$RDTSC_OUT" | grep -q "test result: ok" || fail "H3.4: rdtsc_guest_reproduces_high_bits_across_boots FAILED"
+pass "H3.4: rdtsc_guest_reproduces_high_bits_across_boots — raw rdtsc reproduces in its high bits across two boots once pinned"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -113,5 +128,7 @@ echo "    reaches real entropy: real hardware #UDs it immediately (VT-x's own in
 echo "    CPUID gate), deterministically and identically across two boots"
 echo "  - baud host probe --require <regime> never overclaims: asking for 'enforced' on this"
 echo "    cooperative-only host exits 1 with a clear message, never a false pass"
+echo "  - A compliant guest's raw rdtsc reproduces in its high bits across two boots now that"
+echo "    the vCPU's TSC value is pinned at boot (KVM_SET_MSRS(IA32_TSC=0)), not just its frequency"
 echo ""
 echo "H-series H0-H3 complete. Proceed to H4: ./drive/h4.sh"

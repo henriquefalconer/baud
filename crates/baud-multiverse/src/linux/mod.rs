@@ -27,8 +27,8 @@ use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEA
 use baud_snapshot::{PageRef, PageStore, Universe};
 use baud_vcpu::DeterminismHole;
 use kvm_bindings::{
-    kvm_cpuid_entry2, kvm_enable_cap, kvm_userspace_memory_region, KVM_MAX_CPUID_ENTRIES,
-    KVM_MEM_LOG_DIRTY_PAGES,
+    kvm_cpuid_entry2, kvm_enable_cap, kvm_msr_entry, kvm_userspace_memory_region, Msrs,
+    KVM_MAX_CPUID_ENTRIES, KVM_MEM_LOG_DIRTY_PAGES,
 };
 use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd, VmFd};
 use perf_event::events::Hardware;
@@ -73,6 +73,8 @@ pub enum BootError {
     BranchCounter(#[from] io::Error),
     #[error("failed to set up the dirty ring: {0}")]
     DirtyRing(#[from] baud_snapshot::linux::DirtyRingError),
+    #[error("failed to allocate the MSR entry buffer for TSC pinning: {0}")]
+    MsrAlloc(vmm_sys_util::fam::Error),
 }
 
 /// A fully booted-but-not-yet-run guest: KVM handles, guest memory, and the vCPU, all configured
@@ -125,6 +127,34 @@ fn create_vm_vcpu_shell(
     Ok((BootedGuest { kvm, vm, vcpu, guest_mem }, dirty_ring))
 }
 
+/// Pin the vCPU's *raw* TSC value (what a guest's own `rdtsc`/`rdtscp` instructions read,
+/// distinct from the `IA32_TSC` MSR-filter trap `configure_msr_filter` routes to `WorkClock` —
+/// todo.md §3.3: "cooperative = `KVM_SET_TSC_KHZ` pins a fixed frequency + `KVM_VCPU_TSC_OFFSET`
+/// sets the offset"). `KVM_SET_MSRS(IA32_TSC=value)` is KVM's own documented mechanism for setting
+/// that offset directly (it does not round-trip through `KVM_X86_SET_MSR_FILTER`'s exit-to-
+/// userspace path at all — the filter only gates *guest-instruction-triggered* RDMSR/WRMSR, never
+/// this ioctl; `baud-snapshot::linux::restore`'s `SetVcpuMsrs` step already relies on the same
+/// fact to restore a captured TSC value onto a vCPU with an identical filter active).
+///
+/// Without this call a fresh boot's raw `rdtsc` reads whatever KVM's default offset leaves in
+/// place — implicitly anchored to the *host's* wall-clock TSC at vCPU-creation time, so two
+/// separate boots diverge by however much host wall-clock elapsed between them, not just by
+/// scheduling jitter. Called last in [`boot_guest`], immediately before returning to the caller
+/// (who enters `KVM_RUN` right after) rather than right after [`VcpuFd::set_tsc_khz`] — real-
+/// hardware finding, todo.md §14: pinning that early left the page-table writes and kernel-image
+/// load (both I/O-bound, run-to-run-variable) between the pin and the guest's first `rdtsc`, which
+/// dominated the jitter two boots disagreed by (tens of millions of virtual-TSC counts observed,
+/// i.e. tens of milliseconds at `VIRTUAL_TSC_KHZ` == 1 GHz) — pinning last leaves only genuine
+/// host-scheduling jitter in the microseconds between this call and vCPU entry, small enough that
+/// the *high* bits of a `VIRTUAL_TSC_KHZ`-scaled read stay identical across boots (todo.md §3.3's
+/// test spec: cooperative asserts the high bits / work-derived field, not full equality).
+fn pin_tsc_value(vcpu: &VcpuFd, value: u64) -> Result<(), BootError> {
+    let entry = kvm_msr_entry { index: MSR_IA32_TSC, data: value, ..Default::default() };
+    let msrs = Msrs::from_entries(&[entry]).map_err(BootError::MsrAlloc)?;
+    vcpu.set_msrs(&msrs)?;
+    Ok(())
+}
+
 /// Run the full boot flow (specs/baud-multiverse.md §2's `Kvm::new → create_vm → register guest
 /// RAM → create_vcpu → CPUID/TSC/MSR setup → linux-loader boot`) and return a [`BootedGuest`]
 /// positioned at the kernel's 64-bit entry point, ready to enter `KVM_RUN`, alongside a
@@ -156,6 +186,15 @@ pub fn boot_guest(
     regs.rsp = layout::BOOT_STACK_POINTER;
     regs.rflags = 0x2; // bit 1 is reserved-must-be-1; every other flag starts clear
     guest.vcpu.set_regs(&regs)?;
+
+    // Pinned last, immediately before returning to the caller (which enters `KVM_RUN` right
+    // after) rather than right after `set_tsc_khz` above — real-hardware finding, todo.md §14:
+    // pinning that early left the (I/O-bound, run-to-run-variable) page-table writes and kernel
+    // image load between the pin and the guest's first `rdtsc`, which dominated the jitter
+    // `rdtsc_guest_reproduces_high_bits_across_boots` observed (tens of millions of virtual-TSC
+    // counts, i.e. tens of milliseconds at `VIRTUAL_TSC_KHZ` == 1 GHz) far more than genuine
+    // host-scheduling jitter in the microseconds between this point and vCPU entry.
+    pin_tsc_value(&guest.vcpu, 0)?;
 
     Ok((guest, dirty_ring))
 }
@@ -1155,6 +1194,78 @@ mod tests {
             "the guest's forced #UD/triple-fault on rdrand must be perfectly deterministic across \
              two boots — this is what makes the cooperative regime's CPUID mask a hardware \
              guarantee rather than a mere hint"
+        );
+    }
+
+    /// `tests/fixtures/rdtsc-guest/`'s payload: writes one marker byte (`'T'`) to COM1, then
+    /// executes the raw `rdtsc` instruction directly, packs `edx:eax` into one 64-bit value, and
+    /// echoes its 8 bytes to COM1 low-byte-first before halting. See that directory's `BUILD.md`
+    /// for exact provenance and why only the high bits are asserted reproducible.
+    fn rdtsc_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rdtsc-guest/bzImage")
+    }
+
+    /// The single marker byte `tests/fixtures/rdtsc-guest/payload.s` writes to COM1 before
+    /// executing `rdtsc` — unlike `rdrand-guest`'s marker (an unreachable-in-practice guard,
+    /// `RDRAND_GUEST_MARKER` above), `rdtsc` has no CPUID gate to trip, so the guest always gets
+    /// past this byte and always echoes the 8 value bytes that follow it.
+    const RDTSC_GUEST_MARKER: u8 = b'T';
+
+    /// The number of low bits of a raw `rdtsc` read this test tolerates disagreeing across two
+    /// otherwise-identical boots — see `tests/fixtures/rdtsc-guest/BUILD.md`'s "Bit-exactness
+    /// expectation" section for the exact rationale: generous relative to the real host-scheduling
+    /// jitter actually observed between `pin_tsc_value` and the guest's first `rdtsc`, but nowhere
+    /// near large enough to mask an actually-unpinned TSC (which would disagree by billions of
+    /// counts, not tens of bits).
+    const RDTSC_JITTER_MASK: u64 = !0u64 << 20;
+
+    /// todo.md §3.3 / test-matrix row 1's RDTSC-compliance half of "randomness + time control" —
+    /// the half `rdrand_guest_is_flagged` above does not cover: RDTSC has no CPUID gate, so a
+    /// compliant guest reading it directly needs the VMM itself to serve a reproducible value,
+    /// not a hardware `#UD` to fall back on. Proves [`pin_tsc_value`]'s
+    /// `KVM_SET_MSRS(IA32_TSC=0)` actually closes the gap flagged in every "Not yet done" note
+    /// since H3: before that call existed, a raw `rdtsc` reflected implicit host-wall-clock state,
+    /// so two boots would disagree by however many host-TSC counts separated their real start
+    /// times (typically billions at native GHz rates), not just scheduling jitter in the low
+    /// bits.
+    #[test]
+    fn rdtsc_guest_reproduces_high_bits_across_boots() {
+        let kernel = rdtsc_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        // Warm-up boot, result discarded: real-hardware finding, todo.md §14 — this fixture's
+        // very *first* boot in a process consistently reads a raw `rdtsc` several million counts
+        // higher than every boot after it (cold page-cache fill for the bzImage file, first-ever
+        // KVM/perf_event syscalls in this process, etc. — one-time costs `pin_tsc_value` cannot
+        // account for since they happen *after* it runs, inside `run_to_first_halt`). Comparing
+        // two already-warm boots isolates the steady-state jitter this test actually cares about.
+        Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None)
+            .expect("warm-up boot failed")
+            .run_to_first_halt()
+            .expect("warm-up run failed");
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_outcome = first.run_to_first_halt().expect("first run failed");
+        assert_eq!(
+            first_outcome.console_output.len(),
+            9,
+            "guest must get past the marker and echo all 8 rdtsc value bytes: {:?}",
+            first_outcome.console_output
+        );
+        assert_eq!(first_outcome.console_output[0], RDTSC_GUEST_MARKER);
+        let first_tsc = u64::from_le_bytes(first_outcome.console_output[1..9].try_into().unwrap());
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_outcome = second.run_to_first_halt().expect("second run failed");
+        assert_eq!(second_outcome.console_output.len(), 9);
+        assert_eq!(second_outcome.console_output[0], RDTSC_GUEST_MARKER);
+        let second_tsc = u64::from_le_bytes(second_outcome.console_output[1..9].try_into().unwrap());
+
+        assert_eq!(
+            first_tsc & RDTSC_JITTER_MASK,
+            second_tsc & RDTSC_JITTER_MASK,
+            "raw rdtsc must reproduce in its high bits across two boots once the TSC value is \
+             pinned at boot (KVM_SET_MSRS(IA32_TSC=0)) — first={first_tsc:#x} second={second_tsc:#x}"
         );
     }
 
