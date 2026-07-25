@@ -450,6 +450,21 @@ pub struct HaltOutcome {
     pub ram_hash: String,
 }
 
+/// One stopping condition [`Multiverse::run_until_branch_or_halt`] can report — either the guest
+/// halted normally (same payload as [`Multiverse::run_to_first_halt`]), or it issued the tape
+/// device's `MARK_BRANCH` control op (specs/baud-tape-device.md §4) and is still running, paused
+/// right after that `OUT` retired.
+#[derive(Debug)]
+pub enum RunUntilBranchOutcome {
+    /// The guest reached `Hlt`/`Shutdown` before ever calling `MARK_BRANCH`.
+    Halted(HaltOutcome),
+    /// The guest issued `MARK_BRANCH` at tape cursor `step` (`baud_proto::Msg::MarkBranch`'s own
+    /// field) and is still running — a caller that wants to keep exploring from exactly this
+    /// point should [`Multiverse::snapshot`] this `Multiverse` right now, before calling anything
+    /// else that would advance it further.
+    MarkBranch { step: u64 },
+}
+
 impl Multiverse {
     /// Run [`boot_guest`] and wire up the work-clock (`base + k * rcb`, specs/baud-multiverse.md
     /// §4), console, and tape (specs/baud-tape-device.md) devices the run loop needs. `base` is
@@ -716,6 +731,52 @@ impl Multiverse {
             exits += 1;
         }
         Ok(())
+    }
+
+    /// Step the guest (via [`step_exit`](Self::step_exit)) until it either halts or issues the
+    /// tape device's `MARK_BRANCH` control op (specs/baud-tape-device.md §4's opcode 1) — the
+    /// primitive todo.md's "M-series sixth brick" entry names as the concrete missing piece for
+    /// real multi-level branch-tree growth: every guest fixture older than `mark-branch-guest`
+    /// only ever halts on tape exhaustion, so there was nothing for a "stop before halt"
+    /// primitive to stop at. Every tape-device record emitted along the way (including the
+    /// terminating `MarkBranch`, if that's how the loop ends) is returned alongside the outcome —
+    /// `drain_records` is called once per exit so nothing emitted between two exits is silently
+    /// lost, mirroring [`run_until_console_len`](Self::run_until_console_len)'s "check a
+    /// condition after every single exit" shape but swapping the stop condition. `max_exits`
+    /// bounds a guest that never does either (returns `Err(DeterminismHole)`, the same "no silent
+    /// non-termination" convention as `run_until_console_len`).
+    pub fn run_until_branch_or_halt(
+        &mut self,
+        max_exits: u32,
+    ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let mut exits = 0u32;
+        let mut records = Vec::new();
+        loop {
+            if exits >= max_exits {
+                return Err(DeterminismHole(format!(
+                    "run_until_branch_or_halt: neither Hlt nor MARK_BRANCH within {max_exits} exits"
+                )));
+            }
+            let outcome = self.step_exit()?;
+            exits += 1;
+            if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
+                let halt = HaltOutcome {
+                    console_output: self.bus.console.output().to_vec(),
+                    ram_hash: self.ram_hash(),
+                };
+                return Ok((RunUntilBranchOutcome::Halted(halt), records));
+            }
+            let mut drained = self.bus.tape.device_mut().drain_records();
+            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+                let step = match drained[pos] {
+                    baud_proto::Msg::MarkBranch { step } => step,
+                    _ => unreachable!("position() only matched MarkBranch entries"),
+                };
+                records.extend(drained.drain(..=pos));
+                return Ok((RunUntilBranchOutcome::MarkBranch { step }, records));
+            }
+            records.extend(drained);
+        }
     }
 
     /// Deliver `vector` at the exact instruction boundary `period_rcb` retired conditional
@@ -1714,6 +1775,178 @@ mod tests {
             straight.console_output(),
             "a restored universe's interactive session must be byte-identical to an equivalent \
              straight run that never snapshotted at all"
+        );
+    }
+
+    /// `tests/fixtures/mark-branch-guest/`'s payload: loops 4 times reading one tape byte,
+    /// echoing it to COM1, then issuing `MARK_BRANCH` — the first fixture in this workspace that
+    /// keeps running after a branch point instead of halting on tape exhaustion (see that
+    /// directory's `BUILD.md`).
+    fn mark_branch_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mark-branch-guest/bzImage")
+    }
+
+    /// [`Multiverse::run_until_branch_or_halt`]'s basic contract: it stops before `Hlt`, at the
+    /// first `MARK_BRANCH`, reports the tape cursor at that moment (`mark-branch-guest` marks
+    /// after every byte it reads, so the first marker's `step` is exactly `1`), and the drained
+    /// records contain that `MarkBranch` and nothing else yet (no `Probe`/`Goal`/`Violation`/`Log`
+    /// this fixture never emits).
+    #[test]
+    fn run_until_branch_or_halt_stops_at_first_mark_branch() {
+        let kernel = mark_branch_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const MAX_EXITS: u32 = 16;
+
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, 1, vec![1, 2, 3, 4], None).expect("boot failed");
+        let (outcome, records) = boot.run_until_branch_or_halt(MAX_EXITS).expect("run_until_branch_or_halt failed");
+
+        match outcome {
+            RunUntilBranchOutcome::MarkBranch { step } => assert_eq!(step, 1, "the first MARK_BRANCH must land right after the first tape byte is consumed"),
+            RunUntilBranchOutcome::Halted(_) => panic!("must stop at MARK_BRANCH, not run all the way to Hlt"),
+        }
+        assert_eq!(records.len(), 1, "exactly one record (the MarkBranch itself) must have been drained");
+        assert!(matches!(records[0], baud_proto::Msg::MarkBranch { step: 1 }));
+        assert_eq!(
+            boot.console_output(),
+            &[1],
+            "the guest must have echoed exactly the one byte it read before marking the branch"
+        );
+    }
+
+    /// The real architectural proof todo.md's "M-series sixth brick" entry flagged as missing:
+    /// forking a universe captured at a `MARK_BRANCH` checkpoint with a *new* tape suffix must
+    /// genuinely change the guest's subsequent output, not silently replay the original branch's
+    /// frozen continuation (the no-op that entry proved live against every older, halt-only
+    /// fixture). Captures the checkpoint once, forks it twice on two different suffixes, and
+    /// proves: (1) each fork's final output is exactly its own prefix-so-far plus its own new
+    /// suffix, (2) the two forks' outputs genuinely differ from each other, and (3) forking with
+    /// the checkpoint's *original* continuation bytes reproduces the original straight run exactly
+    /// — so this is a real fork of live, still-running state, not a coincidence of construction.
+    #[test]
+    fn branch_from_mark_branch_checkpoint_diverges_on_new_tape_suffix() {
+        let kernel = mark_branch_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const WORK_CLOCK_K: u64 = 1;
+        const MAX_EXITS: u32 = 16;
+        let original_tape = vec![1u8, 2, 3, 4];
+
+        // A straight, never-forked run of the same image+tape, to compare the "same suffix"
+        // fork against below.
+        let mut straight = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, original_tape.clone(), None)
+            .expect("straight boot failed");
+        let straight_outcome = straight.run_to_first_halt().expect("straight run failed");
+        assert_eq!(straight_outcome.console_output, original_tape);
+
+        // The checkpoint: run the same image+tape only up to the first MARK_BRANCH, then snapshot.
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, original_tape.clone(), None)
+            .expect("checkpoint boot failed");
+        let (outcome, _records) = boot.run_until_branch_or_halt(MAX_EXITS).expect("run_until_branch_or_halt failed");
+        let step = match outcome {
+            RunUntilBranchOutcome::MarkBranch { step } => step,
+            RunUntilBranchOutcome::Halted(_) => panic!("must stop at MARK_BRANCH"),
+        };
+        let mut page_store = PageStore::new();
+        let universe = boot.snapshot(&mut page_store).expect("snapshot at checkpoint failed");
+        assert_eq!(universe.device.tape_cursor, step, "the captured tape cursor must match the marker's own step");
+
+        let padded_tape = |suffix: &[u8]| -> Vec<u8> {
+            let mut tape = vec![0u8; step as usize];
+            tape.extend_from_slice(suffix);
+            tape
+        };
+
+        // Fork A: a suffix that genuinely differs from the checkpoint's own original continuation.
+        let suffix_a = vec![9u8, 8, 7];
+        let mut fork_a = Multiverse::branch(&universe, padded_tape(&suffix_a), WORK_CLOCK_K, None)
+            .expect("fork A failed");
+        let outcome_a = fork_a.run_to_first_halt().expect("fork A run failed");
+        let mut expected_a = vec![1u8];
+        expected_a.extend_from_slice(&suffix_a);
+        assert_eq!(
+            outcome_a.console_output, expected_a,
+            "fork A must echo its checkpoint prefix plus its OWN new suffix, not the original tape's"
+        );
+
+        // Fork B: a different new suffix again.
+        let suffix_b = vec![42u8, 43, 44];
+        let mut fork_b = Multiverse::branch(&universe, padded_tape(&suffix_b), WORK_CLOCK_K, None)
+            .expect("fork B failed");
+        let outcome_b = fork_b.run_to_first_halt().expect("fork B run failed");
+        let mut expected_b = vec![1u8];
+        expected_b.extend_from_slice(&suffix_b);
+        assert_eq!(outcome_b.console_output, expected_b);
+
+        assert_ne!(
+            outcome_a.console_output, outcome_b.console_output,
+            "two forks of the same checkpoint on two different suffixes must genuinely diverge — \
+             the exact property the pre-existing no-op finding disproved for halt-only fixtures"
+        );
+
+        // Fork C: handed back its own original continuation bytes must reproduce the straight
+        // run's tail exactly, proving the checkpoint really is this run's own live state.
+        let original_suffix = &original_tape[step as usize..];
+        let mut fork_c = Multiverse::branch(&universe, padded_tape(original_suffix), WORK_CLOCK_K, None)
+            .expect("fork C failed");
+        let outcome_c = fork_c.run_to_first_halt().expect("fork C run failed");
+        assert_eq!(
+            outcome_c.console_output, straight_outcome.console_output,
+            "forking the checkpoint with its own original continuation must reproduce the \
+             straight run's output exactly"
+        );
+        assert_eq!(outcome_c.ram_hash, straight_outcome.ram_hash);
+    }
+
+    /// Chains two `MARK_BRANCH` checkpoints: reach the first marker, fork it onto fresh input and
+    /// run only to the *second* marker (not to halt), snapshot again, then fork that second
+    /// checkpoint onto yet another fresh suffix and run to completion. Proves the primitive
+    /// composes to real, unbounded-depth tree growth (bounded only by how many times a fixture
+    /// itself calls `MARK_BRANCH`, not by any depth limit in `Multiverse` or the tape-device
+    /// protocol) — todo.md's "M-series sixth brick" entry's literal blocker, closed for real.
+    #[test]
+    fn two_level_mark_branch_checkpoints_chain() {
+        let kernel = mark_branch_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const WORK_CLOCK_K: u64 = 1;
+        const MAX_EXITS: u32 = 16;
+
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![10u8], None).expect("boot failed");
+        let (outcome1, _) = boot.run_until_branch_or_halt(MAX_EXITS).expect("first run_until_branch_or_halt failed");
+        let step1 = match outcome1 {
+            RunUntilBranchOutcome::MarkBranch { step } => step,
+            RunUntilBranchOutcome::Halted(_) => panic!("must stop at the first MARK_BRANCH"),
+        };
+        assert_eq!(step1, 1);
+        let mut page_store = PageStore::new();
+        let checkpoint1 = boot.snapshot(&mut page_store).expect("snapshot at first checkpoint failed");
+
+        // Fork checkpoint 1 onto fresh input, but only run to the SECOND marker, not to halt.
+        let second_byte = 21u8;
+        let mut fork1 = Multiverse::branch(&checkpoint1, vec![0u8, second_byte], WORK_CLOCK_K, None)
+            .expect("fork of checkpoint 1 failed");
+        let (outcome2, _) = fork1.run_until_branch_or_halt(MAX_EXITS).expect("second run_until_branch_or_halt failed");
+        let step2 = match outcome2 {
+            RunUntilBranchOutcome::MarkBranch { step } => step,
+            RunUntilBranchOutcome::Halted(_) => panic!("must stop at the second MARK_BRANCH"),
+        };
+        assert_eq!(step2, 2, "the second marker's step must be the cursor after the second byte is read");
+        assert_eq!(fork1.console_output(), &[10u8, second_byte]);
+        let checkpoint2 = fork1.snapshot(&mut page_store).expect("snapshot at second checkpoint failed");
+
+        // Fork checkpoint 2 onto yet another fresh suffix and finish the fixture's remaining
+        // two loop iterations to Hlt.
+        let tail = vec![77u8, 88];
+        let mut padded = vec![0u8; step2 as usize];
+        padded.extend_from_slice(&tail);
+        let mut fork2 = Multiverse::branch(&checkpoint2, padded, WORK_CLOCK_K, None)
+            .expect("fork of checkpoint 2 failed");
+        let outcome3 = fork2.run_to_first_halt().expect("final run to halt failed");
+
+        let mut expected = vec![10u8, second_byte];
+        expected.extend_from_slice(&tail);
+        assert_eq!(
+            outcome3.console_output, expected,
+            "the fully-chained run must reflect every level's own fresh input, in order: the \
+             root's byte, checkpoint 1's fork's byte, and checkpoint 2's fork's two bytes"
         );
     }
 }

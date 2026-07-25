@@ -1572,3 +1572,85 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     (flagged in the "fourth brick" entry) is untouched, still open — confirmed still real and live
     in the mutate scheduling path (`generation % 3 == 1` in `baud-driver/src/lib.rs`'s `begin_run`)
     by a research pass this iteration, but not fixed (out of scope for this increment).
+- **M-series — seventh brick: the `MARK_BRANCH`-checkpointing guest fixture and
+  run-until-branch-or-halt primitive the sixth brick named as the remaining blocker now exist, and
+  are proven correct.**
+  - **New fixture**: `crates/baud-multiverse/tests/fixtures/mark-branch-guest/` (`payload.s`,
+    `build.py`, `BUILD.md`, `bzImage` — 3101 bytes, built via `python3 build.py` using only `as`/
+    `ld`, same mechanics as `tape-echo-guest`). The assembly loops 4 times: read one tape byte from
+    the tape device's `DATA` port (`0x0500`), echo it to COM1 (`0x3f8`), then issue the tape
+    device's `MARK_BRANCH` control op (`mov al, 1` / `out` to `CONTROL` port `0x0508`,
+    `ControlOp::MarkBranch = 1`, no payload bytes needed) — then loops back for the next byte,
+    instead of halting like every prior fixture. After the 4th iteration it `hlt`s. This is the
+    first fixture in the workspace that keeps running past a branch point.
+  - **New `Multiverse` primitive**: `crates/baud-multiverse/src/linux/mod.rs` — a new
+    `RunUntilBranchOutcome` enum (`Halted(HaltOutcome)` | `MarkBranch { step: u64 }`, defined at
+    module scope right after the pre-existing `HaltOutcome` struct) and a new method
+    `Multiverse::run_until_branch_or_halt(&mut self, max_exits: u32) -> Result<
+    (RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole>`, inserted right after the
+    pre-existing `run_until_console_len` method. It loops calling the existing `step_exit()` (one
+    `KVM_RUN` + dispatch cycle), draining tape-device records after each exit (`self.bus.tape.
+    device_mut().drain_records()`) and stopping the instant a `Msg::MarkBranch { step }` record
+    appears, or the instant `step_exit()` reports `DispatchOutcome::Halted` — whichever comes
+    first. All non-`MarkBranch` records seen along the way are accumulated and returned too, so
+    nothing emitted between exits is silently dropped. `max_exits` bounds a guest that does
+    neither (returns `Err(DeterminismHole)`), the same convention `run_until_console_len` already
+    uses. No existing method's behavior changed.
+  - **Three new tests**, all in `crates/baud-multiverse/src/linux/mod.rs`'s `mod tests`, all
+    passing against real `/dev/kvm`:
+    - `run_until_branch_or_halt_stops_at_first_mark_branch`: boots `mark-branch-guest` with tape
+      `[1,2,3,4]`, calls the new primitive, asserts it stops with `MarkBranch { step: 1 }` (not
+      `Halted`), the drained records are exactly that one `MarkBranch`, and console output so far
+      is exactly `[1]`.
+    - `branch_from_mark_branch_checkpoint_diverges_on_new_tape_suffix` — the key proof, directly
+      refuting the sixth brick entry's own no-op finding: runs to the first `MARK_BRANCH` (step=1),
+      snapshots there, then forks that same universe three times with three different padded tape
+      continuations (`vec![0u8; step]` followed by a new suffix — padding is required because
+      `Multiverse::branch`'s `tape_suffix` argument becomes the fork's *entire* new tape array, and
+      the restored cursor is fast-forwarded to the checkpoint's own `tape_cursor`, so indices
+      before the cursor are never re-read and can be dummy bytes): fork A (suffix `[9,8,7]`) and
+      fork B (suffix `[42,43,44]`) each echo their own prefix-plus-new-suffix and are asserted to
+      differ from each other; fork C (handed the checkpoint's own original continuation bytes
+      `[2,3,4]`) is asserted to reproduce a straight, never-forked run's output and `ram_hash`
+      exactly. This proves forking a `MARK_BRANCH` checkpoint with new input now genuinely changes
+      the guest's subsequent behavior — the opposite of every fixture before `mark-branch-guest`.
+    - `two_level_mark_branch_checkpoints_chain`: reaches the first `MARK_BRANCH` (step 1), forks
+      onto fresh input but only runs the fork to its *own* next `MARK_BRANCH` (step 2, not to
+      halt), snapshots that second checkpoint, forks it again onto yet another fresh suffix, and
+      runs to completion — asserts the final output reflects every level's own fresh input in
+      order. Proves the primitive composes to unbounded-depth chaining (bounded only by how many
+      times a fixture itself calls `MARK_BRANCH`), not just a one-level fix.
+    - `cargo test -p baud-multiverse --lib`: 68/68 (was 64/64 per the sixth brick entry's own
+      count).
+  - **Doc-comment update, no behavior change**: `crates/baud-server/src/routes/run_kvm.rs`'s
+    `GeneratedBranchOutcome` doc comment (the one that used to say "no such fixture or run
+    primitive exists yet") was rewritten to state the blocker is now closed at the
+    `baud-multiverse` level, cite the new fixture/primitive/tests, and explicitly flag what's
+    still missing at the route level: nothing in `run_kvm.rs` calls `run_until_branch_or_halt`
+    yet — `run_driver_generated_branches_with_persist` still always calls `run_to_first_halt` per
+    branch — so a caller of `POST /run/kvm/branch`/`POST /run/kvm/resume` still cannot actually
+    persist-and-explore-further from an intermediate `MARK_BRANCH` checkpoint today; only the
+    underlying `Multiverse`/fixture capability exists. No CLI flags, no server route logic, no new
+    HTTP behavior changed this iteration.
+  - **Verification**: `cargo build --workspace` clean (only pre-existing `baud-tracing`
+    deprecation warnings, unrelated). `cargo clippy --workspace --all-targets` zero new warnings
+    anywhere (confirmed no output referencing `run_kvm.rs`, `linux/mod.rs`, or the new fixture
+    directory). `cargo test --workspace` surfaced exactly two failures, both pre-existing,
+    known-flaky, hardware-timing-dependent tests unrelated to this change (confirmed by isolated
+    re-run of each: both passed 0 failures on retry) — `linux::tests::
+    fleet_of_vms_run_in_parallel_without_interference` (a concurrency-speedup timing assertion
+    sensitive to host contention) and `linux::tests::timer_tick_lands_at_identical_instruction`
+    (the already-documented `RCB_HARDWARE_JITTER_TOLERANCE` PMU-precision flake from the H4 entry
+    earlier in this same file). Every other crate in the workspace passed 100% in the same full
+    run.
+  - **Not yet done**: the concrete next brick is wiring `run_driver_generated_branches_with_persist`
+    (and its callers, `POST /run/kvm/branch`/`POST /run/kvm/resume`) to actually call
+    `run_until_branch_or_halt` instead of always `run_to_first_halt`, so a branch that hits a
+    `MARK_BRANCH` checkpoint can be persisted and explored further rather than only ever run to
+    completion — this is route/CLI wiring on top of an already-proven-correct primitive, not new
+    research. Every other previously-open item remains untouched and still open: `POST
+    /run/kvm/resume` still has no `persist_run_id`/persistence mechanism at all; no `Driver`'s own
+    state (seed/best/reservoir) persists across requests; the `Tape.choices`
+    full-8-byte-vs-truncated-`draw_bits(n)` follow-up (fourth brick entry) is unfixed; the
+    enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server
+    surface, and the framebuffer stream (all documented earlier in this file) are all still open.
