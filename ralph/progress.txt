@@ -3906,3 +3906,61 @@ Post-push verification: git fetch + rev-parse confirms origin/main HEAD (3b88ce4
 Finding most important item to address against todo.md — reviewing build-status next-actions list and scoping the Regime-enum cleanup vs. the entropy/Mario prerequisite gap...
 
 Chose the Regime-enum → capabilities-only cleanup (todo.md build-status item 2): a scoped, self-contained item — items 1 (OS-entropy) and 3 (Mario) are explicitly multi-day efforts blocked on a shared prerequisite (no real-Linux-kernel guest boot pipeline yet), so this is the only immediately tractable forward step. Surveyed actual code (crates/baud-host, baud-server, baud-cli, baud-multiverse's one test assertion, baud-snapshot-store, 7 drive/h*.sh scripts) to confirm scope before touching anything.
+
+cargo build --workspace is green after the Regime-enum removal (baud-host: Probe::is_runnable()/is_enforced_capable() replace the Regime enum + regime field; baud-server JSON now reports runnable/enforced_capable/enforced_module_present instead of "regime"; baud-cli's --require flag now derives from those booleans; the one baud-multiverse hardware-test assertion and baud-snapshot-store's comment updated; all 7 drive/h0-h6.sh scripts' REGIME parsing replaced with RUNNABLE/ENFORCED_CAPABLE). Running clippy next...
+
+clippy --workspace --all-targets is green (only pre-existing unrelated warnings). Running cargo test for baud-host, baud-cli, and the touched baud-multiverse/baud-snapshot-store tests...
+
+Targeted tests (baud-host, baud-cli, baud-snapshot-store) all pass, including the renamed capability_is_recorded_and_not_overclaimed. Running cargo test --workspace next...
+
+cargo test --workspace: 1 failure — fleet_of_vms_run_in_parallel_without_interference failed because rcb_deterministic returned false (branch-counter measurement, unrelated to my Regime refactor — the assertion logic is unchanged, only the error message format). This is the known WSL2 nested-virt PMU-contention flake documented in baud-host/src/linux.rs's rcb_deterministic comment. Re-running that single test in isolation to confirm it's transient, not a regression from my change...
+
+Confirmed: fleet_of_vms_run_in_parallel_without_interference passes in isolation (rcb_deterministic just needed the PMU counter off the contended path) — pre-existing flake, not a regression. Re-running cargo test --workspace in full to get a clean run for the push gate...
+
+cargo test --workspace is fully green on this run. Running drive/h0.sh...
+
+drive/h0.sh PASSED with the new capability-only JSON schema (runnable=true, enforced_capable=false on this host). Running drive/h1.sh...
+
+drive/h1.sh PASSED. Running drive/h2.sh...
+
+drive/h2.sh PASSED. Running drive/h3.sh (exercises --require enforced/cooperative against the new capability booleans)...
+
+drive/h3.sh PASSED — --require enforced correctly refuses on this cooperative-only host, --require cooperative passes; the capability_is_recorded_and_not_overclaimed unit test passed too. Running drive/h4.sh...
+
+drive/h4.sh PASSED. Running drive/h5.sh...
+
+drive/h5.sh PASSED (long-running ~4min including the 1000-branch fork test). Running drive/h6.sh (last of the H-series)...
+
+All 7 H-series drive scripts (h0-h6) PASSED against real /dev/kvm with the new capability-only schema. Dispatched a subagent to update todo.md (remove completed Regime-cleanup item, note it under Built-and-hardware-tested, annotate §13's migration-map bullet). Waiting for that to land before the final commit.
+
+## 2026-07-25T23:16:16 UTC - Changes committed.
+- Removed the two-mode `Regime` enum (`Enforced`/`Cooperative`/`Rejected`) from `baud-host`, replacing it
+  with a capabilities-only reporting model (todo.md build-status item 2, §13's "cleanup owed to this rewrite").
+- Files changed: crates/baud-host/src/{lib.rs,checks.rs,linux.rs,unsupported.rs}, crates/baud-server/src/routes/host.rs,
+  crates/baud-cli/src/{main.rs,cmds/host.rs,cmds/image.rs}, crates/baud-multiverse/src/linux/mod.rs,
+  crates/baud-snapshot-store/src/types.rs, drive/h0.sh through drive/h6.sh, docs/determinism.md, todo.md.
+- **Brief description of changes:**
+  - `baud_host::Probe` no longer has a `regime: Regime` field; it gained `enforced_module_present: bool` plus
+    two derived methods, `is_runnable()` (kvm/vmx/tsc_stable/rcb_deterministic/cpuid/msr_filter/singlestep all
+    true) and `is_enforced_capable()` (`is_runnable() && vendor == Intel && enforced_module_present`).
+  - `baud-server`'s `GET /host/probe` JSON dropped `"regime"` and now reports `enforced_module_present`,
+    `runnable`, `enforced_capable` as plain booleans.
+  - `baud-cli`'s `--require cooperative`/`--require enforced` flag (same user-facing words) now reads those
+    booleans via a renamed `RequiredCapability`/`capability_satisfies`; the CLI unit test was renamed
+    `capability_is_recorded_and_not_overclaimed`.
+  - The one `baud-multiverse` hardware test referencing `baud_host::Regime` now asserts `host.is_runnable()`.
+  - `baud-snapshot-store`'s `RunManifest::regime: String` field and rationale comment updated to reference
+    `Probe::is_runnable`/`is_enforced_capable` instead of the deleted enum (the field itself is unchanged).
+  - All 7 `drive/h0.sh`-`h6.sh` scripts updated to parse the new `runnable`/`enforced_capable` JSON booleans
+    instead of a `"regime"` string; each was individually run against real `/dev/kvm` on this machine and passed.
+  - The enforced/cooperative kernel-module swap-in mechanism itself, and all descriptive "enforced-regime"/
+    "cooperative regime" terminology in comments/test names elsewhere, were deliberately left untouched — only
+    the `Regime` enum type + JSON wire field + CLI internals were removed, per §13's cleanup note.
+  - Verification: `cargo build --workspace`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`
+    all green (one transient `fleet_of_vms_run_in_parallel_without_interference` failure during the full-suite
+    parallel run was the pre-existing, already-documented WSL2 PMU-contention flake in `rcb_deterministic`,
+    confirmed by re-running that single test in isolation where it passed immediately — not a regression).
+    `drive/h0.sh` through `drive/h6.sh` all passed individually against real `/dev/kvm`.
+  - todo.md updated: item 2 removed from "Next actions" (now renumbered 1-2), noted as done under
+    "Built and hardware-tested", and §13's cleanup bullet marked "(Done — see §14.)".
+---

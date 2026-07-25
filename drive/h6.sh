@@ -7,7 +7,7 @@
 # crates/baud-multiverse/src/linux/mod.rs's `run_fleet` and its named test
 # `fleet_of_vms_run_in_parallel_without_interference`:
 #
-#   H6.1  baud host probe reports a non-rejected regime (cheap, early sanity check).
+#   H6.1  baud host probe reports runnable=true (cheap, early sanity check).
 #   H6.2  fleet_of_vms_run_in_parallel_without_interference, which closes all three of H6's
 #         milestone bullets in one real-hardware test:
 #           - capacity_refuses_sibling_split against this host's *real* probed topology (not
@@ -73,11 +73,11 @@ sleep 1
 log "baud host probe --json"
 PROBE_JSON="$("$BAUD" host probe --json)" || fail "H6.1: 'baud host probe --json' FAILED to run"
 echo "$PROBE_JSON"
-REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
-if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
-    fail "H6.1: host probe regime is '$REGIME' — no real /dev/kvm, H6 cannot mean anything here."
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$RUNNABLE" != "true" ]]; then
+    fail "H6.1: host probe runnable is '$RUNNABLE' — no real /dev/kvm, H6 cannot mean anything here."
 fi
-pass "H6.1: host probe regime='$REGIME' (real KVM present)"
+pass "H6.1: host probe runnable='$RUNNABLE' (real KVM present)"
 
 # ---------------------------------------------------------------------------
 # H6.2 — fleet_of_vms_run_in_parallel_without_interference
@@ -94,7 +94,7 @@ pass "H6.2: fleet_of_vms_run_in_parallel_without_interference — N single-vCPU 
 echo ""
 echo "=== H6 milestone: ALL CHECKS PASSED ==="
 echo ""
-echo "Demonstrated on real /dev/kvm (regime=$REGIME):"
+echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
 echo "  - baud_host::Host::place refuses to place a fleet over this host's real capacity, and a"
 echo "    full-capacity placement never splits an SMT sibling pair (capacity_refuses_sibling_split,"
 echo "    exercised against the real probed topology, not a synthetic one)"

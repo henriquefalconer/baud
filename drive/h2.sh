@@ -9,7 +9,7 @@
 # ptrace-era milestone definition; this rewrite replaces it, mirroring h1.sh's own rewrite once
 # real KVM hardware existed to make the current H2 meaningful).
 #
-#   H2.1  baud host probe still reports a non-rejected regime (cheap, early sanity check)
+#   H2.1  baud host probe still reports runnable=true (cheap, early sanity check)
 #   H2.2  cpuid_leaves_are_fixed (`masked_bits_are_always_fixed_regardless_of_host_input`):
 #         RDRAND/RDSEED/TSX/x2APIC bits are always 0 regardless of host CPUID input
 #   H2.3  work_clock_is_monotone_and_reproducible: the work-clock is non-decreasing and the full
@@ -78,11 +78,11 @@ sleep 1
 log "baud host probe --json"
 PROBE_JSON="$("$BAUD" host probe --json)" || fail "H2.1: 'baud host probe --json' FAILED to run"
 echo "$PROBE_JSON"
-REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
-if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
-    fail "H2.1: host probe regime is '$REGIME' — no real /dev/kvm, H2 cannot mean anything here."
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$RUNNABLE" != "true" ]]; then
+    fail "H2.1: host probe runnable is '$RUNNABLE' — no real /dev/kvm, H2 cannot mean anything here."
 fi
-pass "H2.1: host probe regime='$REGIME' (real KVM present)"
+pass "H2.1: host probe runnable='$RUNNABLE' (real KVM present)"
 
 # ---------------------------------------------------------------------------
 # H2.2 — cpuid_leaves_are_fixed
@@ -148,7 +148,7 @@ pass "H2.7: cpuid_leaves_are_fixed (real hardware) — two real boots read back 
 echo ""
 echo "=== H2 milestone: ALL CHECKS PASSED ==="
 echo ""
-echo "Demonstrated on real /dev/kvm (regime=$REGIME):"
+echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
 echo "  - CPUID leaves are fixed (RDRAND/RDSEED/TSX/x2APIC masked, reproducible across reads)"
 echo "  - The work-clock is monotone and reproducible for a fixed (base, k)"
 echo "  - Same guest image + tape boots to byte-identical console + RAM state twice in a row"

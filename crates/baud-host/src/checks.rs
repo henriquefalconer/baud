@@ -5,7 +5,7 @@
 // (via the `linux` / `unsupported` modules) and what tests inject to synthesize hosts that would
 // otherwise require real KVM hardware to exercise (specs/baud-host.md §6).
 
-use crate::{Probe, Regime, Topology, Vendor};
+use crate::{Probe, Topology, Vendor};
 
 /// One host's raw, independently-observed capabilities. Each method is a single check — no
 /// method may infer its answer from another (specs/baud-host.md §3's table, one row each).
@@ -33,13 +33,10 @@ pub trait CapabilityChecks {
     fn topology(&self) -> Topology;
 }
 
-/// Apply the regime decision (specs/baud-host.md §4) to a set of checks.
-///
-/// Required for *any* regime: `/dev/kvm`, the vmx/svm flag, a stable TSC, and a deterministic
-/// branch counter — without these the host cannot run baud at all (`Regime::Rejected`).
-/// Required for `Cooperative` on top of that: CPUID control, MSR filtering, and single-step —
-/// the mechanisms the cooperative regime itself is built from (§7 of specs/baud-multiverse.md).
-/// `Enforced` additionally needs an Intel host and the out-of-tree module.
+/// Probe every capability (specs/baud-host.md §4) — no summary tier is decided here, only the
+/// raw, independently-observed facts plus `reason`, set whenever something worth flagging keeps
+/// this host from being the best case. Callers derive any policy (`Probe::is_runnable`,
+/// `Probe::is_enforced_capable`) from the facts themselves.
 pub fn compute_probe(checks: &dyn CapabilityChecks) -> Probe {
     let kvm = checks.kvm_present();
     let vmx = checks.vmx_present();
@@ -50,13 +47,14 @@ pub fn compute_probe(checks: &dyn CapabilityChecks) -> Probe {
     let singlestep = checks.singlestep_ok();
     let rcb_deterministic = checks.rcb_deterministic();
     let nested = checks.nested_virt();
+    let enforced_module_present = checks.enforced_module_present();
 
-    let base = |regime, reason: Option<String>| Probe {
+    let base = |reason: Option<String>| Probe {
         kvm, vmx, cpuid, tsc_stable, msr_filter, singlestep, rcb_deterministic, nested, vendor,
-        regime, reason,
+        enforced_module_present, reason,
     };
 
-    // Capabilities without which no regime — not even cooperative — can run at all.
+    // Capabilities without which this host cannot run baud at all.
     let hard_gate: [(&str, bool, &str); 4] = [
         ("/dev/kvm", kvm, "expose /dev/kvm to this host (bare-metal, or a nested-virt host with kvm_intel nested=1)"),
         ("vmx/svm CPU flag", vmx, "enable virtualization extensions (VT-x/AMD-V) in firmware/BIOS"),
@@ -64,26 +62,24 @@ pub fn compute_probe(checks: &dyn CapabilityChecks) -> Probe {
         ("branch-counter determinism", rcb_deterministic, "this microarchitecture's retired-conditional-branch counter is not reproducible across two runs of the same loop"),
     ];
     if let Some((name, _, remediation)) = hard_gate.iter().find(|(_, ok, _)| !ok) {
-        return base(Regime::Rejected, Some(format!("{name} unavailable: {remediation}")));
+        return base(Some(format!("{name} unavailable: {remediation}")));
     }
 
-    // Capabilities the cooperative regime itself needs to serve determinism.
+    // Capabilities the tape-device-cooperative determinism model itself needs to serve.
     let cooperative_gate: [(&str, bool, &str); 3] = [
         ("CPUID control", cpuid, "KVM_SET_CPUID2 did not round-trip a masked leaf"),
         ("MSR filter", msr_filter, "KVM_X86_SET_MSR_FILTER was not accepted"),
         ("single-step", singlestep, "KVM_SET_GUEST_DEBUG single-step was not accepted"),
     ];
     if let Some((name, _, remediation)) = cooperative_gate.iter().find(|(_, ok, _)| !ok) {
-        return base(Regime::Rejected, Some(format!("{name} unavailable: {remediation}")));
+        return base(Some(format!("{name} unavailable: {remediation}")));
     }
 
     match vendor {
-        Vendor::Intel if checks.enforced_module_present() => base(Regime::Enforced, None),
-        Vendor::Amd => base(
-            Regime::Cooperative,
-            Some("AMD host: enforced regime unverified (phase-2, specs/baud-host.md §8); cooperative available".into()),
-        ),
-        _ => base(Regime::Cooperative, None),
+        Vendor::Amd => base(Some(
+            "AMD host: enforced regime unverified (phase-2, specs/baud-host.md §8); cooperative available".into(),
+        )),
+        _ => base(None),
     }
 }
 

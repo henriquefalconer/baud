@@ -119,7 +119,7 @@ impl CapabilityChecks for LinuxChecks {
     /// unconditionally restores the stock module on exit (CLAUDE.md). Every other process on this
     /// host — including whatever calls this — therefore runs against the stock module, and
     /// reporting otherwise would overclaim guarantees the running kernel does not provide
-    /// (`regime_is_recorded_and_not_overclaimed`). Wiring this to a real runtime check (e.g. a
+    /// (`capability_is_recorded_and_not_overclaimed`). Wiring this to a real runtime check (e.g. a
     /// `KVM_CHECK_EXTENSION` for `KVM_EXIT_BAUD_DETERMINISM`, which the patches do not add yet)
     /// is the outstanding work here, not the enforcement logic itself.
     ///

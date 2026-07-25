@@ -9,7 +9,7 @@
 # `KVM_GET_*`/`KVM_SET_*` ioctls against a real vCPU (todo.md §14 tracked this exact gap: "nothing
 # calls snapshot/restore/DirtyRing on real KVM hardware yet").
 #
-#   H5.1  baud host probe still reports a non-rejected regime (cheap, early sanity check)
+#   H5.1  baud host probe still reports runnable=true (cheap, early sanity check)
 #   H5.2  snapshot_roundtrip_is_bit_identical: capture a running timer-guest at K (after its first
 #         injected tick), restore it into a brand-new Multiverse, deliver a second tick and run to
 #         halt — the restored run's landed instruction (rip) and its whole observation stream
@@ -92,11 +92,11 @@ sleep 1
 log "baud host probe --json"
 PROBE_JSON="$("$BAUD" host probe --json)" || fail "H5.1: 'baud host probe --json' FAILED to run"
 echo "$PROBE_JSON"
-REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
-if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
-    fail "H5.1: host probe regime is '$REGIME' — no real /dev/kvm, H5 cannot mean anything here."
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$RUNNABLE" != "true" ]]; then
+    fail "H5.1: host probe runnable is '$RUNNABLE' — no real /dev/kvm, H5 cannot mean anything here."
 fi
-pass "H5.1: host probe regime='$REGIME' (real KVM present)"
+pass "H5.1: host probe runnable='$RUNNABLE' (real KVM present)"
 
 # ---------------------------------------------------------------------------
 # H5.2 — snapshot_roundtrip_is_bit_identical
@@ -149,7 +149,7 @@ pass "H5.6: shell_into_universe_resumes — a restored universe's console matche
 echo ""
 echo "=== H5 milestone (first slice): ALL CHECKS PASSED ==="
 echo ""
-echo "Demonstrated on real /dev/kvm (regime=$REGIME):"
+echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
 echo "  - Multiverse::snapshot captures a complete Universe (RAM + all vCPU state + work-clock"
 echo "    anchor/RCB + tape cursor + console) from a real, running guest"
 echo "  - Multiverse::restore reconstructs a brand-new Multiverse from that Universe, refusing a"

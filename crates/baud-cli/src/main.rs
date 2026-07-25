@@ -35,7 +35,7 @@ pub enum Commands {
     Server(cmds::server::ServerCmd),
     /// Environment checks
     Doctor,
-    /// KVM host capability probe + regime decision (H0)
+    /// KVM host capability probe (H0)
     Host(cmds::host::HostCmd),
     /// Guest-image contract checks (tape-device driver, no real RTC/HPET)
     Image(cmds::image::ImageCmd),

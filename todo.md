@@ -616,7 +616,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 - **Targets**: in-tree simulations → **guest images** under `examples/` (incl. the NES emulator, §11).
 - **Cleanup owed to this rewrite**: remove any two-mode / "one KVM module vs stock" split from the code — the
   `Regime`-style enum and its branches in `baud-multiverse`/`baud-vcpu`/`baud-host`/`baud-snapshot-store` —
-  since there is now one determinism model. `host probe` reports capabilities, not a mode.
+  since there is now one determinism model. `host probe` reports capabilities, not a mode. (Done — see §14.)
 
 ## 14. Build status
 
@@ -658,6 +658,10 @@ snapshot, not a duplicate of it.
   because `tests/fixtures/rdseed-guest/` is a hand-assembled flat binary that never goes through the
   ELF-based rewrite pass at all (see that fixture's `BUILD.md`) — a real ELF-based guest image now gets the
   sidecar automatically.
+  **`Regime` enum cleanup is done**: the tri-state `Regime` enum and its `Probe::regime` field are gone from
+  `baud-host`, replaced by capability booleans plus `Probe::is_runnable()` / `Probe::is_enforced_capable()`;
+  `GET /host/probe` and all 7 `drive/h0.sh`-`h6.sh` scripts now read the renamed JSON fields
+  (`enforced_module_present`/`runnable`/`enforced_capable`) instead of a `"regime"` string.
 - **Next actions (this rewrite)**:
   1. **OS-entropy determinism** — pin `SETUP_RNG_SEED` (type 9) `setup_data` in the `boot_params` baud already
      builds; make virtio-rng tape-fed (an ever-ready FIFO, never a plain file) or omitted; confirm the
@@ -674,23 +678,7 @@ snapshot, not a duplicate of it.
      effort (land H4 interrupt injection → build a real Nix kernel/initramfs pipeline → wire
      `SETUP_RNG_SEED`/virtio-rng into `bootparams.rs` → only then write the three tests), not a single
      iteration — split it into its own sub-steps before attempting it.
-  2. **Model cleanup** — remove the two-mode `Regime` enum and its branches from
-     `baud-multiverse`/`baud-vcpu`/`baud-host`/`baud-snapshot-store`; there is one determinism model
-     (§13). `host probe` reports capabilities. (Note: the enforced/cooperative-style kernel-module swap-in
-     dance itself stays necessary for RDTSC, RDRAND, and `#UD`/RDSEED — this cleanup is about collapsing the
-     *reporting*/API-surface split, not about removing that mechanism. `enforced_module_present()`
-     (`crates/baud-host/src/linux.rs`) still correctly returns `false` outside a `drive/h3-enforced-*.sh` swap
-     window — wiring it to a real runtime check needs a new `KVM_CHECK_EXTENSION` the patches don't add yet.)
-     **Scoping survey done**: the enum lives in `crates/baud-host/src/lib.rs:39-52`
-     (`Enforced`/`Cooperative`/`Rejected`), decided by `checks.rs:8,39-88`'s `compute_probe`; consumers are
-     `baud-server/routes/host.rs` (JSON `regime` field), `baud-cli/src/cmds/host.rs` (`--require`/
-     `regime_satisfies`), one `baud-multiverse` hardware-test assertion, and 7 `drive/h0.sh`-`h6.sh` scripts
-     that `grep` the JSON `regime` field — `baud-vcpu` and `baud-snapshot-store` turned out to have **zero**
-     enum usage already (the latter deliberately uses a plain `String`). This is a real API/wire-schema
-     redesign (what replaces the tri-state summary field), not a pure mechanical rename, but is centralized
-     enough (~250-400 changed lines across ~12-14 files) to fit in one focused session once the replacement
-     schema is decided up front.
-  3. **Super Mario Bros validation (§11)** — `examples/mario/` guest image + strategy/tactics + `drive/mario.sh`
+  2. **Super Mario Bros validation (§11)** — `examples/mario/` guest image + strategy/tactics + `drive/mario.sh`
      completion gate + the mandatory ~25% WSLg live window (`baud stream tail | ffplay`). The current
      `examples/mario/` predates the KVM pivot (a static-musl-process spec — `nes_bridge.c`, a hand-rolled
      "CPU + PPU + APU stub" run as a host process reading stdin, not a bootable guest image) and will need to

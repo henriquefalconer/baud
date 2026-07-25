@@ -2093,9 +2093,9 @@ mod tests {
     fn fleet_of_vms_run_in_parallel_without_interference() {
         let host = baud_host::Host::probe();
         assert!(
-            matches!(host.regime, baud_host::Regime::Cooperative | baud_host::Regime::Enforced),
-            "this test needs a real KVM-capable host; got {:?} ({:?})",
-            host.regime, host.reason
+            host.is_runnable(),
+            "this test needs a real KVM-capable host; reason: {:?}",
+            host.reason
         );
 
         // `capacity_refuses_sibling_split` (specs/baud-host.md §6), exercised here against this

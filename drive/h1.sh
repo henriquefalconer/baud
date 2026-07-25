@@ -14,7 +14,7 @@
 #   H1.2  double_boot_memory_identical passes: boots crates/baud-multiverse/tests/fixtures/
 #         hello-guest/bzImage twice against real /dev/kvm, asserts the console marker and
 #         guest-RAM blake3 hash are byte-identical across both boots
-#   H1.3  baud host probe still reports a non-rejected regime (the real hardware this milestone
+#   H1.3  baud host probe still reports runnable=true (the real hardware this milestone
 #         needs is still present — a fast, early sanity check before trusting H1.2's result)
 
 set -euo pipefail
@@ -64,11 +64,11 @@ sleep 1
 log "baud host probe --json"
 PROBE_JSON="$("$BAUD" host probe --json)" || fail "H1.3: 'baud host probe --json' FAILED to run"
 echo "$PROBE_JSON"
-REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
-if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
-    fail "H1.3: host probe regime is '$REGIME' — no real /dev/kvm, H1 cannot mean anything here."
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$RUNNABLE" != "true" ]]; then
+    fail "H1.3: host probe runnable='$RUNNABLE' — no real /dev/kvm, H1 cannot mean anything here."
 fi
-pass "H1.3: host probe regime='$REGIME' (real KVM present)"
+pass "H1.3: host probe runnable='$RUNNABLE' (real KVM present)"
 
 # ---------------------------------------------------------------------------
 # H1.1 — build baud-multiverse for real (links kvm-ioctls/kvm-bindings/linux-loader)
@@ -105,6 +105,6 @@ echo ""
 echo "Fixture: crates/baud-multiverse/tests/fixtures/hello-guest/ (see BUILD.md)"
 echo ""
 echo "Exit criterion met: the same guest image + tape boots to an identical console + RAM state"
-echo "twice in a row on real /dev/kvm (regime=$REGIME)."
+echo "twice in a row on real /dev/kvm (runnable=$RUNNABLE)."
 echo ""
 echo "Run H2 next: ./drive/h2.sh"

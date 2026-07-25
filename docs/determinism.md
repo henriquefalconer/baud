@@ -17,7 +17,7 @@ Probed via `baud host probe --json` (`specs/baud-host.md` §3, `crates/baud-host
 | `kvm` | `false` — `/dev/kvm` does not exist on Windows |
 | `vmx` / `cpuid` / `tsc_stable` / `msr_filter` / `singlestep` / `rcb_deterministic` / `nested` | `false` — all gated behind `/dev/kvm`; never assumed true |
 | `vendor` | `other` (no `/proc/cpuinfo` to read) |
-| `regime` | `rejected` |
+| `enforced_module_present` / `runnable` / `enforced_capable` | `false` |
 | `reason` | `"/dev/kvm unavailable: expose /dev/kvm to this host (bare-metal, or a nested-virt host with kvm_intel nested=1)"` |
 
 This is the **honest, expected** result on this exact machine, not a bug: per `specs/baud-host.md`
@@ -25,8 +25,8 @@ This is the **honest, expected** result on this exact machine, not a bug: per `s
 bare-metal Linux, a nested-virtualization-enabled Linux VM, or (on this Windows box) a WSL2
 distro with `nestedVirtualization=true` in `.wslconfig`, none of which are installed here yet
 (`wsl --status` shows the WSL2 feature is enabled but **no distro is installed**). `baud host
-probe` and the CLI both refuse to overclaim: `regime` downgrades to `rejected` and names the
-failing check rather than reporting a false pass (`baud host probe` exits `1`).
+probe` and the CLI both refuse to overclaim: `runnable` reports `false` and names the failing
+check rather than reporting a false pass (`baud host probe` exits `1`).
 
 `crates/baud-host`'s own capability-decision logic (§4 of the spec: the required-vs-cooperative
 gate, the Intel/AMD split, the sibling-safe fleet placement) is hardware-independent and is

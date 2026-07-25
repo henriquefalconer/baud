@@ -46,8 +46,8 @@ pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
             let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
             fmt::print(&v, json);
             // Never a false pass: a contract violation exits 1 so scripts/drives notice
-            // (mirrors `baud host probe`'s rejected-regime handling and `baud spec lint`'s
-            // not-ok handling).
+            // (mirrors `baud host probe`'s not-runnable handling and `baud spec lint`'s not-ok
+            // handling).
             if !ok {
                 std::process::exit(1);
             }

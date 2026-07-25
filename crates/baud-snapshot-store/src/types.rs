@@ -12,13 +12,14 @@
 //      branch-point-only node; [`crate::SnapshotStore::nearest`] walks past these to find the
 //      nearest ancestor that actually has one, which is what makes §5's "fork from nearest, not
 //      root" guarantee non-trivial to test.
-//   2. `RunManifest::regime` is a `String`, not `baud_host::Regime` — this crate's declared
+//   2. `RunManifest::regime` is a plain `String`, not a `baud_host` type — this crate's declared
 //      dependency set (§2: "Deps = {blake3, baud-keys, baud-proto}") deliberately excludes
 //      `baud-host`, and this crate's job is archival, not interpretation (§1's Non-Goal:
-//      "Interpreting workload semantics" — the regime tag is exactly that kind of semantics).
-//      `baud_host::Regime` remains the single source of truth for the enum itself; callers that
-//      have one (i.e. `baud-server`, which already depends on both crates) pass
-//      `regime.to_string()` in and parse it back out on the other side.
+//      "Interpreting workload semantics" — a capability tag is exactly that kind of semantics).
+//      `baud_host::Probe` (`is_runnable`/`is_enforced_capable`) remains the single source of truth
+//      for what the tag means; callers that have one (i.e. `baud-server`, which already depends on
+//      both crates) format a short tag string and pass it in here, parsing it back out on the
+//      other side.
 
 use std::fmt;
 

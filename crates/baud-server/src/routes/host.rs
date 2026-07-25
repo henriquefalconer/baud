@@ -4,7 +4,9 @@
 // GET /host/probe — `baud host probe` (specs/baud-host.md §3, milestone H0)
 //
 // baud-server runs on the host itself, so probing here probes the real machine baud-multiverse
-// would run guests on. A failing capability downgrades the regime and is reported, never hidden.
+// would run guests on. A failing capability is reported, never hidden — every field is a raw,
+// independently-observed check; `runnable`/`enforced_capable` are derived from those checks
+// (`Probe::is_runnable`/`is_enforced_capable`), not a separate summary tier.
 
 use axum::{extract::State, Json};
 use baud_host::Host;
@@ -27,7 +29,9 @@ pub async fn probe(_state: State<AppState>) -> Json<Value> {
         "rcb_deterministic": host.rcb_deterministic,
         "nested": host.nested,
         "vendor": host.vendor,
-        "regime": host.regime,
+        "enforced_module_present": host.enforced_module_present,
+        "runnable": host.is_runnable(),
+        "enforced_capable": host.is_enforced_capable(),
         "reason": host.reason,
         "capacity": host.capacity(),
     }))

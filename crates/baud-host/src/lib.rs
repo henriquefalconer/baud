@@ -34,23 +34,6 @@ pub enum Vendor {
     Other,
 }
 
-/// Which determinism level a host can support, decided by [`Probe`] (specs/baud-host.md §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Regime {
-    /// Intel + a custom KVM module + every stock-KVM check passes: hardware traps RDTSC and the
-    /// random instruction so even an adversarial guest is reproducible.
-    #[serde(rename = "enforced-capable")]
-    Enforced,
-    /// Every stock-KVM check passes, no module: reproducible for guests that take
-    /// entropy/clock/input from the tape device.
-    #[serde(rename = "cooperative")]
-    Cooperative,
-    /// A required capability failed; this host cannot run baud at all. `Probe::reason` names the
-    /// failing check and its remediation.
-    #[serde(rename = "rejected")]
-    Rejected,
-}
-
 /// The result of probing one host's capabilities (specs/baud-host.md §3).
 ///
 /// Every field is a real, independently-observed check — never inferred from another field or
@@ -78,11 +61,35 @@ pub struct Probe {
     /// VM; `false` on bare metal is not a failure).
     pub nested: bool,
     pub vendor: Vendor,
-    pub regime: Regime,
-    /// Set whenever `regime` is not the best case (`Rejected`, or `Cooperative` on hardware that
-    /// could support `Enforced` but is missing the module) — names the failing check and its
-    /// remediation. `None` only when the regime is the best this host can offer.
+    /// The out-of-tree enforced-regime KVM module (`kernel-module/baud-enforced/`) is loaded
+    /// right now, so RDTSC/RDRAND/`#UD` are hardware-trapped even for an adversarial guest.
+    pub enforced_module_present: bool,
+    /// Set whenever this host is not the best case (a required capability failed, or the vendor
+    /// is AMD, whose enforced-regime intercepts are unverified) — names the failing check and its
+    /// remediation. `None` only when the host is the best it can offer.
     pub reason: Option<String>,
+}
+
+impl Probe {
+    /// Every capability baud needs to run at all is present — a guest that routes
+    /// entropy/clock/input through the tape device gets full determinism here, no hardware
+    /// module needed (specs/baud-host.md §4's "cooperative" case).
+    pub fn is_runnable(&self) -> bool {
+        self.kvm
+            && self.vmx
+            && self.tsc_stable
+            && self.rcb_deterministic
+            && self.cpuid
+            && self.msr_filter
+            && self.singlestep
+    }
+
+    /// This host additionally hardware-traps RDTSC/RDRAND/`#UD` via the enforced-regime KVM
+    /// module, so even an adversarial guest that ignores the tape device is reproducible
+    /// (specs/baud-host.md §4's "enforced" case).
+    pub fn is_enforced_capable(&self) -> bool {
+        self.is_runnable() && self.vendor == Vendor::Intel && self.enforced_module_present
+    }
 }
 
 /// A probed host: the capability [`Probe`] plus the core topology used for fleet placement.
@@ -163,8 +170,8 @@ mod tests {
     fn doctor_checks_kvm() {
         let host = Host::probe_with(&fake_checks_ok(hyperthreaded_topology(4)));
         assert!(host.kvm && host.vmx && host.rcb_deterministic);
-        assert!(matches!(host.regime, Regime::Cooperative | Regime::Enforced));
-        assert!(host.reason.is_none() || host.regime == Regime::Cooperative);
+        assert!(host.is_runnable());
+        assert!(host.reason.is_none() || !host.is_enforced_capable());
     }
 
     /// specs/baud-host.md §6 `rejected_host_names_the_failing_check` — a missing `/dev/kvm`
@@ -172,18 +179,19 @@ mod tests {
     #[test]
     fn rejected_host_names_the_failing_check() {
         let host = Host::probe_with(&no_kvm());
-        assert_eq!(host.regime, Regime::Rejected);
+        assert!(!host.is_runnable());
         let reason = host.reason.clone().expect("a rejected host must name why");
         assert!(reason.contains("/dev/kvm"), "reason was: {reason}");
     }
 
     #[test]
-    fn amd_host_is_cooperative_only() {
+    fn amd_host_is_runnable_but_not_enforced_capable() {
         let mut checks = fake_checks_ok(single_core_topology(2));
         checks.vendor = Vendor::Amd;
         checks.enforced_module_present = true; // even "present" doesn't matter on AMD (phase-2)
         let host = Host::probe_with(&checks);
-        assert_eq!(host.regime, Regime::Cooperative);
+        assert!(host.is_runnable());
+        assert!(!host.is_enforced_capable());
         assert!(host.reason.as_deref().unwrap_or("").contains("AMD"));
     }
 
@@ -192,22 +200,24 @@ mod tests {
         let mut checks = fake_checks_ok(single_core_topology(2));
         checks.msr_filter_ok = false;
         let host = Host::probe_with(&checks);
-        assert_eq!(host.regime, Regime::Rejected);
+        assert!(!host.is_runnable());
         assert!(host.reason.clone().unwrap().contains("MSR filter"));
     }
 
     #[test]
     fn probe_report_json_shape_matches_spec() {
         let mut checks = fake_checks_ok(single_core_topology(2));
-        checks.enforced_module_present = false; // stock KVM => cooperative, matching the spec example
+        checks.enforced_module_present = false; // stock KVM => runnable but not enforced-capable
         let host = Host::probe_with(&checks);
         let v = serde_json::to_value(&host.report).unwrap();
         for key in [
             "kvm", "vmx", "cpuid", "tsc_stable", "msr_filter", "singlestep",
-            "rcb_deterministic", "nested", "vendor", "regime",
+            "rcb_deterministic", "nested", "vendor", "enforced_module_present",
         ] {
             assert!(v.get(key).is_some(), "missing field {key} in Probe JSON");
         }
-        assert_eq!(v["regime"], "cooperative");
+        assert_eq!(v["enforced_module_present"], false);
+        assert!(host.is_runnable());
+        assert!(!host.is_enforced_capable());
     }
 }

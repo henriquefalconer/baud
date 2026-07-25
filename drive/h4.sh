@@ -9,7 +9,7 @@
 # vCPU and a real IDT-registered handler (tests/fixtures/timer-guest/, see its own BUILD.md), not
 # just the hardware-independent scripted-stepper tests `baud-vcpu`'s own unit tests already cover.
 #
-#   H4.1  baud host probe still reports a non-rejected regime (cheap, early sanity check)
+#   H4.1  baud host probe still reports runnable=true (cheap, early sanity check)
 #   H4.2  timer_tick_lands_at_identical_instruction: two ticks injected at chosen work-counts land
 #         on the bit-identical instruction (rip) across two boots of the same image+tape, the
 #         guest actually takes each interrupt exactly once in order, and the final halt state
@@ -62,11 +62,11 @@ sleep 1
 log "baud host probe --json"
 PROBE_JSON="$("$BAUD" host probe --json)" || fail "H4.1: 'baud host probe --json' FAILED to run"
 echo "$PROBE_JSON"
-REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
-if [[ "$REGIME" == "rejected" || -z "$REGIME" ]]; then
-    fail "H4.1: host probe regime is '$REGIME' — no real /dev/kvm, H4 cannot mean anything here."
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$RUNNABLE" != "true" ]]; then
+    fail "H4.1: host probe runnable is '$RUNNABLE' — no real /dev/kvm, H4 cannot mean anything here."
 fi
-pass "H4.1: host probe regime='$REGIME' (real KVM present)"
+pass "H4.1: host probe runnable='$RUNNABLE' (real KVM present)"
 
 # ---------------------------------------------------------------------------
 # H4.2 — timer_tick_lands_at_identical_instruction
@@ -83,7 +83,7 @@ pass "H4.2: timer_tick_lands_at_identical_instruction — two injected ticks lan
 echo ""
 echo "=== H4 milestone: ALL CHECKS PASSED ==="
 echo ""
-echo "Demonstrated on real /dev/kvm (regime=$REGIME):"
+echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
 echo "  - Multiverse::inject_timer_tick drives the real arm-early-then-single-step engine"
 echo "    (baud_vcpu::boundary::inject_at) against a real vCPU and a real IDT-registered handler"
 echo "  - Two ticks injected at chosen work-counts land on the bit-identical instruction (rip)"

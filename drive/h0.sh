@@ -4,12 +4,12 @@
 #
 # `baud host probe --json` asserts every capability baud-multiverse needs before any guest boots:
 #   /dev/kvm + VT-x, CPUID control, TSC stability, MSR filtering, single-step, branch-counter
-#   determinism, nested-virt, CPU vendor, and the regime (cooperative / enforced / rejected) that
-#   decision resolves to.
+#   determinism, nested-virt, CPU vendor, and whether the host is `runnable` (any determinism at
+#   all) / `enforced_capable` (hardware-traps RDTSC/RDRAND/#UD too).
 #
-# A failing capability downgrades the regime and is reported, never hidden (exit 1 for a rejected
-# host) — this drive passes either way, because *reporting the truth* is what H0 verifies, not
-# that this particular machine happens to have real KVM.
+# A failing capability is reported, never hidden (exit 1 for a non-runnable host) — this drive
+# passes either way, because *reporting the truth* is what H0 verifies, not that this particular
+# machine happens to have real KVM.
 
 set -euo pipefail
 
@@ -61,48 +61,46 @@ set -e
 echo "$PROBE_JSON"
 
 # H0.1 — every capability field is present (never a partial / silently-missing probe).
-for field in kvm vmx cpuid tsc_stable msr_filter singlestep rcb_deterministic nested vendor regime capacity; do
+for field in kvm vmx cpuid tsc_stable msr_filter singlestep rcb_deterministic nested vendor \
+             enforced_module_present runnable enforced_capable capacity; do
     if ! echo "$PROBE_JSON" | grep -q "\"$field\""; then
         fail "H0.1: probe JSON missing field '$field'"
     fi
 done
 pass "H0.1: probe reports every capability field"
 
-# H0.2 — the regime is one of the three named outcomes, never invented.
-REGIME="$(echo "$PROBE_JSON" | grep -o '"regime":[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')"
-case "$REGIME" in
-    cooperative|enforced-capable|rejected)
-        pass "H0.2: regime='$REGIME' is a recognized outcome"
-        ;;
-    *)
-        fail "H0.2: unrecognized regime '$REGIME'"
-        ;;
-esac
+# H0.2 — enforced_capable never overclaims: it can only be true when runnable is also true.
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+ENFORCED_CAPABLE="$(echo "$PROBE_JSON" | grep -oE '"enforced_capable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$ENFORCED_CAPABLE" == "true" && "$RUNNABLE" != "true" ]]; then
+    fail "H0.2: enforced_capable=true but runnable=false — an overclaim"
+fi
+pass "H0.2: runnable='$RUNNABLE' enforced_capable='$ENFORCED_CAPABLE' (enforced_capable never overclaims)"
 
-# H0.3 — a rejected host names the failing check, and the CLI reports it as a real failure
+# H0.3 — a non-runnable host names the failing check, and the CLI reports it as a real failure
 # (exit 1) rather than a silent/false pass; a capable host reports success.
-if [[ "$REGIME" == "rejected" ]]; then
+if [[ "$RUNNABLE" != "true" ]]; then
     if ! echo "$PROBE_JSON" | grep -q '"reason":[[:space:]]*"[^"]'; then
-        fail "H0.3: rejected regime did not name a reason"
+        fail "H0.3: non-runnable host did not name a reason"
     fi
-    pass "H0.3: rejected host names the failing check ($(echo "$PROBE_JSON" | grep -o '"reason":[[:space:]]*"[^"]*"'))"
+    pass "H0.3: non-runnable host names the failing check ($(echo "$PROBE_JSON" | grep -o '"reason":[[:space:]]*"[^"]*"'))"
     if [[ "$PROBE_EXIT" -eq 0 ]]; then
-        fail "H0.3: 'baud host probe' exited 0 on a rejected host (must be a real failure, exit 1)"
+        fail "H0.3: 'baud host probe' exited 0 on a non-runnable host (must be a real failure, exit 1)"
     fi
-    pass "H0.3: CLI exits 1 on a rejected host (never a false pass)"
+    pass "H0.3: CLI exits 1 on a non-runnable host (never a false pass)"
     info "This host cannot run baud-multiverse: KVM/VT-x is unavailable here. See docs/determinism.md."
 else
     if [[ "$PROBE_EXIT" -ne 0 ]]; then
-        fail "H0.3: 'baud host probe' exited non-zero despite regime='$REGIME'"
+        fail "H0.3: 'baud host probe' exited non-zero despite runnable='$RUNNABLE'"
     fi
-    pass "H0.3: CLI exits 0 with regime='$REGIME'"
+    pass "H0.3: CLI exits 0 with runnable='$RUNNABLE'"
 fi
 
 echo ""
 echo "=== H0 capability spike: COMPLETE ==="
-echo "Result recorded in docs/determinism.md — regime='$REGIME'."
+echo "Result recorded in docs/determinism.md — runnable='$RUNNABLE' enforced_capable='$ENFORCED_CAPABLE'."
 echo ""
-echo "Run baud-host's own unit tests for the regime-decision logic (hardware-independent):"
+echo "Run baud-host's own unit tests for the capability-decision logic (hardware-independent):"
 echo "  cargo test -p baud-host"
 echo ""
-echo "Next: H1 boots a guest and needs regime != rejected on the deploy host (Linux + /dev/kvm)."
+echo "Next: H1 boots a guest and needs runnable=true on the deploy host (Linux + /dev/kvm)."
