@@ -43,6 +43,7 @@ struct RecordingTime {
     rdmsr_calls: Vec<u32>,
     wrmsr_calls: Vec<(u32, u64)>,
     enforced_rdtsc_calls: u32,
+    enforced_rdrand_calls: u32,
 }
 
 impl TimeSource for RecordingTime {
@@ -55,6 +56,10 @@ impl TimeSource for RecordingTime {
     }
     fn serve_enforced_rdtsc(&mut self) -> u64 {
         self.enforced_rdtsc_calls += 1;
+        self.serve_value
+    }
+    fn serve_enforced_rdrand(&mut self) -> u64 {
+        self.enforced_rdrand_calls += 1;
         self.serve_value
     }
 }
@@ -142,18 +147,31 @@ fn rdtsc_enforced_is_served_from_time_source() {
     assert_eq!(time.enforced_rdtsc_calls, 1);
 }
 
+/// todo.md §3.2's enforced regime: a trapped `RDRAND` resolves to a served value tagged with its
+/// guest-chosen destination GPR — reported back for `linux::run_and_convert`'s caller to write
+/// there (plus RFLAGS.CF), never resolved silently or left for a generic catch-all.
+#[test]
+fn rdrand_enforced_is_served_from_time_source_with_its_gpr_index() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime { serve_value: 0xFEED_FACE_0102_0304, ..Default::default() };
+    let outcome = dispatch_exit(Exit::RdrandEnforced { gpr_index: 6 }, &mut bus, &mut time).unwrap();
+    assert_eq!(outcome, DispatchOutcome::ServeEnforcedRdrand { gpr_index: 6, value: 0xFEED_FACE_0102_0304 });
+    assert_eq!(time.enforced_rdrand_calls, 1);
+}
+
 // specs/baud-vcpu.md §6 `no_unmodeled_exit_is_silent`: the run loop never leaves the dispatch
 // without an `Ok`/`Err` — every unmodeled exit fails loud, and every modeled one always
 // resolves. Fuzzed over a thousand random exit shapes (mirroring the spec's `random_tapes(1000)`).
 proptest! {
     #[test]
     fn no_unmodeled_exit_is_silent(
-        which in 0u8..10,
+        which in 0u8..11,
         port in any::<u16>(),
         addr in any::<u64>(),
         msr in any::<u32>(),
         value in any::<u64>(),
         len in 0usize..8,
+        gpr_index in 0u8..16,
         exit_name in "[a-zA-Z]{1,16}",
     ) {
         let mut bus = RecordingBus::default();
@@ -170,14 +188,15 @@ proptest! {
             6 => dispatch_exit(Exit::Hlt, &mut bus, &mut time),
             7 => dispatch_exit(Exit::Shutdown, &mut bus, &mut time),
             8 => dispatch_exit(Exit::RdtscEnforced, &mut bus, &mut time),
+            9 => dispatch_exit(Exit::RdrandEnforced { gpr_index }, &mut bus, &mut time),
             _ => {
                 let leaked: &'static str = Box::leak(exit_name.into_boxed_str());
                 dispatch_exit(Exit::Unmodeled(leaked), &mut bus, &mut time)
             }
         };
-        // The whole point: never a panic, and the catch-all (`which == 9`) is always `Err`,
+        // The whole point: never a panic, and the catch-all (`which == 10`) is always `Err`,
         // every modeled exit is always `Ok`.
-        if which == 9 {
+        if which == 10 {
             prop_assert!(result.is_err());
         } else {
             prop_assert!(result.is_ok());

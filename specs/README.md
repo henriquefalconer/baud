@@ -76,7 +76,7 @@ baud makes a whole guest machine reproducible by owning it at the virtualization
 |--------|----------|
 | CPUID (RDRAND/RDSEED/TSX/x2APIC/topology) | Always exits under VT-x; served fixed; nondeterministic bits masked |
 | RDTSC / time | Work-clock (retired conditional branches); TSC offset/scale (cooperative) or forced exit (enforced) |
-| Randomness | Masked in CPUID (cooperative) or hardware-trapped and tape-served (enforced) |
+| Randomness | Masked in CPUID (cooperative) or `rdrand` hardware-trapped and served a deterministic tape-seeded value (enforced; `rdseed` stays `#UD`) |
 | External input / entropy | Served from the tape via the tape device |
 | Interrupt timing | Injected at an exact instruction boundary (arm-early-then-single-step) |
 | Memory | Zeroed RAM at fixed addresses |

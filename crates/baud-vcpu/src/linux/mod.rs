@@ -19,11 +19,24 @@ use kvm_ioctls::{VcpuExit, VcpuFd};
 use std::io;
 
 /// Not in pinned `kvm-bindings` 0.14 (invented after that crate was bindgen'd) — the out-of-tree
-/// enforced-regime KVM module's own exit reason for a trapped `RDTSC`
+/// enforced-regime KVM module's own exit reason for a trapped `RDTSC`/`RDRAND`
 /// (`kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md`, `include/uapi/linux/kvm.h`'s
 /// `KVM_EXIT_BAUD_DETERMINISM` in that patched tree). Surfaces here via `kvm-ioctls`'s existing
 /// `VcpuExit::Unsupported(u32)` catch-all — no crate fork needed.
 const KVM_EXIT_BAUD_DETERMINISM: u32 = 41;
+
+/// Decode `kvm_run.hw.hardware_exit_reason`'s payload for a `KVM_EXIT_BAUD_DETERMINISM` exit —
+/// the low byte names which trapped instruction this is (`rdtsc-enforce.patch`'s
+/// `handle_baud_rdtsc_exit` sets `0`; `rdrand-enforce.patch`'s `handle_baud_rdrand_exit` sets `1`
+/// with the destination GPR index, x86-64 ModRM numbering, packed into the next byte). An unknown
+/// kind becomes `Unmodeled` rather than silently guessing, same rule as every other exit.
+fn decode_baud_determinism_exit(payload: u64) -> Exit<'static> {
+    match payload & 0xFF {
+        0 => Exit::RdtscEnforced,
+        1 => Exit::RdrandEnforced { gpr_index: ((payload >> 8) & 0xF) as u8 },
+        _ => Exit::Unmodeled("BaudDeterminismUnknownKind"),
+    }
+}
 
 /// Convert a real KVM exit into baud-vcpu's own vocabulary (specs/baud-vcpu.md §3). This is the
 /// one place a KVM exit kind can enter the system; anything this match does not model becomes
@@ -119,21 +132,47 @@ pub fn run_until_halted(
             DispatchOutcome::Continue => continue,
             DispatchOutcome::Halted => return Ok(()),
             DispatchOutcome::SingleStepBoundary => continue, // no boundary walk in progress here
-            DispatchOutcome::ServeEnforcedRdtsc(_) => {
+            DispatchOutcome::ServeEnforcedRdtsc(_) | DispatchOutcome::ServeEnforcedRdrand { .. } => {
                 unreachable!("run_one_exit always resolves this to Continue before returning")
             }
         }
     }
 }
 
+/// Run one `KVM_RUN` step and convert its result, decoding the enforced-regime
+/// `KVM_EXIT_BAUD_DETERMINISM` payload (RDTSC vs RDRAND, [`decode_baud_determinism_exit`]) when
+/// present. `kvm_run_ptr` is captured *before* `vcpu.run()` (as a raw pointer, not a live
+/// reference — the borrow it comes from ends the moment it is cast) specifically so it can be
+/// dereferenced afterward without conflicting with `exit`'s own borrow of `vcpu`: `exit`'s type
+/// ties a borrow of `vcpu` to the whole function (the elided lifetime in the return type), so
+/// `vcpu.get_kvm_run()` cannot be called again anywhere after `vcpu.run()` while `exit` is still
+/// live (including inside just one match arm — the compiler unifies the borrow across the whole
+/// function, not per branch) — only a raw-pointer read sidesteps that.
+pub fn run_and_convert(vcpu: &mut VcpuFd) -> Result<Exit<'_>, kvm_ioctls::Error> {
+    let kvm_run_ptr: *mut kvm_bindings::kvm_run = vcpu.get_kvm_run();
+    let exit = vcpu.run()?;
+    if matches!(exit, VcpuExit::Unsupported(KVM_EXIT_BAUD_DETERMINISM)) {
+        // SAFETY: `kvm_run_ptr` points at this vCPU's own mmap'd `kvm_run`, valid for the vCPU's
+        // whole lifetime (well past this call). `hw` is the union member the out-of-tree kernel
+        // patch (`rdrand-enforce.patch`'s `handle_baud_rdrand_exit`, `rdtsc-enforce.patch`'s
+        // `handle_baud_rdtsc_exit`) always initializes whenever `exit_reason ==
+        // KVM_EXIT_BAUD_DETERMINISM`, which is exactly the case just checked via `exit` (itself
+        // holding no borrowed data for this variant, so this read aliases nothing `exit` owns).
+        let payload = unsafe { (*kvm_run_ptr).__bindgen_anon_1.hw.hardware_exit_reason };
+        return Ok(decode_baud_determinism_exit(payload));
+    }
+    Ok(convert_exit(exit))
+}
+
 /// Drive exactly one `KVM_RUN` call to completion (retrying on `EINTR`) and dispatch its exit.
 ///
-/// `DispatchOutcome::ServeEnforcedRdtsc` never escapes this function: unlike every other exit,
-/// its destination (EDX:EAX) is not a field inside the mmap'd `kvm_run` `dispatch_exit` already
-/// has a pointer into, but a GPR pair reachable only via a separate `KVM_GET_REGS`/`KVM_SET_REGS`
-/// round trip — the one piece of real hardware work `dispatch_exit` itself cannot do (it has no
-/// ioctl access at all, by design, so it stays testable without KVM). This is that round trip;
-/// callers (`run_until_halted`, `Multiverse::step_exit`) only ever see `Continue`/`Halted`/
+/// Neither `DispatchOutcome::ServeEnforcedRdtsc` nor `ServeEnforcedRdrand` ever escapes this
+/// function: unlike every other exit, their destination (EDX:EAX, or a guest-chosen GPR for
+/// RDRAND) is not a field inside the mmap'd `kvm_run` `dispatch_exit` already has a pointer into,
+/// but GPRs reachable only via a separate `KVM_GET_REGS`/`KVM_SET_REGS` round trip — the one piece
+/// of real hardware work `dispatch_exit` itself cannot do (it has no ioctl access at all, by
+/// design, so it stays testable without KVM). This is that round trip; callers
+/// (`run_until_halted`, `Multiverse::step_exit`) only ever see `Continue`/`Halted`/
 /// `SingleStepBoundary`.
 pub fn run_one_exit(
     vcpu: &mut VcpuFd,
@@ -141,12 +180,17 @@ pub fn run_one_exit(
     time: &mut dyn TimeSource,
 ) -> Result<DispatchOutcome, DeterminismHole> {
     loop {
-        match vcpu.run() {
+        match run_and_convert(vcpu) {
             Ok(exit) => {
-                return match dispatch_exit(convert_exit(exit), bus, time)? {
+                return match dispatch_exit(exit, bus, time)? {
                     DispatchOutcome::ServeEnforcedRdtsc(value) => {
                         write_enforced_rdtsc_result(vcpu, value)
                             .map_err(|e| DeterminismHole(format!("failed to write enforced-RDTSC result: {e}")))?;
+                        Ok(DispatchOutcome::Continue)
+                    }
+                    DispatchOutcome::ServeEnforcedRdrand { gpr_index, value } => {
+                        write_enforced_rdrand_result(vcpu, gpr_index, value)
+                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDRAND result: {e}")))?;
                         Ok(DispatchOutcome::Continue)
                     }
                     other => Ok(other),
@@ -170,6 +214,55 @@ fn write_enforced_rdtsc_result(vcpu: &VcpuFd, value: u64) -> io::Result<()> {
     let mut regs = vcpu.get_regs().map_err(io::Error::from)?;
     regs.rax = value & 0xFFFF_FFFF;
     regs.rdx = value >> 32;
+    vcpu.set_regs(&regs).map_err(io::Error::from)
+}
+
+/// `RFLAGS.CF` (Intel SDM Vol. 1 §3.4.3.1) — the only flag bit `RDRAND` sets on success.
+const X86_EFLAGS_CF: u64 = 1 << 0;
+/// The five flag bits real `RDRAND` (Intel SDM Vol. 2C) always defines on completion: `CF` (set on
+/// success, baud's enforced regime never reports failure), and `PF`/`AF`/`ZF`/`SF`/`OF` (always
+/// cleared). Used to replace exactly these bits in RFLAGS, leaving every other bit (interrupt
+/// flag, direction flag, etc.) untouched.
+const RDRAND_DEFINED_FLAGS_MASK: u64 = X86_EFLAGS_CF | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+
+/// Map an x86-64 ModRM general-register index (0=RAX..7=RDI, 8=R8..15=R15 — the same numbering
+/// `vmx_get_instr_info_reg` decodes from `VMX_INSTRUCTION_INFO`, `rdrand-enforce.patch`'s doc) to
+/// the matching `kvm_regs` field. `rdrand-enforce.patch`'s handler always packs a 4-bit index
+/// (`0..16`), so the fallback arm is defensive, not a reachable path from that patch.
+fn gpr_for_index(regs: &mut kvm_bindings::kvm_regs, index: u8) -> io::Result<&mut u64> {
+    Ok(match index {
+        0 => &mut regs.rax,
+        1 => &mut regs.rcx,
+        2 => &mut regs.rdx,
+        3 => &mut regs.rbx,
+        4 => &mut regs.rsp,
+        5 => &mut regs.rbp,
+        6 => &mut regs.rsi,
+        7 => &mut regs.rdi,
+        8 => &mut regs.r8,
+        9 => &mut regs.r9,
+        10 => &mut regs.r10,
+        11 => &mut regs.r11,
+        12 => &mut regs.r12,
+        13 => &mut regs.r13,
+        14 => &mut regs.r14,
+        15 => &mut regs.r15,
+        _ => return Err(io::Error::other(format!("invalid RDRAND destination GPR index {index}"))),
+    })
+}
+
+/// Real `RDRAND` (Intel SDM Vol. 2C) on success: the destination register (guest-chosen, decoded
+/// by the kernel patch — see [`gpr_for_index`]) is loaded with the random value and `RFLAGS.CF` is
+/// set with `OF`/`SF`/`ZF`/`AF`/`PF` cleared. baud's enforced regime always reports success — the
+/// tape/PRNG-backed draw never "fails" the way real hardware entropy occasionally can. Like
+/// `write_enforced_rdtsc_result`, this overwrites the full 64-bit register: correct for the 32-
+/// and 64-bit operand sizes every guest this project targets uses; a 16-bit-operand `rdrand`
+/// would leave the upper bits of its destination register untouched on real hardware, which this
+/// does not model (the kernel patch does not decode operand size, only the destination register).
+fn write_enforced_rdrand_result(vcpu: &VcpuFd, gpr_index: u8, value: u64) -> io::Result<()> {
+    let mut regs = vcpu.get_regs().map_err(io::Error::from)?;
+    *gpr_for_index(&mut regs, gpr_index)? = value;
+    regs.rflags = (regs.rflags & !RDRAND_DEFINED_FLAGS_MASK) | X86_EFLAGS_CF;
     vcpu.set_regs(&regs).map_err(io::Error::from)
 }
 
@@ -237,6 +330,24 @@ mod tests {
     #[test]
     fn baud_determinism_reason_converts_to_rdtsc_enforced() {
         assert!(matches!(convert_exit(VcpuExit::Unsupported(41)), Exit::RdtscEnforced));
+    }
+
+    /// `run_and_convert` (not `convert_exit`, which never sees the payload) is what actually
+    /// distinguishes RDTSC from RDRAND on a real `KVM_EXIT_BAUD_DETERMINISM` exit — this exercises
+    /// the payload decode directly (`decode_baud_determinism_exit`'s bit layout,
+    /// `rdrand-enforce.patch`'s doc) without needing a real vCPU.
+    #[test]
+    fn baud_determinism_payload_decodes_rdtsc_and_rdrand() {
+        assert!(matches!(decode_baud_determinism_exit(0), Exit::RdtscEnforced));
+        assert!(matches!(
+            decode_baud_determinism_exit(1 | (6 << 8)),
+            Exit::RdrandEnforced { gpr_index: 6 }
+        ));
+        assert!(matches!(
+            decode_baud_determinism_exit(1 | (15 << 8)),
+            Exit::RdrandEnforced { gpr_index: 15 }
+        ));
+        assert!(matches!(decode_baud_determinism_exit(2), Exit::Unmodeled("BaudDeterminismUnknownKind")));
     }
 
     #[test]

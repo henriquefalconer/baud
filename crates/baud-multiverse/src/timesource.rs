@@ -53,11 +53,38 @@ pub struct WorkClock<C: BranchCounter> {
     rcb_offset: u64,
     tsc_deadline: u64,
     tsc_aux: u64,
+    /// Backs [`serve_enforced_rdrand`](TimeSource::serve_enforced_rdrand) — a deterministic draw
+    /// stream independent of the RCB-derived `virtual_tsc` formula above. `0` (via
+    /// [`SplitMix64::new`]`(0)`) until [`with_entropy_seed`](Self::with_entropy_seed) or
+    /// [`restore`](Self::restore) sets it; a fresh [`new`](Self::new) with no seed still produces a
+    /// deterministic (if not tape-derived) sequence, never a panic or a real-entropy fallback.
+    entropy: SplitMix64,
 }
 
 impl<C: BranchCounter> WorkClock<C> {
     pub fn new(base: u64, k: u64, counter: C) -> Self {
-        WorkClock { base, k, counter, rcb_offset: 0, tsc_deadline: 0, tsc_aux: 0 }
+        WorkClock { base, k, counter, rcb_offset: 0, tsc_deadline: 0, tsc_aux: 0, entropy: SplitMix64::new(0) }
+    }
+
+    /// Seed the enforced-regime `RDRAND` entropy stream (todo.md §3.2: enforced regime "serves the
+    /// tape" for the random instruction) from a run-specific value — `linux::Multiverse::boot`
+    /// derives this from a blake3 hash of the run's own tape, so the same tape always produces the
+    /// same `RDRAND` draw sequence, and a different tape byte changes it (mirroring
+    /// `all_input_is_tape_derived`'s guarantee for the guest-facing tape device). Call once, right
+    /// after [`new`](Self::new), before any guest code runs; a restored `WorkClock` uses
+    /// [`restore`](Self::restore)'s `entropy_state` instead, to *continue* the sequence rather than
+    /// restart it.
+    pub fn with_entropy_seed(mut self, seed: u64) -> Self {
+        self.entropy = SplitMix64::new(seed);
+        self
+    }
+
+    /// The entropy stream's current internal state — captured into
+    /// `baud_snapshot::universe::ClockState::entropy_state` so a restored guest's next `RDRAND`
+    /// continues the exact draw sequence a straight run would have produced, rather than replaying
+    /// from the original seed (which would repeat already-served values).
+    pub fn entropy_state(&self) -> u64 {
+        self.entropy.state()
     }
 
     /// Reconstruct a [`WorkClock`] from a captured `Universe`'s clock state
@@ -74,8 +101,25 @@ impl<C: BranchCounter> WorkClock<C> {
     /// [`current_rcb`](Self::current_rcb) reported at the moment of capture — see
     /// [`rcb_offset`](WorkClock::rcb_offset)'s doc for why the restored `counter`'s own raw reads
     /// cannot be trusted to continue that sequence unaided.
-    pub fn restore(base: u64, k: u64, rcb_anchor: u64, tsc_deadline: u64, tsc_aux: u64, counter: C) -> Self {
-        WorkClock { base, k, counter, rcb_offset: rcb_anchor, tsc_deadline, tsc_aux }
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        base: u64,
+        k: u64,
+        rcb_anchor: u64,
+        tsc_deadline: u64,
+        tsc_aux: u64,
+        entropy_state: u64,
+        counter: C,
+    ) -> Self {
+        WorkClock {
+            base,
+            k,
+            counter,
+            rcb_offset: rcb_anchor,
+            tsc_deadline,
+            tsc_aux,
+            entropy: SplitMix64::new(entropy_state),
+        }
     }
 
     /// The current virtual TSC value: `base + k * rcb`. Saturating, not wrapping — a silent
@@ -151,6 +195,37 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
         // Must agree bit-for-bit with `serve_rdmsr(MSR_IA32_TSC)` — a guest that reads the clock
         // via the trapped instruction and one that reads it via the MSR are the same work-clock.
         self.virtual_tsc()
+    }
+
+    fn serve_enforced_rdrand(&mut self) -> u64 {
+        self.entropy.next_u64()
+    }
+}
+
+/// A tiny, dependency-free deterministic PRNG (SplitMix64, Steele/Lea/Flood 2014 — the algorithm
+/// behind Java's `SplittableRandom`) used only to back [`WorkClock::serve_enforced_rdrand`]. No
+/// crate dependency needed for this (`kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md`:
+/// "the userspace side needs zero changes to any pinned crate").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        SplitMix64 { state: seed }
+    }
+
+    fn state(&self) -> u64 {
+        self.state
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 }
 
@@ -251,6 +326,7 @@ mod tests {
             original.current_rcb(),
             original.tsc_deadline(),
             original.tsc_aux(),
+            0,
             ConstantCounter(0),
         );
         assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC), original.serve_rdmsr(MSR_IA32_TSC));
@@ -273,7 +349,7 @@ mod tests {
         // The restored side's counter is a fresh fd: its own raw reads start small again, exactly
         // like a real `LinuxBranchCounter::new()` would after `Multiverse::restore`.
         let mut restored =
-            WorkClock::restore(original.base(), 1, anchor, 0, 0, ScriptedCounter::new(vec![7]));
+            WorkClock::restore(original.base(), 1, anchor, 0, 0, 0, ScriptedCounter::new(vec![7]));
         assert_eq!(
             restored.current_rcb(),
             50_007,
@@ -303,5 +379,47 @@ mod tests {
             9_999,
             "a write to IA32_TSC must be reflected exactly on the very next read at the same RCB"
         );
+    }
+
+    /// todo.md §3.2's enforced regime: `RDRAND` draws must reproduce identically across a
+    /// double-run of the same seed (`with_entropy_seed`, the same tape ⇒ the same seed in
+    /// `linux::Multiverse::boot`), and a different seed must diverge the sequence — the same
+    /// `all_input_is_tape_derived` guarantee the guest-facing tape device already provides,
+    /// applied to this VMM-internal entropy stream instead.
+    #[test]
+    fn enforced_rdrand_is_reproducible_from_the_same_seed_and_diverges_from_a_different_one() {
+        let mut clock_a = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xC0FF_EE);
+        let mut clock_b = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xC0FF_EE);
+        let draws_a: Vec<u64> = (0..5).map(|_| clock_a.serve_enforced_rdrand()).collect();
+        let draws_b: Vec<u64> = (0..5).map(|_| clock_b.serve_enforced_rdrand()).collect();
+        assert_eq!(draws_a, draws_b, "the same seed must produce the identical draw sequence");
+        assert!(draws_a.windows(2).all(|w| w[0] != w[1]), "a real PRNG must not repeat consecutive draws");
+
+        let mut clock_c = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xDEAD_BEEF);
+        let draws_c: Vec<u64> = (0..5).map(|_| clock_c.serve_enforced_rdrand()).collect();
+        assert_ne!(draws_a, draws_c, "a different seed must diverge the draw sequence");
+    }
+
+    /// The RDRAND counterpart to `restore_continues_the_rcb_sequence_instead_of_resetting_it`: a
+    /// restored `WorkClock` must continue the exact same `RDRAND` draw sequence a straight run
+    /// would have produced from that point, not repeat the seed's already-served values —
+    /// `entropy_state()`/`restore`'s `entropy_state` parameter is what makes that possible.
+    #[test]
+    fn restore_continues_the_rdrand_sequence_instead_of_repeating_it() {
+        let mut original = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(42);
+        let first_three: Vec<u64> = (0..3).map(|_| original.serve_enforced_rdrand()).collect();
+        let captured_entropy_state = original.entropy_state();
+        let next_from_original: Vec<u64> = (0..3).map(|_| original.serve_enforced_rdrand()).collect();
+
+        let mut restored =
+            WorkClock::restore(0, 1, 0, 0, 0, captured_entropy_state, ConstantCounter(0));
+        let next_from_restored: Vec<u64> = (0..3).map(|_| restored.serve_enforced_rdrand()).collect();
+
+        assert_eq!(
+            next_from_restored, next_from_original,
+            "a restored WorkClock's next RDRAND draws must continue the captured stream, not repeat \
+             the first three values the original already served"
+        );
+        assert_ne!(next_from_restored, first_three);
     }
 }

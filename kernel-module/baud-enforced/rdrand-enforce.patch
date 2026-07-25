@@ -1,0 +1,86 @@
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 7be0e65..03dd1ba 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -6122,9 +6122,9 @@
+  * kvm_run.hw.hardware_exit_reason scratch u64 (the same field
+  * KVM_EXIT_UNKNOWN uses) -- already a named field in pinned kvm-bindings
+  * 0.14, so no uapi/kvm.h struct addition is needed beyond the bare exit
+- * reason constant. 0 == RDTSC; a future RDRAND/RDSEED increment would use a
+- * different value here (see kernel-module/baud-enforced/
+- * ENFORCEMENT_DESIGN.md in the baud source tree for that follow-up scope).
++ * reason constant. Low byte 0 == RDTSC (this handler); see
++ * handle_baud_rdrand_exit below for RDRAND's payload (low byte 1, plus a
++ * destination-register index in the next byte).
+  */
+ static int handle_baud_rdtsc_exit(struct kvm_vcpu *vcpu)
+ {
+@@ -6139,6 +6139,41 @@
+ }
+ 
+ /*
++ * baud: RDRAND-exiting is already turned on by stock KVM's own opt-in logic
++ * (vmx_exec_control's vmx_adjust_sec_exec_exiting(vmx, &exec_control, rdrand,
++ * RDRAND) above only *clears* SECONDARY_EXEC_RDRAND_EXITING when the RDRAND
++ * CPUID feature bit is actually exposed to the guest -- baud's own CPUID
++ * mask always clears that bit (specs/baud-multiverse.md's determinism mask
++ * table), so this control is already forced on with no patch needed here).
++ * The only thing stock KVM does with that exit is inject #UD
++ * (kvm_handle_invalid_op, the [EXIT_REASON_RDRAND] table entry below) --
++ * this handler replaces that so the trap is served a value instead.
++ *
++ * Unlike RDTSC's fixed EDX:EAX destination, RDRAND's destination is
++ * instruction-encoded: decode it from the VM-exit instruction-information
++ * field the same way handle_rdmsr_imm already does for its own register
++ * operand (vmx_get_instr_info_reg, VMX_INSTRUCTION_INFO bits 6:3). Userspace
++ * needs that index to know which GPR to write the served value into (via
++ * KVM_SET_REGS) and cannot recover it after the fact -- VMX_INSTRUCTION_INFO
++ * is only valid for the vmexit that reported it, not on a later KVM_RUN --
++ * so it is packed into the payload alongside the RDRAND discriminator.
++ */
++static int handle_baud_rdrand_exit(struct kvm_vcpu *vcpu)
++{
++	u32 vmx_instruction_info = vmcs_read32(VMX_INSTRUCTION_INFO);
++	int gpr_index = vmx_get_instr_info_reg(vmx_instruction_info);
++	int r = kvm_skip_emulated_instruction(vcpu);
++
++	if (r <= 0)
++		return r;
++
++	vcpu->run->exit_reason = KVM_EXIT_BAUD_DETERMINISM;
++	/* 1 == RDRAND; next byte == destination GPR index (0-15). */
++	vcpu->run->hw.hardware_exit_reason = 1 | ((u64)(gpr_index & 0xf) << 8);
++	return 0;
++}
++
++/*
+  * The exit handlers return 1 if the exit was handled fully and guest execution
+  * may resume.  Otherwise they set the kvm_run parameter to indicate what needs
+  * to be done to userspace and return 0.
+@@ -6187,7 +6222,7 @@
+ 	[EXIT_REASON_MONITOR_INSTRUCTION]     = kvm_emulate_monitor,
+ 	[EXIT_REASON_INVEPT]                  = handle_vmx_instruction,
+ 	[EXIT_REASON_INVVPID]                 = handle_vmx_instruction,
+-	[EXIT_REASON_RDRAND]                  = kvm_handle_invalid_op,
++	[EXIT_REASON_RDRAND]                  = handle_baud_rdrand_exit,
+ 	[EXIT_REASON_RDSEED]                  = kvm_handle_invalid_op,
+ 	[EXIT_REASON_PML_FULL]		      = handle_pml_full,
+ 	[EXIT_REASON_INVPCID]                 = handle_invpcid,
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 7be761e..f091c84 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -185,9 +185,10 @@
+ #define KVM_EXIT_MEMORY_FAULT     39
+ #define KVM_EXIT_TDX              40
+ /*
+- * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason
+- * (0 == RDTSC). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit and
+- * kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
++ * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason's
++ * low byte (0 == RDTSC, 1 == RDRAND with the destination GPR index in the next
++ * byte). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdrand_exit
++ * and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
+  */
+ #define KVM_EXIT_BAUD_DETERMINISM 41
+ 

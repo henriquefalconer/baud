@@ -147,6 +147,7 @@ pub fn capture(
     rcb_anchor: u64,
     tsc_deadline: u64,
     tsc_aux: u64,
+    entropy_state: u64,
     tape_cursor: u64,
     console: Vec<u8>,
 ) -> Result<Universe, CaptureError> {
@@ -194,6 +195,7 @@ pub fn capture(
         rcb_anchor,
         tsc_deadline,
         tsc_aux,
+        entropy_state,
     };
 
     let device = DeviceState { tape_cursor, console };

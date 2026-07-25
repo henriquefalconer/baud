@@ -52,6 +52,13 @@ pub enum Exit<'a> {
     /// no data pointer; `linux::run_one_exit` performs the `KVM_SET_REGS` write itself once
     /// `dispatch_exit` reports the value via [`DispatchOutcome::ServeEnforcedRdtsc`].
     RdtscEnforced,
+    /// `RDRAND` trapped by the enforced-regime KVM module (same `KVM_EXIT_BAUD_DETERMINISM`
+    /// mechanism as `RdtscEnforced`, distinguished by a payload byte — `linux::convert_exit`'s
+    /// doc). Unlike `RdtscEnforced`'s fixed EDX:EAX, `RDRAND`'s destination register is guest-
+    /// chosen and instruction-encoded, so it is carried here (0-15, x86-64 ModRM register
+    /// numbering: 0=RAX..7=RDI, 8=R8..15=R15) for `linux::run_and_convert`'s caller to write the
+    /// served value into; RFLAGS.CF is also set (success) as part of that write.
+    RdrandEnforced { gpr_index: u8 },
     /// Any exit kind `dispatch_exit`'s caller does not recognize or does not yet model. Carries
     /// the KVM exit's name so a `DeterminismHole` names what leaked. This is the one arm that
     /// exists specifically so nothing new can silently "just continue" (specs/baud-vcpu.md §3).
@@ -78,6 +85,10 @@ pub enum DispatchOutcome {
     /// into EDX:EAX via `KVM_SET_REGS` and re-enters `KVM_RUN` — never surfaced past that one call
     /// site (specs/baud-vcpu.md §3.3).
     ServeEnforcedRdtsc(u64),
+    /// `Exit::RdrandEnforced`'s served value, still tagged with which GPR it goes into —
+    /// `linux::run_one_exit`/`pmu` write it there via `KVM_SET_REGS` (also setting RFLAGS.CF),
+    /// same "never surfaced past that one call site" rule as `ServeEnforcedRdtsc`.
+    ServeEnforcedRdrand { gpr_index: u8, value: u64 },
 }
 
 /// The paravirtual bus every `IoIn`/`IoOut`/`MmioRead`/`MmioWrite` exit is routed through
@@ -98,6 +109,10 @@ pub trait TimeSource {
     /// RDTSC-exiting and return the work-clock value (bit-exact...)") — the same formula
     /// `serve_rdmsr(MSR_IA32_TSC)` already computes, since both must agree bit-for-bit.
     fn serve_enforced_rdtsc(&mut self) -> u64;
+    /// The enforced-regime value for a trapped `RDRAND` (todo.md §3.2: "enforced ... serves the
+    /// tape") — a deterministic draw that must reproduce identically across a double-run of the
+    /// same tape, but is otherwise independent of `serve_enforced_rdtsc`'s work-clock formula.
+    fn serve_enforced_rdrand(&mut self) -> u64;
 }
 
 /// Resolve one exit deterministically (specs/baud-vcpu.md §3's match). Exhaustive over `Exit` —
@@ -136,6 +151,9 @@ pub fn dispatch_exit(
         Exit::Hlt | Exit::Shutdown => Ok(DispatchOutcome::Halted),
         Exit::Debug => Ok(DispatchOutcome::SingleStepBoundary),
         Exit::RdtscEnforced => Ok(DispatchOutcome::ServeEnforcedRdtsc(time.serve_enforced_rdtsc())),
+        Exit::RdrandEnforced { gpr_index } => {
+            Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value: time.serve_enforced_rdrand() })
+        }
         Exit::Unmodeled(name) => Err(DeterminismHole(name.to_string())),
     }
 }

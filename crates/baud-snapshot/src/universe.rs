@@ -108,6 +108,12 @@ pub struct ClockState {
     pub tsc_deadline: u64,
     /// The last value the guest wrote to `IA32_TSC_AUX`, same rationale as `tsc_deadline` above.
     pub tsc_aux: u64,
+    /// `WorkClock::entropy_state()` at the moment of capture — the enforced-regime `RDRAND`
+    /// entropy stream's internal PRNG state, software-only exactly like `tsc_deadline`/`tsc_aux`
+    /// above (no KVM ioctl knows about it). Without this, a restored guest's next `rdrand` would
+    /// repeat the seed's already-served values instead of continuing the sequence a straight run
+    /// would have produced (todo.md §3.2, `baud_multiverse::timesource::WorkClock::restore`'s doc).
+    pub entropy_state: u64,
 }
 
 /// The capture set's device row (specs/baud-snapshot.md §3): the tape-device cursor (how many

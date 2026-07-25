@@ -99,13 +99,21 @@ A single-vCPU KVM VMM whose every exit resolves to a deterministic value. Full c
   enforced — VT-x checks each instruction's own CPUID gate (`RDRAND[bit 30] = 0 ⇒ #UD`, SDM) against the
   guest's configured leaves, so a guest that issues `rdrand`/`rdseed` anyway takes `#UD` (→ triple fault →
   `Halted` for a guest with no handler) instead of reading real entropy; no guest, compliant or adversarial,
-  can reach it. Enforced = hardware random-instruction exiting traps every attempt *before* that `#UD` check
-  and serves the tape.
+  can reach it. Enforced = `rdrand` exits to the VMM *before* that `#UD` and is served a deterministic
+  value instead: the CPUID mask above already makes stock KVM set `SECONDARY_EXEC_RDRAND_EXITING`, so only
+  the exit-handler table entry is patched (no execution-control bit), and the VMM writes a `SplitMix64`
+  draw — seeded from a blake3 hash of the run's own tape, on a sub-stream separate from the tape device's
+  guest-facing cursor, its state carried across snapshot/restore in `ClockState::entropy_state` — into the
+  instruction-encoded destination GPR with `RFLAGS.CF = 1` and `OF/SF/ZF/AF/PF` cleared (baud's `rdrand`
+  always succeeds). `rdseed` is *not* trapped: `SECONDARY_EXEC_RDSEED_EXITING` is not settable on this
+  host's VMX microcode (probed), so `rdseed` stays CPUID-masked/`#UD` in both regimes — a hardware
+  limitation of this host, to be revisited on silicon that exposes the control.
 - **Test** (`rdrand_guest_is_flagged`): a guest that ignores the mask and executes the raw random
-  instruction never gets past it — in cooperative regime two boots produce byte-identical output stopping at
-  the pre-`rdrand` marker (deterministic, *not* a divergence: the original divergence assumption was
-  falsified on real hardware, see `crates/baud-multiverse/tests/fixtures/rdrand-guest/BUILD.md`) — and a
-  `Crash{detail:"rdrand"}` in enforced regime.
+  instruction is deterministic in either regime — in cooperative regime two boots produce byte-identical
+  output stopping at the pre-`rdrand` marker (deterministic, *not* a divergence: the original divergence
+  assumption was falsified on real hardware, see
+  `crates/baud-multiverse/tests/fixtures/rdrand-guest/BUILD.md`), and in enforced regime both boots run
+  *past* `rdrand` on the served value and echo the same result bytes.
 
 ### 3.3 Time — a work-clock
 
@@ -176,9 +184,11 @@ A single-vCPU KVM VMM whose every exit resolves to a deterministic value. Full c
   that do not fight it (masked CPUID *hardware-blocks* the raw random instruction for any guest — `#UD`,
   §3.2 — while the raw timestamp instruction, which has no CPUID gate, still relies on a compliant guest).
   No kernel changes.
-- **Enforced (custom KVM module).** Turns on the hardware VM-execution controls that stock KVM does not
-  expose to userspace — force every RDTSC and every random instruction to exit and be served from the
-  work-clock/tape — so even an adversarial guest is deterministic. A small out-of-tree KVM patch/module.
+- **Enforced (custom KVM module).** Forces every RDTSC to exit (a VM-execution control stock KVM does not
+  expose to userspace) and re-routes the `rdrand` exit stock KVM already takes (§3.2) away from its injected
+  `#UD`, serving both from the work-clock/tape — so even an adversarial guest is deterministic. A small
+  out-of-tree KVM patch/module. (`rdseed`-exiting is not settable on this host's VMX microcode, so `rdseed`
+  stays CPUID-masked/`#UD`; see §3.2.)
 - **Spec**: every run records its regime in the manifest; the CLI and `verify` refuse to report enforced
   guarantees while running on stock KVM. `baud host probe` reports which regime a host supports.
 - **Test** (`regime_is_recorded_and_not_overclaimed`): a run on stock KVM is tagged `cooperative`; asking
@@ -333,8 +343,9 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   `cpuid_leaves_are_fixed`, `work_clock_is_monotone_and_reproducible`, `all_input_is_tape_derived`,
   `no_unmodeled_exit_is_silent`.
 - **H3 — randomness + time control.** Entropy and timestamps flow only through masked CPUID + tape/work-clock;
-  a raw-random guest is hardware-blocked (cooperative: `#UD` on `rdrand`) or trapped (enforced). Drive
-  `drive/h3.sh`: `rdrand_guest_is_flagged`, `regime_is_recorded_and_not_overclaimed`.
+  a raw-random guest is hardware-blocked (cooperative: `#UD` on `rdrand`) or trapped and served a
+  deterministic tape-seeded value (enforced). Drive `drive/h3.sh`: `rdrand_guest_is_flagged`,
+  `regime_is_recorded_and_not_overclaimed`.
 - **H4 — interrupt at an exact boundary.** Deliver a timer tick at a chosen work-count via
   arm-early-then-single-step; identical instruction across a double-run. Drive `drive/h4.sh`:
   `timer_tick_lands_at_identical_instruction`.
@@ -371,7 +382,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 
 | # | Problem | Specification (what must be built/guaranteed) | Test |
 |---|---------|-----------------------------------------------|------|
-| 1 | Stock KVM won't force RDTSC/random-instruction exiting from userspace | Two regimes; cooperative masks CPUID (which hardware-blocks `rdrand`/`rdseed` outright — `#UD`), enforced adds a KVM module for RDTSC; run records regime | `regime_is_recorded_and_not_overclaimed`; `rdrand_guest_is_flagged` |
+| 1 | Stock KVM won't force RDTSC/random-instruction exiting from userspace | Two regimes; cooperative masks CPUID (which hardware-blocks `rdrand`/`rdseed` outright — `#UD`), enforced adds a KVM module that traps RDTSC and serves `rdrand` a deterministic tape-seeded value — `rdseed`-exiting is hardware-unavailable on this host; run records regime | `regime_is_recorded_and_not_overclaimed`; `rdrand_guest_is_flagged` |
 | 2 | Branch counter is nondeterministic on some CPUs | Validate on deploy silicon at H0; reject/downgrade on failure | `rcb_is_deterministic_on_this_cpu` (H0 gate) |
 | 3 | Raw instruction count double-counts faults/interrupts | Forbid raw count; use RCB + PC + registers + stack checksum to name a point | `timer_tick_lands_at_identical_instruction` (tuple identical) |
 | 4 | PMU interrupts are delivered late/imprecisely (skid) | Arm-early-then-single-step to the exact boundary | `timer_tick_lands_at_identical_instruction` |
@@ -2412,11 +2423,116 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     untouched, still unconditionally `false` — this milestone proves the mechanism works when the
     patched module is manually swapped in for a dedicated test, not that any ordinary `baud` run on
     this host is enforced-regime by default (`regime_is_recorded_and_not_overclaimed` still holds).
-  - **Not yet done — the only remaining item in this file**: RDRAND enforcement (the handler-table
-    swap only — `vmx.c`'s `[EXIT_REASON_RDRAND] = kvm_handle_invalid_op` → a shared or sibling
-    handler, decoding the destination GPR via `vmx_get_instr_info_reg`/`VMX_INSTRUCTION_INFO` the
-    way `handle_invpcid`/`handle_rdmsr_imm` already do, since RDRAND's result register is
-    instruction-encoded unlike RDTSC's fixed EDX:EAX) — RDSEED stays permanently out of reach on
-    this host's VMX microcode regardless. `enforced_module_present()` should stay `false` until
+  - **Not yet done (at the time this entry was written — closed by the next entry below)**: RDRAND
+    enforcement (the handler-table swap only — `vmx.c`'s `[EXIT_REASON_RDRAND] =
+    kvm_handle_invalid_op` → a shared or sibling handler, decoding the destination GPR via
+    `vmx_get_instr_info_reg`/`VMX_INSTRUCTION_INFO` the way `handle_invpcid`/`handle_rdmsr_imm`
+    already do, since RDRAND's result register is instruction-encoded unlike RDTSC's fixed
+    EDX:EAX) — RDSEED stays permanently out of reach on this host's VMX microcode regardless. `enforced_module_present()` should stay `false` until
     that lands too (or a decision is made that RDTSC-only enforcement is its own shippable regime
     tier, worth raising with the user rather than assuming).
+- **Enforced-regime KVM module — twenty-second entry: RDRAND enforcement is now REAL, BUILT, and
+  BOOT-TESTED on real hardware too, closing the prior entry's "only remaining item in this file".**
+  `kernel-module/baud-enforced/rdrand-enforce.patch` (new, committed) is a unified diff *layered on
+  top of* `rdtsc-enforce.patch` against the same out-of-git `~/wsl-kernel-src/src` tree — both apply
+  idempotently, and `drive/h3-enforced-rdrand.sh` applies them in order (each guarded by a `grep -q
+  handle_baud_rd{tsc,rand}_exit` so a re-run is a no-op).
+  - **The prior entry's narrowing was confirmed correct on real hardware: no execution-control bit
+    needed patching at all.** `SECONDARY_EXEC_RDRAND_EXITING` is *already* forced on for every baud
+    guest by stock KVM's own `vmx_adjust_sec_exec_exiting(vmx, &exec_control, rdrand, RDRAND)` —
+    that macro is opt-*out* (it clears exiting only when the guest's CPUID actually exposes RDRAND),
+    and baud's determinism mask (§3.2) always clears that feature bit, so exiting is on with no
+    patch. The entire kernel-side change is therefore one table entry: `[EXIT_REASON_RDRAND] =
+    kvm_handle_invalid_op` → `handle_baud_rdrand_exit`, i.e. the trap that stock KVM was already
+    taking and turning into an injected `#UD` is now routed to userspace instead.
+  - **The handler**: `kvm_skip_emulated_instruction` (advance RIP past the trap, same as
+    `handle_baud_rdtsc_exit`), then `KVM_EXIT_BAUD_DETERMINISM` (`=41`, unchanged) with
+    `kvm_run.hw.hardware_exit_reason = 1 | ((u64)(gpr_index & 0xf) << 8)` — the payload's low byte
+    is now a discriminator (`0` == RDTSC, `1` == RDRAND) rather than always-zero, so the RDTSC patch
+    stays wire-compatible. Unlike RDTSC's fixed EDX:EAX, RDRAND's destination is instruction-encoded,
+    decoded here via `vmx_get_instr_info_reg(vmcs_read32(VMX_INSTRUCTION_INFO))` the way
+    `handle_rdmsr_imm` already does; it must be carried in the payload because `VMX_INSTRUCTION_INFO`
+    is only valid for the vmexit that reported it and userspace cannot recover it afterward.
+  - **The GPR decode was verified empirically, not assumed**: a temporary `printk` in the handler,
+    booted against `tests/fixtures/rdrand-guest/` on this live host, confirmed that fixture's `rdrand
+    eax` decodes to `gpr_index = 0` (RAX) — the printk was removed before committing the patch.
+  - **`baud-vcpu`** (`src/lib.rs`, `src/linux/mod.rs`, `src/linux/pmu.rs`, `src/tests.rs`): new
+    `Exit::RdrandEnforced { gpr_index: u8 }` / `DispatchOutcome::ServeEnforcedRdrand { gpr_index,
+    value }` / `TimeSource::serve_enforced_rdrand`, plus `decode_baud_determinism_exit(payload)`
+    (unknown kind ⇒ `Unmodeled("BaudDeterminismUnknownKind")`, never a silent guess — unit-tested by
+    `baud_determinism_payload_decodes_rdtsc_and_rdrand`, no vCPU needed). `write_enforced_rdrand_result`
+    + `gpr_for_index` do the `KVM_GET_REGS`/`KVM_SET_REGS` round trip into the guest-chosen register
+    (0-15, x86-64 ModRM numbering) and set `RFLAGS.CF` with `OF/SF/ZF/AF/PF` cleared — real RDRAND
+    success semantics, and baud's enforced regime *always* succeeds (a PRNG draw never "fails" the
+    way real hardware entropy occasionally does).
+  - **New `linux::run_and_convert(vcpu)` replaces the inline `dispatch_exit(convert_exit(vcpu.run()?),
+    …)` pattern at all four call sites** (`run_one_exit`, and `pmu`'s `run_until_exit`/`step`/
+    `run_until_irq_window`), because reading the payload needs a *second* look at `kvm_run` after
+    `vcpu.run()` — which the borrow checker forbids while the returned `exit` is live, and forbids
+    across the *whole* function, not just the one match arm. The fix is to capture the raw `*mut
+    kvm_run` pointer *before* `vcpu.run()` (the borrow it comes from ends at the cast) and read
+    through it after; the reasoning is non-obvious enough to be written out in that function's doc.
+  - **`baud-multiverse`** (`src/timesource.rs`, `src/linux/mod.rs`): `WorkClock` gained a hand-rolled
+    `SplitMix64` (no new crate dep — `ENFORCEMENT_DESIGN.md`'s "zero changes to any pinned crate"
+    still holds) behind `serve_enforced_rdrand`, seeded by `with_entropy_seed` from
+    `entropy_seed_from_tape` = first 8 bytes of `blake3::hash(tape)`. Deliberately a *separate*
+    sub-stream from the `TapeDevice` cursor the guest's own PIO reads consume, so serving an
+    `rdrand` never perturbs what the guest reads next; same tape ⇒ same draw sequence
+    (`enforced_rdrand_is_reproducible_from_the_same_seed_and_diverges_from_a_different_one`).
+  - **`baud-snapshot`** (`src/universe.rs`, `src/linux.rs`, `src/wire.rs`): `ClockState` gained
+    `entropy_state: u64`, captured/restored alongside `tsc_deadline`/`tsc_aux` for the identical
+    reason (software-only state no KVM ioctl knows about). Without it a restored guest would *repeat*
+    already-served draws instead of continuing the sequence — pinned by
+    `restore_continues_the_rdrand_sequence_instead_of_repeating_it`.
+  - **A real, subtle bug was found and fixed mid-iteration, and it is the single most important thing
+    here for anyone who later touches `Multiverse::boot()`: host-side one-time work must never be
+    placed after `LinuxBranchCounter::new()`.** `entropy_seed_from_tape(&tape)` was first written
+    *after* the counter was created, and `timer_tick_lands_at_identical_instruction` (H4's named
+    real-hardware test) immediately went from consistently green to consistently FAILING — not flaky,
+    8/8 failures, with an RCB disagreement of ~83 counts. Cause: `exclude_host` does not work on this
+    host (already-documented finding), so the branch counter counts *this process's own* retired
+    branches too; `blake3::hash`'s first-ever call in a process does one-time CPU-feature detection
+    with a measurably different branch count than every call after it, and two boots in the same test
+    process are exactly "first call" vs "cached call" — so hashing inside the counted window skewed
+    one boot's RCB baseline against the other's. Fixed by moving `entropy_seed_from_tape` to *before*
+    `LinuxBranchCounter::new()` in `boot()`, with the whole diagnosis in that function's doc comment.
+    This is a general, easy-to-reintroduce hazard, not a one-off: *any* lazily-initialized host-side
+    computation (hashers, allocators warming up, `OnceLock`s, first-use SIMD dispatch) added to
+    `boot()` after the counter exists will silently poison the RCB baseline of the first boot only.
+  - **Boot-tested for real via a new drive script**: new `#[ignore]`d test
+    `rdrand_enforced_regime_is_bit_exact_across_boots` (`crates/baud-multiverse/src/linux/mod.rs`)
+    reuses `tests/fixtures/rdrand-guest/` — whose post-`rdrand` echo loop was *unreachable* under the
+    cooperative regime (masked-CPUID `#UD` fires first) and is exercised here for the first time since
+    it was written — asserting the guest gets past the marker and echoes 4 served value bytes
+    bit-identically across two boots. New `drive/h3-enforced-rdrand.sh` mirrors
+    `drive/h3-enforced-rdtsc.sh`'s discipline exactly (build → `fuser /dev/kvm` refusal check →
+    `rmmod`/`insmod` the patched pair → run the ignored test *plus* a regression re-run of
+    `rdtsc_enforced_regime_is_bit_exact_across_boots` on the same doubly-patched module → restore the
+    stock module unconditionally via `trap … EXIT`). Green multiple times on this host; `lsmod`/
+    `dmesg` confirmed the stock module back in place with no `/dev/kvm` holder every time.
+  - **Full verification after the entropy-timing fix**: `cargo build --workspace` and
+    `cargo clippy --workspace --all-targets` clean (0 errors; only pre-existing warnings in files this
+    increment did not touch); `cargo test --workspace` green with 0 failures on a repeat run — one
+    earlier full-workspace run hit `rdtsc_guest_reproduces_high_bits_across_boots`, the same
+    known-transient hardware-timing jitter documented in the entry above, confirmed not a regression by
+    3/3 clean isolated re-runs. All 22 `drive/*.sh` scripts (`h0`-`h6`, `h3-enforced-rdtsc`,
+    `h3-enforced-rdrand`, `m0`-`m11`, `full-demo`) run individually end-to-end, with the host on the
+    **stock** `kvm_intel` module throughout except inside the two enforced-regime scripts' own bounded
+    swap windows.
+  - **Spec text corrected in the same increment** (`specs/baud-multiverse.md`, `specs/README.md`, and
+    this file's own forward-looking §3.2/§3.8/§10/§12 — not this history section): all of them
+    previously described the enforced regime's RDRAND handling as `Crash{detail:"rdrand"}`, which is
+    now simply wrong; they describe it as hardware-trapped and served a deterministic tape-seeded
+    value.
+  - **Still overclaims nothing, and nothing is left open.** `crates/baud-host/src/linux.rs`'s
+    `enforced_module_present()` remains unconditionally `false` on purpose: the enforced regime is
+    proven to work when the patched module is deliberately swapped in by its two dedicated drive
+    scripts, which is not the same claim as "any ordinary `baud` run on this host is enforced", so
+    `regime_is_recorded_and_not_overclaimed` still holds — flipping it would need the patched module
+    to be the host's *default* `kvm_intel`, a deployment decision for the user, not a code gap. The
+    only enforcement the spec ever named that this project cannot deliver is RDSEED, and that is a
+    hardware fact about this host's VMX microcode (`SECONDARY_EXEC_RDSEED_EXITING` not settable, per
+    `baud_enforced_probe`'s own `dmesg` report), revisitable only on different silicon. With RDRAND
+    landed, **every item this file has ever opened is now closed**: §8's crate map, §10's milestones
+    H0-H6/M0-M11, §12's problem matrix, and the enforced-regime KVM module are all built, wired, and
+    verified end-to-end on real hardware.

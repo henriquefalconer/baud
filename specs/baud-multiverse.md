@@ -63,7 +63,7 @@ from, the tape. It is the first deliverable.
 | RDTSC / RDTSCP                          | Cooperative: `KVM_SET_TSC_KHZ` + `KVM_VCPU_TSC_OFFSET`. Enforced: force RDTSC-exiting → work-clock value |
 | Other time (kvmclock, APIC/TSC-deadline) | Follow the virtual TSC; delivered by the injection engine |
 | HPET / PIT / PM-timer / RTC             | Deleted — a minimal machine has none |
-| Randomness                              | Masked in CPUID (cooperative) — the CPU then `#UD`s `rdrand`/`rdseed` for *any* guest; hardware-trapped and tape-served (enforced) |
+| Randomness                              | Masked in CPUID (cooperative) — the CPU then `#UD`s `rdrand`/`rdseed` for *any* guest; enforced: `rdrand` hardware-trapped and served a deterministic tape-seeded value (§7), `rdseed` stays `#UD` |
 | External input / entropy                | Served from the tape via the tape device |
 | Interrupt timing                        | Injected at an exact instruction boundary (§5) |
 | Memory init                             | Zeroed RAM at fixed guest-physical addresses |
@@ -122,8 +122,26 @@ data.
   which `baud-vcpu` reports as `Halted`, identically on every boot. The raw *timestamp* instruction is the
   part that still needs a cooperative guest (RDTSC has no CPUID gate and does not exit under stock KVM) —
   that is what the enforced regime's RDTSC-exiting control closes.
-- **Enforced (custom KVM module)** — forces every RDTSC and random instruction to exit and be served from
-  the work-clock/tape, so even an adversarial guest is reproducible.
+- **Enforced (custom KVM module)** — forces every RDTSC to exit and routes every `rdrand` to the VMM
+  instead of an injected `#UD`, so even an adversarial guest is reproducible. Both leave the guest through
+  the same `KVM_EXIT_BAUD_DETERMINISM` (41) reason, tagged by a payload byte in `hw.hardware_exit_reason`
+  (0 = RDTSC, 1 = RDRAND, next byte = destination GPR index); `baud-vcpu` decodes them into
+  `Exit::RdtscEnforced` / `Exit::RdrandEnforced { gpr_index }`.
+  - `rdrand`-exiting needs **no execution-control patch**: baud's CPUID mask (§4) clears the RDRAND feature
+    bit, which already makes stock KVM turn `SECONDARY_EXEC_RDRAND_EXITING` on by itself; enforcement only
+    replaces the exit-handler table entry that would otherwise inject `#UD`.
+  - The served value is a `SplitMix64` draw seeded from a blake3 hash of the run's own tape — a VMM-internal
+    servicing choice fed by the tape, on a PRNG sub-stream separate from the tape device's guest-facing read
+    cursor, so serving `rdrand` never consumes bytes the guest's own explicit tape reads would have seen.
+    The PRNG *state* (not just the seed) is captured across snapshot/restore (`ClockState::entropy_state`),
+    so a restored guest continues the exact draw sequence a straight run would have produced.
+  - The value goes into the instruction-encoded destination GPR (not RDTSC's fixed EDX:EAX), with
+    `RFLAGS.CF = 1` and `OF/SF/ZF/AF/PF` cleared: baud's `rdrand` always reports success, unlike real
+    hardware entropy, which occasionally fails.
+  - `rdseed` is **not** trapped: `SECONDARY_EXEC_RDSEED_EXITING` is not settable on this host's VMX
+    microcode (proved by `baud host probe`'s enforced-capability check), so `rdseed` stays CPUID-masked and
+    `#UD`s under both regimes — a hardware limitation of this host, to be revisited on silicon that exposes
+    the control.
 - The manifest records the regime; `run` and `verify` report guarantees only for the regime in force.
 
 ---
@@ -152,10 +170,11 @@ data.
 #[test] fn rdrand_guest_is_flagged() {
     // rdrand_guest() ignores the masked feature bit and executes `rdrand` after emitting one marker byte.
     // cooperative: hardware `#UD` -> triple fault -> Halted, identically every boot (not a divergence);
-    // enforced: Crash{detail:"rdrand"}
+    // enforced: the trap is served a deterministic tape-seeded value in the encoded GPR (§7), so the guest
+    // runs *past* rdrand and echoes the same result bytes on every boot from the same tape.
     let (a, b) = (run(rdrand_guest(), tape.clone()), run(rdrand_guest(), tape));
-    assert_eq!(a.console_output, PRE_RDRAND_MARKER);   // execution stops *at* rdrand, never past it
-    assert_eq!(a.console_output, b.console_output);    // deterministic, not divergent
+    assert_eq!(a.console_output, PRE_RDRAND_MARKER);   // cooperative: stops *at* rdrand, never past it
+    assert_eq!(a.console_output, b.console_output);    // deterministic in either regime, not divergent
 }
 
 #[test] fn regime_is_recorded_and_not_overclaimed() {

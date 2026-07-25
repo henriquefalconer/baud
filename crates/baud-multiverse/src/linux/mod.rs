@@ -504,6 +504,30 @@ pub enum RunUntilBranchOutcome {
     MarkBranch { step: u64 },
 }
 
+/// Seed the enforced-regime `RDRAND` entropy stream (`WorkClock::with_entropy_seed`) from the
+/// run's own tape, so the same tape always produces the same `rdrand` draw sequence and a
+/// different tape byte changes it — the same `all_input_is_tape_derived` guarantee the tape
+/// device already provides for guest-facing I/O, extended to this VMM-internal entropy source
+/// (todo.md §3.2: enforced regime "serves the tape"). A dedicated hash, not a shared cursor: this
+/// keeps the draw independent of `TapeDevice`'s own guest-facing PIO cursor, so serving `rdrand`
+/// never perturbs what the guest's own explicit tape reads consume next.
+///
+/// **Must be called before [`LinuxBranchCounter::new`], never after** — a real-hardware finding
+/// from `timer_tick_lands_at_identical_instruction` going from consistently green to
+/// consistently failing (not flaky) the moment `boot` started calling this: `exclude_host` does
+/// not work on this host (`LinuxBranchCounter::new`'s own doc), so the branch counter counts this
+/// *process's* retired branches too, not just the guest's — and `blake3::hash`'s first-ever call
+/// in a process does one-time CPU-feature-detection work with a materially different branch count
+/// than every call after it (cached). Two boots in the same test process are exactly "first call"
+/// vs "every call after" — hashing *after* the counter starts skewed one boot's RCB baseline
+/// against the other's by tens of counts, blowing straight through
+/// `RCB_HARDWARE_JITTER_TOLERANCE`. Hashing before the counter exists keeps this entirely outside
+/// the counted window, for both boots alike.
+fn entropy_seed_from_tape(tape: &[u8]) -> u64 {
+    let hash = blake3::hash(tape);
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("blake3 hash is at least 8 bytes"))
+}
+
 impl Multiverse {
     /// Run [`boot_guest`] and wire up the work-clock (`base + k * rcb`, specs/baud-multiverse.md
     /// §4), console, and tape (specs/baud-tape-device.md) devices the run loop needs. `base` is
@@ -530,9 +554,12 @@ impl Multiverse {
         dirty_ring_entries: Option<u32>,
     ) -> Result<Self, BootError> {
         let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, dirty_ring_entries)?;
+        // Must come before `LinuxBranchCounter::new()` — see `entropy_seed_from_tape`'s doc.
+        let entropy_seed = entropy_seed_from_tape(&tape);
         let counter = LinuxBranchCounter::new()?;
         let bus = DeviceBus::with_tape(tape);
-        Ok(Multiverse { guest, bus, time: WorkClock::new(base, k, counter), dirty_ring })
+        let time = WorkClock::new(base, k, counter).with_entropy_seed(entropy_seed);
+        Ok(Multiverse { guest, bus, time, dirty_ring })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -584,6 +611,7 @@ impl Multiverse {
             self.time.current_rcb(),
             self.time.tsc_deadline(),
             self.time.tsc_aux(),
+            self.time.entropy_state(),
             self.bus.tape.device().cursor(),
             self.bus.console.output().to_vec(),
         )
@@ -641,6 +669,7 @@ impl Multiverse {
             universe.clock.rcb_anchor,
             universe.clock.tsc_deadline,
             universe.clock.tsc_aux,
+            universe.clock.entropy_state,
             counter,
         );
         Ok(Multiverse { guest, bus, time, dirty_ring })
@@ -1315,6 +1344,49 @@ mod tests {
             "enforced-regime RDTSC is served entirely from the work-clock (a pure function of the \
              branch counter), so it must reproduce bit-for-bit across two boots, not just in its \
              high bits — first={first_tsc:#x} second={second_tsc:#x}"
+        );
+    }
+
+    /// Enforced-regime counterpart to `rdrand_guest_is_flagged`, reusing the exact same
+    /// `rdrand-guest` fixture (`RDRAND_GUEST_MARKER`/`rdrand_guest_kernel_path` above) — its
+    /// post-`rdrand` echo loop is unreachable under the cooperative regime (masked CPUID's
+    /// hardware `#UD`) but was built for exactly this test, per that fixture's own `BUILD.md`.
+    /// Requires the patched `kvm_intel.ko` (this crate's `handle_baud_rdrand_exit`,
+    /// `kernel-module/baud-enforced/rdrand-enforce.patch`, layered on
+    /// `rdtsc-enforce.patch`) already loaded in place of the stock module — `#[ignore]`d so a
+    /// normal `cargo test --workspace` (stock module) never runs it; only
+    /// `drive/h3-enforced-rdrand.sh` invokes it by name.
+    ///
+    /// Under the *enforced* regime, `SECONDARY_EXEC_RDRAND_EXITING` traps the `rdrand` **before**
+    /// the CPUID-gated `#UD` check the cooperative regime relies on, so the guest reaches the echo
+    /// loop and outputs the marker plus 4 value bytes (`RDRAND_GUEST_MARKER.len() + 4 == 5`) —
+    /// served from `WorkClock::serve_enforced_rdrand()`, a deterministic tape-seeded PRNG draw,
+    /// not real hardware entropy, so two boots of the same (empty) tape must reproduce bit-for-bit.
+    #[test]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdrand.sh"]
+    fn rdrand_enforced_regime_is_bit_exact_across_boots() {
+        let kernel = rdrand_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_outcome =
+            first.run_to_first_halt().expect("first run failed (enforced RDRAND exit not served?)");
+        assert_eq!(
+            first_outcome.console_output.len(),
+            RDRAND_GUEST_MARKER.len() + 4,
+            "guest must get past the marker and echo all 4 rdrand value bytes under the enforced \
+             regime: {:?}",
+            first_outcome.console_output
+        );
+        assert_eq!(&first_outcome.console_output[..RDRAND_GUEST_MARKER.len()], RDRAND_GUEST_MARKER);
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_outcome =
+            second.run_to_first_halt().expect("second run failed (enforced RDRAND exit not served?)");
+        assert_eq!(
+            second_outcome.console_output, first_outcome.console_output,
+            "enforced-regime RDRAND is served entirely from a tape-seeded deterministic PRNG, so it \
+             must reproduce bit-for-bit across two boots of the same (empty) tape"
         );
     }
 

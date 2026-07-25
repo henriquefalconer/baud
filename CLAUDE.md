@@ -106,8 +106,11 @@ echo baud | sudo -S modprobe kvm_intel   # restores the stock module + its kvm.k
 
 `drive/h3-enforced-rdtsc.sh` does exactly this dance (build → swap → run the `#[ignore]`d
 `rdtsc_enforced_regime_is_bit_exact_across_boots` test → swap back, unconditionally via a
-`trap ... EXIT`) — every other `drive/*.sh`/`cargo test --workspace` assumes the **stock** module,
-so this is the only script that should ever touch the live `kvm_intel`/`kvm` modules.
+`trap ... EXIT`) — `drive/h3-enforced-rdrand.sh` is its sibling for RDRAND (applies
+`kernel-module/baud-enforced/rdrand-enforce.patch` on top of the same tree, idempotent same as
+`rdtsc-enforce.patch`). Every other `drive/*.sh`/`cargo test --workspace` assumes the **stock**
+module, so these two are the only scripts that should ever touch the live `kvm_intel`/`kvm`
+modules.
 
 ## Git push from WSL2
 

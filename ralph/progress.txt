@@ -3515,3 +3515,79 @@ Full verification suite is green: cargo build/clippy clean, cargo test --workspa
   - Scoped RDRAND enforcement out to a follow-up (source reading found baud's own CPUID mask already makes stock KVM set RDRAND_EXITING, so only the handler-table swap remains there); RDSEED stays hardware-infeasible on this host
   - Full verification: cargo build/clippy clean, cargo test --workspace (2 known-transient jitter failures confirmed passing in isolated re-run), all 21 drive/*.sh (h0-h6, h3-enforced-rdtsc, m0-m11, full-demo 32/32) pass individually with the host left on the stock module throughout
 ---
+
+Push verified: origin/main == local HEAD (3b8c1d0), working tree clean. todo.md re-read: still has one pending item (RDRAND enforcement's handler-table swap, now precisely scoped) so this iteration closes with NEXT.
+
+## 2026-07-25T14:22:25 UTC - Session usage — build-30 [sonnet]
+- cost $10.650938800000002 (exact, from claude -p)
+- context 273,395 tok peak of 1M (27%) across 142 inference calls, monotonic
+- models sonnet-5 $10.6479 (in 284 / out 97,985 / cache-read 25,596,756) · haiku-4-5 $0.0031
+- transcript: ralph/.run/033-build-30.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 31
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose the only remaining todo.md item: RDRAND enforcement (handler-table swap in the enforced-regime KVM patch) — precisely scoped by the last iteration's entry. It's the last piece of the enforced regime (RDTSC done, RDSEED infeasible on this host's microcode).
+
+Design decided: RDRAND enforcement adds handle_baud_rdrand_exit to the kernel patch (decodes destination GPR via vmx_get_instr_info_reg, reuses KVM_EXIT_BAUD_DETERMINISM with a payload byte distinguishing RDTSC=0/RDRAND=1+gpr_index), baud-vcpu gains Exit::RdrandEnforced/DispatchOutcome::ServeEnforcedRdrand/TimeSource::serve_enforced_rdrand, and WorkClock gains a tape-seeded SplitMix64 PRNG (seed = blake3(tape), continued not reseeded across snapshot-restore via a new ClockState::entropy_state field). Dispatching an Opus subagent to fix the stale spec (Crash{detail:"rdrand"} vs the actual 'served from the tape' design) while I implement the code.
+
+Spec-fix subagent finished: updated specs/baud-multiverse.md, specs/README.md, todo.md to reflect enforced RDRAND serving a tape-seeded value instead of the stale Crash{detail:rdrand} framing. Continuing code: baud-vcpu (Exit::RdrandEnforced/DispatchOutcome/TimeSource/run_and_convert/pmu.rs) done; now wiring baud-multiverse WorkClock's SplitMix64 entropy stream and baud-snapshot's ClockState.
+
+baud-vcpu/baud-multiverse/baud-snapshot Rust wiring complete (Exit::RdrandEnforced, TimeSource::serve_enforced_rdrand, WorkClock's SplitMix64 entropy stream seeded from blake3(tape), ClockState::entropy_state for restore continuity). Now writing the kernel patch (handle_baud_rdrand_exit in vmx.c) on the real dev host's ~/wsl-kernel-src tree.
+
+Kernel patch written and verified: kernel-module/baud-enforced/rdrand-enforce.patch applies cleanly (forward+reverse) on top of the already-applied rdtsc-enforce.patch, adds handle_baud_rdrand_exit (decodes destination GPR via vmx_get_instr_info_reg, packs kind=1+gpr_index into the same KVM_EXIT_BAUD_DETERMINISM payload field) and swaps the EXIT_REASON_RDRAND table entry. Now rebuilding/insmod-testing the patched module on this host before writing the guest-boot test.
+
+Verifying the RDRAND destination-GPR decode empirically before trusting SDM table recollection: rdrand-guest's fixture does 'rdrand eax' (ModRM encodes EAX in the rm field, reg field is the fixed /6 opcode extension) — adding a temporary printk to confirm vmx_get_instr_info_reg actually yields gpr_index=0 (RAX) on this real CPU before writing the boot test around it.
+
+Rust wiring compiling now: running cargo build --workspace to catch errors before the empirical GPR-index check.
+
+cargo build --workspace is green. Now running the new #[ignore]d rdrand_enforced_regime_is_bit_exact_across_boots test against a temporary printk-instrumented build of the patched module (still swapped in) to empirically confirm vmx_get_instr_info_reg really decodes RAX (index 0) for 'rdrand eax', before trusting that SDM-table recollection blind.
+
+Empirically confirmed: dmesg shows gpr_index(reg1)=0 for 'rdrand eax' on this real CPU/microcode, and the ignored test passed against the debug build (bit-exact across two boots, correct length). Removing the temporary printk now, rebuilding the clean module, regenerating the final rdrand-enforce.patch, and re-verifying before restoring the stock module.
+
+Both enforced-regime tests (RDTSC and RDRAND) pass against the clean patched module. Restoring the stock kvm_intel module now (never leave the host on the patched module).
+
+Wrote drive/h3-enforced-rdrand.sh (mirrors h3-enforced-rdtsc.sh: applies both patches, swaps module in, runs the new RDRAND test plus a regression re-run of the RDTSC test, restores stock unconditionally). Running it now for real end-to-end verification.
+
+drive/h3-enforced-rdrand.sh ran green end-to-end (build, swap in, both ignored tests pass, unconditional restore confirmed — lsmod/dmesg clean, stock module back). Now running full workspace verification: cargo build/clippy/test, then all drive/*.sh scripts, per todo.md's protocol.
+
+cargo build and cargo clippy both green (clippy warnings are all pre-existing, in files I didn't touch). Running cargo test --workspace now.
+
+cargo test --workspace is long-running (>300s), moved to background by the harness. Waiting for completion notification; meanwhile reviewing the pmu.rs/linux/mod.rs edits once more and drafting the todo.md update for this item.
+
+Full cargo test --workspace output got truncated by my own 'tail -200' before I could confirm baud-multiverse/baud-snapshot's results specifically (they ran earlier in the workspace ordering). Re-running cargo test scoped to just those two crates to check the new entropy/ClockState tests directly.
+
+Full cargo test --workspace, cargo build, cargo clippy all green: baud-multiverse 72/72 (+2 correctly ignored), baud-snapshot 31/31, baud-vcpu 23/23 including new RdrandEnforced/entropy tests. Now running each drive/*.sh script individually per CLAUDE.md's protocol.
+
+Found the real regression: drive/h4.sh's timer_tick_lands_at_identical_instruction failed 8/8 with my changes vs 4/4 passing on HEAD. Bisected to Multiverse::boot()'s new entropy_seed_from_tape(&tape) (a blake3::hash call) running AFTER LinuxBranchCounter::new() — blake3's first-ever call in the process does one-time CPU-feature-detection work with a different branch count than later calls, and since the RCB counter (started at LinuxBranchCounter::new()) counts host-process branches too (exclude_host is non-functional on this host, already documented), boot-A's first blake3 call vs boot-B's cached second call literally skews the two boots' RCB baselines apart, consistently exceeding the 8-count jitter tolerance. Fixing by moving the hash computation before counter creation.
+
+Fix confirmed: moving entropy_seed_from_tape(&tape) before LinuxBranchCounter::new() in Multiverse::boot() makes timer_tick_lands_at_identical_instruction pass 5/5 (was failing 8/8 before the fix, on the same host, same load). Re-running full cargo test --workspace and re-verifying h0-h4 to make sure nothing else regressed.
+
+rdtsc_guest_reproduces_high_bits_across_boots failed once during the full-workspace run but passed 3/3 in isolation immediately after — this matches the exact 'known-transient jitter failure, passes in isolation' pattern already documented from the prior iteration's commit, not a regression from my change (real-wall-clock-based cooperative RDTSC test, sensitive to concurrent system load during a full-workspace run). Re-running cargo test --workspace once more for final confirmation.
+
+cargo test --workspace clean rerun: exit 0, 0 failures. Re-running h0-h4 drive scripts to confirm the entropy-seed-timing fix didn't disturb anything, then continuing through h5/h6/m0-m11/full-demo.
+
+h0-h6 and m0-m11 all re-verified green after the fix. Running full-demo.sh now (the 32-scenario aggregate).
+
+full-demo.sh 32/32, h3.sh green after re-run. Final re-verification of both enforced-regime scripts (h3-enforced-rdtsc.sh, h3-enforced-rdrand.sh) with the entropy-timing fix in place — these are the ones that swap the live kvm module, running one at a time.
+
+All 22 drive/*.sh scripts pass (h0-h6, h3-enforced-rdtsc, h3-enforced-rdrand, m0-m11, full-demo), stock kvm module confirmed restored and unheld. Running cargo build + cargo clippy one final time since I edited linux/mod.rs's boot() ordering after the earlier clippy pass.
+
+todo.md updated: RDRAND enforcement entry appended, prior 'not yet done' bullet closed. Subagent confirms zero pending items remain anywhere in the file after this iteration — every milestone/crate-map/problem-matrix item is now built and verified. Appending final progress block and committing.
+
+## 2026-07-25T15:30:00 UTC - Changes committed.
+- Implemented and boot-tested RDRAND enforcement for the enforced-regime KVM module (todo.md's sole remaining item — every milestone/crate-map/problem-matrix item is now closed)
+- Files changed: kernel-module/baud-enforced/rdrand-enforce.patch (new), drive/h3-enforced-rdrand.sh (new), crates/baud-vcpu/{src/lib.rs,src/linux/mod.rs,src/linux/pmu.rs,src/tests.rs}, crates/baud-multiverse/{src/linux/mod.rs,src/timesource.rs}, crates/baud-snapshot/{src/universe.rs,src/linux.rs,src/wire.rs}, specs/baud-multiverse.md, specs/README.md, todo.md
+- **Brief description of changes:**
+  - New kernel patch (layered on rdtsc-enforce.patch): handle_baud_rdrand_exit replaces kvm_handle_invalid_op for EXIT_REASON_RDRAND — SECONDARY_EXEC_RDRAND_EXITING needed no patch at all (already forced on by stock KVM's own CPUID-driven opt-in logic), only the handler-table entry changed; the destination GPR is decoded via vmx_get_instr_info_reg and empirically verified on real hardware (temporary printk confirmed `rdrand eax` -> gpr_index=0/RAX) before being removed
+  - baud-vcpu: Exit::RdrandEnforced{gpr_index}, DispatchOutcome::ServeEnforcedRdrand, TimeSource::serve_enforced_rdrand, new run_and_convert() replacing the old inline pattern at all 4 call sites (needed to read the KVM_EXIT_BAUD_DETERMINISM payload without a borrow-checker conflict), write_enforced_rdrand_result (writes the served value into the guest-chosen GPR plus RFLAGS.CF=1)
+  - baud-multiverse: WorkClock gained a hand-rolled SplitMix64 PRNG seeded from blake3(tape) (a separate sub-stream from the tape device's own guest-facing cursor), state captured/restored via baud-snapshot's new ClockState::entropy_state so a restored guest continues its RDRAND sequence instead of repeating it
+  - Found and fixed a real regression during verification: the entropy seed's blake3 hash was originally computed after LinuxBranchCounter::new() in Multiverse::boot(), which broke H4's timer_tick_lands_at_identical_instruction (8/8 consistent failures, ~83 RCB counts) because this host's branch counter counts host-process branches too (exclude_host doesn't work here) and blake3's first-ever call does one-time CPU-feature-detection work with a different branch count than later calls — two boots in one test process are exactly "first call" vs "cached call". Fixed by hoisting the hash before counter creation.
+  - New #[ignore]'d test rdrand_enforced_regime_is_bit_exact_across_boots reuses the existing rdrand-guest fixture (its post-rdrand echo loop was unreachable under the cooperative regime, exercised for the first time); new drive/h3-enforced-rdrand.sh mirrors h3-enforced-rdtsc.sh's unconditional-restore discipline
+  - Fixed a stale spec inconsistency (via a parallel Opus subagent): specs/baud-multiverse.md, specs/README.md, and todo.md's forward-looking sections previously described enforced-regime RDRAND as `Crash{detail:"rdrand"}`; now correctly describe it as served a deterministic tape-seeded value
+  - Full verification: cargo build/clippy clean, cargo test --workspace clean (one transient known-jitter failure during an earlier full-workspace run reproduced the same documented pre-existing flake, confirmed not a regression via 3/3 clean isolated re-runs), all 22 drive/*.sh scripts pass individually, host left on the stock kvm module throughout except the two enforced-regime scripts' own bounded swap windows (verified restored every time)
+  - todo.md: closed the RDRAND "not yet done" bullet, appended the twenty-second build-status entry — zero pending items remain anywhere in the file
+---

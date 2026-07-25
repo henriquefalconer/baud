@@ -25,7 +25,7 @@
 // a periodic real exit, e.g. a harmless forced PIO write — see
 // `crates/baud-multiverse/tests/fixtures/timer-guest/BUILD.md`).
 
-use super::{convert_exit, write_enforced_rdtsc_result};
+use super::{run_and_convert, write_enforced_rdrand_result, write_enforced_rdtsc_result};
 use crate::boundary::{ExecPoint, PmuStepper};
 use crate::{dispatch_exit, Bus, DispatchOutcome, TimeSource};
 use kvm_bindings::kvm_regs;
@@ -141,12 +141,18 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
             if self.current_rcb()? >= self.poll_target {
                 return Ok(());
             }
-            match self.vcpu.run() {
-                Ok(exit) => match dispatch_exit(convert_exit(exit), self.bus, self.time) {
+            match run_and_convert(self.vcpu) {
+                Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => continue,
                     Ok(DispatchOutcome::SingleStepBoundary) => continue,
                     Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
                         match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value }) => {
+                        match write_enforced_rdrand_result(self.vcpu, gpr_index, value) {
                             Ok(()) => continue,
                             Err(e) => return Err(e),
                         }
@@ -179,12 +185,18 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     fn step(&mut self) -> io::Result<ExecPoint> {
         super::set_singlestep(self.vcpu, true, true)?;
         let result = loop {
-            match self.vcpu.run() {
-                Ok(exit) => match dispatch_exit(convert_exit(exit), self.bus, self.time) {
+            match run_and_convert(self.vcpu) {
+                Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => continue,
                     Ok(DispatchOutcome::SingleStepBoundary) => break Ok(()),
                     Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
                         match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => break Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value }) => {
+                        match write_enforced_rdrand_result(self.vcpu, gpr_index, value) {
                             Ok(()) => continue,
                             Err(e) => break Err(e),
                         }
@@ -214,8 +226,8 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
 
     fn run_until_irq_window(&mut self) -> io::Result<()> {
         loop {
-            match self.vcpu.run() {
-                Ok(exit) => match dispatch_exit(convert_exit(exit), self.bus, self.time) {
+            match run_and_convert(self.vcpu) {
+                Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => {
                         if self.vcpu.get_kvm_run().ready_for_interrupt_injection != 0 {
                             // `kvm_run.request_interrupt_window` is sticky exactly like
@@ -235,6 +247,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     Ok(DispatchOutcome::SingleStepBoundary) => continue,
                     Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
                         match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value }) => {
+                        match write_enforced_rdrand_result(self.vcpu, gpr_index, value) {
                             Ok(()) => continue,
                             Err(e) => return Err(e),
                         }
