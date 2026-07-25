@@ -2952,3 +2952,9 @@ All 18 drive/*.sh scripts (h0-h6, m0-m9, full-demo) pass end-to-end on real /dev
   - drive/h3.sh: new H3.4 step runs the test against real /dev/kvm.
   - **Verification**: cargo build/clippy --workspace clean (zero new warnings, only pre-existing baud-tracing aya::Bpf deprecations). cargo test --workspace: only the already-documented `fleet_of_vms_run_in_parallel_without_interference` timing flake under load, confirmed transient by isolated re-run (1/1 pass). All 18 drive/*.sh scripts (h0-h6, m0-m9, full-demo) re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
 ---
+
+Committed c49d1b1. Pushing to origin/main...
+
+Pushed c49d1b1 to origin/main. Verifying push (git fetch + confirm HEAD matches origin, working tree clean)...
+
+Verified: local HEAD (c49d1b1) == origin/main, working tree clean apart from this progress note. Re-reading todo.md: still pending — consensus-cluster fuzz loop random-tactics/Driver-scheduler coupling (non-blocking), the enforced-regime KVM module, baud shell-into CLI/server surface (needs new WebSocket infra), the framebuffer stream, and /runs/fuzz/:id/step's aspirational continuation endpoint. This iteration's step (closing H3's RDTSC-compliance gap: pinning the raw rdtsc value deterministically at boot) is closed, committed, pushed, and verified green. Emitting NEXT.
