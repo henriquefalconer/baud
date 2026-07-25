@@ -829,8 +829,12 @@ impl Multiverse {
     }
 
     /// blake3 of every byte of guest RAM, read in fixed-size chunks so this never needs to
-    /// allocate the whole [`layout::GUEST_RAM_SIZE`] region at once.
-    fn ram_hash(&self) -> String {
+    /// allocate the whole [`layout::GUEST_RAM_SIZE`] region at once. `pub` (not just used
+    /// internally by [`run_to_first_halt`](Self::run_to_first_halt)/
+    /// [`run_until_branch_or_halt`](Self::run_until_branch_or_halt)'s own `HaltOutcome`) so a
+    /// caller that stops at a live [`RunUntilBranchOutcome::MarkBranch`] checkpoint — which has no
+    /// `HaltOutcome` of its own — can still observe the RAM state at that exact point.
+    pub fn ram_hash(&self) -> String {
         const CHUNK: usize = 1 << 20; // 1 MiB
         let mut hasher = blake3::Hasher::new();
         let mut buf = vec![0u8; CHUNK];
