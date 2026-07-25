@@ -2319,10 +2319,44 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     secondary control the spec's enforced regime needs, independent of any future module code.
   - **Not yet done**: implementing the actual enforcement (hooking KVM's own VMCS setup to force
     the RDTSC/RDRAND/RDSEED-exiting bits on for every guest, regardless of guest cooperation) —
-    this module only *reads* the capability MSRs today; that is a materially larger, separate task
-    (KVM-internals-level hook, not just MSR reads) on top of this, and its result could never be
-    fully validated on this exact host given the RDSEED-exiting finding above. Whoever picks this
-    up next may want a second host to validate against before investing in the hook itself.
+    this module only *reads* the capability MSRs today.
     `crates/baud-host/src/linux.rs`'s `enforced_module_present()` deliberately still returns
     `false` unconditionally — wiring it to this probe module would overclaim a regime this host
     doesn't actually enforce yet (`regime_is_recorded_and_not_overclaimed`).
+- **Enforced-regime KVM module — twentieth entry: the enforcement hook's design is now concrete
+  and source-grounded, not a guess; the hook itself is still unbuilt.** The prior entry above
+  flagged the hook as "a materially larger, separate task (KVM-internals-level hook, not just MSR
+  reads)" and suggested a second host might be needed before investing in it, without knowing the
+  actual mechanism. This iteration read the real kernel source already on disk
+  (`~/wsl-kernel-src/src/arch/x86/kvm/vmx/vmx.c`, the same tree the probe module already builds
+  against) to replace that guess with facts, written up in
+  `kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md` (new):
+  - Kprobes cannot implement this at all — the exit-reason dispatch table
+    (`kvm_vmx_exit_handlers[]`) is `static` inside `vmx.c`, invisible to any other module by
+    symbol name. The hook has to be a source patch to `vmx.c` itself, rebuilding `kvm_intel.ko`
+    in place — "a small out-of-tree KVM patch/module" (§3.8) is literal, not a separate add-on.
+  - `EXIT_REASON_RDRAND`/`EXIT_REASON_RDSEED` already map to `kvm_handle_invalid_op` (injects
+    `#UD` in-kernel) — forcing the execution-control-bit alone, without also replacing the
+    handler-table entry, would change nothing observable. `EXIT_REASON_RDTSC` has no table entry
+    at all today and falls through to `unexpected_vmexit`, which is bounds-checked, null-checked,
+    and returns a clean `KVM_EXIT_INTERNAL_ERROR` to userspace rather than panicking — a real
+    finding that lowers the risk of attempting this on this same dev host (a wrong patch degrades
+    to a guest-visible error, not a host crash).
+  - The userspace side needs **zero changes to any pinned crate**: `kvm-ioctls` 0.25 already has
+    a `VcpuExit::Unsupported(u32)` catch-all for exit reasons it doesn't recognize, so a new
+    `KVM_EXIT_BAUD_DETERMINISM` constant surfaces there without a crate fork; only `baud-vcpu`'s
+    own (unpinned) `dispatch_exit` needs a new match arm.
+  - RDSEED-exiting stays out of reach on this host regardless (hardware, confirmed by the probe's
+    own `dmesg` report, see the prior entry) — the design targets RDTSC+RDRAND enforcement here;
+    full three-instruction enforcement needs a host whose microcode exposes
+    `SECONDARY_EXEC_RDSEED_EXITING`.
+  - **Not yet done**: the patch itself is still unwritten, `kvm_intel.ko` still unpatched and
+    unrebuilt, no boot has been attempted against a forced RDTSC/RDRAND-exiting vcpu. This is the
+    concrete next step, now scoped down from "materially larger, separate task" to three named
+    source locations (`vmx.c:4443`, `vmx.c:6157-6158`, the missing `RDTSC` table slot) plus one
+    new `include/uapi/linux/kvm.h` constant plus one new `baud-vcpu` match arm — still real kernel
+    work, not attempted this iteration because it needs a dedicated increment of its own (write
+    patch → rebuild → `rmmod`/`insmod` the live `kvm_intel.ko` → boot a real guest against it →
+    observe whether `KVM_EXIT_BAUD_DETERMINISM` actually reaches userspace) rather than being
+    rushed alongside the research pass that produced the design. This remains the sole open item
+    in this file.

@@ -112,10 +112,16 @@ bit); it means this exact dev machine can never itself validate a fully-enforced
 
 **Not yet done**: implementing the actual enforcement (hooking KVM's own VMCS setup to
 force the RDTSC/RDRAND/RDSEED-exiting bits on for every guest, regardless of guest
-cooperation) — this module only *reads* the capability MSRs today. That is a materially
-larger, separate task (KVM internals, likely a `kvm_x86_ops`-level hook or an eBPF/kprobe
-approach, not just capability MSR reads) on top of this, and on this host in particular its
-result could never be fully validated against the RDSEED-exiting bit specifically.
+cooperation) — this module only *reads* the capability MSRs today. `ENFORCEMENT_DESIGN.md`
+(new, same directory) now has a concrete, source-grounded design for this, replacing the
+earlier "likely a `kvm_x86_ops`-level hook or eBPF/kprobe approach" guess: it turns out
+kprobes cannot do this at all (the relevant dispatch table is `static` inside
+`arch/x86/kvm/vmx/vmx.c`), it has to be a patch to that file rebuilding `kvm_intel.ko`
+itself, and — a real finding — KVM's own exit dispatch is bounds/null-checked and falls back
+to a clean userspace-visible `KVM_EXIT_INTERNAL_ERROR` rather than panicking on an unwired
+exit reason, which meaningfully lowers the risk of attempting this on this same dev host.
+Still not built or boot-tested; still on this host in particular the result could never be
+fully validated against the RDSEED-exiting bit specifically (RDTSC+RDRAND only).
 `crates/baud-host/src/linux.rs`'s `enforced_module_present()` deliberately still returns
 `false` unconditionally — wiring it to this probe module would overclaim a regime this host
 doesn't actually enforce yet (`regime_is_recorded_and_not_overclaimed`).

@@ -3391,3 +3391,71 @@ All 19 h*/m*.sh drive scripts PASS individually. Running full-demo.sh.
   - Updated BUILD.md/CLAUDE.md with the corrected, verified procedure; updated todo.md's enforced-regime entry and baud-host's enforced_module_present() doc comment to reflect insmod now working (enforcement itself is still not implemented, so the function correctly still returns false)
   - Verification: cargo build/clippy/test --workspace all clean; all 19 individual drive/*.sh scripts pass; full-demo.sh 32/32 CHECKS PASSED
 ---
+
+Post-push verification: local HEAD (f23fbd4) matches origin/main, working tree clean. Real forward progress this iteration: the enforced-regime KVM module's insmod blocker is fixed for real (root cause was a missing pahole dependency, not a toolchain gap as previously believed) -- first successful out-of-tree module load in this project's history, verified twice including from a clean re-clone. todo.md's enforced-regime item remains open (actual VMCS-hook enforcement is still unimplemented, and this exact host's RDSEED-exiting hardware limit means it could never fully validate that enforcement anyway) -- this iteration ends with NEXT.
+
+## 2026-07-25T13:13:23 UTC - Session usage — build-28 [sonnet]
+- cost $5.4218754 (exact, from claude -p)
+- context 180,746 tok peak of 1M (18%) across 91 inference calls, monotonic
+- models sonnet-5 $5.4188 (in 182 / out 51,430 / cache-read 12,348,278) · haiku-4-5 $0.0031
+- transcript: ralph/.run/031-build-28.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 29
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick next step.
+
+Studied todo.md end-to-end (2329 lines): 18 M-series bricks landed, all H/M milestones closed on real KVM hardware. The sole remaining pending item is the enforced-regime KVM module's actual VMX enforcement hook (RDTSC/RDRAND/RDSEED-exiting bits) -- prior iteration built a read-only capability probe (insmod-verified) but flagged the real hook as too risky to attempt without a second, disposable host to validate against, since a VMCS-manipulation bug in kernel code can panic the whole machine. Investigating whether nested KVM-in-KVM is already available on this WSL2 host, which would let us build that disposable second host without new physical hardware.
+
+Confirmed nested VMX passthrough is exposed at the kernel-module level here (kvm_intel nested=Y), but qemu-system-x86_64 is not installed and building a full disposable L2 KVM guest (needed to safely test-load a real enforcement hook without host risk) would require a full distro image + qemu install -- too large a detour for one iteration. Re-scoping: instead of attempting to build+insmod a live VMX-hook kernel patch this iteration (real risk: a bug in KVM's own vmx.c exit-handling code can panic the whole WSL2 instance, and the actual mechanism needed -- forcing RDTSC/RDRAND-exiting VM-execution-control bits so those exits reach userspace instead of being handled in-kernel -- is genuinely a kernel patch to arch/x86/kvm/vmx/vmx.c, not an add-on module, since VMCS execution controls are set deep inside KVM's own vcpu setup code), doing real research against the actual kernel source tree already on disk from the prior insmod work to nail down exactly how KVM's exit-handler table treats EXIT_REASON_RDTSC/RDRAND today, and turn that into a concrete, reviewed patch design -- the safe next slice, deferring the risky build+insmod+test step to a follow-up iteration once the design is grounded in real source instead of memory.
+
+Found solid ground truth by reading the actual kernel source tree (arch/x86/kvm/vmx/vmx.c) already on disk from the prior insmod work: RDRAND/RDSEED exit reasons already map to kvm_handle_invalid_op (injects #UD in-kernel -- forcing the exiting bit alone would do nothing observable), RDTSC has no handler entry at all and falls through to a bounds-checked, null-checked, non-panicking KVM_EXIT_INTERNAL_ERROR fallback, and kprobes cannot hook this (the dispatch table is a static file-scope array) -- it has to be a real patch to vmx.c rebuilding kvm_intel.ko. Also confirmed kvm-ioctls 0.25 (pinned) already has a VcpuExit::Unsupported(u32) catch-all, so a new custom KVM_EXIT_* number needs zero changes to the pinned crate. Writing this up as a concrete design doc (kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md) replacing the prior iteration's vague 'kvm_x86_ops hook or eBPF/kprobe' guess, so the next iteration can attempt the actual patch+build+boot-test with a bounded, reviewed plan instead of starting from scratch or guessing at risk.
+
+Design doc + todo.md written. Running full pre-push verification (build, clippy, test, all drive scripts) to confirm the tree is still green -- this iteration made no Rust code changes, only docs, so expecting a clean pass.
+
+cargo build and cargo clippy both clean (only pre-existing unrelated warnings). Running cargo test --workspace next.
+
+cargo test --workspace surfaced 2 failures in baud-multiverse: rdtsc_guest_reproduces_high_bits_across_boots and timer_tick_lands_at_identical_instruction, both previously-documented hardware-timing-sensitive tests per todo.md. Re-running both isolated to check if transient, per the established verification pattern.
+
+Both failures confirmed transient (1/1 pass in isolation) -- concurrent-load hardware-timing jitter, matching prior iterations' documented pattern for these exact two tests. Every other crate passed 100%. Now running all drive/*.sh scripts individually against real /dev/kvm (h0-h6, m0-m11, full-demo).
+
+Drive scripts h0-h3 all pass individually against real /dev/kvm. Continuing with h4-h6.
+
+h4 and h5 pass (h5's 1000-branch/dirty-ring/shell-into round trip included, ~long-running). Continuing with h6 and the m-series.
+
+m0-m3 pass. Continuing m4-m7.
+
+m4-m7 pass. Continuing m8-m11.
+
+All 19 h/m drive scripts pass individually. Running full-demo.sh as the final verification step.
+
+full-demo.sh 32/32 CHECKS PASSED. All 20 drive scripts + cargo build/clippy/test verified green. Appending final progress block and committing.
+
+## 2026-07-25T13:39:55 UTC - Changes committed.
+- What was implemented: a concrete, source-grounded design for the enforced-regime KVM
+  enforcement hook (the sole remaining open item in todo.md), replacing the prior
+  iteration's speculative "kvm_x86_ops hook or eBPF/kprobe" guess with facts read directly
+  from the real kernel source tree already on this host.
+- Files changed:
+  - kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md (new)
+  - kernel-module/baud-enforced/BUILD.md (Not-yet-done section updated to point at the design)
+  - todo.md (twentieth entry recording the research and the concrete next step)
+  - ralph/progress.txt
+- **Brief description of changes:**
+  - Read ~/wsl-kernel-src/src/arch/x86/kvm/vmx/vmx.c (the real kernel source this host's
+    module build already uses) to confirm: kprobes cannot implement the hook (the exit
+    dispatch table is a static file-scope array); EXIT_REASON_RDRAND/RDSEED already map to
+    kvm_handle_invalid_op (in-kernel #UD injection -- forcing the exiting bit alone changes
+    nothing observable); EXIT_REASON_RDTSC has no table entry and safely falls through to a
+    bounds/null-checked KVM_EXIT_INTERNAL_ERROR, not a panic.
+  - Confirmed kvm-ioctls 0.25 (pinned) already exposes VcpuExit::Unsupported(u32) as a
+    catch-all, so a new custom KVM_EXIT_BAUD_DETERMINISM constant needs zero changes to any
+    pinned crate -- only baud-vcpu's own dispatch needs a new match arm.
+  - No Rust code was changed this iteration; full verification (cargo build/clippy/test
+    --workspace, all 19 drive/*.sh scripts individually, full-demo.sh) re-confirmed green
+    with zero regressions. The only test failures seen (rdtsc_guest_reproduces_high_bits_
+    across_boots, timer_tick_lands_at_identical_instruction) were confirmed transient
+    hardware-timing jitter under concurrent load by isolated re-runs (1/1 pass each),
+    matching the same pattern documented in prior iterations.
+---
