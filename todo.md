@@ -2064,3 +2064,56 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     passes, see the H5 entry above), the framebuffer stream, and `/runs/fuzz`'s aspirational
     `/runs/fuzz/:id/step` continuation endpoint (the older ptrace-era route, distinct from
     `/run/kvm/branch`'s and `/run/kvm/resume`'s generate-mode persistence).
+- **M-series — sixteenth brick: the consensus-cluster fuzz loop's random-tactics/`Driver`-scheduler
+  coupling flagged in every "Not yet done" list since the thirteenth brick is now closed —
+  `run_consensus_fuzz_loop` (`crates/baud-server/src/routes/fuzz.rs`) no longer draws its
+  "random"/"random-drops" tape bytes straight off `driver.draw_bits(8)`.** Drawing all 256 bytes
+  per generation that way meant the tape meant to serve as an independent negative control against
+  guided tactics like `markov-crash-restart`/`markov-partition` silently inherited
+  `Driver::begin_run`'s own generation-over-generation hill-climbing toward `self.best` — the exact
+  same coupling already fixed once before for the parser workload's `draw_parser_input`, and this
+  fix mirrors that one.
+  - **Fix**: new `draw_consensus_tape(driver, len, rng)` in `fuzz.rs` draws one marker byte via
+    `driver.draw_bits(8)` (so the driver's corpus/score tracking stays in the loop) and then draws
+    all `len` real tape bytes from the dedicated `tactics_rng`, independent of the driver's
+    replay/mutate/splice scheduling. `run_consensus_fuzz_loop`'s per-generation loop now calls this
+    helper in place of the old inline `driver.draw_bits` loop.
+  - **New tests**, both in a new `#[cfg(test)] mod consensus_tape_tests` at the bottom of
+    `fuzz.rs`: `consensus_tape_is_independent_of_driver_hill_climbing` hill-climbs a driver for 10
+    generations with a maximal score every time (biasing `self.best`, advancing `generation` well
+    past 0), then asserts `draw_consensus_tape`'s output is byte-identical to a fresh, never-run
+    driver given the same `tactics_rng` seed — proving the tape depends only on the RNG, never on
+    driver state. `consensus_tape_varies_across_generations` asserts successive draws differ, so
+    the negative control is genuine per-generation noise rather than degenerate output. `cargo test
+    -p baud-server`: 16/16 (was 14).
+  - **Bonus cleanup, same iteration**: `fuzz.rs`'s header comment claimed a
+    `POST /runs/fuzz/:id/step` continuation route that was never implemented or registered in
+    `main.rs` and that no spec references. A research pass confirmed the KVM pivot already solves
+    cross-request continuation via `/run/kvm/branch`'s and `/run/kvm/resume`'s generate mode
+    (`DriverState`/`put_driver_state`/`get_driver_state`, see the fourteenth-brick entry above), so
+    a parallel continuation mechanism for the older ptrace-era `/runs/fuzz` route would be
+    redundant rather than a real gap. The header comment now describes the actual route surface
+    (`POST /runs/fuzz`, `GET /runs/fuzz/:id`) and points at the KVM-era surface for continuation
+    instead of describing an endpoint that does not exist. Worth remembering for future comments in
+    this crate: the workload-noun CI grep enforced by `drive/m1.sh`'s M1.8 and `drive/m0.sh`'s
+    check forbids the literal lowercase word "emulator" outside `baud-raftlet` — an early draft of
+    this comment tripped it via "emulator-bridge workloads" and had to be reworded to "bridge
+    workloads (see WorkloadKind)".
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` — zero new
+    warnings/errors on any touched line in `fuzz.rs` (every warning shown is pre-existing, on lines
+    this iteration never touched). `cargo test --workspace`: 100% green, 0 failed across every
+    crate. All 18 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m9.sh`, `full-demo.sh`) re-run
+    individually end-to-end on real `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS
+    PASSED" — `drive/m6.sh`, the only drive script exercising the consensus workload, still passes
+    with the fix in place (random-tactics baseline completes, stateful-mask still finds the
+    violation in 1 generation).
+  - **Not yet done**: the enforced-regime KVM module (RDTSC-compliance under *enforced* regime —
+    bit-exact, forced-exiting), `baud shell-into` CLI/server surface (confirmed this iteration via
+    research to need a genuinely new axum `ws`-feature route plus a bidirectional Multiverse
+    session, universe-by-ID deserialization, CLI subcommand, and auth — a multi-subsystem task, not
+    a one-iteration fix), and the framebuffer stream (confirmed this iteration via research to be
+    blocked on building an entirely new guest display device model first — `baud-multiverse` has no
+    framebuffer/VGA/virtio-gpu device today, an explicit spec non-goal per
+    `specs/baud-multiverse.md` — before `baud-stream`, otherwise essentially complete per
+    `specs/baud-stream.md`'s named tests, has anything real to capture).

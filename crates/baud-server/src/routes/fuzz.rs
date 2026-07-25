@@ -4,9 +4,15 @@
 // /runs/fuzz — M4 fuzz loop endpoint
 //
 // Routes:
-//   POST /runs/fuzz         → start or advance a fuzz session
+//   POST /runs/fuzz         → run a fuzz session to completion (or max_iterations) in one call
 //   GET  /runs/fuzz/:id     → get fuzz session status
-//   POST /runs/fuzz/:id/step → run N more iterations of the fuzz loop
+//
+// This route predates the KVM pivot and models parser/consensus/bridge workloads (see
+// WorkloadKind) as in-process simulations, not KVM guests. It has no continuation/step verb —
+// each POST is a fresh, complete run. Cross-request continuation of an exploration now lives on
+// the KVM-era surface instead: `/run/kvm/branch` and `/run/kvm/resume` (see run_kvm.rs), whose
+// `generate` mode persists `Driver` state (best/reservoir/generation) across calls via
+// `baud-snapshot-store`'s `put_driver_state`/`get_driver_state`.
 
 use axum::{extract::{Path, State}, Json};
 use serde::{Deserialize, Serialize};
@@ -418,6 +424,19 @@ struct FuzzLoopResult {
     workload_kind: WorkloadKind,
 }
 
+/// Draw the base cluster tape from a dedicated per-session RNG, independent of the driver's
+/// own tape replay/mutate/splice scheduling (`Driver::begin_run`) — identical rationale to
+/// `draw_parser_input`: a single `driver.draw_bits()` call keeps the driver's corpus machinery
+/// (score tracking, best-tape updates) in the loop, without letting its generation-over-
+/// generation hill-climbing toward `self.best` leak into the bytes actually used below. Without
+/// this decoupling, "random"/"random-drops" tactics would silently inherit the driver's own
+/// guided mutation of its best tape and stop being an independent negative control against
+/// guided tactics like `markov-crash-restart`/`markov-partition`.
+fn draw_consensus_tape(driver: &mut Driver, len: usize, rng: &mut ChaCha20Rng) -> Vec<u8> {
+    let _marker = driver.draw_bits(8);
+    (0..len).map(|_| (rng.next_u32() & 0xff) as u8).collect()
+}
+
 /// Run the consensus-cluster fuzz loop (VR2-B6 fix: dispatch based on workload type).
 /// Uses baud_raftlet::simulate() to exercise the 3-node cluster with its planted
 /// modal bug (leader-election x log-truncation x network-partition interleaving).
@@ -471,9 +490,7 @@ fn run_consensus_fuzz_loop(
         driver.begin_run();
 
         // Draw a byte sequence as the cluster tape
-        let base_tape: Vec<u8> = (0..tape_len).map(|_| {
-            driver.draw_bits(8).first().copied().unwrap_or(0)
-        }).collect();
+        let base_tape = draw_consensus_tape(&mut driver, tape_len, &mut tactics_rng);
 
         // On generation 0 with planted bug: use the pre-found violation tape
         // to reliably demonstrate that guided tactics find the violation "within budget".
@@ -739,5 +756,77 @@ pub async fn get_session(
         })),
         Ok(None) => Json(json!({ "error": format!("run {id} not found") })),
         Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+    }
+}
+
+#[cfg(test)]
+mod consensus_tape_tests {
+    use super::*;
+    use baud_driver::TacticsSpec;
+
+    fn default_strategy() -> StrategySpec {
+        StrategySpec {
+            maximize: vec!["op_depth".to_string()],
+            buckets: Vec::new(),
+            reservoir: Some(baud_proto::Reservoir { keep: 32, p_backoff: 0.1 }),
+            goal: None,
+        }
+    }
+
+    /// Reproduces the exact coupling bug this test guards against: before the fix,
+    /// `run_consensus_fuzz_loop` drew every cluster-tape byte straight from
+    /// `driver.draw_bits(8)`, so a "random"/"random-drops" tape (meant to be an
+    /// independent negative control) silently inherited `Driver::begin_run`'s own
+    /// generation-over-generation hill-climbing toward `self.best`. This asserts
+    /// `draw_consensus_tape`'s output depends only on the dedicated tactics RNG,
+    /// never on how much the driver has already converged.
+    #[test]
+    fn consensus_tape_is_independent_of_driver_hill_climbing() {
+        let strategy = default_strategy();
+
+        // Driver A: fresh, never run before the call under test.
+        let mut driver_a = Driver::new(42, strategy.clone(), TacticsSpec::default());
+        driver_a.begin_run();
+        let mut rng_a = ChaCha20Rng::seed_from_u64(0xdead_beef);
+        let tape_a = draw_consensus_tape(&mut driver_a, 32, &mut rng_a);
+
+        // Driver B: hill-climbed for ten generations with a maximal score every time,
+        // strongly biasing `self.best` and pushing `generation` well past 0 (so
+        // `begin_run` enters replay/mutate/splice mode), before the call under test.
+        let mut driver_b = Driver::new(42, strategy, TacticsSpec::default());
+        for _ in 0..10 {
+            driver_b.begin_run();
+            let _ = driver_b.draw_bits(64);
+            driver_b.end_run(&[("op_depth".to_string(), 1_000.0)]);
+        }
+        driver_b.begin_run();
+        let mut rng_b = ChaCha20Rng::seed_from_u64(0xdead_beef);
+        let tape_b = draw_consensus_tape(&mut driver_b, 32, &mut rng_b);
+
+        assert_eq!(
+            tape_a, tape_b,
+            "consensus tape must depend only on the dedicated tactics RNG, not on the \
+             driver's own hill-climbing state — otherwise 'random'/'random-drops' silently \
+             inherit guided-search bias and stop being a valid negative control"
+        );
+    }
+
+    /// The negative control must actually vary generation to generation (pure noise),
+    /// not collapse to a fixed/degenerate tape.
+    #[test]
+    fn consensus_tape_varies_across_generations() {
+        let strategy = default_strategy();
+        let mut driver = Driver::new(7, strategy, TacticsSpec::default());
+        let mut rng = ChaCha20Rng::seed_from_u64(0x1234_5678);
+
+        driver.begin_run();
+        let tape_gen0 = draw_consensus_tape(&mut driver, 32, &mut rng);
+        driver.end_run(&[("op_depth".to_string(), 0.0)]);
+
+        driver.begin_run();
+        let tape_gen1 = draw_consensus_tape(&mut driver, 32, &mut rng);
+        driver.end_run(&[("op_depth".to_string(), 0.0)]);
+
+        assert_ne!(tape_gen0, tape_gen1, "successive draws from the same rng must differ");
     }
 }

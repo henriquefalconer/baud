@@ -2958,3 +2958,93 @@ Committed c49d1b1. Pushing to origin/main...
 Pushed c49d1b1 to origin/main. Verifying push (git fetch + confirm HEAD matches origin, working tree clean)...
 
 Verified: local HEAD (c49d1b1) == origin/main, working tree clean apart from this progress note. Re-reading todo.md: still pending — consensus-cluster fuzz loop random-tactics/Driver-scheduler coupling (non-blocking), the enforced-regime KVM module, baud shell-into CLI/server surface (needs new WebSocket infra), the framebuffer stream, and /runs/fuzz/:id/step's aspirational continuation endpoint. This iteration's step (closing H3's RDTSC-compliance gap: pinning the raw rdtsc value deterministically at boot) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T09:15:14 UTC - Session usage — build-22 [sonnet]
+- cost $6.246860550000003 (exact, from claude -p)
+- context 192,527 tok peak of 1M (19%) across 101 inference calls, monotonic
+- models sonnet-5 $6.2438 (in 224 / out 53,802 / cache-read 14,112,926) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/024-build-22.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 23
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Read todo.md tail: pending items are (1) consensus-cluster fuzz loop random-tactics/Driver-scheduler coupling (non-blocking), (2) enforced-regime KVM module, (3) baud shell-into CLI/server surface (needs WebSocket infra), (4) framebuffer stream, (5) /runs/fuzz/:id/step continuation endpoint (ptrace-era route). Dispatching research subagents to scope each before picking.
+
+Launched 4 parallel Explore agents to scope the pending items: consensus-cluster fuzz coupling, shell-into/WebSocket infra, framebuffer stream, and /runs/fuzz/:id/step. Waiting for reports to pick the best-scoped one.
+
+Framebuffer-stream scout back: blocked on building an entirely new guest display device model first (multi-iteration VMM work, explicit spec non-goal today) — ruling it out for this iteration. Waiting on the other 3 scouts.
+
+Shell-into: confirmed large (needs new WS route, universe-by-ID deserialization, CLI subcommand, auth) — not one-iteration scope. /runs/fuzz/:id/step: confirmed stale aspirational comment, KVM pivot already solved continuation elsewhere — real fix is a doc cleanup, not a feature build. Waiting on consensus-cluster fuzz loop coupling scout.
+
+
+
+All 4 scouts back. Enforced-regime KVM module and shell-into are architecturally large (multi-subsystem), framebuffer is blocked on new VMM device-model work, and /runs/fuzz/:id/step is stale aspirational text (KVM pivot already solved continuation elsewhere). The consensus-cluster fuzz-loop coupling bug is small, well-scoped, and mirrors an already-fixed parser-workload bug — but has zero test coverage today. Chose: fix the consensus-cluster random-tactics/Driver-scheduler coupling in crates/baud-server/src/routes/fuzz.rs, adding a negative-control/plateau test so the fix has real coverage (it's the well-scoped, testable forward step among the pending items).
+
+Implemented the fix: extracted draw_consensus_tape() (crates/baud-server/src/routes/fuzz.rs) mirroring the already-proven draw_parser_input pattern — one marker driver.draw_bits(8) call for corpus tracking, then independent bytes from tactics_rng, decoupling 'random'/'random-drops' consensus tactics from the driver's hill-climbing. Added 2 unit tests plus cleaned up the stale /runs/fuzz/:id/step header comment. Building baud-server now.
+
+New tests pass (consensus_tape_is_independent_of_driver_hill_climbing, consensus_tape_varies_across_generations). Running full baud-server test suite for regressions...
+
+baud-server: 16/16 tests pass, no regressions. Running clippy on the touched crate before the full workspace protocol.
+
+clippy on baud-server: all warnings pre-existing (fuzz.rs:95 doc-overindent, fuzz.rs:353 if_same_then_else, replay.rs, tracing.rs — none on lines I touched). Running full workspace build now.
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets...
+
+clippy --workspace --all-targets: zero errors, all warnings pre-existing and unrelated to my change. Running cargo test --workspace...
+
+cargo test --workspace: 100% green, 0 failed across every crate. Running drive/*.sh scripts individually now (h0-h6, m0-m9, full-demo).
+
+drive/h0.sh PASS. Running h1.sh...
+
+drive/h1.sh PASS. Running h2.sh...
+
+drive/h2.sh PASS. Running h3.sh...
+
+drive/h3.sh PASS. Running h4.sh...
+
+drive/h4.sh PASS. Running h5.sh...
+
+drive/h5.sh PASS (1000-branch fork test, 258s). Running h6.sh...
+
+drive/h6.sh PASS. H-series (h0-h6) all green. Running m0.sh...
+
+drive/m0.sh PASS. Running m1.sh...
+
+drive/m1.sh caught a real regression: my header-comment edit used lowercase 'emulator-bridge', tripping the workload-noun CI grep (which forbids literal 'emulator' outside baud-raftlet). Fixed wording to 'bridge workloads (see WorkloadKind)'. Re-running m1.sh.
+
+drive/m1.sh PASS after fix. Running m2.sh...
+
+drive/m2.sh PASS. Running m3.sh...
+
+drive/m3.sh PASS. Running m4.sh...
+
+drive/m4.sh PASS. Running m5.sh...
+
+drive/m5.sh PASS. Running m6.sh (this exercises the consensus fuzz loop I changed)...
+
+drive/m6.sh PASS — consensus fuzz loop works correctly with the coupling fix (random-tactics baseline + stateful-mask violation both still work as expected). Running m7.sh...
+
+drive/m7.sh PASS. Running m8.sh...
+
+drive/m8.sh PASS. Running m9.sh...
+
+drive/m9.sh PASS. Running full-demo.sh (final drive script)...
+
+full-demo.sh: 32/32 CHECKS PASSED. All 18 drive scripts green with zero regressions (m1.sh caught and I fixed a real workload-noun-grep violation from my own comment edit along the way). Dispatching a subagent to update todo.md with this iteration's findings.
+
+todo.md updated with the sixteenth-brick entry, consensus-cluster coupling item removed from Not-yet-done. Appending final progress block and committing.
+
+## 2026-07-25T09:44:11 UTC - Changes committed.
+- Fixed the consensus-cluster fuzz loop's random-tactics/Driver-scheduler coupling
+- Files changed: crates/baud-server/src/routes/fuzz.rs, todo.md
+- **Brief description of changes:**
+  - Extracted `draw_consensus_tape(driver, len, rng)` in fuzz.rs: one marker `driver.draw_bits(8)` call for corpus tracking, then all real tape bytes drawn from the dedicated `tactics_rng` — decoupling "random"/"random-drops" consensus tactics from `Driver::begin_run`'s hill-climbing (mirrors the already-fixed parser-workload bug)
+  - `run_consensus_fuzz_loop` now calls `draw_consensus_tape` instead of looping `driver.draw_bits(8)` 256 times
+  - Added `consensus_tape_tests` module: `consensus_tape_is_independent_of_driver_hill_climbing` and `consensus_tape_varies_across_generations` (cargo test -p baud-server: 16/16, was 14)
+  - Cleaned up fuzz.rs's stale header comment (removed the never-implemented `/runs/fuzz/:id/step` claim; pointed at `/run/kvm/branch`/`/run/kvm/resume`'s generate-mode persistence instead)
+  - Updated todo.md with the sixteenth-brick entry; removed the now-fixed item from "Not yet done"
+---
