@@ -107,7 +107,11 @@ impl CapabilityChecks for LinuxChecks {
     }
 
     /// The enforced regime (specs/baud-host.md §8 future work) needs an out-of-tree KVM module
-    /// that does not exist yet — always `false` until it ships.
+    /// that does not exist yet. `kernel-module/baud-enforced/` has a real VMX-capability probe
+    /// (build-verified, not yet insmod-able — see its BUILD.md) but no enforcement logic, so this
+    /// stays `false` until a module that actually forces the RDTSC/RDRAND/RDSEED-exiting bits
+    /// ships — reporting presence any earlier would overclaim guarantees this host doesn't have
+    /// (`regime_is_recorded_and_not_overclaimed`).
     fn enforced_module_present(&self) -> bool {
         false
     }

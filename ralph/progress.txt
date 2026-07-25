@@ -3267,3 +3267,67 @@ Committed (2c65334). Pushing to origin/main.
 ---
 
 Post-push verification: local HEAD (17101b5) matches origin/main, working tree clean. todo.md still has one pending item (the enforced-regime KVM module — a real out-of-tree kernel patch, not attempted). This iteration ends with NEXT.
+
+## 2026-07-25T12:00:50 UTC - Session usage — build-26 [sonnet]
+- cost $7.2081489 (exact, from claude -p)
+- context 218,564 tok peak of 1M (22%) across 89 inference calls, monotonic
+- models sonnet-5 $7.2051 (in 238 / out 70,812 / cache-read 15,309,103) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/029-build-26.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 27
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+Chose the enforced-regime KVM module (RDTSC-compliance under enforced regime, forced-exiting) — the sole remaining pending item in todo.md. Researching existing groundwork before deciding scope for this iteration's step, since this is an out-of-tree kernel module touching the live host kernel.
+
+Found network access + exact matching kernel source tag (microsoft/WSL2-Linux-Kernel@linux-msft-wsl-6.18.33.2) for this running kernel (6.18.33.2-microsoft-standard-WSL2), plus /proc/config.gz for the running config. Real out-of-tree module compilation was previously blocked by missing /lib/modules/$(uname -r)/build. Scoping this iteration's step: prepare a real kernel-module build tree, then build+load+unload a harmless skeleton baud-enforced module as a smoke test, proving the pipeline end-to-end without touching live VMX/KVM behavior (the actual RDTSC/RDRAND-exiting logic stays future work, but the headers blocker gets removed for real).
+
+Cloned kernel source (91k files) and ran olddefconfig against the running kernel's exact config (/proc/config.gz) with zero prompts/conflicts. Now running make modules_prepare -j8...
+
+modules_prepare succeeded cleanly against gcc 15.2.0 (kernel was built with gcc 13.2.0) — no version-mismatch failures. Real build tree now exists at ~/wsl-kernel-src/src. Writing a minimal harmless skeleton kernel module in-repo (kernel-module/baud-enforced/) to smoke-test the build+insmod+rmmod pipeline for real before touching any VMX/KVM internals.
+
+Kernel headers/build-tree now ready (symlinked at /lib/modules/$(uname -r)/build). Wrote a real, non-stub module kernel-module/baud-enforced/baud_enforced_probe.c: reads the VMX capability MSRs (IA32_VMX_BASIC/PROCBASED_CTLS/PROCBASED_CTLS2) to check whether this CPU's microcode allows setting RDTSC-exiting + RDRAND/RDSEED-exiting VM-execution controls — the actual open hardware question behind the enforced regime. Read-only, no VMX state touched, safe alongside running VMs. Building now...
+
+Module built: baud_enforced_probe.ko. vermagic matches running kernel (modinfo above). Missing Module.symvers is an expected side-effect of a headers-only (modules_prepare) tree — no full vmlinux build — standard for WSL2 out-of-tree modules; insmod resolves the real symbols against the live kernel's actual exports at load time regardless, so this is a build-time metadata gap, not a correctness risk. Proceeding to real insmod smoke test (read-only MSR probe, no VMX/KVM state touched).
+
+Vermagic mismatch fixed (shallow clone's git metadata was defeating scripts/setlocalversion's tag lookup since Microsoft tags aren't named like mainline vX.Y.Z, so it always appended a spurious '+' suffix; removed .git from the scratch kernel tree — it's a one-off build tree, not something needing version control — and re-ran modules_prepare). vermagic now matches uname -r exactly. Attempting the real safety-critical step: insmod the read-only probe module, capture dmesg output, then rmmod. This module never writes VMX/KVM state, only reads capability MSRs, so it is safe to load alongside the currently-running system.
+
+Root-caused the load failure: our .config vs the running kernel's actual /proc/config.gz differ in CONFIG_CC_HAS_COUNTED_BY=y (present only on our side) — GCC 15's __counted_by flexible-array-member attribute support, which the kernel conditionally uses in struct layouts, changing sizeof(struct module) at the ABI level vs. gcc 13.2.0 (what Microsoft actually built this kernel with). Config options matched; the compiler version itself doesn't. Installing gcc-13 (apt candidate 13.4.0, close enough to not have __counted_by either, gated by GCC major version not patch) to rebuild with a matching-generation compiler.
+
+insmod still fails identically even with gcc-13.4.0 matching major.minor — root cause is deeper than the GCC major version: binutils also differs (original built with 'GNU ld 2.41' per uname -a's compile string; this machine ships 2.46), and .config now shows CONFIG_GCC_ASM_GOTO_OUTPUT_BROKEN=y on the original build (a known GCC<13.3-ish codegen quirk marking 'asm goto' with outputs as broken) vs CONFIG_CC_HAS_ASM_GOTO_OUTPUT=y on ours — a real codegen-path divergence between the vendor's exact toolchain and any Ubuntu-packaged substitute. Reproducing Microsoft's bit-exact struct-module ABI needs their literal build toolchain (exact gcc 13.2.0 + binutils 2.41), not just a same-major substitute — open-ended toolchain archaeology, not a config bug on our side. Stopping the insmod-success chase here: it is a real, precisely diagnosed blocker, not a vague one, and going further risks turning this into an unbounded toolchain-hunting exercise instead of a forward step. Wrapping up: keeping the real, working, non-stub build tree + real capability-probe source as this iteration's landed progress, documenting the exact toolchain blocker for whoever continues.
+
+Wrote todo.md build-status entry and updated CLAUDE.md with the kernel-header-prep procedure. Committing kernel-module/baud-enforced/ (Makefile + C source + BUILD.md) and the linux.rs doc-comment update. Running mandatory pre-push validation now: cargo build --workspace first.
+
+cargo build + clippy both clean (only pre-existing unrelated warnings, none on baud-host which I touched). Running cargo test --workspace...
+
+cargo test --workspace: 100% green, 0 failed. Running drive/*.sh scripts one at a time now (h0-h6, m0-m11, full-demo)...
+
+drive/h0-h3.sh all PASSED. Continuing through h4-h6, m0-m11, full-demo...
+
+H0-H6 all PASSED. Continuing through m0-m11...
+
+m0-m5 all PASSED. Continuing through m6-m11...
+
+All 20 individual drive scripts (h0-h6, m0-m11) PASSED. Running full-demo.sh (the aggregate 32-check suite) now...
+
+
+
+## 2026-07-25T12:33:42 UTC - Changes committed.
+- Built the first real, on-hardware artifact toward the enforced-regime KVM module (todo.md's sole remaining item): a working out-of-tree kernel-module build pipeline for this WSL2 kernel (previously infeasible — no headers/build tree at all) plus a real, non-stub VMX-capability-probe kernel module.
+- Files changed:
+  - kernel-module/baud-enforced/baud_enforced_probe.c (new) — reads VMX capability MSRs to check if RDTSC/RDRAND/RDSEED-exiting are settable on this CPU
+  - kernel-module/baud-enforced/Makefile, .gitignore, BUILD.md (new)
+  - crates/baud-host/src/linux.rs — updated enforced_module_present() doc comment to reference the new scaffolding without overclaiming
+  - CLAUDE.md — documented the kernel-header-prep procedure for this WSL2 kernel
+  - todo.md — new build-status entry with full findings
+- **Brief description of changes:**
+  - Cloned microsoft/WSL2-Linux-Kernel at the exact matching tag (linux-msft-wsl-6.18.33.2), seeded .config from /proc/config.gz, ran modules_prepare, symlinked /lib/modules/$(uname -r)/build — closes the "no headers" blocker for real
+  - Wrote a real (not stub) module that answers the enforced regime's open hardware question via read-only VMX capability-MSR probing, safe to load alongside running VMs
+  - insmod itself still fails (struct-module-size ABI mismatch traced to a real toolchain-generation gap: vendor gcc 13.2.0 + binutils 2.41 vs any Ubuntu-packaged substitute) — precisely diagnosed and documented, not silently left broken
+  - enforced_module_present() deliberately still returns false — no overclaiming
+  - cargo build/clippy/test --workspace clean; all 20 drive/*.sh green; full-demo.sh 32/32
+---

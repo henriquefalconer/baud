@@ -43,6 +43,34 @@ cargo run -p baud-cli -- host probe --json        # regime must NOT be "rejected
 H1+ (booting a real guest) runs here directly, e.g. `bash drive/h1.sh`. If `/dev/kvm` is ever missing,
 VT-x is off in firmware — everything else is already in place.
 
+## Building an out-of-tree kernel module against this WSL2 kernel
+
+The stock WSL2 kernel ships no `linux-headers-*` package, so `/lib/modules/$(uname -r)/build` is
+missing by default. To build one (needed for `kernel-module/baud-enforced/`, and any future
+out-of-tree KVM module work):
+
+```
+mkdir -p ~/wsl-kernel-src && cd ~/wsl-kernel-src
+git clone --depth 1 --branch linux-msft-wsl-$(uname -r | sed 's/-microsoft-standard-WSL2//') \
+    https://github.com/microsoft/WSL2-Linux-Kernel.git src
+cd src && rm -rf .git   # shallow clone defeats scripts/setlocalversion's tag lookup, which then
+                        # appends a spurious "+" to kernelrelease and breaks vermagic matching
+zcat /proc/config.gz > .config
+sudo apt-get install -y gcc-13   # match the running kernel's actual build-gcc major version;
+                                  # the default gcc here is newer and changes struct ABI details
+                                  # (e.g. CONFIG_CC_HAS_COUNTED_BY) that stock gcc doesn't have
+make CC=gcc-13 olddefconfig && make CC=gcc-13 modules_prepare -j$(nproc)
+sudo ln -sfn "$PWD" "/lib/modules/$(uname -r)/build"
+```
+
+Build modules with `KBUILD_MODPOST_WARN=1 make CC=gcc-13` (a headers-only tree has no
+`Module.symvers`, so modpost can't resolve ordinary exported symbols like `printk` at build
+time — this is expected, not a real error; resolution happens correctly at `insmod` time).
+As of this writing `insmod` still fails with a struct-module-size ABI mismatch even with a
+matching-major-version gcc, because Microsoft's exact build toolchain (gcc 13.2.0 + binutils
+2.41) differs from any Ubuntu-packaged substitute — see `kernel-module/baud-enforced/BUILD.md`
+for the full diagnosis.
+
 ## Git push from WSL2
 
 WSL2's native Linux `git` has no credential helper configured, so a plain `git push` fails with

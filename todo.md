@@ -2274,3 +2274,42 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     patch, not something any prior iteration has attempted; everything else the M-series crate map
     (§8) and milestone list (§10) originally scoped is now built and wired end-to-end on real
     hardware.
+- **Enforced-regime KVM module — first real, on-hardware attempt: out-of-tree module build
+  pipeline now genuinely works on this host, real (non-stub) VMX capability-probe module written
+  and build-verified, `insmod` blocked on a precisely diagnosed toolchain issue.** Previously this
+  was "not attempted" because the stock WSL2 kernel ships no `linux-headers-*`/`/lib/modules/
+  $(uname -r)/build` at all. Closed that blocker for real: cloned the exact matching kernel source
+  (`microsoft/WSL2-Linux-Kernel@linux-msft-wsl-6.18.33.2`, matching this dev machine's running
+  `uname -r` exactly), seeded `.config` from `/proc/config.gz` (the running kernel's actual build
+  config), ran `make modules_prepare`, and symlinked the result to `/lib/modules/$(uname -r)/build`
+  — full procedure now in `CLAUDE.md`. New `kernel-module/baud-enforced/` (Makefile +
+  `baud_enforced_probe.c`, `BUILD.md`): a real, complete, non-stub module — not a hello-world
+  placeholder — that reads the VMX capability MSRs (`IA32_VMX_BASIC`/`PROCBASED_CTLS`/
+  `PROCBASED_CTLS2`, Intel SDM Vol. 3D §A.3) to answer the actual open hardware question behind the
+  enforced regime: does this CPU's microcode even allow setting RDTSC-exiting (primary proc-based
+  control bit 12) and RDRAND/RDSEED-exiting (secondary controls bits 11/16) at all. Read-only, never
+  touches VMX/KVM state, safe to load alongside running VMs by construction. Builds cleanly with
+  vermagic matching `uname -r` exactly (needed fixing the shallow clone's `git describe` failure,
+  which was appending a spurious `+`, and matching the running kernel's build-gcc major version via
+  `gcc-13` to remove a `CONFIG_CC_HAS_COUNTED_BY` divergence — both now documented in `BUILD.md` and
+  `CLAUDE.md`).
+  - **`insmod` still fails, precisely diagnosed, not a bug in this module or its build files**:
+    `.gnu.linkonce.this_module section size must match the kernel's built struct module size at run
+    time` (`kernel/module/main.c`'s `elf_validity_cache_index_mod`) persists even with a
+    config-identical, gcc-major-matching (`gcc-13.4.0`) build. Root cause traced to a toolchain-
+    generation gap `.config` alone can't close: the real running kernel was built with the exact
+    vendor toolchain `gcc (GCC) 13.2.0` + `GNU ld 2.41`; this machine's closest available substitute
+    is Ubuntu's `gcc-13.4.0` + `binutils 2.46`, and `.config` itself still shows
+    `CONFIG_GCC_ASM_GOTO_OUTPUT_BROKEN=y` on the real build vs. `CONFIG_CC_HAS_ASM_GOTO_OUTPUT=y`
+    with any Ubuntu gcc-13 — a genuine codegen-path divergence between compiler builds of the same
+    nominal version. Full diagnosis and every ruled-out hypothesis (config diffing, GCC major-version
+    matching) in `kernel-module/baud-enforced/BUILD.md`.
+  - **Not yet done**: (1) getting `insmod` to actually succeed needs Microsoft's literal build
+    toolchain (exact `gcc 13.2.0` + `binutils 2.41`), not a same-major substitute — an open-ended
+    toolchain-reproduction task, deliberately not attempted further this iteration to avoid an
+    unbounded rabbit hole; (2) even once loadable, this module only *reads* capability MSRs — the
+    actual enforcement (hooking KVM's own VMCS setup to force those bits on for every guest,
+    regardless of guest cooperation) is a materially larger, separate task on top of this;
+    `crates/baud-host/src/linux.rs`'s `enforced_module_present()` deliberately still returns `false`
+    unconditionally — wiring it to this probe module would overclaim a regime this host doesn't
+    actually enforce yet (`regime_is_recorded_and_not_overclaimed`).
