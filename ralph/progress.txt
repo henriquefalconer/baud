@@ -3265,3 +3265,5 @@ Committed (2c65334). Pushing to origin/main.
   - New drive/m11.sh (5 checks): real boot -> frames_recorded=1 -> real frame row in DB -> rendered QOI decodes (hand-rolled decoder) to the guests actual pixels -> re-render is byte-identical -> synthetic fallback still works
   - cargo build/clippy/test --workspace clean; all 20 drive/*.sh green; full-demo.sh 32/32
 ---
+
+Post-push verification: local HEAD (17101b5) matches origin/main, working tree clean. todo.md still has one pending item (the enforced-regime KVM module — a real out-of-tree kernel patch, not attempted). This iteration ends with NEXT.
