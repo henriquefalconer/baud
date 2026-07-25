@@ -3252,3 +3252,16 @@ m9, m10 pass. Running full-demo.sh (32-check comprehensive suite) now.
 full-demo.sh: 32/32 CHECKS PASSED. All 20 drive/*.sh scripts (h0-h6, m0-m11, full-demo) green, zero regressions. Updating todo.md now, then committing.
 
 todo.md updated: nineteenth brick entry appended documenting the frame-persistence + real-replay-render work, eighteenth brick cross-referenced closed. Sole remaining open item: the enforced-regime KVM module. Committing now.
+
+Committed (2c65334). Pushing to origin/main.
+
+## 2026-07-25T11:59:51 UTC - Changes committed.
+- Real Msg::Frame persistence into frame_records + real replay-based POST /runs/:id/stream/render
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, crates/baud-server/migrations/0010_kvm_run_meta.sql, drive/m11.sh (new), todo.md
+- **Brief description of changes:**
+  - POST /run/kvm gained an optional run_id; when set, kernel/cmdline/tape is persisted to a new kvm_run_meta table and every real Msg::Frame the guest emits is drained and inserted into frame_records (previously captured in-process and dropped)
+  - POST /runs/:id/stream/render now checks kvm_run_meta first and, when a row exists, re-boots that exact kernel/cmdline/tape to replay the guests real pixels via baud_stream::to_rgba, instead of a hash-seeded synthetic gradient; falls back unchanged to the synthetic path for pre-pivot manually-seeded runs (drive/m5.sh, m8.sh, full-demo.sh unaffected)
+  - New unit test boot_and_drain_frames_is_deterministic_and_carries_real_pixels (real /dev/kvm, framebuffer-guest fixture)
+  - New drive/m11.sh (5 checks): real boot -> frames_recorded=1 -> real frame row in DB -> rendered QOI decodes (hand-rolled decoder) to the guests actual pixels -> re-render is byte-identical -> synthetic fallback still works
+  - cargo build/clippy/test --workspace clean; all 20 drive/*.sh green; full-demo.sh 32/32
+---
