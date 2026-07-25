@@ -2895,3 +2895,9 @@ full-demo.sh: 32/32 CHECKS PASSED. All 18 drive/*.sh scripts (h0-h6, m0-m9, full
   - drive/m9.sh: M9.5/M9.6 assert cumulative_generation (3, then 5); new M9.6b makes a third resume-generate HTTP call and asserts cumulative_generation==6, proving accumulation compounds across three separate real requests against real /dev/kvm.
   - Verification: cargo build/clippy --workspace clean (only pre-existing baud-tracing aya::Bpf warnings). cargo test --workspace: only the already-documented timer_tick_lands_at_identical_instruction hardware-timing flake, confirmed transient by isolated re-run and by passing cleanly inside drive/h4.sh later in this run. All 18 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
 ---
+
+Committed f9f9e98. Pushing to origin/main...
+
+Pushed f9f9e98 to origin/main. Verifying push (git fetch + confirm HEAD matches origin, working tree clean)...
+
+Verified: local HEAD (f9f9e98) == origin/main, working tree clean apart from this progress note. Re-reading todo.md: still pending — enforced-regime KVM module, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface (needs new WebSocket infra), framebuffer stream, consensus-cluster fuzz loop random-tactics/Driver-scheduler coupling (non-blocking follow-up). This iteration's step (persisting Driver exploration state — best/reservoir/generation/rng position — across HTTP requests, closing a gap flagged since the eleventh brick) is closed, committed, pushed, and verified green. Emitting NEXT.
