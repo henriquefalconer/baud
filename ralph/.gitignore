@@ -1,0 +1,3 @@
+# ralph shell-loop run artifacts (session JSON, assembled prompts, findings)
+.run/
+.archive/
