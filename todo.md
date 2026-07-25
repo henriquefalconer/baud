@@ -1026,7 +1026,9 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
       already exists in `baud-snapshot-store`, but nothing deserializes its bytes back into a
       `baud_snapshot::Universe` today). An `EventFd`-backed `Trigger` (replacing `NoIrqTrigger`)
       for a guest that blocks on IRQ4 instead of polling LSR is also open, tracked in `console.rs`'s
-      module doc. H6 and the rest of the M-series remain **not yet started**.
+      module doc. **H6 is now closed (see the H6 entry below, added a later iteration); the rest
+      of the M-series (rebuilding `baud-driver`/`baud-server`/snapshot-store wiring on this KVM
+      core) remains not yet started.**
 - **Learned this iteration**: the dev environment is now genuinely WSL2 Ubuntu (not the Windows-side
   git-bash environment several older entries below reference) — `python3` (3.14.4) is present at
   `/usr/bin/python3`, unlike the prior "known gap" noted below. `drive/m1.sh` was spot-checked and
@@ -1132,3 +1134,41 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     this real `/dev/kvm` host in one sitting: `drive/h0.sh` through `drive/h5.sh`, `drive/m0.sh`
     through `drive/m8.sh`, and `drive/full-demo.sh` — the first time this project's full
     drive-script suite has been all-green together.
+- **H6 (multi-VM fleet, todo.md §10) — CLOSED for real on real KVM hardware; `drive/h6.sh` now
+  exists and passes end-to-end.** Prior iterations had built `baud-host::Host::place` (pure core
+  arithmetic over a real `/sys` topology read) and `baud_vcpu::linux::pin_thread_to_core` (a real
+  `sched_setaffinity` wrapper) but nothing ever called either together, and no code spawned more
+  than one `Multiverse` at once — confirmed by grep before starting (`pin_thread_to_core` had zero
+  call sites anywhere in the workspace). This iteration added `baud_multiverse::linux::run_fleet`
+  (`crates/baud-multiverse/src/linux/mod.rs`): given a probed `Host` and a kernel image, it calls
+  `Host::place(n)`, spawns one `std::thread::scope`-scoped thread per assigned physical core, pins
+  each thread to its core via `pin_thread_to_core` (that function's first real call site), boots a
+  real `Multiverse` per thread with its own tape, and returns each VM's `HaltOutcome` plus its core
+  id and elapsed time. New test `linux::tests::fleet_of_vms_run_in_parallel_without_interference`
+  closes all three of H6's milestone bullets in one real-hardware test: (1) `capacity_refuses_
+  sibling_split` re-exercised against this host's *real* probed topology (`baud-host`'s own unit
+  test only ever used a synthetic fake topology) — placing one VM over real capacity is refused,
+  and a full-capacity placement never splits an SMT sibling pair; (2) no cross-VM interference —
+  `tape-echo-guest` (H2's fixture) is booted once per VM with a unique 4-byte tape suffix, and every
+  VM's console output is asserted to match exactly its own suffix, the same construction H5's
+  `thousand_branches_are_independent_and_deterministic` uses for branches, here applied across
+  genuinely concurrent OS threads instead of sequential `restore` calls; (3) aggregate throughput —
+  a single-VM serial baseline is timed, then the N-VM fleet is timed running concurrently, and the
+  fleet's wall time must stay under 85% of the naively-extrapolated N-times-serial estimate (real
+  measured margin on this dev machine, n=3: ~160-210ms parallel vs. a ~260-310ms threshold, stable
+  across 6+ consecutive runs — comfortably real, not a coin-flip). This host reports `capacity=3`,
+  so `n = host.capacity().clamp(1, 4)` sizes the fleet to exactly this machine's real placement
+  limit rather than a hardcoded guess. `cargo test -p baud-multiverse`: 64/64 (was 63/63). New
+  `drive/h6.sh` mirrors `h0.sh`-`h5.sh`'s exact pattern (host-probe gate, then the named test) and
+  passes end-to-end; `drive/h0.sh`-`h5.sh` and every `drive/m*.sh`/`full-demo.sh` re-verified with
+  zero regressions; `cargo build/test/clippy --workspace` all green, zero new warnings in any
+  touched file (`HaltOutcome` gained `#[derive(Debug)]` so `FleetVmResult` could derive it too — the
+  only change outside the new `run_fleet`/`FleetVmResult`/`FleetError` code and the new test).
+  - **Not yet done**: this closes H6 as todo.md §10 literally specifies it (many single-vCPU VMs
+    pinned across cores, running in parallel on one host, with no cross-VM interference and real
+    aggregate throughput) — it does not add NUMA-local memory placement (specs/baud-host.md §5
+    names it, but this dev machine is single-socket so there is nothing to exercise it against), and
+    it does not wire any real exploration/scheduling logic across the fleet's VMs (that is
+    `baud-driver`'s job, still part of the not-yet-started M-series rebuild). `run_fleet` always
+    boots fresh (no `restore`-based fleet-of-branches variant yet) — a natural follow-up once
+    `baud-driver`'s snapshot-tree exploration exists to actually want one.

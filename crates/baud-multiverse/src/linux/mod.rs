@@ -442,6 +442,7 @@ pub struct TimerTick {
 
 /// What running a booted guest to its first halt observed (specs/baud-multiverse.md §8's
 /// `ram_hash_at_first_hlt`).
+#[derive(Debug)]
 pub struct HaltOutcome {
     /// Every byte the guest wrote to the console (COM1 data register), in order.
     pub console_output: Vec<u8>,
@@ -789,6 +790,77 @@ impl Multiverse {
         }
         format!("blake3:{}", hasher.finalize().to_hex())
     }
+}
+
+/// One VM's result from [`run_fleet`] (H6, todo.md §10 — "many single-vCPU VMs pinned across
+/// cores explore in parallel on one host").
+#[derive(Debug)]
+pub struct FleetVmResult {
+    /// The logical CPU this VM's thread was pinned to (specs/baud-host.md §5's `sched_setaffinity`
+    /// rule).
+    pub core_id: usize,
+    pub outcome: HaltOutcome,
+    pub elapsed: std::time::Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FleetError {
+    #[error(transparent)]
+    Placement(#[from] baud_host::PlacementError),
+    #[error("VM on core {core_id} failed to pin its thread: {source}")]
+    Pin { core_id: usize, source: io::Error },
+    #[error("VM on core {core_id} failed to boot: {source}")]
+    Boot { core_id: usize, source: BootError },
+    #[error("VM on core {core_id} failed to run: {source}")]
+    Run { core_id: usize, source: DeterminismHole },
+    #[error("VM thread on core {core_id} panicked")]
+    ThreadPanicked { core_id: usize },
+}
+
+/// Run `tapes.len()` single-vCPU guests concurrently, one per physical core [`baud_host::Host::
+/// place`] assigns, each thread pinned to its own core via [`baud_vcpu::linux::
+/// pin_thread_to_core`] (specs/baud-host.md §5: "One physical core per VM | vCPU thread pinned
+/// via `sched_setaffinity`" — until this function, that call had zero call sites anywhere in the
+/// workspace, todo.md §14). Every VM boots the same kernel image with its own tape (`tapes[i]`)
+/// and runs to first halt; results come back in the same order as `tapes`, one per VM, so a
+/// caller can prove no VM observed another's state (each guest's own tape pins its own expected
+/// output, the same construction `thousand_branches_are_independent_and_deterministic` uses for
+/// branches). Refuses outright — never partially places — when `tapes.len()` exceeds this host's
+/// fleet capacity ([`baud_host::Host::place`]'s own contract).
+pub fn run_fleet(
+    host: &baud_host::Host,
+    kernel_path: &Path,
+    cmdline: &str,
+    tapes: Vec<Vec<u8>>,
+) -> Result<Vec<FleetVmResult>, FleetError> {
+    let placement = host.place(tapes.len())?;
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = placement
+            .assigned_cores
+            .iter()
+            .zip(tapes)
+            .map(|(core, tape)| {
+                let core_id = core.sibling_threads[0];
+                scope.spawn(move || -> Result<FleetVmResult, FleetError> {
+                    baud_vcpu::linux::pin_thread_to_core(core_id)
+                        .map_err(|source| FleetError::Pin { core_id, source })?;
+                    let start = std::time::Instant::now();
+                    let mut vm = Multiverse::boot(kernel_path, cmdline, 0, 1, tape, None)
+                        .map_err(|source| FleetError::Boot { core_id, source })?;
+                    let outcome = vm
+                        .run_to_first_halt()
+                        .map_err(|source| FleetError::Run { core_id, source })?;
+                    Ok(FleetVmResult { core_id, outcome, elapsed: start.elapsed() })
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or(Err(FleetError::ThreadPanicked { core_id: usize::MAX })))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -1469,6 +1541,93 @@ mod tests {
                 "branch {i} replayed from the same universe+suffix must produce byte-identical \
                  guest RAM — a double-run divergence here would mean this branch is not actually \
                  deterministic"
+            );
+        }
+    }
+
+    /// H6 (todo.md §10) — "many single-vCPU VMs pinned across cores explore in parallel on one
+    /// host": closes all three of H6's milestone bullets against real KVM hardware in one test —
+    /// aggregate throughput (running N VMs concurrently is meaningfully faster than running them
+    /// one at a time), `capacity_refuses_sibling_split` (this time against the *real* probed
+    /// topology, not `baud-host`'s own fake-topology unit test), and "no cross-VM interference"
+    /// (each VM's own tape pins its own expected output, so any VM observing another's state would
+    /// surface as a wrong-output assertion failure — the same construction H5's
+    /// `thousand_branches_are_independent_and_deterministic` already uses for branches, applied
+    /// here across genuinely concurrent OS threads pinned to distinct physical cores instead of
+    /// sequential `restore` calls). Also gives [`baud_vcpu::linux::pin_thread_to_core`] its first
+    /// real call site in the workspace (todo.md §14: written for spec compliance, zero callers
+    /// until this test).
+    #[test]
+    fn fleet_of_vms_run_in_parallel_without_interference() {
+        let host = baud_host::Host::probe();
+        assert!(
+            matches!(host.regime, baud_host::Regime::Cooperative | baud_host::Regime::Enforced),
+            "this test needs a real KVM-capable host; got {:?} ({:?})",
+            host.regime, host.reason
+        );
+
+        // `capacity_refuses_sibling_split` (specs/baud-host.md §6), exercised here against this
+        // real host's own probed topology rather than baud-host's own fake-topology unit test.
+        assert!(
+            host.place(host.capacity() + 1).is_err(),
+            "placing one VM over real capacity must be refused"
+        );
+        let full = host.place(host.capacity()).expect("placing at capacity must succeed");
+        assert!(full.no_two_on_sibling_threads(), "no two placed VMs may share an SMT sibling pair");
+
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let n = host.capacity().clamp(1, 4);
+
+        let suffix_for = |i: usize| -> Vec<u8> {
+            let i = i as u32;
+            vec![(i & 0xff) as u8, ((i >> 8) & 0xff) as u8, 0xCC, 0xDD]
+        };
+        let tapes: Vec<Vec<u8>> = (0..n).map(suffix_for).collect();
+
+        // Serial baseline: one VM, run alone, timed the same way each fleet VM is timed.
+        let mut baseline = Multiverse::boot(&kernel, cmdline, 0, 1, tapes[0].clone(), None)
+            .expect("baseline boot failed");
+        let serial_start = std::time::Instant::now();
+        baseline.run_to_first_halt().expect("baseline run failed");
+        let serial_one = serial_start.elapsed();
+
+        let parallel_start = std::time::Instant::now();
+        let results = run_fleet(&host, &kernel, cmdline, tapes.clone()).expect("fleet run failed");
+        let parallel_total = parallel_start.elapsed();
+        eprintln!(
+            "fleet_of_vms_run_in_parallel_without_interference: n={n} serial_one={serial_one:?} \
+             parallel_total={parallel_total:?}"
+        );
+
+        assert_eq!(results.len(), n);
+        let mut seen_cores = std::collections::HashSet::new();
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                result.outcome.console_output, tapes[i],
+                "VM {i} (core {}) must echo exactly its own tape suffix {:?}, got {:?} — a \
+                 mismatch means it observed a different VM's state",
+                result.core_id, tapes[i], result.outcome.console_output
+            );
+            assert!(
+                seen_cores.insert(result.core_id),
+                "two VMs landed on the same core {}",
+                result.core_id
+            );
+        }
+
+        if n >= 2 {
+            // Real parallel execution: N VMs concurrently must not cost anywhere near N times the
+            // serial baseline — a generous 0.85 factor leaves ample margin for host jitter on this
+            // dev machine's contended nested-virt host (todo.md §14 documents similar jitter for
+            // other timing-sensitive checks here) while still failing if the fleet secretly ran
+            // the VMs one at a time.
+            let serial_n_estimate = serial_one * n as u32;
+            assert!(
+                parallel_total < serial_n_estimate.mul_f64(0.85),
+                "fleet of {n} VMs took {parallel_total:?}, not meaningfully faster than the \
+                 {serial_n_estimate:?} estimated serial cost of one VM ({serial_one:?}) times {n} \
+                 — real concurrency is not happening"
             );
         }
     }

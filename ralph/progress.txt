@@ -2014,3 +2014,58 @@ drive/full-demo.sh: now PASSES end-to-end (32/32 checks) after the fix — was s
   - todo.md updated: root-caused two previously-vague 'not yet diagnosed' notes, documented both fixes
   - Full verification: cargo build/test/clippy --workspace all green, zero regressions; all 16 drive/*.sh scripts (h0-h5, m0-m8, full-demo) pass end-to-end on real /dev/kvm hardware in one sitting — first time for full-demo.sh and m1.sh both
 ---
+
+Committed fdf79f8. Pushing to origin/main...
+
+Post-push verification GREEN: local HEAD (fdf79f8) == origin/main via git fetch + rev-parse comparison. This tip already passed the full cargo build/test/clippy --workspace + all 16 drive/*.sh scripts before commit (no changes since). This closes two real, previously-undiscovered drive-script bugs (drive/m1.sh's cargo-run/health-check race, drive/full-demo.sh's set-e silent abort on 'baud doctor'). todo.md still has many pending items (H6 multi-VM fleet not started, M-series driver/snapshot-store wiring, Snapshot::branch's real UFFDIO_CONTINUE/memfd work, baud shell-into CLI/server verb needing WebSocket infra, the enforced-regime custom KVM module, H3's RDTSC-adversarial-guest gap), so this iteration ends with NEXT.
+
+## 2026-07-25T00:21:56 UTC - Session usage — build-6 [sonnet]
+- cost $4.339134949999999 (exact, from claude -p)
+- context 148,535 tok peak of 1M (15%) across 66 inference calls, monotonic
+- models sonnet-5 $4.3360 (in 196 / out 43,753 / cache-read 8,354,694) · haiku-4-5 $0.0031
+- subagents (4) sonnet-5 x4
+- transcript: ralph/.run/008-build-6.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Wrote run_fleet() in baud-multiverse (real thread-per-core fleet runner using Host::place + pin_thread_to_core), running cargo build -p baud-multiverse to check it compiles...
+
+Added fleet_of_vms_run_in_parallel_without_interference test in baud-multiverse (real H6 test: pins threads to cores, boots N VMs concurrently, asserts no interference + real speedup). Building now...
+
+H6 test fleet_of_vms_run_in_parallel_without_interference is stable across 6 back-to-back real-hardware runs (n=3, parallel ~160-210ms vs serial-estimate threshold ~260-310ms, always passes with margin). Now writing drive/h6.sh.
+
+Wrote drive/h6.sh mirroring h5.sh's pattern. Running it end-to-end now...
+
+drive/h6.sh PASSES end-to-end on real /dev/kvm. Now running full verification suite: cargo build --workspace...
+
+cargo build --workspace green. Running cargo clippy --workspace --all-targets...
+
+cargo clippy --workspace --all-targets clean, zero new warnings in touched files. Running cargo test --workspace...
+
+cargo test --workspace: 64/64 baud-multiverse (was 63/63), all crates green, 0 failures. Now running drive/*.sh one at a time per CLAUDE.md protocol, starting with h0.sh...
+
+drive/h0.sh through h4.sh all re-verified green with zero regressions from the H6 fleet-runner addition. Running h5.sh (the slower one, ~1000 real VM lifecycles)...
+
+h5.sh green (H6 already verified separately). H0-H6 all pass with zero regressions. Now running m0.sh...
+
+m0-m6 all green. Continuing with m7, m8, full-demo...
+
+m7, m8 green. Running the final drive script, full-demo.sh (chains M0-M8)...
+
+ALL 17 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end with zero regressions. Updated todo.md with the new H6 entry (run_fleet, drive/h6.sh, fleet_of_vms_run_in_parallel_without_interference). Preparing final commit.
+
+## 2026-07-25T00:47:12 UTC - Changes committed.
+- Implemented H6 (multi-VM fleet, todo.md §10) for real on real KVM hardware
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, drive/h6.sh (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Added baud_multiverse::linux::run_fleet: places N single-vCPU VMs one per physical core via baud_host::Host::place, spawns one pinned OS thread per core via baud_vcpu::linux::pin_thread_to_core (its first real call site in the workspace — previously written but never called), boots a real Multiverse per thread with its own tape, and returns each VM's HaltOutcome + core id + elapsed time
+  - New test linux::tests::fleet_of_vms_run_in_parallel_without_interference closes all three H6 milestone bullets in one real-hardware test: capacity_refuses_sibling_split against the real probed topology (not baud-host's synthetic fake), no cross-VM interference (each VM's own tape suffix pins its own expected output), and aggregate throughput (fleet wall time stays well under a naive N-times-serial estimate, stable across 6+ consecutive real-hardware runs)
+  - New drive/h6.sh mirrors h0.sh-h5.sh's exact pattern (host-probe gate, then the named test); passes end-to-end
+  - HaltOutcome gained #[derive(Debug)] so the new FleetVmResult could derive it too
+  - todo.md §14 updated with the new H6 build-status entry and a correction to the stale 'H6 not yet started' note in the H5 entry
+  - Full verification: cargo build/test/clippy --workspace all green (baud-multiverse 64/64, was 63/63), zero regressions, zero new clippy warnings in any touched file; all 17 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end on real /dev/kvm hardware in one sitting
+---
