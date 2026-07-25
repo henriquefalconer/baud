@@ -553,12 +553,44 @@ impl Multiverse {
         tape: Vec<u8>,
         dirty_ring_entries: Option<u32>,
     ) -> Result<Self, BootError> {
+        Self::boot_with_rdseed_sites(kernel_path, cmdline, base, k, tape, dirty_ring_entries, [])
+    }
+
+    /// [`boot`](Self::boot) plus this guest image's known `rdseed`→`UD2` rewrite sites
+    /// (`baud_packages::rewrite_rdseed`'s `RdseedRewriteReport`, todo.md §4), keyed by the guest
+    /// address of the `UD2` itself and registered on the work-clock via
+    /// [`WorkClock::with_rdseed_sites`](crate::timesource::WorkClock::with_rdseed_sites) before any
+    /// guest code runs.
+    ///
+    /// Only sites passed here are ever *served* a value: under the enforced-regime patched module
+    /// (`kernel-module/baud-enforced/ud2-enforce.patch`), every `UD2` the guest executes traps to
+    /// userspace, and any that this table does not recognize gets its `#UD` re-injected verbatim
+    /// (`baud_vcpu::DispatchOutcome::ReinjectUd`) — a real invalid opcode, or the guest kernel's
+    /// own `BUG()`/`WARN_ON()`, both of which also compile to a bare `UD2`, keep behaving exactly
+    /// as they would with no patch loaded. Passing an empty table (what [`boot`](Self::boot) does)
+    /// is therefore always safe, never a silent "serve a guess for every `#UD`".
+    ///
+    /// There is no automatic wiring from an image build to this table yet: `baud image build`
+    /// produces the report, but nothing plumbs it into a boot (todo.md §14). Callers — today, only
+    /// `rdseed_enforced_regime_is_bit_exact_across_boots` — pass the hand-verified sites of a fixed
+    /// fixture image, recorded in that fixture's own `BUILD.md`.
+    pub fn boot_with_rdseed_sites(
+        kernel_path: &Path,
+        cmdline: &str,
+        base: u64,
+        k: u64,
+        tape: Vec<u8>,
+        dirty_ring_entries: Option<u32>,
+        rdseed_sites: impl IntoIterator<Item = (u64, baud_vcpu::EnforcedRdseedSite)>,
+    ) -> Result<Self, BootError> {
         let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, dirty_ring_entries)?;
         // Must come before `LinuxBranchCounter::new()` — see `entropy_seed_from_tape`'s doc.
         let entropy_seed = entropy_seed_from_tape(&tape);
         let counter = LinuxBranchCounter::new()?;
         let bus = DeviceBus::with_tape(tape);
-        let time = WorkClock::new(base, k, counter).with_entropy_seed(entropy_seed);
+        let time = WorkClock::new(base, k, counter)
+            .with_entropy_seed(entropy_seed)
+            .with_rdseed_sites(rdseed_sites);
         Ok(Multiverse { guest, bus, time, dirty_ring })
     }
 
@@ -1387,6 +1419,127 @@ mod tests {
             second_outcome.console_output, first_outcome.console_output,
             "enforced-regime RDRAND is served entirely from a tape-seeded deterministic PRNG, so it \
              must reproduce bit-for-bit across two boots of the same (empty) tape"
+        );
+    }
+
+    /// `tests/fixtures/rdseed-guest/`'s payload: writes one marker byte (`'S'`) to COM1, then hits
+    /// the `UD2` that `baud_packages::rewrite_rdseed`'s build-time pass left where an `rdseed eax`
+    /// used to be, then echoes the 4 raw result bytes to COM1 and halts. Unlike `rdrand-guest`,
+    /// **the checked-in image contains no `rdseed` opcode at all** — the rewrite is already baked
+    /// in, exactly as a real `baud image build` would emit it. See that directory's `BUILD.md`.
+    fn rdseed_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rdseed-guest/bzImage")
+    }
+
+    /// The single marker byte `tests/fixtures/rdseed-guest/payload.s` writes to COM1 *before* the
+    /// rewritten site — the only byte the fixture emits whenever the `UD2` is not served (stock
+    /// module, or enforced module with the site unregistered), since it has no IDT and the
+    /// resulting `#UD` triple-faults.
+    const RDSEED_GUEST_MARKER: &[u8] = b"S";
+
+    /// Guest address of `rdseed-guest`'s one `UD2`, and the site descriptor for it. Hand-verified
+    /// and derived in `tests/fixtures/rdseed-guest/BUILD.md`'s "Where the UD2 is" table
+    /// (`layout::KERNEL_LOAD_ADDR + layout::KERNEL_64BIT_ENTRY_OFFSET + 0x07`); `build.py` re-prints
+    /// the same three numbers on every regeneration of that image. Hardcoded rather than derived
+    /// from an image build because nothing plumbs `RdseedRewriteReport` into a boot yet (todo.md
+    /// §14) — the same "fixed, hand-verified binary" arrangement `rdtsc-guest`/`rdrand-guest`
+    /// already use.
+    const RDSEED_GUEST_UD2_ADDR: u64 = 0x0020_0207;
+    /// `gpr_index: 0` == `RAX`/`EAX` (the `0F C7 F8` encoding's ModRM `rm` field);
+    /// `length: 3` == the original `RDSEED r32` encoding, so a served value resumes at
+    /// `RDSEED_GUEST_UD2_ADDR + 3` — past the `NOP` padding, not at it.
+    const RDSEED_GUEST_SITE: baud_vcpu::EnforcedRdseedSite =
+        baud_vcpu::EnforcedRdseedSite { gpr_index: 0, length: 3 };
+
+    /// Enforced-regime RDSEED (todo.md §4, §3.8), the third and last of the enforced-instruction
+    /// tests. Requires the patched `kvm_intel.ko` (`kernel-module/baud-enforced/ud2-enforce.patch`
+    /// layered on `rdrand-enforce.patch` on `rdtsc-enforce.patch`) already loaded in place of the
+    /// stock module — `#[ignore]`d so a normal `cargo test --workspace` (stock module) never runs
+    /// it; only `drive/h3-enforced-rdseed.sh` invokes it by name.
+    ///
+    /// RDSEED's enforced path is structurally different from RDTSC's and RDRAND's, and this is what
+    /// proves that difference works end to end. `SECONDARY_EXEC_RDSEED_EXITING` is not settable on
+    /// this host's VMX microcode at all (`kernel-module/baud-enforced/BUILD.md`'s probe report), so
+    /// the instruction is never trapped as an instruction: `baud-packages` rewrites every `rdseed`
+    /// opcode to `UD2` + `NOP` at **build** time, and the `UD2`'s ordinary `#UD` exception exit
+    /// (already in stock KVM's exception bitmap — no exec-control patch needed) is what reaches
+    /// userspace. Because a `UD2` carries no destination-register encoding and no length, both come
+    /// from this crate's own site table (`RDSEED_GUEST_SITE`, registered via
+    /// [`Multiverse::boot_with_rdseed_sites`]) rather than from the trap — which is exactly why the
+    /// kernel handler leaves RIP *at* the `UD2` and userspace advances it.
+    ///
+    /// Asserts the same end state as its two siblings: the guest gets past the marker (so the
+    /// value really was served, not `#UD`-injected) and the 4 echoed bytes are bit-identical across
+    /// two boots of the same (empty) tape, since `serve_enforced_rdseed` draws from the same
+    /// tape-seeded `SplitMix64` stream `serve_enforced_rdrand` does.
+    #[test]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdseed.sh"]
+    fn rdseed_enforced_regime_is_bit_exact_across_boots() {
+        let kernel = rdseed_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let sites = [(RDSEED_GUEST_UD2_ADDR, RDSEED_GUEST_SITE)];
+
+        let mut first =
+            Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, sites)
+                .expect("first boot failed");
+        let first_outcome =
+            first.run_to_first_halt().expect("first run failed (enforced RDSEED exit not served?)");
+        assert_eq!(
+            first_outcome.console_output.len(),
+            RDSEED_GUEST_MARKER.len() + 4,
+            "guest must get past the marker and echo all 4 served rdseed value bytes under the \
+             enforced regime — a marker-only output means the UD2's #UD was re-injected instead of \
+             served, i.e. the site table did not match the trapping RIP: {:?}",
+            first_outcome.console_output
+        );
+        assert_eq!(&first_outcome.console_output[..RDSEED_GUEST_MARKER.len()], RDSEED_GUEST_MARKER);
+
+        let mut second =
+            Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, sites)
+                .expect("second boot failed");
+        let second_outcome =
+            second.run_to_first_halt().expect("second run failed (enforced RDSEED exit not served?)");
+        assert_eq!(
+            second_outcome.console_output, first_outcome.console_output,
+            "enforced-regime RDSEED is served entirely from a tape-seeded deterministic PRNG, so it \
+             must reproduce bit-for-bit across two boots of the same (empty) tape"
+        );
+    }
+
+    /// The other half of `ud2-enforce.patch`'s contract, and the one that keeps it safe to load at
+    /// all: a `UD2` the site table does *not* know about must have its `#UD` re-injected untouched,
+    /// never served a bogus value. A real guest kernel's `BUG()`/`WARN_ON()` compiles to a bare
+    /// `UD2`, and every genuinely invalid opcode raises the same `#UD`, so a handler that served
+    /// every trapping `UD2` would silently turn kernel panics into wrong-answer executions.
+    ///
+    /// Uses the same `rdseed-guest` fixture with an **empty** site table (plain [`Multiverse::boot`]
+    /// — which is what every other caller in this workspace already does), making its one `UD2`
+    /// indistinguishable, from the VMM's point of view, from an unrelated `BUG()`. Expected end
+    /// state is byte-identical to what the *stock* module produces for this image: `#UD` injected
+    /// at the untouched RIP, no IDT to catch it, triple fault, `DispatchOutcome::Halted`, marker
+    /// byte only.
+    ///
+    /// The two failure modes this catches are exactly the two that matter. If
+    /// `handle_baud_ud2_exit` served a value regardless of the table (or if `resolve_rdseed_site`
+    /// matched too loosely), the guest would run on and emit 5 bytes instead of 1. If `reinject_ud`
+    /// failed to inject anything, RIP would still be sitting on the `UD2` (the kernel handler never
+    /// advances it) and the guest would re-trap the same instruction forever — this test would hang
+    /// rather than fail, which is itself a legible signal in `drive/h3-enforced-rdseed.sh`'s output.
+    #[test]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdseed.sh"]
+    fn ud2_outside_the_rdseed_site_table_reinjects_ud() {
+        let kernel = rdseed_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut guest =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+        let outcome = guest.run_to_first_halt().expect("run failed");
+        assert_eq!(
+            outcome.console_output, RDSEED_GUEST_MARKER,
+            "a UD2 with no registered rdseed site must have its #UD re-injected verbatim (a real \
+             BUG()/WARN_ON() or invalid opcode must keep faulting exactly as it would with no \
+             patch loaded), so this guest must never get past the marker: {:?}",
+            outcome.console_output
         );
     }
 

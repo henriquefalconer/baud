@@ -25,9 +25,12 @@
 // a periodic real exit, e.g. a harmless forced PIO write — see
 // `crates/baud-multiverse/tests/fixtures/timer-guest/BUILD.md`).
 
-use super::{run_and_convert, write_enforced_rdrand_result, write_enforced_rdtsc_result};
+use super::{
+    reinject_ud, run_and_convert, write_enforced_rdrand_result, write_enforced_rdseed_result,
+    write_enforced_rdtsc_result, ConvertedExit,
+};
 use crate::boundary::{ExecPoint, PmuStepper};
-use crate::{dispatch_exit, Bus, DispatchOutcome, TimeSource};
+use crate::{dispatch_exit, Bus, DispatchOutcome, Exit, TimeSource};
 use kvm_bindings::kvm_regs;
 use kvm_ioctls::VcpuFd;
 use perf_event::events::Hardware;
@@ -141,7 +144,18 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
             if self.current_rcb()? >= self.poll_target {
                 return Ok(());
             }
-            match run_and_convert(self.vcpu) {
+            let exit = match run_and_convert(self.vcpu) {
+                Ok(ConvertedExit::Exit(exit)) => Ok(exit),
+                // `converted` (a fieldless variant) borrows nothing further from `self.vcpu` past
+                // this match, so this fresh `get_regs()` is not competing with any live borrow —
+                // see `ConvertedExit`'s doc for why the same fetch cannot happen one level down,
+                // inside `run_and_convert` itself.
+                Ok(ConvertedExit::RdseedTrapNeedsRip) => {
+                    self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
+                }
+                Err(e) => Err(e),
+            };
+            match exit {
                 Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => continue,
                     Ok(DispatchOutcome::SingleStepBoundary) => continue,
@@ -157,6 +171,16 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                             Err(e) => return Err(e),
                         }
                     }
+                    Ok(DispatchOutcome::ServeEnforcedRdseed { rip, site, value }) => {
+                        match write_enforced_rdseed_result(self.vcpu, rip, site, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ReinjectUd) => match reinject_ud(self.vcpu) {
+                        Ok(()) => continue,
+                        Err(e) => return Err(e),
+                    },
                     Ok(DispatchOutcome::Halted) => {
                         return Err(io::Error::other("guest halted while armed for interrupt injection"))
                     }
@@ -185,7 +209,14 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     fn step(&mut self) -> io::Result<ExecPoint> {
         super::set_singlestep(self.vcpu, true, true)?;
         let result = loop {
-            match run_and_convert(self.vcpu) {
+            let exit = match run_and_convert(self.vcpu) {
+                Ok(ConvertedExit::Exit(exit)) => Ok(exit),
+                Ok(ConvertedExit::RdseedTrapNeedsRip) => {
+                    self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
+                }
+                Err(e) => Err(e),
+            };
+            match exit {
                 Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => continue,
                     Ok(DispatchOutcome::SingleStepBoundary) => break Ok(()),
@@ -201,6 +232,16 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                             Err(e) => break Err(e),
                         }
                     }
+                    Ok(DispatchOutcome::ServeEnforcedRdseed { rip, site, value }) => {
+                        match write_enforced_rdseed_result(self.vcpu, rip, site, value) {
+                            Ok(()) => continue,
+                            Err(e) => break Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ReinjectUd) => match reinject_ud(self.vcpu) {
+                        Ok(()) => continue,
+                        Err(e) => break Err(e),
+                    },
                     Ok(DispatchOutcome::Halted) => {
                         break Err(io::Error::other("guest halted mid single-step boundary walk"))
                     }
@@ -226,7 +267,14 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
 
     fn run_until_irq_window(&mut self) -> io::Result<()> {
         loop {
-            match run_and_convert(self.vcpu) {
+            let exit = match run_and_convert(self.vcpu) {
+                Ok(ConvertedExit::Exit(exit)) => Ok(exit),
+                Ok(ConvertedExit::RdseedTrapNeedsRip) => {
+                    self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
+                }
+                Err(e) => Err(e),
+            };
+            match exit {
                 Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
                     Ok(DispatchOutcome::Continue) => {
                         if self.vcpu.get_kvm_run().ready_for_interrupt_injection != 0 {
@@ -257,6 +305,16 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                             Err(e) => return Err(e),
                         }
                     }
+                    Ok(DispatchOutcome::ServeEnforcedRdseed { rip, site, value }) => {
+                        match write_enforced_rdseed_result(self.vcpu, rip, site, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ReinjectUd) => match reinject_ud(self.vcpu) {
+                        Ok(()) => continue,
+                        Err(e) => return Err(e),
+                    },
                     Ok(DispatchOutcome::Halted) => {
                         return Err(io::Error::other("guest halted waiting for an interrupt window"))
                     }

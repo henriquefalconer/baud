@@ -69,10 +69,10 @@ commit a kernel change."
 
 1. `vmx.c:4443` — do not clear `CPU_BASED_RDTSC_EXITING` (leave it set); same idea for
    `SECONDARY_EXEC_RDRAND_EXITING` in the equivalent secondary-exec-control computation. RDSEED
-   is skipped: `baud_enforced_probe`'s own `dmesg` report already proved
+   is skipped here: `baud_enforced_probe`'s own `dmesg` report already proved
    `SECONDARY_EXEC_RDSEED_EXITING` is **not settable on this host's VMX microcode**
-   (`BUILD.md`'s "Result"), so this dev machine can only ever validate the RDTSC+RDRAND half of
-   enforcement — spec'd, not a new limitation.
+   (`BUILD.md`'s "Result"). *This was originally recorded as a permanent ceiling on what this dev
+   machine could validate; it is not — see "RDSEED, without any secondary control at all" below.*
 2. Add a new, small, self-contained handler, e.g. `handle_baud_deterministic_exit`, replacing the
    `kvm_handle_invalid_op` entries for `RDRAND`/`RDSEED` and filling the previously-empty `RDTSC`
    slot. It does not emulate anything itself — it fills a payload (which instruction; for RDRAND,
@@ -85,6 +85,46 @@ commit a kernel change."
    struct in the `kvm_run` exit-reason union (mirroring `kvm_run.rdmsr`/`wrmsr`'s existing
    `X86_RDMSR`/`X86_WRMSR` shape) carries: instruction kind (RDTSC=0/RDRAND=1), destination GPR
    index for RDRAND.
+
+## RDSEED, without any secondary control at all (`ud2-enforce.patch`)
+
+The two bullets above, and everything in `BUILD.md`'s "Result", assumed RDSEED enforcement meant
+*trapping the `RDSEED` instruction* — which this host's microcode makes impossible. **That
+assumption is what was wrong, not the hardware finding.** `baud-packages`
+(`crates/baud-packages/src/rdseed.rs`, todo.md §4) rewrites every `rdseed` opcode in a guest ELF's
+executable sections to `UD2` (`0F 0B`) + `NOP` padding at **build** time, in place and
+length-preserving. The real `RDSEED` opcode therefore never executes in the guest at all, and
+`SECONDARY_EXEC_RDSEED_EXITING` is moot for this path — a host that cannot set that bit (this one)
+enforces RDSEED exactly as well as one that can.
+
+What makes this cheap on the kernel side is a second finding, from reading `vmx.c` rather than
+guessing: **`#UD` already causes a VM-exit with no patch whatsoever.**
+`vmx_update_exception_bitmap` (`vmx.c:~819`) unconditionally includes `UD_VECTOR` in the exception
+bitmap, because stock KVM wants the trap for its own software-instruction-emulation fallback. Every
+guest `#UD` already takes exactly one path: `EXIT_REASON_EXCEPTION_NMI` → `handle_exception_nmi` →
+`is_invalid_opcode(intr_info)` (`vmx.c:~5212`) → `handle_ud` (`x86.c:~8054`). So `ud2-enforce.patch`
+adds **no exec-control change and no exception-bitmap change at all** — the earlier assumption that
+it would need one (and that `kvm-bindings` 0.14.1's missing `exception_bitmap` field was therefore a
+problem) is simply not applicable. It intercepts that one branch with `handle_baud_ud2_exit`, which:
+
+1. Reads the 2 bytes at `kvm_get_linear_rip(vcpu)` via `kvm_read_guest_virt` — the same read
+   `handle_ud` itself already does for its force-emulation-prefix signature check.
+2. If the read fails, or the bytes are not exactly `0F 0B`, tail-calls `handle_ud(vcpu)` unchanged.
+   This is load-bearing: the Linux kernel's own `BUG()`/`WARN_ON()` compile to a bare `UD2`, and
+   every genuinely invalid opcode raises the same `#UD`, so anything not positively identified must
+   keep behaving exactly as it does with no patch loaded.
+3. Otherwise sets `KVM_EXIT_BAUD_DETERMINISM` with payload low byte `2` and returns 0.
+
+Unlike the RDTSC/RDRAND handlers, it **never calls `kvm_skip_emulated_instruction`**: RIP stays
+exactly at the trapping `UD2`. Only userspace's image-specific site table knows how far a
+*confirmed* site's `UD2`+`NOP` padding extends (3 bytes for `RDSEED r32`, 4 for `r64`) and which
+GPR the original instruction targeted — the `UD2` that replaced it encodes neither — so userspace
+advances RIP itself on a hit, and re-injects `#UD` at that same untouched RIP
+(`KVM_SET_VCPU_EVENTS`) on a miss, which is what a native un-intercepted fault would have reported.
+
+The consequence for the regime as a whole: **RDTSC + RDRAND + RDSEED are all enforceable on this
+exact dev host**, not just the first two. `drive/h3-enforced-rdseed.sh` exercises both halves
+(served site, and re-injected non-site) against real `/dev/kvm`.
 
 ## The userspace side needs zero changes to any pinned crate
 
@@ -106,14 +146,24 @@ code, not a dependency-version problem.
 
 ## What is still open after this design
 
-- The design above is unbuilt and untested — no line of `vmx.c` has been changed, no
-  `kvm_intel.ko` rebuilt, no boot attempted with it. That is the next concrete step, now scoped
-  down from "materially larger, separate task" to a bounded patch against three known source
-  locations plus one new userspace match arm.
-- RDSEED-exiting stays permanently out of reach on this exact host (hardware, not code) —
-  whoever builds this next should treat that as expected, not a regression, and the resulting
-  regime is "RDTSC+RDRAND enforced, RDSEED still CPUID-masked" until validated on hardware that
-  does expose `SECONDARY_EXEC_RDSEED_EXITING`.
-- `crates/baud-host/src/linux.rs`'s `enforced_module_present()` should keep returning `false`
-  until a built, loaded, *and* boot-tested module exists — this document is a plan, not evidence
-  of a working regime (`regime_is_recorded_and_not_overclaimed`).
+*(This section was written when nothing here was built. Struck through where since superseded.)*
+
+- ~~The design above is unbuilt and untested~~ — all three patches now exist, build against
+  `~/wsl-kernel-src/src`, and are hardware-tested: `rdtsc-enforce.patch` and `rdrand-enforce.patch`
+  via `drive/h3-enforced-rdtsc.sh`/`drive/h3-enforced-rdrand.sh`, and `ud2-enforce.patch` via
+  `drive/h3-enforced-rdseed.sh` — both its served-site and re-injected-non-site halves pass against
+  real `/dev/kvm` with the patched module swapped in, and the stock module restores cleanly on exit.
+- ~~RDSEED-exiting stays permanently out of reach on this exact host~~ — true of the *secondary
+  control*, irrelevant to the *regime*: see "RDSEED, without any secondary control at all" above.
+  The resulting regime is "RDTSC + RDRAND + RDSEED all enforced", on this host, with no hardware
+  caveat left.
+- `crates/baud-host/src/linux.rs`'s `enforced_module_present()` still returns `false` — but now for
+  a different reason than "no such module exists" (see that function's own doc): the patched module
+  is only ever swapped in transiently by the `drive/h3-enforced-*.sh` scripts, which always restore
+  the stock one, so no ordinary process on this host is running under it. Wiring this to a real
+  runtime check (a `KVM_CHECK_EXTENSION` the patches would have to add) is the outstanding work.
+- Nothing plumbs a real `baud image build`'s `RdseedRewriteReport` into
+  `Multiverse::boot_with_rdseed_sites` yet — the one enforced-RDSEED test hardcodes the
+  hand-verified site of a fixed fixture image
+  (`crates/baud-multiverse/tests/fixtures/rdseed-guest/BUILD.md`). An explicit scope cut, not a gap
+  in the serve-path mechanism.

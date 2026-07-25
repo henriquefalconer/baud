@@ -104,11 +104,18 @@ VMX capability report for the enforced regime (todo.md "enforced-regime KVM modu
 ```
 
 This is a genuine, previously-unknown hardware finding, not a bug in the probe: this
-specific host's VMX microcode does not expose the RDSEED-exiting secondary control, so the
-enforced regime (as specified — force RDTSC *and* RDRAND *and* RDSEED all to exit) cannot
-be hardware-feasible here regardless of what module code is written. This does not block
-building the module (or testing it on a different host whose microcode does expose the
-bit); it means this exact dev machine can never itself validate a fully-enforced run.
+specific host's VMX microcode does not expose the RDSEED-exiting secondary control.
+
+**The conclusion originally drawn from it — "the enforced regime cannot be hardware-feasible
+here regardless of what module code is written" — was wrong, and is superseded.** It assumed
+enforcing RDSEED meant trapping the `RDSEED` *instruction*. It does not: `baud-packages`
+(`crates/baud-packages/src/rdseed.rs`, todo.md §4) rewrites every `rdseed` opcode to `UD2` +
+`NOP` padding at build time, so the real opcode never executes in the guest and this
+secondary control is moot for that path. The resulting `UD2`'s `#UD` is already trapped by
+the exception bitmap stock KVM sets unconditionally, and `ud2-enforce.patch` serves it — see
+`ENFORCEMENT_DESIGN.md`'s "RDSEED, without any secondary control at all". The line above
+stays as recorded because the *measurement* is still true and still worth knowing; only the
+inference from it changed. This dev machine can validate a fully-enforced run.
 
 **Not yet done**: implementing the actual enforcement (hooking KVM's own VMCS setup to
 force the RDTSC/RDRAND/RDSEED-exiting bits on for every guest, regardless of guest

@@ -106,14 +106,29 @@ impl CapabilityChecks for LinuxChecks {
         false
     }
 
-    /// The enforced regime (specs/baud-host.md §8 future work) needs an out-of-tree KVM module
-    /// that does not exist yet. `kernel-module/baud-enforced/` has a real VMX-capability probe
-    /// (build- *and* insmod-verified on this dev host — see its BUILD.md) but no enforcement
-    /// logic, so this stays `false` until a module that actually forces the RDTSC/RDRAND/RDSEED-
-    /// exiting bits ships — reporting presence any earlier would overclaim guarantees this host
-    /// doesn't have (`regime_is_recorded_and_not_overclaimed`). Even once such a module exists,
-    /// the probe itself already found this exact dev host's VMX microcode does not allow setting
-    /// RDSEED-exiting, so the enforced regime cannot be hardware-feasible here regardless.
+    /// The enforced regime (specs/baud-host.md §8) needs a patched, out-of-tree `kvm_intel.ko`
+    /// (`kernel-module/baud-enforced/{rdtsc,rdrand,ud2}-enforce.patch`, ENFORCEMENT_DESIGN.md).
+    /// All three instructions the regime covers are now implemented there — RDTSC via
+    /// `CPU_BASED_RDTSC_EXITING`, RDRAND via the exit-handler table, and RDSEED via
+    /// `baud-packages`' build-time `rdseed`→`UD2` rewrite plus `ud2-enforce.patch`'s
+    /// `handle_baud_ud2_exit`.
+    ///
+    /// **This reports whether the patched module is *loaded right now*, which is a different
+    /// question from whether it exists**, and it deliberately stays `false`: that module is only
+    /// ever swapped in transiently, by `drive/h3-enforced-{rdtsc,rdrand,rdseed}.sh`, each of which
+    /// unconditionally restores the stock module on exit (CLAUDE.md). Every other process on this
+    /// host — including whatever calls this — therefore runs against the stock module, and
+    /// reporting otherwise would overclaim guarantees the running kernel does not provide
+    /// (`regime_is_recorded_and_not_overclaimed`). Wiring this to a real runtime check (e.g. a
+    /// `KVM_CHECK_EXTENSION` for `KVM_EXIT_BAUD_DETERMINISM`, which the patches do not add yet)
+    /// is the outstanding work here, not the enforcement logic itself.
+    ///
+    /// The probe module's finding that this host's VMX microcode does not allow setting
+    /// `SECONDARY_EXEC_RDSEED_EXITING` (`kernel-module/baud-enforced/BUILD.md`'s "Result") is **no
+    /// longer a blocker for the RDSEED half**, as it was assumed to be when that probe was written:
+    /// the build-time `UD2` rewrite means the real `RDSEED` opcode never executes in the guest, so
+    /// no secondary control is needed — the `UD2`'s `#UD` is already trapped by the exception
+    /// bitmap stock KVM sets unconditionally.
     fn enforced_module_present(&self) -> bool {
         false
     }

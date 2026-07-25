@@ -586,7 +586,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 | 12 | An unhandled VM exit silently continues | Catch-all returns `Err(DeterminismHole)` | `no_unmodeled_exit_is_silent` |
 | 13 | Host TSC instability (`KVM_GET_TSC_KHZ` = -EIO) | Pin constant-/invariant-TSC host; reject unstable | `host_tsc_is_stable` (H0) |
 | 14 | Making guest RNG deterministic without modifying the guest | Modern CRNG output is a pure function of its seed material; the hypervisor pins every seeding input — fixed `SETUP_RNG_SEED` boot seed, trapped `rdtsc`/`rdrand`, rewritten `rdseed`, deterministic interrupt timing, tape-fed-or-omitted virtio-rng; vDSO getrandom rides on syscall determinism | `entropy_guest_is_deterministic`; `initial_crng_state_is_reproducible`; `virtio_rng_reseed_is_deterministic` |
-| 15 | Raw un-gated `rdseed` bypasses CPUID masking | Build-time `rdseed`→`UD2`(+`NOP`) rewrite of all executable sections; VMM intercepts the `#UD` via the VMCS exception bitmap, verifies the site, serves a tape value, advances RIP | `no_rdseed_opcode_survives_in_image`; `image_rewrites_rdseed` |
+| 15 | Raw un-gated `rdseed` bypasses CPUID masking | Build-time `rdseed`→`UD2`(+`NOP`) rewrite of all executable sections; stock KVM already traps `#UD` unconditionally (no VMCS exception-bitmap change needed) and the enforced `kvm_intel.ko` (`ud2-enforce.patch`) forwards a confirmed rewritten site as `KVM_EXIT_BAUD_DETERMINISM`, verifies the site, serves a tape value, advances RIP; an unregistered `UD2` re-injects `#UD` verbatim | `no_rdseed_opcode_survives_in_image`; `image_rewrites_rdseed`; `rdseed_enforced_regime_is_bit_exact_across_boots`; `ud2_outside_the_rdseed_site_table_reinjects_ud` |
 | 16 | Branch-point residual nondeterminism (RDRAND/TSC/wall-clock) | VMM serves them deterministically so branches are bit-identical | `thousand_branches_are_independent_and_deterministic` |
 | 17 | Dev host needs `/dev/kvm` | Run the agent in WSL2 on the bare-metal box; `/dev/kvm` native | `doctor_checks_kvm` |
 | 18 | Multi-core guest determinism is unsolved cheaply | Single vCPU only; refuse >1 | `vm_creation_refuses_multiple_vcpus` |
@@ -626,48 +626,47 @@ snapshot, not a duplicate of it.
 - **Built and hardware-tested** (details in `ralph/progress.txt`): `baud-host` (`host probe`), `baud-vcpu`
   (exit dispatch, single-step interrupt injection), `baud-multiverse` (KVM boot flow, CPUID mask, work-clock,
   console, tape bus, dirty-ring reset), `baud-tape-device`, `baud-snapshot` (capture/restore, userfaultfd
-  branching, dirty-ring), `baud-snapshot-store`, `baud-packages` guest-image contract + `baud image lint`,
-  and the patched `kvm_intel` module that hardware-traps `rdtsc` and `rdrand` and serves them from the
-  work-clock / tape (boot-tested bit-exact on real KVM).
-- **Built, not yet hardware-validated**: `baud-packages`' build-time `rdseed`→`UD2`(+`NOP`) rewrite pass
-  (`crates/baud-packages/src/rdseed.rs`) — a real Capstone x86-64 decoder scans every `SHF_EXECINSTR` ELF
-  section (never a byte-grep: a fixture test proves bytes that merely *resemble* `0F C7 /7` inside a
-  non-executable section are left untouched) and overwrites each decoded `rdseed` in place with `UD2` + `NOP`
-  padding out to its original encoded length, so no address/jump-target/relocation shifts. Wired end-to-end:
-  `POST /image/rewrite-rdseed` (base64 ELF in/out) and `baud image rewrite-rdseed <path>`. Unit + property
-  tests green (`cargo test -p baud-packages`): `image_rewrites_rdseed`, `no_rdseed_opcode_survives_in_image`,
-  plus multi-section and no-op-when-absent coverage. Not yet run against a real linked kernel/userspace ELF
-  (only synthetic hand-built ELF fixtures so far) — do that before relying on it for a real guest image.
+  branching, dirty-ring), `baud-snapshot-store`, `baud-packages` guest-image contract + `baud image lint` +
+  the build-time `rdseed`→`UD2`(+`NOP`) rewrite pass (`crates/baud-packages/src/rdseed.rs`, wired end-to-end
+  via `POST /image/rewrite-rdseed` and `baud image rewrite-rdseed <path>`), and the patched `kvm_intel`
+  module that hardware-traps `rdtsc`/`rdrand` and serves them from the work-clock / tape **and** now serves
+  the `rdseed`-rewrite's `UD2` trap too: `kernel-module/baud-enforced/ud2-enforce.patch` intercepts
+  `handle_exception_nmi`'s existing `is_invalid_opcode` branch (stock KVM already traps `#UD` unconditionally
+  for its own emulation fallback, so no exception-bitmap change was needed), forwards a confirmed rewritten
+  site as `KVM_EXIT_BAUD_DETERMINISM`, and tail-calls the original `handle_ud` for anything else (so kernel
+  `BUG()`/`WARN_ON()` and genuine invalid opcodes are untouched). `drive/h3-enforced-rdseed.sh` hardware-
+  validated both halves on real `/dev/kvm`: `rdseed_enforced_regime_is_bit_exact_across_boots` (a registered
+  site serves a tape-seeded value into the destination GPR, bit-exact across two boots) and
+  `ud2_outside_the_rdseed_site_table_reinjects_ud` (an unregistered `UD2` re-injects `#UD` verbatim, never
+  served a value), plus regression re-runs of the RDTSC/RDRAND enforced tests with all three patches layered
+  on the same module. Stock module restores cleanly on exit every time. `rdseed`'s own rewrite pass is still
+  only exercised against synthetic hand-built ELF fixtures (`crates/baud-packages` tests) plus the small
+  hand-assembled `tests/fixtures/rdseed-guest/` boot fixture — not yet run against a real linked
+  kernel/userspace ELF; do that before relying on it for a real guest image.
 - **Next actions (this rewrite)**:
-  1. **`rdseed` handling, remaining half** — the build-time rewrite pass above is done; what's left is the
-     **serve path** in `baud-multiverse`: on the `UD2` trap, confirm the faulting site, write a tape-seeded
-     value with `RDSEED` flag semantics, advance RIP. This needs the VM to actually *exit* to userspace on
-     `#UD` first, and that turns out to be the hard part: `kvm-bindings` 0.14.1 exposes no `exception_bitmap`
-     field anywhere in its x86_64 bindings (checked directly against the vendored crate source — grep for
-     `exception_bitmap`/`guest_debug` finds nothing), so stock `KVM_SET_SREGS`/`KVM_SET_GUEST_DEBUG` cannot
-     set VMCS exception-bitmap bit 6 from userspace. This needs the **same out-of-tree kernel-module-patch
-     pattern already used for RDTSC/RDRAND enforcement** (`kernel-module/baud-enforced/{rdtsc,rdrand}-enforce.patch`,
-     `drive/h3-enforced-{rdtsc,rdrand}.sh`) — a new `ud2-enforce.patch` that sets exception-bitmap bit 6 in
-     `vmx.c` and forwards the exit to userspace as a new `KVM_EXIT_*` reason (or reuses `KVM_EXIT_DEBUG`),
-     plus a `handle_baud_ud2_exit`-style handler mirroring `handle_baud_rdtsc_exit`. Do this next: it is real,
-     hardware-dependent, out-of-tree-kernel-module work, not a userspace-only change. QEMU-TCG + `icount` +
-     record/replay fallback for JIT is still undesigned (lower priority — baud's target workloads run no
-     entropy instructions at all, per §4).
-  2. **OS-entropy determinism** — pin `SETUP_RNG_SEED` (type 9) `setup_data` in the `boot_params` baud already
+  1. **OS-entropy determinism** — pin `SETUP_RNG_SEED` (type 9) `setup_data` in the `boot_params` baud already
      builds; make virtio-rng tape-fed (an ever-ready FIFO, never a plain file) or omitted; confirm the
      deterministic-TSC + exact-interrupt seeding covers the initial CRNG state. Add
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
-     `virtio_rng_reseed_is_deterministic`. No guest-kernel patch.
-  3. **Model cleanup** — remove the two-mode `Regime` enum and its branches from
+     `virtio_rng_reseed_is_deterministic`. No guest-kernel patch. **Prerequisite gap found**: no fixture in
+     the test suite boots a real Linux kernel yet (hello/rdrand/rdtsc/rdseed-guest are all hand-assembled
+     non-Linux flat binaries with no IDT/scheduler); these tests cannot be written non-vacuously without
+     first building a real-kernel guest image — a larger antecedent task than the phrasing here implies.
+  2. **Model cleanup** — remove the two-mode `Regime` enum and its branches from
      `baud-multiverse`/`baud-vcpu`/`baud-host`/`baud-snapshot-store`; there is one determinism model
-     (§13). `host probe` reports capabilities. (Note: item 1's serve path still needs an enforced/cooperative-
-     style kernel-module swap-in dance for the `#UD` trap specifically, same as RDTSC/RDRAND today — so this
-     cleanup is about collapsing the *reporting*/API-surface split, not about removing the kernel-module-patch
-     mechanism itself, which stays necessary for RDTSC, RDRAND, and now `#UD`.)
-  4. **Super Mario Bros validation (§11)** — `examples/mario/` guest image + strategy/tactics + `drive/mario.sh`
+     (§13). `host probe` reports capabilities. (Note: the enforced/cooperative-style kernel-module swap-in
+     dance itself stays necessary for RDTSC, RDRAND, and `#UD`/RDSEED — this cleanup is about collapsing the
+     *reporting*/API-surface split, not about removing that mechanism. `enforced_module_present()`
+     (`crates/baud-host/src/linux.rs`) still correctly returns `false` outside a `drive/h3-enforced-*.sh` swap
+     window — wiring it to a real runtime check needs a new `KVM_CHECK_EXTENSION` the patches don't add yet.)
+  3. **Super Mario Bros validation (§11)** — `examples/mario/` guest image + strategy/tactics + `drive/mario.sh`
      completion gate + the mandatory ~25% WSLg live window (`baud stream tail | ffplay`). The current
      `examples/mario/` predates the KVM pivot (a static-musl-process spec, not a bootable guest image) and
      will need to be rebuilt from scratch under the new model.
+  4. **`RdseedRewriteReport` → boot wiring** — nothing yet plumbs a real `baud image build`'s rewrite-site
+     table into `Multiverse::boot_with_rdseed_sites`; the enforced-RDSEED test hardcodes the hand-verified
+     site of the fixed `tests/fixtures/rdseed-guest/` fixture. Needed before a real, non-fixture guest image
+     can use enforced RDSEED end-to-end.
 - **Specs to update alongside**: `specs/baud-multiverse.md` and `specs/README.md` (one model, entropy-by-
   input-control, `rdseed` rewrite), `specs/baud-packages.md` (rewrite pass — now implemented, update from
   planned to built), `specs/baud-host.md` (`host probe` reports capabilities), a new `specs/baud-stream.md`

@@ -3682,3 +3682,116 @@ Normalized stray CRLF line-ending churn in .gitignore/ralph/.gitignore/todo.md b
 ---
 
 Post-push verification: origin/main == local HEAD (e006b31), working tree clean. todo.md still has pending items (rdseed serve-path kernel patch, OS-entropy determinism, Regime-enum cleanup, Mario rebuild) -- emitting NEXT.
+
+## 2026-07-25T20:12:26 UTC (14min) - Session usage — build-1 [sonnet]
+- cost $1.8389 (from claude -p)
+- context 115,867 tok peak of 1M (12%) across 38 inference calls, monotonic
+- models sonnet-5 $1.8358 (in 76 / out 12,022 / cache-read 3,674,140) · haiku-4-5 $0.0031
+- transcript: ralph/.run/20260725T193324Z/002-build-1.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md — studying specs and current build status (§14) to pick the next forward step...
+
+Dispatched two Sonnet Explore agents in parallel: one surveying the rdseed UD2 VMM serve-path state (todo.md §14 item 1 -- needs a new kernel-module patch + exception-bitmap plumbing), one surveying OS-entropy determinism state (§14 item 2 -- SETUP_RNG_SEED boot seed, virtio-rng tape-feed). Waiting on both to decide which is the higher-value forward step this iteration.
+
+rdseed UD2 serve-path survey back: kernel-module/baud-enforced/ has rdtsc-enforce.patch and rdrand-enforce.patch as the established pattern (new KVM_EXIT_BAUD_DETERMINISM=41, payload in kvm_run.hw.hardware_exit_reason, handle_baud_*_exit in vmx.c, Rust side in baud-vcpu/src/linux/mod.rs + baud-multiverse/src/timesource.rs) but NO ud2/rdseed patch exists yet -- 100% greenfield on both kernel and Rust sides. Confirmed kvm-bindings 0.14.1 truly has no exception_bitmap field, so the kernel-module-patch route is required, mirroring rdtsc/rdrand. Also found stale docs (drive/h3-enforced-{rdtsc,rdrand}.sh banners, ENFORCEMENT_DESIGN.md, baud-host/src/linux.rs) that mischaracterize the RDSEED blocker as SECONDARY_EXEC_RDSEED_EXITING microcode-unavailability -- that described the old trap-real-RDSEED plan; the actual blocker for the new UD2-rewrite plan is the unprobed exception-bitmap bit-6 (#UD) capability. Still waiting on the OS-entropy determinism survey before choosing this iteration's item.
+
+OS-entropy determinism survey back: reveals a much bigger prerequisite gap than todo.md implies -- no fixture in the test suite boots a real Linux kernel at all (hello/rdrand/rdtsc-guest are all hand-assembled non-Linux flat binaries with no IDT/scheduler, deliberately, because H4 interrupt injection isn't wired into the boot flow yet). So OS-entropy determinism tests (entropy_guest_is_deterministic etc.) cannot be written non-vacuously without first building a real-kernel guest image -- a much larger antecedent task. Also confirmed SETUP_RNG_SEED is not built at all (todo.md's phrasing overclaims -- no setup_data node of any kind exists in bootparams.rs today, only e820+header). By contrast the rdseed UD2 serve-path (item 1) mirrors an existing, proven pattern (rdtsc/rdrand kernel-module patches) with no such prerequisite gap. Choosing item 1 for this iteration.
+
+Read crates/baud-packages/src/rdseed.rs, crates/baud-vcpu/src/{lib.rs,linux/mod.rs}, crates/baud-multiverse/src/timesource.rs, and the kernel's handle_exception_nmi/handle_ud in vmx.c/x86.c directly. Key discovery: stock KVM's vmx_update_exception_bitmap ALREADY sets UD_VECTOR unconditionally (for its own instruction-emulation fallback) -- so todo.md's assumption that an exception-bitmap patch is needed for #UD is WRONG; #UD already exits, it's just currently routed to handle_ud (software emulation + re-inject). Also discovered the original rdseed rewrite destroys the destination-register info (ModRM byte overwritten with NOP), so the VMM cannot recover which GPR to serve from the UD2 bytes alone -- it needs a separate per-image site table (address -> gpr_index/length), looked up by RIP, exactly like real Linux BUG()/WARN_ON() also compile to bare UD2 and must NOT be served a value (must re-inject #UD untouched). Designing the full Rust-side plumbing (Exit::RdseedEnforced, DispatchOutcome::ServeEnforcedRdseed/ReinjectUd, TimeSource::resolve_rdseed_site/serve_enforced_rdseed) now, then a new ud2-enforce.patch, before delegating fixture+drive-script+doc work to a subagent.
+
+Implemented the full Rust-side plumbing directly: Exit::RdseedEnforced + EnforcedRdseedSite + DispatchOutcome::ServeEnforcedRdseed/ReinjectUd + TimeSource::resolve_rdseed_site/serve_enforced_rdseed in baud-vcpu/src/lib.rs; run_and_convert's UD2 special-case (extra KVM_GET_REGS for rip since the kernel patch won't skip the instruction) + write_enforced_rdseed_result + reinject_ud (via KVM_SET_VCPU_EVENTS) in baud-vcpu/src/linux/mod.rs; WorkClock::rdseed_sites BTreeMap + with_rdseed_sites + trait impls in baud-multiverse/src/timesource.rs. Added unit/proptest coverage for both the known-site-served and unknown-site-reinjected paths. Running a quick cargo check on these crates before writing the kernel patch.
+
+Hit a real Rust borrow-checker limitation: a function whose return type is generic over vcpu's own &mut lifetime (Exit<'_>, needed for IoIn/MmioRead's &mut [u8] variants) reserves that whole borrow for its entire execution -- so run_and_convert couldn't ALSO do the extra KVM_GET_REGS the UD2 case needs, on any path, even one that never borrows anything. Fixed by having run_and_convert return a ConvertedExit enum (Exit, or a RdseedTrapNeedsRip sentinel) and moving the get_regs() fetch to each of the 4 real call sites (run_one_exit + pmu.rs's 3 loops), where ordinary flow-sensitive borrow checking (not function-signature-boundary conservatism) applies. Re-running cargo check.
+
+cargo check now clean (fixed a privacy warning by making run_and_convert module-private, matching ConvertedExit's own visibility -- both only used by linux/mod.rs and its pmu child module). Running the baud-vcpu and baud-multiverse unit test suites next.
+
+Rust-side plumbing complete and passing (36 total: 25 baud-vcpu + 11 relevant baud-multiverse unit tests, including the new rdseed known-site-served and unknown-site-reinjected paths). Delegating the remaining pieces to an Opus subagent: the ud2-enforce.patch kernel patch (mirroring rdtsc/rdrand-enforce.patch, intercepting handle_exception_nmi's existing is_invalid_opcode branch -- no exception-bitmap change needed since UD_VECTOR is already default-intercepted by stock KVM), a new rdseed-guest hardware fixture + #[ignore] test, drive/h3-enforced-rdseed.sh, and fixing the stale RDSEED-blocker docs the earlier survey found.
+
+Dispatched an Opus subagent (background) to author kernel-module/baud-enforced/ud2-enforce.patch (compile-verify only, no insmod/hardware swap -- that stays for the orchestrating session to run carefully), a new rdseed-guest fixture + #[ignore] hardware test, drive/h3-enforced-rdseed.sh, and fix stale RDSEED-blocker docs. While it works, running cargo clippy on the Rust changes made directly this session.
+
+Confirmed via git stash that all clippy warnings in baud-multiverse/baud-vcpu are pre-existing (15 present even without my changes) -- my additions just reuse an existing literal-formatting convention already in the file. Waiting on the Opus kernel-patch/fixture subagent to complete before running the full workspace build/clippy/test suite.
+
+## 2026-07-25T20:54:11 UTC (42min) - Session usage — build-2 [sonnet]
+- cost $12.3886 (from claude -p)
+- context 326,882 tok peak of 1M (33%) across 103 inference calls, monotonic
+- models sonnet-5 $11.7037 (in 511 / out 172,294 / cache-read 22,562,257) · opus-5[1m] $4.8474 · haiku-4-5 $0.0031
+- subagents (3) sonnet-5 x2 · opus-5 x1
+- transcript: ralph/.run/20260725T193324Z/003-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... resuming uncommitted rdseed/UD2-enforce work found in git status (crates/baud-host, baud-multiverse, baud-vcpu modified; drive/h3-enforced-rdseed.sh, kernel-module/baud-enforced/ud2-enforce.patch, tests/fixtures/rdseed-guest/ untracked). Studying diffs before continuing.
+
+Verifying the Opus subagent's kernel patch + fixture + drive script landed cleanly. Running cargo build --workspace first.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... investigating uncommitted working-tree changes (ud2-enforce.patch, rdseed fixtures, h3-enforced-rdseed.sh) that appear to be in-progress work on todo.md item 1 (rdseed #UD serve path).
+
+Opus subagent's deliverables landed: kernel-module/baud-enforced/ud2-enforce.patch, tests/fixtures/rdseed-guest/ (build.py, bzImage, payload.s, BUILD.md), drive/h3-enforced-rdseed.sh, plus doc fixes. Running cargo build --workspace to verify everything compiles before running the hardware dance.
+
+Build green. Running cargo clippy --workspace --all-targets...
+
+Clippy clean (0 errors, only pre-existing warnings confirmed by prior git-stash check). Running cargo test --workspace...
+
+Full workspace test run: 73 passed, 1 failed (linux::tests::rdtsc_guest_reproduces_high_bits_across_boots), 4 ignored (the 3 enforced-regime hardware tests + rdrand_guest one). This exact flake was diagnosed in a prior iteration as CPU-contention timing jitter, not a regression. Re-running it alone to confirm before proceeding.
+
+Confirmed rdtsc_guest_reproduces_high_bits_across_boots passes in isolation -- pre-existing CPU-contention flake, not a regression from this iteration's work. Proceeding to the real validation: drive/h3-enforced-rdseed.sh (kernel module build + swap + hardware test of the new UD2/rdseed enforcement path).
+
+drive/h3-enforced-rdseed.sh: ALL CHECKS PASSED on real hardware -- rdseed_enforced_regime_is_bit_exact_across_boots, ud2_outside_the_rdseed_site_table_reinjects_ud, and regression re-runs of the rdrand/rdtsc enforced tests all green with ud2-enforce.patch layered on the patched kvm.ko/kvm-intel.ko. Stock module restored cleanly afterward (lsmod confirms kvm_intel/kvm back, fuser /dev/kvm empty). This closes todo.md §14 next-action item 1 (rdseed serve path). Updating todo.md now.
+
+Updated todo.md §14 (build status + next actions, item 1 removed/folded into hardware-tested, remaining items renumbered) and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md's 'still open' section to record the completed swap-in hardware test. Committing everything now.
+
+
+## 2026-07-25T21:46:51 UTC - Changes committed.
+- Hardware-validated the rdseed UD2-serve path (todo.md §14 next-action item 1), closing it out
+- Files changed: kernel-module/baud-enforced/ud2-enforce.patch (new), drive/h3-enforced-rdseed.sh (new),
+  crates/baud-multiverse/tests/fixtures/rdseed-guest/ (new: BUILD.md, build.py, bzImage, payload.s),
+  crates/baud-vcpu/src/{lib.rs,tests.rs,linux/mod.rs,linux/pmu.rs}, crates/baud-multiverse/src/{linux/mod.rs,timesource.rs},
+  crates/baud-host/src/linux.rs, kernel-module/baud-enforced/{BUILD.md,ENFORCEMENT_DESIGN.md},
+  drive/h3-enforced-{rdrand,rdtsc}.sh (doc accuracy only), todo.md
+- **Brief description of changes:**
+  - Rust-side plumbing: Exit::RdseedEnforced + EnforcedRdseedSite + DispatchOutcome::ServeEnforcedRdseed/ReinjectUd
+    in baud-vcpu; run_and_convert's ConvertedExit sentinel (works around a borrow-checker limitation where a
+    function generic over vcpu's lifetime can't also do an extra KVM_GET_REGS on one path) plus
+    write_enforced_rdseed_result/reinject_ud (via KVM_SET_VCPU_EVENTS) in linux/mod.rs and pmu.rs's three loops;
+    WorkClock::rdseed_sites BTreeMap + resolve/serve in baud-multiverse's timesource.rs.
+  - kernel-module/baud-enforced/ud2-enforce.patch: intercepts handle_exception_nmi's existing is_invalid_opcode
+    branch (stock KVM already traps #UD unconditionally for its own emulation fallback -- no exception-bitmap
+    change needed, correcting an earlier assumption). Confirms a genuine 0F 0B at RIP, forwards it to userspace
+    as KVM_EXIT_BAUD_DETERMINISM (payload byte 2), leaves RIP untouched; anything else tail-calls the original
+    handle_ud unchanged so kernel BUG()/WARN_ON() and real invalid opcodes are unaffected.
+  - New tests/fixtures/rdseed-guest/ (hand-assembled, rdseed already rewritten to UD2+NOP as a real
+    `baud image build` would emit it) backing two new #[ignore]'d hardware tests:
+    rdseed_enforced_regime_is_bit_exact_across_boots and ud2_outside_the_rdseed_site_table_reinjects_ud.
+  - drive/h3-enforced-rdseed.sh: builds ud2-enforce.patch layered on rdtsc+rdrand-enforce.patch, swaps in the
+    patched kvm.ko/kvm-intel.ko, runs both new tests plus regression re-runs of the rdrand/rdtsc enforced
+    tests, always restores the stock module on exit (trap ... EXIT).
+  - Verified end-to-end on real hardware this iteration: cargo build/clippy (0 errors, only pre-existing
+    warnings) --workspace green; cargo test --workspace 73 passed / 1 pre-existing flake (confirmed passes in
+    isolation, unrelated to this work) / 4 ignored; drive/h3-enforced-rdseed.sh ALL CHECKS PASSED on real
+    /dev/kvm (both new tests plus the rdrand/rdtsc regression re-runs), stock kvm_intel/kvm module confirmed
+    restored afterward (lsmod + fuser /dev/kvm empty).
+  - Updated stale docs that pre-dated this discovery (BUILD.md, ENFORCEMENT_DESIGN.md, baud-host/linux.rs,
+    the rdtsc/rdrand drive scripts' trailing banners) to stop claiming RDSEED enforcement is permanently
+    hardware-infeasible on this host -- it needed no VMX secondary control at all, only the build-time UD2
+    rewrite plus a #UD intercept stock KVM already performs.
+  - todo.md §14: folded the rdseed rewrite pass into "built and hardware-tested"; removed next-action item 1
+    (done); renumbered OS-entropy determinism, Regime-enum cleanup, and Mario validation as items 1-3; added
+    a new item 4 (RdseedRewriteReport -> boot wiring, the one remaining explicit scope cut); updated the
+    problem-matrix row 15 with the corrected mechanism and the two new test names.
+---

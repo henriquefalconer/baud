@@ -59,10 +59,33 @@ pub enum Exit<'a> {
     /// numbering: 0=RAX..7=RDI, 8=R8..15=R15) for `linux::run_and_convert`'s caller to write the
     /// served value into; RFLAGS.CF is also set (success) as part of that write.
     RdrandEnforced { gpr_index: u8 },
+    /// A `#UD` trapped by the enforced-regime KVM module's `ud2-enforce.patch` (same
+    /// `KVM_EXIT_BAUD_DETERMINISM` mechanism, payload kind 2) at `rip`. Stock KVM already forces
+    /// every `#UD` to exit (its own exception bitmap always includes `UD_VECTOR`, for its
+    /// software-emulation fallback) — the patch only intercepts what happens next. Every `#UD` in
+    /// the guest reaches here now, not just the ones `baud-packages`' build-time `rdseed`→`UD2`
+    /// rewrite (todo.md §4) produced, because a bare `UD2` is also exactly what Linux's own
+    /// `BUG()`/`WARN_ON()` compile to — the kernel patch cannot tell those apart by opcode alone
+    /// (the original `rdseed`'s destination-register ModRM byte was overwritten with `NOP` and is
+    /// gone). `dispatch_exit` must ask `TimeSource::resolve_rdseed_site` whether `rip` is a known
+    /// rewrite site before serving anything.
+    RdseedEnforced { rip: u64 },
     /// Any exit kind `dispatch_exit`'s caller does not recognize or does not yet model. Carries
     /// the KVM exit's name so a `DeterminismHole` names what leaked. This is the one arm that
     /// exists specifically so nothing new can silently "just continue" (specs/baud-vcpu.md §3).
     Unmodeled(&'static str),
+}
+
+/// A known `rdseed`→`UD2`+`NOP` build-time rewrite site (`baud_packages::rdseed::RdseedSite`,
+/// todo.md §4): the destination GPR the original `rdseed` would have written (x86-64 ModRM
+/// numbering, same as [`Exit::RdrandEnforced`]'s `gpr_index`), and the total encoded length in
+/// bytes (2, 3, or 4) of the `UD2`+`NOP` sequence that replaced it — `linux::run_one_exit` needs
+/// this to advance RIP exactly as far as the original `rdseed` instruction would have, not just
+/// past the 2-byte `UD2` itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnforcedRdseedSite {
+    pub gpr_index: u8,
+    pub length: u8,
 }
 
 /// A VM exit resolved to a value the dispatch loop's own match could not — but every exit still
@@ -89,6 +112,16 @@ pub enum DispatchOutcome {
     /// `linux::run_one_exit`/`pmu` write it there via `KVM_SET_REGS` (also setting RFLAGS.CF),
     /// same "never surfaced past that one call site" rule as `ServeEnforcedRdtsc`.
     ServeEnforcedRdrand { gpr_index: u8, value: u64 },
+    /// `Exit::RdseedEnforced` resolved to a known rewritten site: `value` goes into the GPR named
+    /// by `site.gpr_index` (same RDRAND flag semantics as `ServeEnforcedRdrand`) and RIP advances
+    /// to `rip + site.length` — past the whole `UD2`+`NOP` sequence, not just the 2-byte `UD2`.
+    /// `linux::run_one_exit` performs both writes in one `KVM_SET_REGS` round trip.
+    ServeEnforcedRdseed { rip: u64, site: EnforcedRdseedSite, value: u64 },
+    /// `Exit::RdseedEnforced` at a `rip` with no known site: a genuine invalid-opcode fault (or a
+    /// kernel `BUG()`/`WARN_ON()`), which must be re-injected into the guest exactly as if baud
+    /// had never intercepted `#UD` at all (todo.md §12 row 15) — `linux::run_one_exit` does this
+    /// via `KVM_SET_VCPU_EVENTS`, RIP left untouched (the trap never advanced it).
+    ReinjectUd,
 }
 
 /// The paravirtual bus every `IoIn`/`IoOut`/`MmioRead`/`MmioWrite` exit is routed through
@@ -113,6 +146,14 @@ pub trait TimeSource {
     /// tape") — a deterministic draw that must reproduce identically across a double-run of the
     /// same tape, but is otherwise independent of `serve_enforced_rdtsc`'s work-clock formula.
     fn serve_enforced_rdrand(&mut self) -> u64;
+    /// Look up whether `rip` is a known `rdseed`→`UD2` build-time rewrite site (todo.md §4) —
+    /// `None` for a genuine invalid-opcode fault (including a real kernel `BUG()`/`WARN_ON()`,
+    /// which also compiles to a bare `UD2`), which `dispatch_exit` must re-inject rather than
+    /// serve a value for.
+    fn resolve_rdseed_site(&self, rip: u64) -> Option<EnforcedRdseedSite>;
+    /// The enforced-regime value for a trapped, confirmed `rdseed` site (todo.md §3.8: "the value
+    /// comes from the same tape-seeded entropy sub-stream as rdrand").
+    fn serve_enforced_rdseed(&mut self) -> u64;
 }
 
 /// Resolve one exit deterministically (specs/baud-vcpu.md §3's match). Exhaustive over `Exit` —
@@ -154,6 +195,12 @@ pub fn dispatch_exit(
         Exit::RdrandEnforced { gpr_index } => {
             Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value: time.serve_enforced_rdrand() })
         }
+        Exit::RdseedEnforced { rip } => match time.resolve_rdseed_site(rip) {
+            Some(site) => {
+                Ok(DispatchOutcome::ServeEnforcedRdseed { rip, site, value: time.serve_enforced_rdseed() })
+            }
+            None => Ok(DispatchOutcome::ReinjectUd),
+        },
         Exit::Unmodeled(name) => Err(DeterminismHole(name.to_string())),
     }
 }

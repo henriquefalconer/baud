@@ -44,6 +44,10 @@ struct RecordingTime {
     wrmsr_calls: Vec<(u32, u64)>,
     enforced_rdtsc_calls: u32,
     enforced_rdrand_calls: u32,
+    enforced_rdseed_calls: u32,
+    /// The one `rip` (if any) [`TimeSource::resolve_rdseed_site`] should recognize as a known
+    /// rewrite site — every other `rip` resolves to `None`, exercising the re-inject path.
+    known_rdseed_site: Option<(u64, EnforcedRdseedSite)>,
 }
 
 impl TimeSource for RecordingTime {
@@ -60,6 +64,16 @@ impl TimeSource for RecordingTime {
     }
     fn serve_enforced_rdrand(&mut self) -> u64 {
         self.enforced_rdrand_calls += 1;
+        self.serve_value
+    }
+    fn resolve_rdseed_site(&self, rip: u64) -> Option<EnforcedRdseedSite> {
+        match self.known_rdseed_site {
+            Some((known_rip, site)) if known_rip == rip => Some(site),
+            _ => None,
+        }
+    }
+    fn serve_enforced_rdseed(&mut self) -> u64 {
+        self.enforced_rdseed_calls += 1;
         self.serve_value
     }
 }
@@ -159,23 +173,66 @@ fn rdrand_enforced_is_served_from_time_source_with_its_gpr_index() {
     assert_eq!(time.enforced_rdrand_calls, 1);
 }
 
+/// todo.md §4/§12 row 15: a `#UD` at a `rip` the `TimeSource` recognizes as a known `rdseed`→`UD2`
+/// rewrite site is served a value tagged with that site's GPR/length — never resolved silently or
+/// left for a generic catch-all.
+#[test]
+fn rdseed_enforced_at_a_known_site_is_served_from_time_source() {
+    let mut bus = RecordingBus::default();
+    let site = EnforcedRdseedSite { gpr_index: 3, length: 4 };
+    let mut time = RecordingTime {
+        serve_value: 0x0BAD_F00D_CAFE_BABE,
+        known_rdseed_site: Some((0x1000, site)),
+        ..Default::default()
+    };
+    let outcome = dispatch_exit(Exit::RdseedEnforced { rip: 0x1000 }, &mut bus, &mut time).unwrap();
+    assert_eq!(
+        outcome,
+        DispatchOutcome::ServeEnforcedRdseed { rip: 0x1000, site, value: 0x0BAD_F00D_CAFE_BABE }
+    );
+    assert_eq!(time.enforced_rdseed_calls, 1);
+}
+
+/// The other half of todo.md §12 row 15: a `#UD` at a `rip` with no known site (a real
+/// invalid-opcode fault, or a kernel `BUG()`/`WARN_ON()` that also compiles to a bare `UD2`) must
+/// be re-injected, never served a guessed value — and must not even call `serve_enforced_rdseed`.
+#[test]
+fn rdseed_enforced_at_an_unknown_site_is_reinjected_not_served() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime {
+        known_rdseed_site: Some((0x1000, EnforcedRdseedSite { gpr_index: 3, length: 4 })),
+        ..Default::default()
+    };
+    let outcome = dispatch_exit(Exit::RdseedEnforced { rip: 0x2000 }, &mut bus, &mut time).unwrap();
+    assert_eq!(outcome, DispatchOutcome::ReinjectUd);
+    assert_eq!(time.enforced_rdseed_calls, 0, "an unknown site must never draw from the entropy stream");
+}
+
 // specs/baud-vcpu.md §6 `no_unmodeled_exit_is_silent`: the run loop never leaves the dispatch
 // without an `Ok`/`Err` — every unmodeled exit fails loud, and every modeled one always
 // resolves. Fuzzed over a thousand random exit shapes (mirroring the spec's `random_tapes(1000)`).
 proptest! {
     #[test]
     fn no_unmodeled_exit_is_silent(
-        which in 0u8..11,
+        which in 0u8..13,
         port in any::<u16>(),
         addr in any::<u64>(),
         msr in any::<u32>(),
         value in any::<u64>(),
         len in 0usize..8,
         gpr_index in 0u8..16,
+        rip in any::<u64>(),
         exit_name in "[a-zA-Z]{1,16}",
     ) {
         let mut bus = RecordingBus::default();
-        let mut time = RecordingTime::default();
+        // `rip` is always the recognized site here — the unknown-site (re-inject) path is
+        // exhaustively still `Ok` either way, so this proptest only needs to prove "never a
+        // panic, never silently unresolved"; the known-vs-unknown distinction itself is covered
+        // by the two dedicated tests above.
+        let mut time = RecordingTime {
+            known_rdseed_site: Some((rip, EnforcedRdseedSite { gpr_index, length: 3 })),
+            ..Default::default()
+        };
         let mut buf = vec![0u8; len.max(1)];
         let mut msr_out = 0u64;
         let result = match which {
@@ -189,14 +246,16 @@ proptest! {
             7 => dispatch_exit(Exit::Shutdown, &mut bus, &mut time),
             8 => dispatch_exit(Exit::RdtscEnforced, &mut bus, &mut time),
             9 => dispatch_exit(Exit::RdrandEnforced { gpr_index }, &mut bus, &mut time),
+            10 => dispatch_exit(Exit::RdseedEnforced { rip }, &mut bus, &mut time),
+            11 => dispatch_exit(Exit::RdseedEnforced { rip: rip.wrapping_add(1) }, &mut bus, &mut time),
             _ => {
                 let leaked: &'static str = Box::leak(exit_name.into_boxed_str());
                 dispatch_exit(Exit::Unmodeled(leaked), &mut bus, &mut time)
             }
         };
-        // The whole point: never a panic, and the catch-all (`which == 10`) is always `Err`,
+        // The whole point: never a panic, and the catch-all (`which == 12`) is always `Err`,
         // every modeled exit is always `Ok`.
-        if which == 10 {
+        if which == 12 {
             prop_assert!(result.is_err());
         } else {
             prop_assert!(result.is_ok());

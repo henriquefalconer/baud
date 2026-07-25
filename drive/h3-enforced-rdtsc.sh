@@ -16,9 +16,10 @@
 # is forced to VM-exit (CPU_BASED_RDTSC_EXITING left set, never cleared) and a new handler
 # (`handle_baud_rdtsc_exit`) hands the trap to userspace as `KVM_EXIT_BAUD_DETERMINISM` instead of
 # executing the instruction natively; `baud-vcpu::linux::run_one_exit` resolves it via
-# `WorkClock::serve_enforced_rdtsc()` and writes EDX:EAX before resuming. RDRAND/RDSEED enforcement
-# is a separate, not-yet-built increment (RDSEED-exiting is not even settable on this host's VMX
-# microcode, confirmed by `kernel-module/baud-enforced/baud_enforced_probe.c`'s own dmesg report).
+# `WorkClock::serve_enforced_rdtsc()` and writes EDX:EAX before resuming. RDRAND and RDSEED
+# enforcement are separate increments layered on this patch, each with its own drive script —
+# `drive/h3-enforced-rdrand.sh` (rdrand-enforce.patch) and `drive/h3-enforced-rdseed.sh`
+# (ud2-enforce.patch).
 #
 #   Reuses `tests/fixtures/rdtsc-guest/` (already built for H3.4's cooperative-regime test) —
 #   its payload has no CPUID gate and no dependency on which module served RDTSC, so the exact
@@ -125,5 +126,8 @@ echo "    dispatch_exit (Exit::RdtscEnforced) via the work-clock, with zero pinn
 echo "  - The served value is bit-exact across two boots of the same guest+tape, not just"
 echo "    high-bits-tolerant like the cooperative regime's native rdtsc"
 echo ""
-echo "Not yet done: RDRAND/RDSEED enforcement (a separate increment; RDSEED-exiting is not even"
-echo "settable on this host's VMX microcode per baud_enforced_probe's own dmesg report)."
+echo "Covered by sibling scripts, not this one: RDRAND enforcement (drive/h3-enforced-rdrand.sh,"
+echo "rdrand-enforce.patch) and RDSEED enforcement (drive/h3-enforced-rdseed.sh, ud2-enforce.patch —"
+echo "RDSEED needs no VMX secondary control at all, so this host's unsettable"
+echo "SECONDARY_EXEC_RDSEED_EXITING bit does not block it: baud-packages rewrites every rdseed opcode"
+echo "to UD2+NOP at build time and the UD2's ordinary #UD exit is what gets served)."

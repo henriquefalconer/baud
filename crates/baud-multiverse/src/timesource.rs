@@ -19,7 +19,8 @@
 //                               consistent for a guest that polls it.
 //   IA32_TSC_AUX (0xC0000103) - absorbed/served verbatim (RDTSCP's auxiliary value).
 
-use baud_vcpu::TimeSource;
+use baud_vcpu::{EnforcedRdseedSite, TimeSource};
+use std::collections::BTreeMap;
 
 // Single source of truth: `baud-snapshot::msr` (this crate depends on `baud-snapshot`, not the
 // reverse, per specs/baud-snapshot.md §2's architecture diagram) — `baud-snapshot`'s restore-order
@@ -59,11 +60,40 @@ pub struct WorkClock<C: BranchCounter> {
     /// [`restore`](Self::restore) sets it; a fresh [`new`](Self::new) with no seed still produces a
     /// deterministic (if not tape-derived) sequence, never a panic or a real-entropy fallback.
     entropy: SplitMix64,
+    /// Every known `rdseed`→`UD2`+`NOP` build-time rewrite site (`baud_packages::rdseed::
+    /// RdseedSite`, todo.md §4) in the currently-loaded guest image, keyed by the address of the
+    /// `UD2` itself. Empty for a guest with no such sites (or none registered yet, e.g. every
+    /// fixture that predates this table) — every `#UD` then re-injects, exactly the same as a
+    /// real un-rewritten guest, never silently served a guess.
+    rdseed_sites: BTreeMap<u64, EnforcedRdseedSite>,
 }
 
 impl<C: BranchCounter> WorkClock<C> {
     pub fn new(base: u64, k: u64, counter: C) -> Self {
-        WorkClock { base, k, counter, rcb_offset: 0, tsc_deadline: 0, tsc_aux: 0, entropy: SplitMix64::new(0) }
+        WorkClock {
+            base,
+            k,
+            counter,
+            rcb_offset: 0,
+            tsc_deadline: 0,
+            tsc_aux: 0,
+            entropy: SplitMix64::new(0),
+            rdseed_sites: BTreeMap::new(),
+        }
+    }
+
+    /// Register this guest image's known `rdseed` rewrite sites (from `baud_packages::rewrite_
+    /// rdseed`'s `RdseedRewriteReport`, todo.md §4) so [`resolve_rdseed_site`]
+    /// (TimeSource::resolve_rdseed_site) can recognize a trapped `UD2` as a confirmed site rather
+    /// than a genuine invalid-opcode fault. Call once, right after [`new`](Self::new)/
+    /// [`with_entropy_seed`](Self::with_entropy_seed), before any guest code runs — mirrors that
+    /// method's "call once, before boot" contract.
+    pub fn with_rdseed_sites(
+        mut self,
+        sites: impl IntoIterator<Item = (u64, EnforcedRdseedSite)>,
+    ) -> Self {
+        self.rdseed_sites = sites.into_iter().collect();
+        self
     }
 
     /// Seed the enforced-regime `RDRAND` entropy stream (todo.md §3.2: enforced regime "serves the
@@ -101,6 +131,11 @@ impl<C: BranchCounter> WorkClock<C> {
     /// [`current_rcb`](Self::current_rcb) reported at the moment of capture — see
     /// [`rcb_offset`](WorkClock::rcb_offset)'s doc for why the restored `counter`'s own raw reads
     /// cannot be trusted to continue that sequence unaided.
+    ///
+    /// The rdseed site table isn't part of the captured `Universe` (it's a property of the guest
+    /// image, not of any one run's state); a caller that needs it re-applies
+    /// [`with_rdseed_sites`](Self::with_rdseed_sites) after this call, same as a fresh
+    /// [`new`](Self::new) would.
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
         base: u64,
@@ -119,6 +154,7 @@ impl<C: BranchCounter> WorkClock<C> {
             tsc_deadline,
             tsc_aux,
             entropy: SplitMix64::new(entropy_state),
+            rdseed_sites: BTreeMap::new(),
         }
     }
 
@@ -198,6 +234,16 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
     }
 
     fn serve_enforced_rdrand(&mut self) -> u64 {
+        self.entropy.next_u64()
+    }
+
+    fn resolve_rdseed_site(&self, rip: u64) -> Option<EnforcedRdseedSite> {
+        self.rdseed_sites.get(&rip).copied()
+    }
+
+    fn serve_enforced_rdseed(&mut self) -> u64 {
+        // Same tape-seeded entropy sub-stream as RDRAND (todo.md §3.8: "the value comes from the
+        // same tape-seeded entropy sub-stream as rdrand").
         self.entropy.next_u64()
     }
 }
@@ -421,5 +467,40 @@ mod tests {
              the first three values the original already served"
         );
         assert_ne!(next_from_restored, first_three);
+    }
+
+    /// todo.md §4/§12 row 15: a known rewrite site resolves by exact RIP match, and its serve
+    /// draws from the same entropy stream RDRAND uses (distinct from, but not diverging from,
+    /// whatever RDRAND has already drawn -- they share one SplitMix64 stream by design).
+    #[test]
+    fn known_rdseed_site_resolves_and_serves_from_the_shared_entropy_stream() {
+        let site = EnforcedRdseedSite { gpr_index: 7, length: 4 };
+        let mut clock = WorkClock::new(0, 1, ConstantCounter(0))
+            .with_entropy_seed(0xC0FF_EE)
+            .with_rdseed_sites([(0x1000, site)]);
+
+        assert_eq!(clock.resolve_rdseed_site(0x1000), Some(site));
+        assert_eq!(clock.resolve_rdseed_site(0x2000), None, "an unregistered rip must resolve to None");
+
+        let rdrand_first = {
+            let mut reference = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xC0FF_EE);
+            reference.serve_enforced_rdrand()
+        };
+        assert_eq!(
+            clock.serve_enforced_rdseed(),
+            rdrand_first,
+            "RDSEED's first served value must match what RDRAND would have drawn from the same seed \
+             at the same point in the stream"
+        );
+    }
+
+    /// A `WorkClock` with no registered sites at all (every fixture that predates this table, or a
+    /// guest image with no rdseed instructions) resolves every rip to `None` -- never a panic, and
+    /// never a guessed site.
+    #[test]
+    fn no_registered_sites_resolves_every_rip_to_none() {
+        let clock = WorkClock::new(0, 1, ConstantCounter(0));
+        assert_eq!(clock.resolve_rdseed_site(0), None);
+        assert_eq!(clock.resolve_rdseed_site(0xFFFF_FFFF), None);
     }
 }

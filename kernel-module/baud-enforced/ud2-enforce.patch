@@ -1,0 +1,120 @@
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 03dd1ba..2fd15de 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -5178,6 +5178,71 @@
+ 	       !kvm_is_cr0_bit_set(vcpu, X86_CR0_TS);
+ }
+ 
++/*
++ * baud: #UD already causes a VM-exit with no patch at all --
++ * vmx_update_exception_bitmap above unconditionally includes UD_VECTOR in the
++ * exception bitmap (stock KVM needs the trap for its own software-instruction
++ * emulation fallback), so EXIT_REASON_EXCEPTION_NMI -> handle_exception_nmi ->
++ * is_invalid_opcode() below is already the one and only path a guest #UD takes.
++ * No exec-control/exception-bitmap change is needed here, unlike RDTSC's
++ * CPU_BASED_RDTSC_EXITING (vmx_exec_control above).
++ *
++ * baud's build-time pass rewrites every RDSEED opcode in the guest image to
++ * UD2 (0F 0B) plus NOP padding, length-preserving (crates/baud-packages/src/
++ * rdseed.rs, todo.md §4), so the real RDSEED instruction never executes in the
++ * guest and SECONDARY_EXEC_RDSEED_EXITING -- which this host's VMX microcode
++ * does not even expose (kernel-module/baud-enforced/BUILD.md's probe report) --
++ * is not needed for RDSEED enforcement at all. This handler is what turns the
++ * resulting UD2 trap back into a served value.
++ *
++ * Two things this handler must NOT break:
++ *
++ *  - A bare UD2 is *also* how the Linux kernel's own BUG()/WARN_ON() compile,
++ *    and any genuinely invalid opcode raises the same #UD. Only userspace holds
++ *    the image-specific table of confirmed rewrite sites, so anything this
++ *    handler cannot positively identify as a UD2 falls straight through to
++ *    handle_ud() unchanged (and userspace re-injects #UD via
++ *    KVM_SET_VCPU_EVENTS for a UD2 that is not in its site table).
++ *
++ *  - RIP is deliberately left pointing *at* the trapping UD2 --
++ *    kvm_skip_emulated_instruction() is never called, unlike
++ *    handle_baud_rdtsc_exit/handle_baud_rdrand_exit below. Only userspace's
++ *    site table knows how far a confirmed site's UD2+NOP padding actually
++ *    extends (3 bytes for RDSEED r32, 4 for r64), and a site that turns out to
++ *    be a genuine #UD instead must be re-injected at exactly the RIP a native,
++ *    un-intercepted fault would have reported. Userspace advances RIP itself
++ *    (KVM_SET_REGS) when it serves a value.
++ *
++ * The payload is the same kvm_run.hw.hardware_exit_reason scratch u64 the other
++ * two handlers use; low byte 2 == UD2. No destination-register index is packed
++ * in (unlike RDRAND's): the original RDSEED's destination was decoded at
++ * *build* time and is nowhere in the trap -- the UD2 that replaced it encodes
++ * nothing -- so userspace recovers it from its own site table, keyed by RIP.
++ */
++static int handle_baud_ud2_exit(struct kvm_vcpu *vcpu)
++{
++	struct x86_exception e;
++	u8 opcode[2];
++
++	/*
++	 * Same read handle_ud() itself already does for its force-emulation-
++	 * prefix signature check (arch/x86/kvm/x86.c): a real x86_exception is
++	 * passed, not NULL -- kvm_read_guest_virt_helper writes through that
++	 * pointer unconditionally on a failed access. A failed read is not an
++	 * error here, just "not identifiable as ours".
++	 */
++	if (kvm_read_guest_virt(vcpu, kvm_get_linear_rip(vcpu), opcode,
++				sizeof(opcode), &e) != 0)
++		return handle_ud(vcpu);
++
++	if (opcode[0] != 0x0f || opcode[1] != 0x0b)
++		return handle_ud(vcpu);
++
++	vcpu->run->exit_reason = KVM_EXIT_BAUD_DETERMINISM;
++	vcpu->run->hw.hardware_exit_reason = 2; /* 2 == UD2 */
++	return 0;
++}
++
+ static int handle_exception_nmi(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+@@ -5209,8 +5274,13 @@
+ 		return 1;
+ 	}
+ 
++	/*
++	 * baud: handle_baud_ud2_exit tail-calls handle_ud(vcpu) itself for every
++	 * #UD it cannot positively identify as a UD2, so this path is unchanged
++	 * for genuine invalid opcodes and for the kernel's own BUG()/WARN_ON().
++	 */
+ 	if (is_invalid_opcode(intr_info))
+-		return handle_ud(vcpu);
++		return handle_baud_ud2_exit(vcpu);
+ 
+ 	if (WARN_ON_ONCE(is_ve_fault(intr_info))) {
+ 		struct vmx_ve_information *ve_info = vmx->ve_info;
+@@ -6124,7 +6194,9 @@
+  * 0.14, so no uapi/kvm.h struct addition is needed beyond the bare exit
+  * reason constant. Low byte 0 == RDTSC (this handler); see
+  * handle_baud_rdrand_exit below for RDRAND's payload (low byte 1, plus a
+- * destination-register index in the next byte).
++ * destination-register index in the next byte), and handle_baud_ud2_exit
++ * above for the build-time-rewritten RDSEED's (low byte 2, no register
++ * index -- userspace keys its own site table by RIP instead).
+  */
+ static int handle_baud_rdtsc_exit(struct kvm_vcpu *vcpu)
+ {
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index f091c84..d9d8d6c 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -187,8 +187,11 @@
+ /*
+  * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason's
+  * low byte (0 == RDTSC, 1 == RDRAND with the destination GPR index in the next
+- * byte). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdrand_exit
+- * and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
++ * byte, 2 == a UD2 that may be a build-time-rewritten RDSEED site -- no register
++ * index, and RIP is left *at* the UD2 for userspace to advance or re-inject #UD
++ * from). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdrand_exit/
++ * handle_baud_ud2_exit and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the
++ * baud source tree.
+  */
+ #define KVM_EXIT_BAUD_DETERMINISM 41
+ 
