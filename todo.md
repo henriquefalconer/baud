@@ -1740,13 +1740,63 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`, `full-demo.sh`) re-run individually end-to-end on real
     `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS PASSED" (h5's ~233s 1000-branch test
     and h4's timer-tick test both passed clean in this run too).
-  - **Not yet done**: every other previously-open item remains untouched and still open: neither
+  - **Not yet done (at the time this entry was written — closed by the tenth brick below)**: neither
     `boot_snapshot_and_branch` nor `resume_and_branch` persists a per-branch node when a fixed-tape
-    fork stops at `MARK_BRANCH` the way the generate path's `persist_universe_as` does — a caller
-    can now *detect* a fixed-tape `MARK_BRANCH` stop but still cannot persist-and-resume-further from
-    that exact intermediate point without going through `generate` mode instead; `POST
+    fork stops at `MARK_BRANCH` the way the generate path's `persist_universe_as` does; `POST
     /run/kvm/resume` still has no `persist_run_id`/persistence mechanism at all; no `Driver`'s own
     state (seed/best/reservoir) persists across requests; the `Tape.choices`
     full-8-byte-vs-truncated-`draw_bits(n)` follow-up (fourth brick entry) is unfixed; the
     enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface,
     and the framebuffer stream (all documented earlier in this file) are all still open.
+- **M-series — tenth brick: `run_branches` (the shared fork loop behind both `boot_snapshot_and_branch`
+  and `resume_and_branch`) now persists a real child node whenever a fixed-tape fork stops at
+  `MARK_BRANCH`, closing the ninth brick entry's own named next step — the fixed-tape path's sibling
+  of what `run_driver_generated_branches_with_persist` already does for the driver-generated path.**
+  - `crates/baud-server/src/routes/run_kvm.rs`: `run_branches` now takes an optional
+    `persist: Option<(&SnapshotStore, &str, Option<NodeId>)>` (store, run_id, parent); whenever a
+    branch's `mark_branch_step` is `Some(_)`, it snapshots the live `Multiverse::branch` instance
+    (`branch.snapshot(&mut page_store)`, before it drops) and persists it via the existing
+    `persist_universe_as` (same content-addressing/`tape_range` scheme
+    `run_driver_generated_branches_with_persist` already uses, now with a per-branch cumulative byte
+    offset instead of a fixed `tape_len_bytes` stride, since fixed-tape suffixes can vary in length).
+    `BranchOutcome` grew a fourth field, `node_id: Option<String>`, surfaced in both `/run/kvm/branch`'s
+    and `/run/kvm/resume`'s fixed-tape JSON response bodies via `branch_outcome_to_json` (mirroring
+    `generated_outcome_to_json`'s own `node_id` handling). A new shared helper,
+    `persisted_root_parent`, replaces the near-duplicate inline match `boot_snapshot_and_generate` used
+    to compute its own `root_parent` — `boot_snapshot_and_branch` now uses the same helper.
+    `boot_snapshot_and_branch` persists per-branch `MARK_BRANCH` nodes only when its own
+    `persist`/`persist_run_id` is set (same opt-in the branch-point persist already required);
+    `resume_and_branch` persists unconditionally, since resuming already requires a `store`/`run_id`
+    to reconstruct from — this is what actually closes the gap: a caller can now walk a
+    `branch_tapes_hex` chain of `MARK_BRANCH` checkpoints via repeated `POST /run/kvm/resume` calls
+    without ever switching to `generate` mode.
+  - **New test**: `fixed_tape_branch_hitting_mark_branch_persists_and_resumes_further`
+    (`crates/baud-server/src/routes/run_kvm.rs`), the fixed-tape sibling of
+    `generated_branch_hitting_mark_branch_persists_and_resumes_further` — proves (1) a
+    `boot_snapshot_and_branch` fork that stops at `MARK_BRANCH` persists a node parented on the
+    branch point (`SnapshotStore::read_node`, same parent-check pattern
+    `interesting_generated_branches_persist_as_child_nodes` uses), and (2) `resume_and_branch` from
+    that node with a fresh suffix both reaches the guest's *next* `MARK_BRANCH` (not a frozen replay)
+    and persists a second node parented on the first — a genuine two-hop chain entirely through the
+    fixed-tape HTTP-route functions, the `branch_tapes_hex` analogue of
+    `two_level_mark_branch_checkpoints_chain`. `cargo test -p baud-server run_kvm`: 13/13 (was 12/12).
+  - **Verification**: `cargo build --workspace` clean. `cargo clippy --workspace --all-targets` zero
+    new warnings (no output referencing `run_kvm.rs`; every warning shown is pre-existing and
+    unrelated). `cargo test --workspace` (`--no-fail-fast`) surfaced exactly the one already-documented,
+    hardware-timing-sensitive `linux::tests::timer_tick_lands_at_identical_instruction` flake
+    (`RCB_HARDWARE_JITTER_TOLERANCE`, jitter 79 vs. tolerance 8), confirmed transient by an isolated
+    re-run passing 1/1 — every other crate passed 100%, including `baud-server`'s full 12→13-test
+    `run_kvm` module. All 17 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`, `full-demo.sh`)
+    re-run individually end-to-end on real `/dev/kvm`, zero regressions, `full-demo.sh` "32/32 CHECKS
+    PASSED" (h5's ~231s 1000-branch test included). None of the 17 drive scripts exercise the
+    `/run/kvm/*` HTTP routes directly today (they remain covered only by `baud-server`'s own unit
+    tests) — a real gap worth closing with a dedicated `drive/m9.sh` or similar, but out of scope for
+    this increment.
+  - **Not yet done**: every other previously-open item remains untouched and still open: `POST
+    /run/kvm/resume` still has no `persist_run_id` toggle for its own *branch-point* persistence (only
+    per-`MARK_BRANCH`-checkpoint persistence, added this iteration, needs no such toggle since it's
+    unconditional); no `Driver`'s own state (seed/best/reservoir) persists across requests; the
+    `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)` follow-up (fourth brick entry) is unfixed;
+    no `drive/*.sh` script exercises `/run/kvm/*` end-to-end (see above); the enforced-regime KVM
+    module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface, and the framebuffer
+    stream (all documented earlier in this file) are all still open.

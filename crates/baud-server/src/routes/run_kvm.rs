@@ -53,7 +53,7 @@ pub async fn run(Json(body): Json<RunKvmBody>) -> Json<Value> {
         .expect("run/kvm task panicked");
 
     match result {
-        Ok((console_output, ram_hash, _mark_branch_step)) => Json(json!({
+        Ok((console_output, ram_hash, _mark_branch_step, _node_id)) => Json(json!({
             "ok": true,
             "console_output_hex": hex_encode(&console_output),
             "ram_hash": ram_hash,
@@ -62,12 +62,16 @@ pub async fn run(Json(body): Json<RunKvmBody>) -> Json<Value> {
     }
 }
 
-/// One branch/boot's result: `(console_output, ram_hash, mark_branch_step)`. `mark_branch_step` is
-/// `Some(step)` when the branch stopped at a `MARK_BRANCH` checkpoint (the tape cursor it stopped
-/// at) instead of running to `Hlt` — see [`GeneratedBranchOutcome::mark_branch_step`]'s doc for why
-/// this distinction matters. `boot_and_run` (a plain boot-to-first-halt, never a branch fork) always
-/// leaves this `None`.
-type BranchOutcome = (Vec<u8>, String, Option<u64>);
+/// One branch/boot's result: `(console_output, ram_hash, mark_branch_step, node_id)`.
+/// `mark_branch_step` is `Some(step)` when the branch stopped at a `MARK_BRANCH` checkpoint (the
+/// tape cursor it stopped at) instead of running to `Hlt` — see
+/// [`GeneratedBranchOutcome::mark_branch_step`]'s doc for why this distinction matters. `node_id` is
+/// set only when the branch stopped at `MARK_BRANCH` *and* the call persisted (`boot_snapshot_and_
+/// branch`'s `persist` argument, or `resume_and_branch`, which always persists since it already has
+/// a store/run_id) — the fixed-tape analogue of `GeneratedBranchOutcome::node_id`, a real child node
+/// a caller can hand back to `POST /run/kvm/resume` to keep exploring past this exact checkpoint.
+/// `boot_and_run` (a plain boot-to-first-halt, never a branch fork) always leaves both `None`.
+type BranchOutcome = (Vec<u8>, String, Option<u64>, Option<String>);
 /// `(run_id, node_id_hex)` — what a caller hands to `POST /run/kvm/resume` to fork more branches
 /// from a persisted universe later.
 type PersistedRef = (String, String);
@@ -76,7 +80,7 @@ fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<Bran
     let mut mv = baud_multiverse::linux::Multiverse::boot(kernel_path, cmdline, 0, 1, tape, None)
         .map_err(|e| format!("boot error: {e}"))?;
     let outcome = mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?;
-    Ok((outcome.console_output, outcome.ram_hash, None))
+    Ok((outcome.console_output, outcome.ram_hash, None, None))
 }
 
 /// The work-clock constant this route uses for every boot/branch — a run-level constant
@@ -256,10 +260,13 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
 /// `BranchOutcome` → JSON, shared by `/run/kvm/branch` and `/run/kvm/resume`'s fixed-tape
 /// (`branch_tapes_hex`) response bodies. Mirrors `generated_outcome_to_json`'s `mark_branch_step`
 /// handling for the generate-mode response.
-fn branch_outcome_to_json((console_output, ram_hash, mark_branch_step): BranchOutcome) -> Value {
+fn branch_outcome_to_json((console_output, ram_hash, mark_branch_step, node_id): BranchOutcome) -> Value {
     let mut value = json!({ "console_output_hex": hex_encode(&console_output), "ram_hash": ram_hash });
     if let Some(step) = mark_branch_step {
         value["mark_branch_step"] = json!(step);
+    }
+    if let Some(node_id) = node_id {
+        value["node_id"] = json!(node_id);
     }
     value
 }
@@ -286,12 +293,22 @@ fn boot_and_snapshot(kernel_path: &Path, cmdline: &str) -> Result<baud_snapshot:
 /// `MARK_BRANCH` (todo.md §14's own "Not yet done" for this function). Now it stops there instead,
 /// reporting `mark_branch_step` just like the generate path does, so a caller can advance a
 /// checkpoint one `MARK_BRANCH` at a time with `branch_tapes_hex` too.
+///
+/// When `persist` is set, every branch that stops at `MARK_BRANCH` is additionally persisted as a
+/// real child node of `parent` (`GeneratedBranchOutcome`'s own "unconditionally interesting" doc
+/// applies here too — a `MARK_BRANCH` stop, unlike a genuine `Hlt`, is the one outcome where handing
+/// the persisted node a fresh suffix through `POST /run/kvm/resume` actually changes what the guest
+/// does next), closing the "can detect but cannot persist-and-resume-further" gap the fixed-tape
+/// path used to have relative to the generate path (todo.md §14's ninth-brick entry).
 fn run_branches(
     universe: &baud_snapshot::Universe,
     tape_suffixes: Vec<Vec<u8>>,
+    persist: Option<(&SnapshotStore, &str, Option<baud_snapshot_store::NodeId>)>,
 ) -> Result<Vec<BranchOutcome>, String> {
     let mut outcomes = Vec::with_capacity(tape_suffixes.len());
+    let mut offset: u64 = 0;
     for (i, suffix) in tape_suffixes.into_iter().enumerate() {
+        let suffix_len = suffix.len() as u64;
         let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix, WORK_CLOCK_K, None)
             .map_err(|e| format!("branch {i} error: {e}"))?;
         let (run_outcome, _records) = branch
@@ -305,9 +322,43 @@ fn run_branches(
                 (branch.console_output().to_vec(), branch.ram_hash(), Some(*step))
             }
         };
-        outcomes.push((console_output, ram_hash, mark_branch_step));
+        let tape_range = (offset, offset + suffix_len);
+        offset = tape_range.1;
+        let node_id = if mark_branch_step.is_some() {
+            match persist {
+                Some((store, run_id, parent)) => {
+                    let mut page_store = baud_snapshot::PageStore::new();
+                    let branch_universe = branch
+                        .snapshot(&mut page_store)
+                        .map_err(|e| format!("branch {i} snapshot error: {e}"))?;
+                    let nid =
+                        persist_universe_as(store, run_id, &branch_universe, parent, tape_range.1, tape_range)?;
+                    Some(nid.to_hex())
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        outcomes.push((console_output, ram_hash, mark_branch_step, node_id));
     }
     Ok(outcomes)
+}
+
+/// `persisted`'s node id, parsed, for use as the `parent` of any deeper node persisted in the same
+/// call — `None` when nothing was persisted at all (no `run_id` to persist deeper nodes under
+/// either). Shared by `boot_snapshot_and_branch` and `boot_snapshot_and_generate`.
+fn persisted_root_parent(
+    persisted: &Option<PersistedRef>,
+) -> Result<Option<baud_snapshot_store::NodeId>, String> {
+    match persisted {
+        Some((_, node_id_hex)) => {
+            let id = baud_snapshot_store::NodeId::from_hex(node_id_hex)
+                .map_err(|e| format!("bad persisted node_id: {e}"))?;
+            Ok(Some(id))
+        }
+        None => Ok(None),
+    }
 }
 
 fn boot_snapshot_and_branch(
@@ -321,7 +372,9 @@ fn boot_snapshot_and_branch(
         Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
         None => None,
     };
-    let outcomes = run_branches(&universe, tape_suffixes)?;
+    let parent = persisted_root_parent(&persisted)?;
+    let branch_persist = persist.map(|(store, run_id)| (store, run_id, parent));
+    let outcomes = run_branches(&universe, tape_suffixes, branch_persist)?;
     Ok((outcomes, persisted))
 }
 
@@ -384,14 +437,7 @@ fn boot_snapshot_and_generate(
     // The branch point itself was just persisted (if `persist` is set) as a fresh root node
     // (`parent: None, at_step: 0`, `persist_universe`'s own contract) — that's the parent every
     // interesting generated branch chains onto.
-    let root_parent = match (&persisted, persist) {
-        (Some((_, node_id_hex)), Some(_)) => {
-            let id = baud_snapshot_store::NodeId::from_hex(node_id_hex)
-                .map_err(|e| format!("bad persisted node_id: {e}"))?;
-            Some(id)
-        }
-        _ => None,
-    };
+    let root_parent = persisted_root_parent(&persisted)?;
     let (outcomes, summary) = run_driver_generated_branches_with_persist(&universe, spec, persist, root_parent)?;
     Ok((outcomes, summary, persisted))
 }
@@ -752,6 +798,11 @@ fn reconstruct_universe(
     .map_err(|e| format!("reconstruct error: {e}"))
 }
 
+/// Resuming from a persisted node always has a `store`/`run_id` to persist deeper into (unlike
+/// `boot_snapshot_and_branch`, where persistence is opt-in via `persist_run_id`) — so a fresh
+/// `MARK_BRANCH` stop reached from here is always persisted as a child of the resumed node, letting
+/// a caller walk a `branch_tapes_hex` chain of checkpoints via repeated `POST /run/kvm/resume` calls
+/// without ever switching to `generate` mode.
 fn resume_and_branch(
     store: &SnapshotStore,
     run_id: &str,
@@ -759,7 +810,8 @@ fn resume_and_branch(
     tape_suffixes: Vec<Vec<u8>>,
 ) -> Result<Vec<BranchOutcome>, String> {
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
-    run_branches(&universe, tape_suffixes)
+    let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
+    run_branches(&universe, tape_suffixes, Some((store, run_id, Some(parent))))
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
@@ -808,9 +860,9 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let (first_console, first_hash, _) =
+        let (first_console, first_hash, _, _) =
             boot_and_run(&kernel, cmdline, vec![]).expect("first boot failed");
-        let (second_console, second_hash, _) =
+        let (second_console, second_hash, _, _) =
             boot_and_run(&kernel, cmdline, vec![]).expect("second boot failed");
 
         assert_eq!(first_console, second_console, "console output must be identical across two boots");
@@ -831,7 +883,7 @@ mod tests {
         let (first_run, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None)
             .expect("boot_snapshot_and_branch failed");
         assert_eq!(first_run.len(), suffixes.len());
-        for (i, (console_output, _ram_hash, mark_branch_step)) in first_run.iter().enumerate() {
+        for (i, (console_output, _ram_hash, mark_branch_step, _node_id)) in first_run.iter().enumerate() {
             assert_eq!(
                 console_output, &suffixes[i],
                 "branch {i} must echo exactly its own tape suffix, not another branch's state"
@@ -1183,7 +1235,7 @@ mod tests {
             let fresh_suffix: Vec<u8> = vec![outcome.console_output[0], 0xAA];
             let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()])
                 .expect("resuming a MARK_BRANCH-persisted node failed");
-            let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step) = &resumed[0];
+            let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, _resumed_node_id) = &resumed[0];
             assert_eq!(
                 *resumed_mark_branch_step,
                 Some(2),
@@ -1196,6 +1248,85 @@ mod tests {
                  echo it, not replay a frozen halt"
             );
         }
+    }
+
+    /// The fixed-tape (`branch_tapes_hex`) sibling of
+    /// `generated_branch_hitting_mark_branch_persists_and_resumes_further` — todo.md §14's ninth-
+    /// brick entry's own named next step: a `boot_snapshot_and_branch`/`resume_and_branch` fork that
+    /// stops at `MARK_BRANCH` must not just *report* `mark_branch_step` but also persist a real
+    /// child node (parented on the branch point, confirmed via `SnapshotStore::read_node`, the same
+    /// check `interesting_generated_branches_persist_as_child_nodes` does for the generate path),
+    /// and that node must genuinely support resuming exploration further — a fresh tape suffix
+    /// handed to `resume_and_branch` must make the guest consume/echo it and land on its *next*
+    /// `MARK_BRANCH`, not replay frozen state.
+    #[test]
+    fn fixed_tape_branch_hitting_mark_branch_persists_and_resumes_further() {
+        let kernel = mark_branch_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "mark-branch-fixed-tape-test";
+
+        // mark-branch-guest reads one byte, echoes it, then issues MARK_BRANCH —
+        // run_until_branch_or_halt stops right there, same one-byte suffix the generate-mode
+        // sibling test above uses (tape_len_bytes: 1).
+        let (outcomes, persisted) =
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)))
+                .expect("boot_snapshot_and_branch failed");
+        let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
+        assert_eq!(root_run_id, run_id);
+
+        assert_eq!(outcomes.len(), 1);
+        let (console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
+        assert_eq!(*mark_branch_step, Some(1), "must stop right after the first MARK_BRANCH");
+        assert_eq!(
+            console_output, &vec![0x42],
+            "console output at the checkpoint must be exactly the one byte read+echoed so far"
+        );
+        let node_id_hex = node_id.as_ref().expect("a MARK_BRANCH stop must persist a node_id");
+        assert_ne!(node_id_hex, &root_node_id_hex, "a branch's node must differ from the branch point's");
+
+        let run = baud_snapshot_store::RunId::new(run_id.to_owned());
+        let node = store
+            .read_node(&run, baud_snapshot_store::NodeId::from_hex(node_id_hex).expect("valid node_id"))
+            .expect("read_node failed");
+        assert_eq!(
+            node.parent.as_deref(),
+            Some(root_node_id_hex.as_str()),
+            "a fixed-tape branch's persisted node must be parented on the branch point"
+        );
+
+        // Same technique as the generate-mode sibling test: index 0 is never re-read (the restored
+        // cursor is already past it) so it can be anything; index 1 is the one real new byte for
+        // the guest's second loop iteration.
+        let fresh_suffix: Vec<u8> = vec![console_output[0], 0xAA];
+        let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()])
+            .expect("resuming a MARK_BRANCH-persisted node failed");
+        let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, resumed_node_id) = &resumed[0];
+        assert_eq!(
+            *resumed_mark_branch_step,
+            Some(2),
+            "resuming a branch_tapes_hex fork of a MARK_BRANCH-persisted node must stop at the \
+             guest's next MARK_BRANCH, not silently require a full tape to Hlt"
+        );
+        assert_eq!(
+            resumed_console, &fresh_suffix,
+            "resuming past a MARK_BRANCH checkpoint with fresh tape must genuinely consume and \
+             echo it, not replay a frozen halt"
+        );
+        let resumed_node_id_hex =
+            resumed_node_id.as_ref().expect("resume_and_branch must also persist a further MARK_BRANCH stop");
+        assert_ne!(
+            resumed_node_id_hex, node_id_hex,
+            "the second checkpoint's node must differ from the first's"
+        );
+        let resumed_node = store
+            .read_node(&run, baud_snapshot_store::NodeId::from_hex(resumed_node_id_hex).expect("valid node_id"))
+            .expect("read_node failed");
+        assert_eq!(
+            resumed_node.parent.as_deref(),
+            Some(node_id_hex.as_str()),
+            "resuming must chain the new node onto the resumed-from node, not the original branch point"
+        );
     }
 
     #[test]
