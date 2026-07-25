@@ -171,6 +171,104 @@ fn log_opcode_carries_arbitrary_non_utf8_bytes_through_unmodified() {
 }
 
 #[test]
+fn frame_opcode_decodes_format_dimensions_and_pixels_and_hashes_them() {
+    let mut dev = TapeDevice::new(vec![]);
+    // format=Indexed8 (2), width=2, height=2, 4 pixel bytes
+    let payload: Vec<u8> = [2u8]
+        .into_iter()
+        .chain(2u32.to_le_bytes())
+        .chain(2u32.to_le_bytes())
+        .chain([10u8, 20, 30, 40])
+        .collect();
+    for b in payload {
+        dev.pio_write(reg::DATA, b);
+    }
+    dev.pio_write(reg::CONTROL, ControlOp::Frame as u8);
+    assert_eq!(dev.last_opcode_result(), OpcodeResult::Ok);
+    let records = dev.drain_records();
+    assert_eq!(records.len(), 1);
+    match &records[0] {
+        Msg::Frame(rec) => {
+            assert_eq!(rec.width, 2);
+            assert_eq!(rec.height, 2);
+            assert_eq!(rec.format, baud_proto::PixFmt::Indexed8);
+            assert_eq!(rec.bytes.as_deref(), Some([10u8, 20, 30, 40].as_slice()));
+            assert_eq!(rec.hash, baud_proto::Hash(*blake3::hash(&[10, 20, 30, 40]).as_bytes()));
+        }
+        other => panic!("expected Frame, got {other:?}"),
+    }
+}
+
+#[test]
+fn frame_opcode_two_identical_payloads_hash_identically() {
+    let payload = |buf: &mut TapeDevice| {
+        let bytes: Vec<u8> = [0u8]
+            .into_iter()
+            .chain(1u32.to_le_bytes())
+            .chain(1u32.to_le_bytes())
+            .chain([1u8, 2, 3, 4])
+            .collect();
+        for b in bytes {
+            buf.pio_write(reg::DATA, b);
+        }
+        buf.pio_write(reg::CONTROL, ControlOp::Frame as u8);
+    };
+    let mut dev1 = TapeDevice::new(vec![]);
+    payload(&mut dev1);
+    let mut dev2 = TapeDevice::new(vec![]);
+    payload(&mut dev2);
+    let hash_of = |records: Vec<Msg>| match records.into_iter().next() {
+        Some(Msg::Frame(rec)) => rec.hash,
+        other => panic!("expected Frame, got {other:?}"),
+    };
+    assert_eq!(
+        hash_of(dev1.drain_records()),
+        hash_of(dev2.drain_records()),
+        "identical frame bytes must hash identically across two devices"
+    );
+}
+
+#[test]
+fn frame_opcode_with_unknown_format_byte_is_malformed() {
+    let mut dev = TapeDevice::new(vec![]);
+    let payload: Vec<u8> = [0xffu8].into_iter().chain(0u32.to_le_bytes()).chain(0u32.to_le_bytes()).collect();
+    for b in payload {
+        dev.pio_write(reg::DATA, b);
+    }
+    dev.pio_write(reg::CONTROL, ControlOp::Frame as u8);
+    assert_eq!(dev.last_opcode_result(), OpcodeResult::MalformedPayload);
+    assert!(dev.drain_records().is_empty());
+}
+
+#[test]
+fn frame_opcode_with_header_shorter_than_nine_bytes_is_malformed() {
+    let mut dev = TapeDevice::new(vec![]);
+    for b in [0u8, 1, 2, 3] {
+        dev.pio_write(reg::DATA, b);
+    }
+    dev.pio_write(reg::CONTROL, ControlOp::Frame as u8);
+    assert_eq!(dev.last_opcode_result(), OpcodeResult::MalformedPayload);
+    assert!(dev.drain_records().is_empty());
+}
+
+#[test]
+fn frame_opcode_with_zero_pixel_bytes_is_still_well_formed() {
+    // Geometry validation is baud-stream's job (bad_geometry_is_a_crash), not this transport's —
+    // a header with no trailing pixel bytes still finalizes as a well-formed (if empty) Frame.
+    let mut dev = TapeDevice::new(vec![]);
+    let payload: Vec<u8> = [1u8].into_iter().chain(3u32.to_le_bytes()).chain(3u32.to_le_bytes()).collect();
+    for b in payload {
+        dev.pio_write(reg::DATA, b);
+    }
+    dev.pio_write(reg::CONTROL, ControlOp::Frame as u8);
+    assert_eq!(dev.last_opcode_result(), OpcodeResult::Ok);
+    match &dev.drain_records()[0] {
+        Msg::Frame(rec) => assert!(rec.bytes.as_ref().unwrap().is_empty()),
+        other => panic!("expected Frame, got {other:?}"),
+    }
+}
+
+#[test]
 fn unknown_opcode_byte_is_reported_and_queues_nothing() {
     let mut dev = TapeDevice::new(vec![]);
     dev.pio_write(reg::DATA, 1);

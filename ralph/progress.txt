@@ -3154,3 +3154,57 @@ Committed (c13ba1a) and pushed to origin/main successfully (2dbc5d9..c13ba1a). R
 Post-push verification GREEN: drive/m10.sh re-run against the pushed tip (c13ba1a) — all M10.1-M10.4 checks pass on real /dev/kvm. Step closed. Checking todo.md for remaining pending items to decide NEXT vs COMPLETE...
 
 todo.md still has two pending items (enforced-regime KVM module, framebuffer stream) — not zero. Emitting <promise>NEXT</promise>.
+
+## 2026-07-25T10:50:48 UTC - Session usage — build-24 [sonnet]
+- cost $3.495211099999999 (exact, from claude -p)
+- context 141,710 tok peak of 1M (14%) across 69 inference calls, monotonic
+- models sonnet-5 $3.4921 (in 156 / out 21,363 / cache-read 7,728,702) · haiku-4-5 $0.0031
+- subagents (3) sonnet-5 x3
+- transcript: ralph/.run/027-build-24.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 25
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick up where iteration 24 left off.
+
+Chose to close the framebuffer/baud-stream capability gap: todo.md's Not-yet-done list has two open items (enforced-regime KVM module, and the framebuffer stream). The enforced-regime module needs an out-of-tree kernel patch (high risk, unlikely to land safely in one iteration); the framebuffer stream turns out to NOT need a new device model at all — specs/baud-multiverse.md's non-goal 'no real device emulation beyond console + tape' just means frame data should ride the existing tape device as a new opcode, matching specs/baud-stream.md's own contract ('the guest writes length-prefixed raw frame buffers... the supervisor's device model delivers them'). baud-proto::Msg::Frame(FrameRecord) already exists; baud-tape-device's ControlOp enum just never grew a FRAME variant, and no guest fixture has ever exercised it. Implementing that closes real, useful scope in one iteration without kernel work.
+
+baud-tape-device: added ControlOp::Frame (opcode 5) — parses format/width/height header + raw pixel bytes, blake3-hashes them, pushes Msg::Frame(FrameRecord). 6 new unit tests, 24/24 passing (was 18). Now building the real guest fixture that exercises this over the actual PIO bus on real KVM...
+
+New fixture crates/baud-multiverse/tests/fixtures/framebuffer-guest/ (hand-assembled bzImage, same mechanics as rdtsc-guest) writes a real 2x2 Indexed8 frame through the tape device's new FRAME opcode. New test framebuffer_guest_frame_is_reproducible_across_boots boots it twice on real /dev/kvm and asserts the drained Msg::Frame record (width/height/format/bytes/hash) is byte-identical across boots, and that baud-tape-device's hash agrees with baud_stream::fingerprint. Passing. Running the full baud-multiverse suite now to check for regressions...
+
+Tape-device spec (specs/baud-tape-device.md) updated to document the new FRAME opcode. Dispatching two subagents in parallel: an Opus one to fix specs/baud-stream.md's stale pre-pivot language (baud-init/agent-side references that predate the KVM rewrite), and a Sonnet one to update todo.md's build-status section with this iteration's brick. Meanwhile running cargo build/clippy/test --workspace myself.
+
+cargo build --workspace clean (only pre-existing baud-tracing aya::Bpf warnings), cargo clippy --workspace --all-targets: zero new warnings on any touched file (grep for tape-device/framebuffer in clippy output is empty). Running cargo test --workspace now (this is the long one)...
+
+cargo test --workspace: 100% green, 0 failed across every crate (all test result: ok lines, no FAILED). Opus subagent finished specs/baud-stream.md pivot fix (baud-init/agent-side language replaced with the real FRAME-opcode transport, version bumped to 2.0) — it also flagged crates/baud-init's dead FrameAdapter/FrameTransport{Fifo,Vfs} as pre-pivot cruft worth a follow-up cleanup, noted for todo.md. Now running the 19 drive/*.sh scripts individually, starting with h0-h6...
+
+drive/h0.sh through h5.sh all PASS on real /dev/kvm, zero regressions (h5 took ~4min for the 1000-branch fork test, as expected). Continuing with h6 and the m-series scripts...
+
+drive/h6.sh, m0.sh-m4.sh all PASS. Running m5.sh (the stream milestone) next — most relevant to check since this iteration touched frame/tape-device code, though m5 itself tests the older pre-pivot synthetic-frame path, not the new real FRAME opcode.
+
+m6.sh through m9.sh all PASS. Continuing with m10.sh (shell-into) and full-demo.sh.
+
+All 19 drive/*.sh scripts (h0-h6, m0-m10, full-demo) re-run individually end-to-end on real /dev/kvm: zero regressions, full-demo.sh 32/32 CHECKS PASSED. Full verification suite green. Updating todo.md's build-status section with this iteration's brick now, then committing.
+
+
+## 2026-07-25T11:25:25 UTC - Changes committed.
+- Closed the framebuffer-stream transport gap flagged in every prior iteration's Not-yet-done list
+- Files changed:
+  - crates/baud-tape-device/src/lib.rs, Cargo.toml, src/tests.rs — new ControlOp::Frame (opcode 5)
+  - crates/baud-multiverse/src/linux/mod.rs, Cargo.toml — new real-hardware double-boot test
+  - crates/baud-multiverse/tests/fixtures/framebuffer-guest/ — new hand-assembled guest fixture
+  - specs/baud-tape-device.md, specs/baud-stream.md — spec updates (new opcode + pivot-language fix)
+  - todo.md — eighteenth-brick entry, corrected the framebuffer non-goal misdiagnosis
+- **Brief description of changes:**
+  - baud-tape-device gained a FRAME control opcode: a guest writes format+width+height+pixels to
+    the tape device and finalizes with opcode 5; the VMM blake3-hashes the pixels and emits
+    baud_proto::Msg::Frame(FrameRecord) — no new device model, reusing the existing tape transport
+  - New guest fixture framebuffer-guest writes a real 2x2 Indexed8 frame through this opcode
+  - New test framebuffer_guest_frame_is_reproducible_across_boots proves determinism on real /dev/kvm
+  - specs/baud-stream.md's stale pre-pivot language (baud-init/agent-side) fixed by an Opus subagent
+  - Full verification green: cargo build/clippy/test --workspace clean, all 19 drive/*.sh pass,
+    full-demo.sh 32/32
+---
+

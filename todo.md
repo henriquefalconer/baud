@@ -2152,7 +2152,84 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     from 16, including the two new `shell_into` regression tests). All 19 `drive/*.sh` scripts (`h0.sh`-`h6.sh`,
     `m0.sh`-`m10.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero regressions;
     `drive/m10.sh` itself all M10.1-M10.4 checks passed; `full-demo.sh` "32/32 CHECKS PASSED".
-  - **Not yet done**: the enforced-regime KVM module (RDTSC-compliance under *enforced* regime — bit-exact,
-    forced-exiting; only the cooperative-regime half closed, per the fifteenth brick), and the framebuffer
-    stream (still blocked on building an entirely new guest display device model first — `baud-multiverse`
-    has no framebuffer/VGA/virtio-gpu device today, an explicit spec non-goal per `specs/baud-multiverse.md`).
+  - **Not yet done (at the time this entry was written — the framebuffer-stream half closed by the
+    eighteenth brick below)**: the enforced-regime KVM module (RDTSC-compliance under *enforced*
+    regime — bit-exact, forced-exiting; only the cooperative-regime half closed, per the fifteenth
+    brick), and the framebuffer stream (this entry's premise — "blocked on building an entirely new
+    guest display device model" — turned out to be wrong; see the eighteenth brick).
+- **M-series — eighteenth brick: the framebuffer stream, flagged as open (and, on closer look,
+  mis-diagnosed) in every "Not yet done" list since the M-series crate map first described
+  `baud-stream` capturing a real guest's display, is now closed at the transport level.** The
+  seventeenth brick's note above assumed real frame capture needed "an entirely new guest display
+  device model" (VGA/virtio-gpu) — a genuine research pass this iteration found that premise false:
+  `baud_proto::Msg` already had a `Frame(FrameRecord)` variant nobody populated, and
+  `crates/baud-stream` (frame fingerprinting, QOI/Y4M encoding) was already fully built and
+  unit-tested — the actual gap was narrower: `baud-tape-device::ControlOp` only had
+  `Probe`/`MarkBranch`/`Goal`/`Violation`/`Log`, and no guest fixture ever wrote to the tape device
+  to emit a frame. specs/baud-stream.md §3's own display-adapter contract already described exactly
+  this shape ("the guest ... writes length-prefixed raw frame buffers ... the supervisor's device
+  model delivers them") — the tape device already *is* that device model, the same way it already
+  carries `LOG`/`PROBE`; specs/baud-multiverse.md's non-goal ("real device emulation beyond the
+  console + tape device") stays true because no new device was added, only a new opcode on the
+  existing one.
+  - **Fix**: new `ControlOp::Frame` (opcode 5, `crates/baud-tape-device/src/lib.rs`) — a guest
+    writes a 1-byte pixel-format tag + little-endian `u32` width + little-endian `u32` height + raw
+    pixel bytes to `DATA`, then finalizes with opcode 5 on `CONTROL`; `parse_frame` decodes the
+    header (geometry validation is deliberately left to `baud-stream::fingerprint`, not this
+    transport — a short header or unrecognized format byte is the only `MalformedPayload`), blake3
+    hashes the pixel bytes (new `blake3` dependency on this crate), and pushes
+    `Msg::Frame(FrameRecord)`. 6 new unit tests (decode/hash agreement across two devices/malformed
+    header/unknown format/zero-length pixels), `cargo test -p baud-tape-device`: 24/24 (was 18).
+    specs/baud-tape-device.md §4 documents the new opcode as the single source of truth for its byte
+    layout.
+  - **New fixture** `crates/baud-multiverse/tests/fixtures/framebuffer-guest/` (hand-assembled
+    bzImage, identical wrapping mechanics to `rdtsc-guest`/`rdrand-guest`): writes marker byte `'F'`
+    to COM1, then a real 2x2 `Indexed8` frame (pixels `10, 20, 30, 40`) through the new `FRAME`
+    opcode, then halts — the first real guest fixture in this workspace to exercise
+    `ControlOp::Frame`. New test `linux::tests::framebuffer_guest_frame_is_reproducible_across_boots`
+    boots it twice on real `/dev/kvm`, drains the tape device's single `Msg::Frame` record via
+    `Multiverse::drain_tape_records`, and asserts width/height/format/bytes/hash are byte-identical
+    across both boots — specs/baud-stream.md §7's own named test
+    (`frame_hashes_double_run_identical`) run for the first time against a real guest on real
+    hardware instead of `baud-stream`'s crate-level synthetic buffers — and cross-checks that
+    `baud-tape-device`'s hash agrees with `baud_stream::fingerprint` (new `baud-stream` dev-dependency
+    on `baud-multiverse`, test-only). `cargo test -p baud-multiverse`: 69/69 (was 68).
+  - **Spec fix (dispatched to an Opus subagent, per the "spec inconsistencies" directive)**:
+    specs/baud-stream.md was still "Version 1.0" describing the *pre-pivot* userspace model
+    (`baud-init`, `transport: fifo|vfs`, "the agent side") even though every sibling spec this
+    system touches (`baud-multiverse.md`, `baud-tape-device.md`) had already been rewritten for the
+    KVM pivot. Bumped to "Version 2.0" (2026-07-25); §3's display adapter now describes the real
+    `FRAME`-opcode transport and cross-references specs/baud-tape-device.md §4 as the byte layout's
+    single source of truth instead of re-describing it (avoiding two sources of truth); §2's
+    diagram caption and §6's "agent transport" phrasing updated to current terminology. §§1, 4, 5,
+    8–10 were verified against `crates/baud-stream/src/lib.rs` and left untouched (already
+    accurate). The agent also flagged a **separate, smaller follow-up**: `crates/baud-init`'s
+    `FrameAdapter`/`FrameTransport{Fifo,Vfs}` types (and specs/baud-init.md:90's reference to them)
+    are dead pre-pivot artifacts — `FrameTransport` has zero references outside that crate — not
+    fixed this iteration, noted here for whoever picks up `baud-init` next.
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` — zero warnings on
+    any file this iteration touched (`baud-tape-device`, the new fixture, `linux/mod.rs`,
+    `Cargo.toml`s). `cargo test --workspace`: 100% green, 0 failed, across every crate. All 19
+    `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m10.sh`, `full-demo.sh`) re-run individually
+    end-to-end on real `/dev/kvm`, zero regressions (including `drive/m5.sh`, the only drive script
+    that already exercised `baud-stream`'s pre-pivot synthetic-frame HTTP path — untouched by this
+    iteration and still 100% passing); `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: this closes the framebuffer stream's *transport* — a real guest can now
+    produce a real, deterministic `Msg::Frame` — but nothing in `baud-server`/`baud-cli` consumes it
+    yet. Two concrete gaps remain, both scoped follow-ups, not further transport work: (1) no
+    `/run/kvm*` boot route drains `Msg::Frame` records and persists their hashes into the
+    `frame_records` table the way `POST /runs/:id/frames` (the pre-pivot manual-seed endpoint) does
+    — a real KVM boot's frames are captured in-process but never reach the DB `baud stream frames`
+    reads from; (2) `POST /runs/:id/stream/render` (`crates/baud-server/src/routes/stream.rs`) is
+    still an explicit stub — its own header comment says "In a full implementation this would replay
+    the tape under baud-multiverse with capture enabled," but it actually fabricates a synthetic
+    gradient from each frame's stored hash, since `frame_records` deliberately stores hashes only
+    (specs/baud-stream.md §5's "Storage Discipline" — pixels are meant to be regenerated on demand
+    by replay, never journaled). Implementing real replay-based rendering needs the render route to
+    know which kernel/tape produced a run's frames (not currently persisted per run_id by `/run/kvm`)
+    and to re-boot `Multiverse` with frame capture enabled — a genuinely separate task from this
+    iteration's transport fix, since it touches run-metadata persistence, not the tape device.
+    Also still open, untouched by this iteration: the enforced-regime KVM module (RDTSC-compliance
+    under *enforced* regime — bit-exact, forced-exiting; only the cooperative-regime half closed,
+    per the fifteenth brick).

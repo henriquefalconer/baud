@@ -13,7 +13,7 @@
 // `baud_vcpu::Bus`) is `baud-multiverse`'s job (specs/baud-tape-device.md §2's architecture
 // diagram: "served on the vCPU bus by baud-vcpu") — see `crates/baud-multiverse/src/tape_bus.rs`.
 
-use baud_proto::{Msg, Observation, Outcome, Value};
+use baud_proto::{FrameRecord, Msg, Observation, Outcome, PixFmt, Value};
 
 /// The tape device's PIO/MMIO register offsets, relative to whatever base address/port the caller
 /// maps it at (specs/baud-tape-device.md §3).
@@ -47,6 +47,13 @@ pub enum ControlOp {
     Violation = 3,
     /// `LOG(bytes)` — emit a log line.
     Log = 4,
+    /// `FRAME(format,width,height,pixels)` — emit one graphical-surface frame for `baud-stream`
+    /// (specs/baud-stream.md §3's display adapter: "the guest ... writes length-prefixed raw
+    /// frame buffers ... the supervisor's device model delivers them"). This *is* that device
+    /// model — no separate VGA/virtio-gpu device is added (specs/baud-multiverse.md's non-goal
+    /// "real device emulation beyond the console + tape device" stays true; a frame is just
+    /// another tape-device record, the same way `LOG`/`PROBE` are).
+    Frame = 5,
 }
 
 impl ControlOp {
@@ -57,6 +64,7 @@ impl ControlOp {
             2 => Some(ControlOp::Goal),
             3 => Some(ControlOp::Violation),
             4 => Some(ControlOp::Log),
+            5 => Some(ControlOp::Frame),
             _ => None,
         }
     }
@@ -243,6 +251,22 @@ impl TapeDevice {
                 self.records.push(Msg::Log { bytes: payload, step });
                 self.last_result = OpcodeResult::Ok;
             }
+            Some(ControlOp::Frame) => match parse_frame(&payload) {
+                Some((width, height, format, bytes)) => {
+                    let hash = baud_proto::Hash(*blake3::hash(&bytes).as_bytes());
+                    self.records.push(Msg::Frame(FrameRecord {
+                        node: 0,
+                        step,
+                        width,
+                        height,
+                        format,
+                        hash,
+                        bytes: Some(bytes),
+                    }));
+                    self.last_result = OpcodeResult::Ok;
+                }
+                None => self.last_result = OpcodeResult::MalformedPayload,
+            },
             None => self.last_result = OpcodeResult::UnknownOpcode,
         }
     }
@@ -263,6 +287,30 @@ fn parse_probe(payload: &[u8]) -> Option<(String, Vec<u8>)> {
     let key = std::str::from_utf8(&payload[1..1 + key_len]).ok()?.to_string();
     let value = payload[1 + key_len..].to_vec();
     Some((key, value))
+}
+
+/// `FRAME`'s outbound payload format (this crate's own wire choice, same latitude
+/// specs/baud-tape-device.md §4 leaves `PROBE` — see [`parse_probe`]): byte 0 is the pixel format
+/// tag (`0` = Rgba8888, `1` = Rgb565, `2` = Indexed8), bytes 1..5 are the little-endian `u32`
+/// width, bytes 5..9 the little-endian `u32` height, and everything after that is the raw pixel
+/// buffer, verbatim. Geometry (buffer length vs. `width * height * bytes-per-pixel`) is
+/// deliberately *not* validated here — that is `baud-stream::fingerprint`'s job
+/// (`bad_geometry_is_a_crash`); this transport only rejects payloads too short to carry a header
+/// or tagged with an unrecognized format byte, both `OpcodeResult::MalformedPayload`.
+fn parse_frame(payload: &[u8]) -> Option<(u32, u32, PixFmt, Vec<u8>)> {
+    if payload.len() < 9 {
+        return None;
+    }
+    let format = match payload[0] {
+        0 => PixFmt::Rgba8888,
+        1 => PixFmt::Rgb565,
+        2 => PixFmt::Indexed8,
+        _ => return None,
+    };
+    let width = u32::from_le_bytes(payload[1..5].try_into().ok()?);
+    let height = u32::from_le_bytes(payload[5..9].try_into().ok()?);
+    let bytes = payload[9..].to_vec();
+    Some((width, height, format, bytes))
 }
 
 #[cfg(test)]

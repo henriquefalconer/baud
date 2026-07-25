@@ -1269,6 +1269,79 @@ mod tests {
         );
     }
 
+    /// `tests/fixtures/framebuffer-guest/`'s payload: writes one marker byte (`'F'`) to COM1,
+    /// then writes a 2x2 `Indexed8` frame (pixels `10, 20, 30, 40`) to the tape device and
+    /// finalizes it with the `FRAME` control opcode, then halts. See that directory's `BUILD.md`
+    /// for exact provenance — the first guest fixture in this workspace to exercise
+    /// `baud_tape_device::ControlOp::Frame`.
+    fn framebuffer_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/framebuffer-guest/bzImage")
+    }
+
+    /// The single marker byte `tests/fixtures/framebuffer-guest/payload.s` writes to COM1 before
+    /// writing the frame — mirrors `RDTSC_GUEST_MARKER`'s role: a cheap sanity check that the
+    /// guest actually ran past its first instruction before we go looking at drained tape records.
+    const FRAMEBUFFER_GUEST_MARKER: u8 = b'F';
+
+    /// specs/baud-stream.md §7's own named test (`frame_hashes_double_run_identical`), run for the
+    /// first time against a real guest on real `/dev/kvm` instead of `baud-stream`'s crate-level
+    /// synthetic buffers: proves `baud_tape_device::ControlOp::Frame` (todo.md §14's "framebuffer
+    /// stream" gap — no real device ever produced a `Msg::Frame` before this) is a deterministic
+    /// tape-device record like every other opcode, not just a wire type nothing ever populated.
+    #[test]
+    fn framebuffer_guest_frame_is_reproducible_across_boots() {
+        let kernel = framebuffer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_outcome = first.run_to_first_halt().expect("first run failed");
+        assert_eq!(first_outcome.console_output, vec![FRAMEBUFFER_GUEST_MARKER]);
+        let first_records = first.drain_tape_records();
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_outcome = second.run_to_first_halt().expect("second run failed");
+        assert_eq!(second_outcome.console_output, vec![FRAMEBUFFER_GUEST_MARKER]);
+        let second_records = second.drain_tape_records();
+
+        assert_eq!(first_records.len(), 1, "guest emits exactly one Frame record: {first_records:?}");
+        assert_eq!(second_records.len(), 1, "guest emits exactly one Frame record: {second_records:?}");
+
+        let as_frame = |records: Vec<baud_proto::Msg>| match records.into_iter().next() {
+            Some(baud_proto::Msg::Frame(rec)) => rec,
+            other => panic!("expected exactly one Msg::Frame, got {other:?}"),
+        };
+        let first_frame = as_frame(first_records);
+        let second_frame = as_frame(second_records);
+
+        assert_eq!(first_frame.width, 2);
+        assert_eq!(first_frame.height, 2);
+        assert_eq!(first_frame.format, baud_proto::PixFmt::Indexed8);
+        assert_eq!(first_frame.bytes.as_deref(), Some([10u8, 20, 30, 40].as_slice()));
+
+        assert_eq!(
+            first_frame.hash, second_frame.hash,
+            "the same guest fixture on the same tape must produce byte-identical frame hashes \
+             across two boots — this is what makes baud-stream's frame-hash journaling a real \
+             determinism guarantee rather than an assumption"
+        );
+        assert_eq!(first_frame.bytes, second_frame.bytes);
+        assert_eq!(first_frame.width, second_frame.width);
+        assert_eq!(first_frame.height, second_frame.height);
+        assert_eq!(first_frame.format, second_frame.format);
+
+        // Confirm the transport's hash actually matches baud-stream's own fingerprint function —
+        // the two crates must agree on what "the frame's hash" means, or downstream verification
+        // (frame hashes joining `verify determinism`, specs/baud-stream.md §4) would be comparing
+        // apples to oranges.
+        let expected_hash = baud_stream::fingerprint(
+            first_frame.bytes.as_deref().unwrap(),
+            first_frame.width,
+            first_frame.height,
+            &first_frame.format,
+        ).expect("fixture's frame geometry must be internally consistent");
+        assert_eq!(first_frame.hash, expected_hash, "tape-device hash must match baud_stream::fingerprint");
+    }
+
     /// `tests/fixtures/timer-guest/`'s payload: builds a real IDT (one gate at vector `0x30`
     /// pointing at a handler that writes one marker byte to COM1 and `iretq`s back), enables
     /// interrupts, then busy-loops long enough to absorb several injected ticks before a clean

@@ -42,3 +42,7 @@ perf-event = "0.4"
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = "1"
+# Only for framebuffer_guest_frame_is_reproducible_across_boots' cross-check that
+# baud-tape-device's Frame-record hash agrees with baud-stream's own fingerprint function — no
+# non-test code in this crate depends on baud-stream.
+baud-stream = { path = "../baud-stream" }

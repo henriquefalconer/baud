@@ -62,7 +62,7 @@ pub struct TapeDevice {
 impl TapeDevice {
     pub fn pio_read(&mut self, off: u16) -> u8;        // 0x00 → next tape byte; 0x10 → status
     pub fn pio_write(&mut self, off: u16, b: u8);      // 0x00 → append outbound; 0x08 → control opcode
-    pub fn drain_records(&mut self) -> Vec<Msg>;       // PROBE/MARK_BRANCH/GOAL/VIOLATION/LOG → baud-proto
+    pub fn drain_records(&mut self) -> Vec<Msg>;       // PROBE/MARK_BRANCH/GOAL/VIOLATION/LOG/FRAME → baud-proto
     pub fn cursor(&self) -> u64;                        // captured in a Universe (baud-snapshot)
 }
 ```
@@ -92,8 +92,20 @@ outbound record. All values are opaque bytes.
 | `GOAL(metric)`      | Emit `GoalReached` |
 | `VIOLATION(inv)`    | Emit `Crash{invariant}` |
 | `LOG(bytes)`        | Emit a log line |
+| `FRAME(format,width,height,pixels)` | Emit one graphical-surface frame for `baud-stream` |
 
 Opcodes map to `baud-proto` messages the VMM forwards to the server/driver.
+
+`FRAME` is the display adapter specs/baud-stream.md §3 describes, and this section is that byte
+layout's single source of truth: a guest (or its bridge fixture) writes a one-byte pixel-format
+tag, the little-endian `u32` width, the little-endian `u32` height, then the raw pixel bytes to
+`DATA`, then finalizes with this opcode.
+The VMM hashes the pixel bytes (blake3) and forwards a `baud_proto::Msg::Frame(FrameRecord)` —
+geometry validation (buffer length vs. `width × height × bytes-per-pixel`) is `baud-stream`'s job,
+not this device's; a short header or unrecognized format byte is the only way this opcode reports
+`MalformedPayload`. This is deliberately *not* a new device — specs/baud-multiverse.md's non-goal
+"real device emulation beyond the console + tape device" stays true, since a frame rides the same
+transport as every other control record.
 
 ---
 

@@ -460,6 +460,7 @@ dependencies = [
  "baud-host",
  "baud-proto",
  "baud-snapshot",
+ "baud-stream",
  "baud-tape-device",
  "baud-vcpu",
  "blake3",
@@ -651,6 +652,7 @@ name = "baud-tape-device"
 version = "0.1.0"
 dependencies = [
  "baud-proto",
+ "blake3",
  "proptest",
 ]
 

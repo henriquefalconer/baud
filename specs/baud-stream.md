@@ -6,8 +6,8 @@
 # Baud Stream Specification
 
 **Status:** Planned\
-**Version:** 1.0\
-**Last Updated:** 2026-07-23
+**Version:** 2.0\
+**Last Updated:** 2026-07-25
 
 ---
 
@@ -42,7 +42,7 @@ recording.
 │  ingest raw frames → validate → blake3 hash    │
 │  render (replay w/ capture) · QOI · Y4M        │
 └──────────────────────────────────────────────┘
-        ▲ fed by the supervisor's display device via the agent
+        ▲ fed by the tape device's FRAME opcode (specs/baud-tape-device.md §4)
 ```
 
 ### Rationale
@@ -54,14 +54,19 @@ recording.
 
 ## 3. Display Adapter
 
-A guest declares its surface via baud-init:
+A guest emits a frame through the one paravirtual tape device — there is no separate display device and
+no side channel. At each frame boundary the guest (or its bridge fixture) writes the frame's header
+(pixel format ∈ `rgba8888|rgb565|indexed8`, then width, then height) followed by the raw pixel buffer to
+the tape device's `DATA` port, and finalizes the record with the `FRAME` control opcode (opcode 5) on the
+`CONTROL` port.
 
-```
-frame{width, height, format: rgba8888|rgb565|indexed8, transport: fifo|vfs}
-```
+**specs/baud-tape-device.md §4 is the single source of truth for that byte layout** — it is deliberately
+not restated here.
 
-The guest (or its bridge fixture) writes length-prefixed raw frame buffers at each frame boundary; the
-supervisor's device model delivers them to this crate on the agent side.
+The VMM blake3-hashes the pixel bytes and forwards `baud_proto::Msg::Frame(FrameRecord)` —
+`{node, step, width, height, format, hash, bytes}` — to this crate. Geometry is thus declared per frame by
+the guest itself rather than once up front, and the tape device does not check it: validating the buffer
+length against the declared geometry is this crate's job (§4).
 
 ---
 
@@ -90,7 +95,7 @@ supervisor's device model delivers them to this crate on the agent side.
 | ------------- | ------------------------------------------------ |
 | Single frame  | QOI (in-crate encoder) |
 | Sequence      | Y4M (raw, pipeable → user's ffmpeg for mp4) |
-| Live          | `--stream` runs and `stream render` forward `FrameRecord`s over the agent transport; server re-serves via SSE |
+| Live          | `--stream` runs and `stream render` forward `FrameRecord`s over `baud-tape-agent`'s stream transport; server re-serves via SSE |
 
 ### Commands
 
@@ -121,6 +126,10 @@ fn bad_geometry_is_a_crash() {
 }
 ```
 
+- **framebuffer-guest (H-series)**: `crates/baud-multiverse/tests/fixtures/framebuffer-guest/` emits one
+  `indexed8` frame via §3's `FRAME` opcode;
+  `linux::tests::framebuffer_guest_frame_is_reproducible_across_boots` proves the frame hash is identical
+  across two boots on real KVM, and that it matches `baud-stream`'s own `fingerprint`.
 - **framedemo (M5)**: a guest writing a moving `indexed8` gradient; the tests above pass on it.
 - **Mario (M8)**: `stream render -o mario-completion.y4m` produces the watchable completion video from the
   tape alone.
