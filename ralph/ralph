@@ -254,7 +254,19 @@ root = os.path.join(os.path.expanduser("~"), ".claude", "projects",
 # with 109 inference calls the server reported num_turns=14 and duration_ms=157840
 # (2.6 min). Neither could be reconciled with the transcript, so the ledger states
 # only the inference-call count, which is derived and verifiable.
-print(f"- cost ${meta.get('total_cost_usd', 0):.4f} (from claude -p)")
+# Two independent cost figures live in the session JSON and they do NOT always
+# agree: total_cost_usd is the session total, modelUsage[].costUSD is per model.
+# They reconcile to the cent on sonnet-only sessions, but a session with an Opus
+# subagent was measured at total_cost_usd $12.3886 against a modelUsage sum of
+# $16.5541. Print the headline figure, and say so when the two disagree rather
+# than emitting two contradictory numbers in one entry.
+total = meta.get("total_cost_usd", 0) or 0
+mu_sum = sum((m.get("costUSD") or 0) for m in (meta.get("modelUsage") or {}).values())
+if abs(mu_sum - total) >= 0.005:
+    print(f"- cost ${total:.4f} (from claude -p; per-model sums to ${mu_sum:.4f}, "
+          f"differs by ${mu_sum - total:+.4f})")
+else:
+    print(f"- cost ${total:.4f} (from claude -p)")
 
 session = calls(os.path.join(root, sid + ".jsonl"))
 if session:
