@@ -2607,3 +2607,70 @@ full-demo.sh 32/32 CHECKS PASSED, zero regressions. Updated todo.md with the ten
   - New test: fixed_tape_branch_hitting_mark_branch_persists_and_resumes_further — the fixed-tape sibling of generated_branch_hitting_mark_branch_persists_and_resumes_further, proving a two-hop MARK_BRANCH persist-and-resume chain entirely through boot_snapshot_and_branch/resume_and_branch. cargo test -p baud-server run_kvm: 13/13 (was 12/12).
   - Full re-verification: cargo build/clippy/test --workspace all green (only the already-documented timer_tick_lands_at_identical_instruction hardware-timing flake seen once, confirmed transient by isolated re-run). All 17 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
 ---
+
+Post-push verification: local HEAD == origin/main (0b0a091, git fetch confirmed), working tree clean, build/clippy/test/all-17-drive-scripts already green pre-push against this exact commit. Re-reading todo.md: still many pending items (POST /run/kvm/resume's own branch-point persist_run_id toggle, Driver-state persistence across requests, Tape.choices truncation follow-up, no drive/*.sh exercises /run/kvm/* end-to-end yet, AMD phase-2, enforced-regime custom KVM module, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface, framebuffer stream). This iteration's step (persisting per-branch nodes for fixed-tape MARK_BRANCH stops, closing the ninth brick entry's own named next step) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T06:35:09 UTC - Session usage — build-17 [sonnet]
+- cost $4.6130963000000005 (exact, from claude -p)
+- context 177,820 tok peak of 1M (18%) across 68 inference calls, monotonic
+- models sonnet-5 $4.6100 (in 146 / out 44,705 / cache-read 9,321,236) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/019-build-17.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 18
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where iteration 17 left off.
+
+Chose to build drive/m9.sh — a dedicated drive script exercising the /run/kvm, /run/kvm/branch, /run/kvm/resume HTTP routes end-to-end, since the previous iteration explicitly flagged this as a real gap (no drive script covers these routes today, only baud-server's own unit tests). It's the most concrete, well-scoped, already-identified next step in todo.md.
+
+Wrote drive/m9.sh, exercising POST /run/kvm, /run/kvm/branch (fixed-tape + generate), and /run/kvm/resume (fixed-tape + generate) end-to-end over real HTTP against a real baud-server on real /dev/kvm, using the hello-guest/mark-branch-guest/tape-echo-guest fixtures. Building the workspace now before running it.
+
+drive/m9.sh passes all 9 checks (/run/kvm double-boot determinism; /run/kvm/branch fixed-tape independence; /run/kvm/branch+resume MARK_BRANCH persist-and-chain for both fixed-tape and driver-generate modes; error handling). Re-running once more to confirm stability, then starting full pre-push verification: build, clippy, test, then all 18 drive/*.sh scripts one at a time.
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets next...
+
+cargo clippy --workspace --all-targets: zero new warnings (only pre-existing ones, none referencing run_kvm.rs — this change is drive/m9.sh only, no Rust source touched). Running cargo test --workspace next...
+
+cargo test --workspace surfaced the single already-documented hardware-timing flake, linux::tests::timer_tick_lands_at_identical_instruction (RCB_HARDWARE_JITTER_TOLERANCE, jitter 78 vs tolerance 8) — everything else passed, 66/67 in baud-multiverse. Re-running that one test in isolation to confirm it's transient, same pattern as prior iterations documented.
+
+Confirmed transient (1/1 pass in isolation), matching prior iterations' documented flake. cargo test/build/clippy all green. Now running each drive/*.sh script individually per the verification protocol — h0 through h6 first.
+
+h0-h3 all PASS. Continuing with h4, h5, h6...
+
+h4, h5 (1000-branch ~231s) both PASS. Continuing with h6...
+
+h6 PASS — all H-series (h0-h6) green. Continuing with m0-m4...
+
+m0-m4 all PASS. Continuing with m5-m8...
+
+m5-m8 all PASS. Running full-demo.sh now (comprehensive ~4min script, includes h5's 1000-branch test)...
+
+full-demo.sh 32/32 CHECKS PASSED, zero regressions. drive/m9.sh (new) also re-confirmed passing. Updating todo.md with the new brick entry, then appending final progress block and committing.
+
+
+## 2026-07-25T06:57:57 UTC - Changes committed.
+- Implemented: `drive/m9.sh` — the first drive script to exercise `POST /run/kvm`, `/run/kvm/branch`,
+  and `/run/kvm/resume` end-to-end over real HTTP against a real `baud-server` process on real
+  `/dev/kvm`, closing the tenth-brick entry's own named gap ("none of the 17 drive scripts exercise
+  the `/run/kvm/*` HTTP routes directly today").
+- Files changed: drive/m9.sh (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - drive/m9.sh: 9 checks — /run/kvm double-boot determinism (hello-guest); /run/kvm/branch
+    fixed-tape independence (tape-echo-guest); /run/kvm/branch + /run/kvm/resume fixed-tape
+    MARK_BRANCH persist-and-chain (mark-branch-guest, two-hop); /run/kvm/branch + /run/kvm/resume
+    generate-mode (baud-driver-generated tapes) MARK_BRANCH persist-and-chain; three error-handling
+    checks (mutually-exclusive fields, invalid hex, unknown run/node).
+  - Found live while writing M9.6: resuming a MARK_BRANCH-persisted node in generate mode needs
+    `tape_len_bytes: 2`, not `1` — the restored tape cursor is already past the checkpoint byte, so
+    the first generated byte is never re-read (the same quirk `resume_and_branch`'s own doc/tests
+    document for the fixed-tape path, now confirmed identical for generate-mode resume, which had no
+    prior test at all).
+  - No Rust source touched — this increment is purely a new drive script plus the todo.md brick entry
+    documenting it.
+  - Full verification: cargo build/clippy/test --workspace all green (only the already-documented
+    timer_tick_lands_at_identical_instruction hardware-timing flake seen once, confirmed transient by
+    isolated re-run). All 17 pre-existing drive/*.sh scripts plus the new drive/m9.sh re-run
+    individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED.
+---
