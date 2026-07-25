@@ -13,6 +13,10 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 tempfile = { workspace = true }
+# rdseed build-time rewrite pass (todo.md §3.8/§4): real ELF section parsing + a real x86
+# decoder -- never a byte-grep over `SHF_EXECINSTR` sections.
+object = "0.36"
+capstone = "0.14"
 
 [dev-dependencies]
 proptest = "1"

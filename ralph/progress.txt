@@ -3606,3 +3606,77 @@ Push verified: origin/main == local HEAD (425d6d3), working tree clean, host on 
 - context 114,157 tok peak of 1M (11%) across 13 inference calls, monotonic
 - models sonnet-5 $1.0182 (in 26 / out 10,735 / cache-read 1,047,751) · haiku-4-5 $0.0008
 - transcript: ralph/.run/035-verify-domains.json
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1
+
+═══════════════════════════════════════════════════════
+
+Studying specs/* and todo.md to find most important pending item. todo.md §14 lists 4 'next actions' (rdseed rewrite, OS-entropy determinism, Regime-enum cleanup, Mario validation) but the previous session's progress.txt entry claims zero pending items remain — investigating which is accurate before picking a step...
+
+Wrote crates/baud-packages/src/rdseed.rs (Capstone-based rdseed->UD2 rewrite pass) + wired into lib.rs; added object/capstone deps. Building baud-packages now...
+
+baud-packages builds clean with the new capstone/object deps. Running cargo test -p baud-packages...
+
+Wired /image/rewrite-rdseed server route (base64 ELF in/out) + baud image rewrite-rdseed CLI subcommand. Building workspace...
+
+Workspace build green. Running cargo clippy --workspace --all-targets...
+
+Clippy clean on new code (pre-existing warnings elsewhere untouched). Running cargo test --workspace...
+
+Full 'cargo test --workspace' run is grinding through a second pass in the background (already saw all suites print 'ok' once); updating todo.md now to record what landed while that finishes.
+
+Full test run surfaced one failure unrelated to this iteration's rdseed work: baud-multiverse::linux::tests::rdtsc_guest_reproduces_high_bits_across_boots (a real-KVM TSC timing test). Per project rules I must resolve unrelated failing tests too -- investigating whether it's flaky or a real regression before proceeding.
+
+Confirmed the one full-suite failure (rdtsc_guest_reproduces_high_bits_across_boots) is pre-existing hardware-timing flakiness, not a regression from this iteration's changes -- it passes cleanly in isolation and I never touched baud-multiverse. Root cause of the flake: I accidentally ran two full 'cargo test --workspace' invocations back to back, and the second one's CPU contention induced timing jitter past the test's tolerance. Waiting for that stray second run to finish before doing one clean, serial, protocol-compliant test pass.
+
+## 2026-07-25T19:58:55 UTC (26min) - Session usage — build-1 [sonnet]
+- cost $4.9722 (from claude -p)
+- context 179,062 tok peak of 1M (18%) across 69 inference calls, monotonic
+- models sonnet-5 $4.9691 (in 160 / out 62,798 / cache-read 9,552,773) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260725T193324Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... checking uncommitted diff state and todo.md next actions before picking.
+
+rdseed.rs looks complete and well-tested (Capstone-based decoder scan, in-place UD2+NOP rewrite, wired end-to-end via /image/rewrite-rdseed route + baud image rewrite-rdseed CLI). Running cargo build --workspace to verify it still compiles clean before committing this as the forward step.
+
+Build green. Running cargo clippy --workspace --all-targets...
+
+Clippy clean (only pre-existing unrelated warnings). Running cargo test --workspace once, cleanly, serially...
+
+Full 'cargo test --workspace' single clean run: 0 failed across all crates (confirms prior session's flake was contention from a stray duplicate run, not a regression). Running drive/h0.sh through the image-related drive scripts next, then committing this rdseed-rewrite-pass wiring as this iteration's forward step.
+
+Manual smoke test: spawned baud-server, ran 'baud image rewrite-rdseed' via CLI against a real ELF (/bin/true) — round-trip succeeded (count=0, byte-identical output, correct no-op since /bin/true has no rdseed). CLI<->server wiring confirmed working end-to-end. Committing this rdseed rewrite pass now.
+
+Normalized stray CRLF line-ending churn in .gitignore/ralph/.gitignore/todo.md back to LF (unrelated to this feature, introduced by tooling in the prior session) -- kept todo.md's real content update (§14 build-status entry for the rdseed rewrite pass). Ready to commit.
+
+
+## 2026-07-25T20:11:43 UTC - Changes committed.
+- Wired the baud-packages rdseed->UD2(+NOP) build-time rewrite pass end-to-end via the CLI and server
+- Files changed: crates/baud-packages/src/rdseed.rs (new), crates/baud-packages/src/lib.rs,
+  crates/baud-server/src/routes/image.rs, crates/baud-server/src/main.rs, crates/baud-cli/src/cmds/image.rs,
+  Cargo.toml/Cargo.lock (object + capstone + base64 deps), todo.md
+- **Brief description of changes:**
+  - crates/baud-packages/src/rdseed.rs: Capstone-based x86-64 decoder scans every SHF_EXECINSTR ELF
+    section for rdseed opcodes (never a byte-grep) and rewrites each in place to UD2+NOP, length-preserving;
+    re-scans + re-disassembles after patching to confirm the rewrite is clean. Unit + property tests green.
+  - POST /image/rewrite-rdseed (base64 ELF in/out) wired in baud-server; `baud image rewrite-rdseed <path>`
+    wired in baud-cli, round-tripping base64 over the existing Client.
+  - Verified: cargo build/clippy/test --workspace all green (one prior flaky TSC-timing test traced to CPU
+    contention from a stray duplicate test run, not a regression); manual smoke test spawning baud-server and
+    running `baud image rewrite-rdseed` against a real ELF (/bin/true) confirmed the CLI<->server round trip.
+  - Normalized incidental CRLF line-ending churn in .gitignore/ralph/.gitignore back to LF; kept todo.md's
+    real §14 build-status update describing this pass and the still-open rdseed serve-path kernel work.
+---

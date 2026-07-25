@@ -31,6 +31,7 @@ use std::path::PathBuf;
 mod spec;
 mod flake;
 mod image;
+mod rdseed;
 
 pub use spec::{WorkloadSpec, WorkloadPackage};
 pub use flake::FlakeTemplate;
@@ -38,6 +39,7 @@ pub use image::{
     image_lint, lint_kernel_config, ConfigState, GuestImageManifest, LintReport, LintViolation,
     FORBIDDEN_REAL_TIMERS, TAPE_DEVICE_CONFIG,
 };
+pub use rdseed::{rewrite_rdseed, scan_rdseed_opcodes, RdseedRewriteReport, RdseedSite};
 
 // ---------------------------------------------------------------------------
 // Pinned nixpkgs revision (the single source of truth)
