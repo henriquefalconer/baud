@@ -504,11 +504,10 @@ Read from NES RAM by the bridge each frame:
 ### 11.4 Tactics (input distribution)
 
 - **Sticky flip-mask**: `next_byte = prev_byte XOR low_probability_mask` — each controller bit flips with a
-  small per-frame probability (a **tuned parameter**, not a fixed constant from the source), so buttons stay
-  held across many frames. This is essential: completing a jump requires holding A for ~30–100 frames, which
-  fresh-per-frame random input (50% per frame) achieves with probability `1/2^N` (≈ 0 for a long jump);
-  correlated "start/stop pressing" input makes held presses common. The principle: white noise is maximum
-  entropy per frame but minimum entropy at the macro scale — the opposite of what exploration wants.
+  small per-frame probability (tuned), so buttons stay held across many frames. Correlate input across frames;
+  never draw a fresh independent byte per frame. A jump needs A held for ~30–100 frames, which independent
+  50%-per-frame input reaches with probability `1/2^N` (≈ 0 for a long jump) — so uncorrelated input clears no
+  jump, while flipping a bit only to start or stop pressing makes long holds common.
 - **Pure per-frame random** is kept only as a negative control — its reachable-position heat-map decays fast
   near the spawn.
 
