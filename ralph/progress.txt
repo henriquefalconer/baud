@@ -3591,3 +3591,18 @@ todo.md updated: RDRAND enforcement entry appended, prior 'not yet done' bullet 
   - Full verification: cargo build/clippy clean, cargo test --workspace clean (one transient known-jitter failure during an earlier full-workspace run reproduced the same documented pre-existing flake, confirmed not a regression via 3/3 clean isolated re-runs), all 22 drive/*.sh scripts pass individually, host left on the stock kvm module throughout except the two enforced-regime scripts' own bounded swap windows (verified restored every time)
   - todo.md: closed the RDRAND "not yet done" bullet, appended the twenty-second build-status entry — zero pending items remain anywhere in the file
 ---
+
+Push verified: origin/main == local HEAD (425d6d3), working tree clean, host on stock kvm module with no /dev/kvm holder. todo.md re-read: zero pending items remain anywhere in the file — every milestone (H0-H6, M0-M11), the crate map, and the problem-matrix are built and verified end-to-end on real hardware. This iteration closes with COMPLETE.
+
+## 2026-07-25T15:39:58 UTC - Session usage — build-31 [sonnet]
+- cost $26.348873300000015 (exact, from claude -p)
+- context 421,281 tok peak of 1M (42%) across 223 inference calls, monotonic
+- models sonnet-5 $24.0893 (in 472 / out 187,095 / cache-read 62,014,006) · opus-5[1m] $2.2565 · haiku-4-5 $0.0031
+- subagents (3) opus-5 x2 · sonnet-5 x1
+- transcript: ralph/.run/034-build-31.json
+
+## 2026-07-25T15:42:28 UTC - Session usage — verify-domains [sonnet]
+- cost $1.0190162999999999 (exact, from claude -p)
+- context 114,157 tok peak of 1M (11%) across 13 inference calls, monotonic
+- models sonnet-5 $1.0182 (in 26 / out 10,735 / cache-read 1,047,751) · haiku-4-5 $0.0008
+- transcript: ralph/.run/035-verify-domains.json

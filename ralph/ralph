@@ -75,6 +75,16 @@ CLAUDE_ARGS=( -p --dangerously-skip-permissions --chrome --model "$MODEL" --outp
 # ── small helpers ────────────────────────────────────────────────────────────
 
 say()  { printf '[ralph %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+
+# Human session duration: "1h45min" over an hour, "45min" under. Measured on the
+# wall clock in run_session — the session JSON's duration_ms is NOT usable (it
+# reported 157840ms for a session that ran 31 minutes).
+fmt_dur() { # <seconds>
+  local s="${1:-0}" h m
+  h=$(( s / 3600 )); m=$(( (s % 3600 + 30) / 60 ))
+  (( m == 60 )) && { h=$(( h + 1 )); m=0; }
+  if (( h > 0 )); then printf '%dh%02dmin' "$h" "$m"; else printf '%dmin' "$m"; fi
+}
 note() { printf '\n%s\n' "$*" >> "$PROGRESS"; }
 
 # jsonfield <file> <dotted.path> — python3 stands in for jq, which is absent here.
@@ -168,8 +178,8 @@ log_usage() { # <label> <json-file>
   cost=$(jsonfield "$f" total_cost_usd 2>/dev/null || echo "")
   [[ -z "$cost" ]] && return 0
   {
-    printf '\n## %s UTC - Session usage — %s [%s]\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%S)" "$label" "$MODEL"
+    printf '\n## %s UTC (%s) - Session usage — %s [%s]\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S)" "$(fmt_dur "${SESSION_SECS:-0}")" "$label" "$MODEL"
     python3 - "$f" <<'PY'
 import glob, json, os, sys
 
@@ -288,8 +298,9 @@ PY
 # run_session <label> <prompt-file> — writes the session's final text to
 # $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
 run_session() {
-  local label="$1" pf="$2" out rc pid
+  local label="$1" pf="$2" out rc pid t0
   SESSION_N=$((SESSION_N + 1))
+  t0=$(date +%s)
   out="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.json"
   LAST_JSON="$out"
   say "session $SESSION_N [$label] starting (model=$MODEL)"
@@ -297,6 +308,7 @@ run_session() {
   pid=$!
   watchdog "$pid" "$label"
   wait "$pid"; rc=$?
+  SESSION_SECS=$(( $(date +%s) - t0 ))   # read by log_usage for the header
   log_usage "$label" "$out"
   (( rc != 0 )) && say "session [$label] exited rc=$rc — see $out.err"
   jsonfield "$out" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
