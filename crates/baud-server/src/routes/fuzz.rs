@@ -142,11 +142,14 @@ pub fn simulate_parser(bytes: &[u8]) -> ParseResult {
 }
 
 /// Generate input bytes using the specified tactics.
-/// For random tactics: draws from the driver (on-tape, deterministic).
-/// For stateful-mask: uses a separate per-session RNG to mutate best_input;
-///   the driver is used only for corpus management (score tracking, best-tape updates).
-///   This ensures the stateful-mask converges reliably regardless of the driver's
-///   replay scheduling.
+/// Both tactics draw the actual bytes from a dedicated per-session RNG, independent of the
+/// driver's own tape replay/mutate/splice/extend scheduling (`Driver::begin_run`) — each still
+/// calls `driver.draw_bits()` once per run purely to keep the driver's corpus machinery
+/// (score tracking, best-tape updates) in the loop. Without this decoupling, "random" tactics
+/// would inherit the driver's generation-over-generation bit-flip mutation of its best tape
+/// (applied to every caller of `draw_bits`, regardless of the caller's own tactics label) and
+/// stop being independent per-generation noise — undermining the very contrast this tactic
+/// exists to demonstrate against `stateful-mask`'s guided search.
 pub fn draw_parser_input(
     driver: &mut Driver,
     tactics: &str,
@@ -156,15 +159,14 @@ pub fn draw_parser_input(
     const N: usize = 8;
     let mut bytes = Vec::with_capacity(N);
 
+    // Keep the driver in the loop for corpus tracking (depth scoring, best-tape updates),
+    // without letting its replay scheduling influence the bytes actually used below.
+    let _marker = driver.draw_bits(8);
+
     match tactics {
         "stateful-mask" => {
             // Stateful mask: start from best_input, mutate each byte independently.
             // p_flip per byte ≈ 0.20 (20% chance of replacement with a fresh random byte).
-            // This is independent of the driver's tape replay, so convergence is reliable.
-            // We still call driver.draw_bits() once per run so the driver tracks depth
-            // through its corpus machinery.
-            let _marker = driver.draw_bits(8); // keep driver in the loop for corpus tracking
-
             for i in 0..N {
                 let base = if i < best_input.len() { best_input[i] } else { 0u8 };
                 let r = (rng.next_u32() & 0xFF) as u8;
@@ -179,9 +181,9 @@ pub fn draw_parser_input(
             }
         }
         _ => {
-            // Random tactics: pure white noise drawn from the driver (on-tape)
+            // Random tactics: pure white noise, independent every generation.
             for _ in 0..N {
-                bytes.push(driver.draw_bits(8).first().copied().unwrap_or(0));
+                bytes.push((rng.next_u32() & 0xFF) as u8);
             }
         }
     }

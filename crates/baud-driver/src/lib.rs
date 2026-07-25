@@ -294,23 +294,21 @@ impl Driver {
 
     /// Draw `n` bits (up to 64). Returns the n-bit value as a Vec<u8> (little-endian, ceil(n/8) bytes).
     /// Spec: `fn draw_bits(&mut self, n: u32) -> Vec<u8>`
+    ///
+    /// Records only the `byte_count` bytes actually returned to the caller, not the full 8-byte
+    /// raw draw — so a tape mutation that flips a bit in this choice always changes what the
+    /// caller sees (previously the choice recorded all 8 raw bytes while draw_bits(8) only ever
+    /// surfaced byte 0, so ~7/8 of mutations were invisible to callers using draw_bits(8)).
     pub fn draw_bits(&mut self, n: u32) -> Vec<u8> {
         assert!(n <= 64, "draw_bits: n must be <= 64");
-        let raw = self.draw_u64();
+        let raw = self.next_raw_u64();
         let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
         let value = raw & mask;
         let byte_count = ((n + 7) / 8) as usize;
         // Little-endian encoding
-        value.to_le_bytes()[..byte_count].to_vec()
-    }
-
-    /// Draw `n` bits as a raw u64 (legacy internal helper — use draw_bits for the spec API).
-    #[allow(dead_code)]
-    fn draw_bits_u64(&mut self, n: u32) -> u64 {
-        assert!(n <= 64, "draw_bits_u64: n must be <= 64");
-        let raw = self.draw_u64();
-        let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
-        raw & mask
+        let bytes = value.to_le_bytes()[..byte_count].to_vec();
+        self.record_draw(bytes.clone());
+        bytes
     }
 
     /// Draw an integer in [lo, hi] (inclusive).
@@ -454,17 +452,25 @@ impl Driver {
     // -----------------------------------------------------------------------
 
     fn draw_u64(&mut self) -> u64 {
-        // If replaying and within bounds, return recorded choice
+        let val = self.next_raw_u64();
+        self.record_draw(val.to_le_bytes().to_vec());
+        val
+    }
+
+    /// Get the next draw's raw u64 value (from replay or live RNG) without recording it —
+    /// callers record whatever subset of bytes is actually meaningful to them (see `draw_bits`).
+    fn next_raw_u64(&mut self) -> u64 {
+        // If replaying and within bounds, return the recorded choice.
         if self.replay_mode && self.run_cursor < self.replay_tape.choices.len() {
-            let bytes = self.replay_tape.choices[self.run_cursor].clone();
-            let val = u64::from_le_bytes(bytes.try_into().unwrap_or([0u8; 8]));
-            self.record_draw(val.to_le_bytes().to_vec());
-            val
+            let bytes = &self.replay_tape.choices[self.run_cursor];
+            // Recorded choices may be shorter than 8 bytes (e.g. draw_bits(8) records 1 byte) —
+            // zero-extend rather than fail (a naive try_into would drop the value to all-zero).
+            let mut buf = [0u8; 8];
+            let take = bytes.len().min(8);
+            buf[..take].copy_from_slice(&bytes[..take]);
+            u64::from_le_bytes(buf)
         } else {
-            // Live draw
-            let val = self.rng.next_u64();
-            self.record_draw(val.to_le_bytes().to_vec());
-            val
+            self.rng.next_u64()
         }
     }
 
@@ -683,6 +689,50 @@ mod tests {
         let draws2: Vec<Vec<u8>> = (0..10).map(|_| engine.draw_u64().to_le_bytes().to_vec()).collect();
 
         assert_eq!(draws1, draws2, "replay tape: should produce identical draw sequence");
+    }
+
+    #[test]
+    fn draw_bits_records_only_caller_visible_bytes() {
+        // Regression test: draw_bits(n) used to record the full 8-byte raw draw_u64() value in
+        // Tape.choices even when it only ever handed the caller ceil(n/8) bytes (e.g. draw_bits(8)
+        // only ever surfaces byte 0). begin_run's mutate pass picks a byte index uniformly within
+        // the recorded choice's length, so ~7/8 of mutations landed in the invisible bytes 1-7 and
+        // never changed what a draw_bits(8) caller actually saw. The fix: record exactly the bytes
+        // handed back, so the choice length always matches the caller-visible byte count.
+        let mut d = make_driver(7);
+        d.begin_run();
+        let v8 = d.draw_bits(8);
+        let v16 = d.draw_bits(16);
+        let v32 = d.draw_bits(32);
+        assert_eq!(d.live_tape().choices[0], v8);
+        assert_eq!(d.live_tape().choices[0].len(), 1, "draw_bits(8) must record exactly 1 byte");
+        assert_eq!(d.live_tape().choices[1], v16);
+        assert_eq!(d.live_tape().choices[1].len(), 2, "draw_bits(16) must record exactly 2 bytes");
+        assert_eq!(d.live_tape().choices[2], v32);
+        assert_eq!(d.live_tape().choices[2].len(), 4, "draw_bits(32) must record exactly 4 bytes");
+    }
+
+    #[test]
+    fn mutating_a_draw_bits_choice_always_changes_the_replayed_value() {
+        // With the recorded choice trimmed to exactly the caller-visible byte(s), the mutate
+        // pass's `bi = draw_raw_u64() % len` always lands on a meaningful byte for draw_bits(8)
+        // (len == 1), guaranteeing the flip is observable on replay — the property the bug report
+        // says was violated ~7/8 of the time before this fix.
+        let mut d = make_driver(7);
+        d.begin_run();
+        let original = d.draw_bits(8);
+        d.end_run(&[]);
+
+        let mut mutated = d.best_tape().clone();
+        mutated.choices[0][0] ^= 0x01;
+
+        let mut replay = make_driver(7);
+        replay.replay_mode = true;
+        replay.replay_tape = mutated;
+        let replayed = replay.draw_bits(8);
+
+        assert_ne!(replayed, original, "flipping the only recorded byte must change draw_bits(8)'s replayed output");
+        assert_eq!(replayed[0], original[0] ^ 0x01);
     }
 
     #[test]

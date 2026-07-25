@@ -1825,7 +1825,70 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     /run/kvm/resume` still has no `persist_run_id` toggle for its own *branch-point* persistence (only
     per-`MARK_BRANCH`-checkpoint persistence, added the tenth-brick iteration, needs no such toggle
     since it's unconditional); no `Driver`'s own state (seed/best/reservoir) persists across requests;
-    the `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)` follow-up (fourth brick entry) is
-    unfixed; the enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into`
+    the enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into`
     CLI/server surface, and the framebuffer stream (all documented earlier in this file) are all still
     open.
+- **M-series — twelfth brick: fixed the `Tape.choices` full-8-byte-vs-truncated-`draw_bits(n)` bug
+  (flagged as a follow-up since the fourth brick entry) — `Driver::begin_run`'s mutate scheduling now
+  actually mutates what a `draw_bits(8)` caller sees, every time, instead of ~7/8 of flips landing on
+  invisible bytes.**
+  - **Root cause** (`crates/baud-driver/src/lib.rs`): `draw_u64()` recorded the *full 8-byte raw*
+    `rng.next_u64()`/replay value into `Tape.choices` for every draw, but `draw_bits(n)` (the only
+    public draw API any caller in this workspace actually uses) only ever hands the caller
+    `ceil(n/8)` bytes of that value — e.g. `draw_bits(8)` only ever surfaces byte 0. `begin_run`'s
+    mutate pass (`generation % 3 == 1`) picks `bi = draw_raw_u64() % mutated.choices[i].len()` and
+    flips one bit there; with `len() == 8` that lands on the caller-invisible bytes 1-7 seven times
+    out of eight, so a "mutated" tape usually replayed byte-for-byte identical to the tape it was
+    mutated from.
+  - **Fix**: `draw_bits(n)` no longer routes through `draw_u64()`'s recording. A new private
+    `next_raw_u64()` returns the next raw/replayed u64 *without* recording it; `draw_u64()` (used by
+    `draw_int`/`draw_choice`/`draw_f64`, which already consume the full 8 bytes) calls it and records
+    all 8 bytes as before, while `draw_bits(n)` calls it and records only the `ceil(n/8)` bytes it
+    actually hands back. `next_raw_u64()`'s replay path also had to stop assuming every recorded
+    choice is exactly 8 bytes (the old `bytes.try_into().unwrap_or([0u8; 8])` silently zeroed the
+    whole value for any shorter recording); it now zero-extends short choices instead.
+  - **New tests** (`crates/baud-driver/src/lib.rs`, 15/15 passing, was 13/13):
+    `draw_bits_records_only_caller_visible_bytes` (asserts `draw_bits(8)`/`(16)`/`(32)` record exactly
+    1/2/4 bytes, not 8) and `mutating_a_draw_bits_choice_always_changes_the_replayed_value` (flips the
+    single recorded byte directly and replays it, asserting the returned byte always differs — the
+    property `begin_run`'s mutate pass depends on for `draw_bits(8)` callers specifically, `len() == 1`
+    forces `bi == 0` every time).
+  - **A real, second bug this fix exposed and also had to be fixed** (`crates/baud-server/src/routes/
+    fuzz.rs`, M4/M8's fuzz loop): `draw_parser_input`'s `"random"` tactics branch drew its 8 input
+    bytes directly via `driver.draw_bits(8)` per byte, riding on `Driver::begin_run`'s own
+    mutate/splice/extend scheduler (which applies to *every* caller of `draw_bits`, regardless of the
+    caller's own tactics label) — under the old recording bug that scheduler's mutate pass was itself
+    almost always a no-op for these single-byte draws, so "random" tactics accidentally behaved like
+    genuine independent-per-generation noise and reliably plateaued (`drive/m4.sh`'s M4.2:
+    `plateau_detected` was expected `true`). Once the `Tape.choices` fix above made mutation actually
+    work, "random" tactics silently became a weak on-tape hill-climber for roughly a third of
+    generations, so `drive/m4.sh` started failing M4.2 (`plateau_detected=false` for seed 42 — the
+    run's single depth-2 hit landed outside the naive first-third/last-third window `detect_plateau`
+    compares, even though `best_depth` never exceeded 2). Fixed by decoupling `"random"` tactics from
+    the driver's tape the same way the `"stateful-mask"` branch already was: draw one on-tape
+    `driver.draw_bits(8)` "marker" per generation purely to keep the driver's corpus/depth bookkeeping
+    in the loop, then draw the actual 8 input bytes from the tactics-dedicated `ChaCha20Rng`
+    (independent every generation, matching the function's own doc comment's stated intent and the
+    "why random plateaus" math already documented above `simulate_parser`).
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` zero new warnings in
+    either touched file (`baud-driver/src/lib.rs`, `baud-server/src/routes/fuzz.rs` — every warning
+    shown is pre-existing, on lines this iteration never touched). `cargo test --workspace
+    --no-fail-fast` (run twice): the only failure both times was the already-documented
+    hardware-timing-sensitive `linux::tests::timer_tick_lands_at_identical_instruction` flake, in code
+    this iteration never touched, confirmed transient by an isolated re-run passing 1/1 both times;
+    every other crate passed 100% both runs. All 18 `drive/*.sh` scripts (`h0.sh`-`h6.sh`,
+    `m0.sh`-`m9.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero
+    regressions — `drive/m4.sh`'s M4.2 (`--tactics random` plateau) and M8.3 (Mario's random-tactics
+    negative control) both explicitly re-verified passing after the fuzz.rs fix, `full-demo.sh`
+    "32/32 CHECKS PASSED".
+  - **Not yet done**: the consensus-cluster fuzz loop (`run_consensus_fuzz_loop`, same file) still
+    draws its base tape via unconditional `driver.draw_bits(8)` per byte regardless of tactics —
+    the same coupling to `Driver::begin_run`'s scheduler `draw_parser_input`'s `"random"` branch used
+    to have — but no drive script asserts a plateau/negative-control property for the consensus
+    workload's `"random"`/default tactics today (`drive/m6.sh`'s M6.2 only asserts the random-tactics
+    run *completes*, not that it plateaus), so this was left as-is rather than changed speculatively;
+    worth revisiting if a future consensus-workload plateau test is added. `POST /run/kvm/resume`'s
+    own *branch-point* persist_run_id toggle, `Driver` state persistence across requests, the
+    enforced-regime KVM module, RDTSC-compliant-guest testing, `baud shell-into` CLI/server surface,
+    and the framebuffer stream remain open (see above).
