@@ -1362,3 +1362,78 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     increment; no caller yet chains a `/run/kvm/branch { persist_run_id }` → score → `/run/kvm/
     resume` exploration loop — this iteration only proves the primitive round-trips correctly and
     fast.
+- **M-series — fourth brick: `baud-driver`'s tape generation wired into branch scoring, closing
+  bullet (3) above** ("baud-driver's tape generation feeding branch scoring" — flagged twice now
+  as the natural next M-series increment).
+  - `POST /run/kvm/branch` gained an optional `generate: DriverGenerateSpec { seed, count,
+    tape_len_bytes, strategy }` field (`crates/baud-server/src/routes/run_kvm.rs`), mutually
+    exclusive with `branch_tapes_hex`. When set, the server drives `baud_driver::Driver` itself:
+    `begin_run()` → draw `tape_len_bytes` bytes via `draw_bits(8)` per byte → fork+run the branch
+    via `Multiverse::branch`/`run_to_first_halt` → drain real tape-device records via
+    `Multiverse::drain_tape_records()` → `observations_from_records()` turns them into `(probe,
+    value)` pairs (every `Msg::Observe` plus a built-in `console_len` fallback observation, since
+    no in-tree guest fixture emits a real Observe probe yet) and detects `Msg::Outcome(Outcome::
+    Crash)` → `driver.end_run(&observations)` feeds the score back before drawing the next
+    branch's tape. Response gains per-branch `tape_hex`/`observations`/`interesting` plus a
+    top-level `driver_summary: {generations, goal_reached, best_tape_hex}`.
+  - New CLI flags on `baud run kvm-branch`: `--generate-seed`, `--generate-count`,
+    `--generate-tape-len-bytes` (default 4), `--maximize <probe>` (repeatable, feeds
+    `StrategySpec.maximize`) — `crates/baud-cli/src/cmds/run.rs`, `branch_tapes_hex` changed from
+    `required = true` to `required_unless_present = "generate_seed"`.
+  - Refactored `boot_snapshot_and_branch`/`resume_and_branch` to share new `boot_and_snapshot`/
+    `run_branches` helpers (extracted, not duplicated a third time) — no behavior change to the
+    existing fixed-tape path, confirmed by the pre-existing tests still passing unchanged.
+  - New tests in `crates/baud-server/src/routes/run_kvm.rs` (8/8 passing, was 5/5):
+    `observations_from_records_extracts_probes_and_crash` (pure, no KVM — verifies Msg::Observe/
+    Outcome::Crash extraction and the console_len fallback), `run_kvm_branch_generate_is_
+    reproducible_and_independent` (real KVM — same seed draws byte-identical tapes across two
+    fully independent runs against `tape-echo-guest`, and no cross-branch bleed, the generate-mode
+    analogue of the existing fixed-tape test), `generated_branch_point_persists_and_resumes` (real
+    KVM — a driver-generated branch point persists and resumes exactly like a fixed-tape one,
+    sharing `persist_universe`).
+  - Manual live-server end-to-end verification (not just unit tests): `baud run kvm-branch
+    --generate-seed --generate-count --maximize console_len --json` against a live server returned
+    real `observations`/`driver_summary`; the same seed across two fully separate CLI process
+    invocations produced byte-identical `tape_hex` and `driver_summary.best_tape_hex`; mixing
+    `branch_tapes_hex` and `generate` in one request, and `generate.count=0`, both returned clean
+    `{error}` (never a false pass); the existing fixed-tape `branch_tapes_hex` path was
+    re-verified byte-for-byte unchanged.
+  - A real, non-blocking finding worth recording as a follow-up (do NOT call this a bug in this
+    iteration's own code — it's pre-existing `baud-driver` behavior, `crates/baud-driver/src/
+    lib.rs`'s `begin_run`/`draw_bits`/`draw_u64`): `Tape.choices` entries record the *full 8-byte
+    raw `draw_u64()` value* for every draw, not the caller-visible truncated `draw_bits(n)` output
+    — so `begin_run`'s "mutate" scheduling path (generation % 3 == 1) flips a random bit across
+    all 8 recorded bytes, but `draw_bits(8)` only ever surfaces the low byte (LE byte 0) masked
+    out of that value. A mutation whose flipped bit lands in bytes 1-7 is invisible to a caller
+    that only ever calls `draw_bits(8)` (~7/8 chance per flip on this workspace's current only
+    caller). Observed live: with `console_len` constant (tape-echo-guest always echoes exactly
+    `tape_len_bytes`, so the maximize signal never varies), `end_run`'s best-tape update never
+    fires past generation 0, and several observed generations reproduced byte-identical tapes to
+    generation 0. Not a defect in this iteration's route wiring (which drives the Driver exactly
+    per its public API) — a corpus-scheduler characteristic that only becomes visible once a
+    *real* differentiating score signal exists. Flag as a follow-up: worth revisiting once a guest
+    fixture emits real `Msg::Observe` probes with actual variance (todo.md's tape-device entry:
+    "no real guest ever writes to this port range" — still true), or fixing `Tape.choices` to
+    record only the caller-visible truncated bytes.
+  - **Verification**: `cargo build --workspace` clean (zero new warnings anywhere touched).
+    `cargo clippy --workspace --all-targets` — fixed one new lint this iteration introduced itself
+    (a stray markdown `+`-at-line-start in a new CLI doc comment parsed as an indented list
+    continuation, `crates/baud-cli/src/cmds/run.rs`); zero other new warnings in any touched file.
+    `cargo test --workspace`: one transient failure seen (`baud-multiverse::linux::tests::
+    timer_tick_lands_at_identical_instruction`, H4's own documented real-hardware PMU-jitter test,
+    in code this iteration never touched) confirmed transient by an immediate isolated re-run
+    (passed). All 16 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m8.sh`, `full-demo.sh`)
+    re-run individually end-to-end on real `/dev/kvm`, zero regressions, `full-demo.sh` "32/32
+    CHECKS PASSED".
+  - **Not yet done**: this closes bullet (3) from the earlier "M-series — second brick" entry
+    ("baud-driver's tape generation feeding branch scoring") for the branch-point route; `POST
+    /run/kvm/resume` still only accepts fixed `branch_tapes_hex` (a natural, symmetric follow-up —
+    resuming a persisted universe and continuing an in-flight driver's exploration from there);
+    nothing yet persists a `Driver`'s own state (seed/best/reservoir) across requests, so a caller
+    resuming exploration today always starts a fresh `Driver` rather than continuing an
+    interrupted one; no probe-emitting guest fixture exists yet to exercise the `Msg::Observe`
+    path for real (the mechanism is built and unit-tested with synthetic records, per finding #6
+    above); the "expand a branch point, fork N, score, keep interesting ones as new branch
+    points" tree-growth loop (todo.md §6) is still one level deep (one shared branch point per
+    request) — chaining `interesting` branches into further generate calls is the natural next
+    increment.

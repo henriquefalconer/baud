@@ -2223,3 +2223,55 @@ cargo clippy --workspace re-confirmed: zero new warnings anywhere touched by thi
 ---
 
 Pushed to origin/main (a13549e). Post-push verification: local HEAD == origin/main (git fetch confirmed), working tree clean, build/test/clippy/all-16-drive-scripts already green pre-push against this exact commit. Re-reading todo.md: still many pending items (Snapshot::branch's real UFFDIO_CONTINUE mechanism, enforced-regime custom KVM module, baud-driver wiring into the KVM core / bullet (3) of this iteration's own entry, AMD phase-2, RDTSC-compliant-guest adversarial test, baud shell-into CLI/server surface, framebuffer stream). This iteration's step (Universe<->bytes serialization + real SnapshotStore persist/resume for KVM branch points) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T02:57:01 UTC - Session usage — build-10 [sonnet]
+- cost $18.086393849999997 (exact, from claude -p)
+- context 370,654 tok peak of 1M (37%) across 192 inference calls, monotonic
+- models sonnet-5 $18.0833 (in 392 / out 114,072 / cache-read 46,837,017) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/012-build-10.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 11
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history first.
+
+Read full todo.md §14 build-status log (1365 lines). H0-H6 are all closed on real KVM hardware; M-series has three bricks landed (POST /run/kvm, /run/kvm/branch, /run/kvm/resume with persist). The todo.md log explicitly flags the natural next M-series increment twice: wiring baud-driver's tape generation (Driver::draw_bits) into the branch/resume routes instead of caller-supplied fixed tape_hex, since Driver is already hardware-independent and structurally ready (fuzz.rs already shows the Driver-drives-a-generation-loop shape for parser/raftlet, just never pointed at Multiverse). Picking this as this iteration's step. Dispatching Sonnet explore agents to study baud-driver's Strategy/Tactics/draw_bits and baud-server's fuzz.rs pattern before writing code.
+
+Design settled: add an optional 'generate' mode to POST /run/kvm/branch's request body, backed by baud_driver::Driver. When set, the server draws each branch's tape suffix via Driver::draw_bits, runs it through Multiverse::branch, drains real tape-device records (baud_proto::Msg::Observe/Outcome) into (probe,value) observations plus a built-in console_len signal, feeds them back via Driver::end_run, and reports per-branch observations/interesting plus a driver_summary. Implementing in crates/baud-server/src/routes/run_kvm.rs now, then CLI flags in crates/baud-cli/src/cmds/run.rs.
+
+Wired baud-driver into POST /run/kvm/branch (DriverGenerateSpec/generate mode) and the CLI (--generate-seed/--generate-count/--generate-tape-len-bytes/--maximize). Running cargo build --workspace now.
+
+cargo build --workspace: clean, only pre-existing baud-tracing warnings. Running cargo clippy --workspace --all-targets now.
+
+clippy clean on touched files after fixing a doc-list-item warning in cmds/run.rs (a stray '+' at line-start was parsed as markdown). Running cargo test --workspace now (this will take a while — real KVM tests).
+
+cargo test --workspace: 1 failure — baud-multiverse::linux::tests::timer_tick_lands_at_identical_instruction — in code this iteration never touched (H4's PMU-jitter test, todo.md already documents RCB_HARDWARE_JITTER_TOLERANCE and prior transient failures under load). All other crates including baud-server (with the new run_kvm generate-mode tests) passed. Re-running that one test in isolation to confirm it's the known transient hardware flake, not a regression.
+
+Confirmed transient: re-run in isolation passes. Not a regression from this iteration's change (run_kvm.rs/baud-driver wiring never touches baud-vcpu/pmu.rs). Checking baud-server's own test output specifically now for the new generate-mode tests.
+
+All 8 baud-server run_kvm tests pass (was 5/5, now +3 new). Manually verifying end-to-end against a live baud-server + baud CLI now (not just unit tests) before running all 16 drive/*.sh scripts.
+
+Manual live-server verification passed: generate mode produces scored/observed branches with real reproducibility across separate CLI process invocations (confirmed same seed -> byte-identical generated tapes and driver_summary twice); fixed-tape mode unaffected (regression-free); both validation errors (mixing branch_tapes_hex+generate, count=0) return clean {error}. Noted for todo.md: baud-driver's default mutate/extend scheduler (pre-existing, untouched) only visibly changes a fixed-length tape when a bit-flip lands in draw_bits' low byte (~1-(7/8)^k chance) — a corpus-scheduler characteristic, not a bug in this wiring, worth flagging as follow-up once a probe-emitting guest exists. Killed manual server, now running all 16 drive/*.sh scripts one at a time.
+
+drive/h0.sh, h1.sh, h2.sh all PASS. Continuing through h3-h6, m0-m8, full-demo.
+
+h3, h4, h5 (the ~220s 1000-branch stress test) all PASS. Continuing to h6, m0-m8, full-demo.
+
+h0-h6, m0-m7 all PASS so far, zero regressions. Running m8 and full-demo now.
+
+All 16 drive/*.sh scripts (h0-h6, m0-m8, full-demo) pass end-to-end on real /dev/kvm, zero regressions, full-demo 32/32. Updating todo.md build-status log now, then committing and pushing.
+
+## 2026-07-25T03:20:00 UTC - Changes committed.
+- Wired baud-driver's tape generation into POST /run/kvm/branch's scoring loop, closing the twice-flagged "natural next M-series increment."
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-cli/src/cmds/run.rs, todo.md.
+- **Brief description of changes:**
+  - POST /run/kvm/branch gained an optional `generate: DriverGenerateSpec {seed, count, tape_len_bytes, strategy}` field, mutually exclusive with `branch_tapes_hex`. When set, the server drives baud_driver::Driver itself per-branch: begin_run -> draw tape via draw_bits(8) -> fork+run via Multiverse::branch/run_to_first_halt -> drain real tape-device records via Multiverse::drain_tape_records() -> observations_from_records() turns Msg::Observe records (plus a built-in console_len fallback) into (probe,value) pairs and detects Msg::Outcome(Outcome::Crash) -> driver.end_run(&observations) feeds the score back before the next branch's tape is drawn. Response gains per-branch tape_hex/observations/interesting plus a top-level driver_summary.
+  - New CLI flags on `baud run kvm-branch`: --generate-seed, --generate-count, --generate-tape-len-bytes, --maximize (repeatable).
+  - Refactored boot_snapshot_and_branch/resume_and_branch to share new boot_and_snapshot/run_branches helpers — no behavior change to the existing fixed-tape path.
+  - New tests in run_kvm.rs (8/8 passing, was 5/5): observations_from_records_extracts_probes_and_crash (pure), run_kvm_branch_generate_is_reproducible_and_independent (real KVM), generated_branch_point_persists_and_resumes (real KVM).
+  - Manual live-server end-to-end verification: generate mode returns real observations/driver_summary; same seed across two separate CLI process invocations is byte-identical; both validation errors (mixing branch_tapes_hex+generate, count=0) return clean {error}; existing fixed-tape path unaffected.
+  - Found and documented (not fixed — pre-existing baud-driver behavior, out of this iteration's scope): Tape.choices records the full 8-byte raw draw_u64() value, not draw_bits(n)'s truncated output, so the mutate scheduler's bit-flip is often invisible to a draw_bits(8) caller. Flagged as a todo.md follow-up.
+  - Full re-verification: cargo build/test/clippy --workspace all green (one transient, unrelated H4 PMU-jitter test failure confirmed by isolated re-run — not a regression). All 16 drive/*.sh scripts re-run individually end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32.
+---

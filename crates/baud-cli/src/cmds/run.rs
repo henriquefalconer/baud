@@ -78,8 +78,9 @@ pub enum RunAction {
         tape_hex: String,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
-    /// independent continuation per `--branch-tape-hex` (repeatable) and run each to its first
-    /// halt — the KVM-era snapshot-tree exploration primitive (todo.md §5/§6).
+    /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
+    /// and `--generate-count`, per a `baud-driver`-generated tape instead — and run each to its
+    /// first halt: the KVM-era snapshot-tree exploration primitive (todo.md §5/§6).
     KvmBranch {
         /// Path to a bzImage kernel on the server host's filesystem.
         #[arg(long)]
@@ -87,14 +88,28 @@ pub enum RunAction {
         /// Kernel command line.
         #[arg(long, default_value = "console=ttyS0")]
         cmdline: String,
-        /// A hex-encoded tape suffix for one branch. Repeat for multiple branches.
-        #[arg(long = "branch-tape-hex", required = true)]
+        /// A hex-encoded tape suffix for one branch. Repeat for multiple branches. Ignored when
+        /// `--generate-seed`/`--generate-count` are set instead.
+        #[arg(long = "branch-tape-hex", required_unless_present = "generate_seed")]
         branch_tapes_hex: Vec<String>,
         /// Persist the branch-point universe into the server's SnapshotStore under this run id —
         /// the response's `persisted.node_id` can later be handed to `kvm-resume` to fork more
         /// branches from the same point with no re-boot.
         #[arg(long)]
         persist_run_id: Option<String>,
+        /// Generate branch tapes with `baud-driver` (seeded, reproducible) instead of supplying
+        /// them via `--branch-tape-hex`. Requires `--generate-count`.
+        #[arg(long, requires = "generate_count")]
+        generate_seed: Option<u64>,
+        /// Number of driver-generated branches to run.
+        #[arg(long)]
+        generate_count: Option<usize>,
+        /// Bytes drawn per generated tape suffix.
+        #[arg(long, default_value_t = 4)]
+        generate_tape_len_bytes: u32,
+        /// Probe name to maximize (`StrategySpec.maximize`), in priority order. Repeatable.
+        #[arg(long = "maximize")]
+        maximize: Vec<String>,
     },
     /// Fork more branches from a universe a prior `kvm-branch --persist-run-id` call persisted —
     /// no kernel image, no re-boot: reconstructs the universe from the server's SnapshotStore and
@@ -181,13 +196,31 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                 std::process::exit(1);
             }
         }
-        RunAction::KvmBranch { kernel, cmdline, branch_tapes_hex, persist_run_id } => {
-            let body = json!({
+        RunAction::KvmBranch {
+            kernel,
+            cmdline,
+            branch_tapes_hex,
+            persist_run_id,
+            generate_seed,
+            generate_count,
+            generate_tape_len_bytes,
+            maximize,
+        } => {
+            let mut body = json!({
                 "kernel_path": kernel,
                 "cmdline": cmdline,
-                "branch_tapes_hex": branch_tapes_hex,
                 "persist_run_id": persist_run_id,
             });
+            if let (Some(seed), Some(count)) = (generate_seed, generate_count) {
+                body["generate"] = json!({
+                    "seed": seed,
+                    "count": count,
+                    "tape_len_bytes": generate_tape_len_bytes,
+                    "strategy": { "maximize": maximize },
+                });
+            } else {
+                body["branch_tapes_hex"] = json!(branch_tapes_hex);
+            }
             let v = c.post("/run/kvm/branch", &body).await?;
             fmt::print(&v, json);
             if v.get("error").is_some() {

@@ -98,7 +98,9 @@ pub struct RunKvmBranchBody {
     #[serde(default = "default_cmdline")]
     pub cmdline: String,
     /// One hex-encoded tape suffix per branch — each is forked independently from the shared branch
-    /// point via `Multiverse::branch` and run to its first halt.
+    /// point via `Multiverse::branch` and run to its first halt. Ignored (and may be omitted) when
+    /// `generate` is set instead.
+    #[serde(default)]
     pub branch_tapes_hex: Vec<String>,
     /// If set, persist the shared branch-point universe (RAM pages + capture body,
     /// `baud_snapshot::wire`) into the server's `SnapshotStore` under this run id before forking —
@@ -107,6 +109,39 @@ pub struct RunKvmBranchBody {
     /// "Not yet done: nothing persists the branch point's Universe across requests").
     #[serde(default)]
     pub persist_run_id: Option<String>,
+    /// Generate branch tapes with `baud_driver::Driver` instead of the caller supplying them
+    /// directly — todo.md §14's twice-flagged "natural next M-series increment" ("wiring
+    /// `baud-driver`'s tape generation into this route instead of a caller-supplied fixed
+    /// `tape_hex`"). Mutually exclusive with `branch_tapes_hex`.
+    #[serde(default)]
+    pub generate: Option<DriverGenerateSpec>,
+}
+
+/// Drives `baud_driver::Driver` to generate `count` branch tapes instead of a caller supplying
+/// them literally, scoring each branch from its real drained tape-device records
+/// (`observations_from_records`) and feeding the score back via `Driver::end_run` before drawing
+/// the next tape — the snapshot-tree "expand a branch point, fork N continuations, score" loop
+/// (todo.md §6) applied to one real branch-point request.
+#[derive(Debug, Deserialize)]
+pub struct DriverGenerateSpec {
+    /// Seed for `baud_driver::Driver` — same seed + same guest responses reproduce byte-identical
+    /// generated tapes (`Driver`'s own `same_seed_same_replies_same_tape` property).
+    pub seed: u64,
+    /// Number of branches to generate and run.
+    pub count: usize,
+    /// Bytes drawn per generated tape suffix.
+    #[serde(default = "default_generate_tape_len_bytes")]
+    pub tape_len_bytes: u32,
+    /// Scoring strategy fed back into the driver after each branch. `maximize` picks which
+    /// observed probe(s) score a run (`console_len` is always available even for guests that never
+    /// touch the tape device — see `observations_from_records`); `goal`, if set, additionally marks
+    /// a branch `interesting` when reached, alongside any real `Outcome::Crash` from the guest.
+    #[serde(default)]
+    pub strategy: baud_driver::StrategySpec,
+}
+
+fn default_generate_tape_len_bytes() -> u32 {
+    4
 }
 
 /// POST /run/kvm/branch — boot `kernel_path`, snapshot immediately after boot as the shared branch
@@ -117,8 +152,55 @@ pub struct RunKvmBranchBody {
 /// the M-series' first real snapshot-tree-exploration server route (todo.md §14's "Natural next
 /// steps" for `/run/kvm`).
 pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranchBody>) -> Json<Value> {
+    if body.generate.is_some() && !body.branch_tapes_hex.is_empty() {
+        return Json(json!({ "error": "specify either branch_tapes_hex or generate, not both" }));
+    }
+    let kernel_path = PathBuf::from(&body.kernel_path);
+    let cmdline = body.cmdline;
+    let persist = body.persist_run_id.map(|run_id| (state.snapshot_store.clone(), run_id));
+
+    if let Some(spec) = body.generate {
+        if spec.count == 0 {
+            return Json(json!({ "error": "generate.count must be at least 1" }));
+        }
+        if spec.count > MAX_BRANCHES_PER_REQUEST {
+            return Json(json!({
+                "error": format!(
+                    "too many branches requested ({}) — max {MAX_BRANCHES_PER_REQUEST} per call",
+                    spec.count
+                )
+            }));
+        }
+        let result = tokio::task::spawn_blocking(move || {
+            let persist_ref = persist.as_ref().map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
+            boot_snapshot_and_generate(&kernel_path, &cmdline, spec, persist_ref)
+        })
+        .await
+        .expect("run/kvm/branch (generate) task panicked");
+
+        return match result {
+            Ok((outcomes, summary, persisted)) => {
+                let branches: Vec<Value> = outcomes.into_iter().map(generated_outcome_to_json).collect();
+                let mut response = json!({
+                    "ok": true,
+                    "branches": branches,
+                    "driver_summary": {
+                        "generations": summary.generations,
+                        "goal_reached": summary.goal_reached,
+                        "best_tape_hex": summary.best_tape_hex,
+                    },
+                });
+                if let Some((run_id, node_id)) = persisted {
+                    response["persisted"] = json!({ "run_id": run_id, "node_id": node_id });
+                }
+                Json(response)
+            }
+            Err(e) => Json(json!({ "error": e })),
+        };
+    }
+
     if body.branch_tapes_hex.is_empty() {
-        return Json(json!({ "error": "branch_tapes_hex must contain at least one tape" }));
+        return Json(json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }));
     }
     if body.branch_tapes_hex.len() > MAX_BRANCHES_PER_REQUEST {
         return Json(json!({
@@ -135,9 +217,6 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
             None => return Json(json!({ "error": "branch_tapes_hex must contain only valid hex strings" })),
         }
     }
-    let kernel_path = PathBuf::from(&body.kernel_path);
-    let cmdline = body.cmdline;
-    let persist = body.persist_run_id.map(|run_id| (state.snapshot_store.clone(), run_id));
 
     let result = tokio::task::spawn_blocking(move || {
         let persist_ref = persist.as_ref().map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
@@ -164,34 +243,167 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
     }
 }
 
-fn boot_snapshot_and_branch(
-    kernel_path: &Path,
-    cmdline: &str,
-    tape_suffixes: Vec<Vec<u8>>,
-    persist: Option<(&SnapshotStore, &str)>,
-) -> Result<(Vec<BranchOutcome>, Option<PersistedRef>), String> {
+/// Boot + snapshot the shared branch point, shared by every `/run/kvm/branch` flavor (fixed-tape
+/// and driver-generated alike).
+fn boot_and_snapshot(kernel_path: &Path, cmdline: &str) -> Result<baud_snapshot::Universe, String> {
     let mut boot = baud_multiverse::linux::Multiverse::boot(kernel_path, cmdline, 0, WORK_CLOCK_K, vec![], None)
         .map_err(|e| format!("boot error: {e}"))?;
     let mut page_store = baud_snapshot::PageStore::new();
-    let universe = boot
-        .snapshot(&mut page_store)
-        .map_err(|e| format!("snapshot error: {e}"))?;
+    boot.snapshot(&mut page_store).map_err(|e| format!("snapshot error: {e}"))
+}
 
-    let persisted = match persist {
-        Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
-        None => None,
-    };
-
+/// Fork one independent `Multiverse::branch` continuation per tape suffix and run each to its
+/// first halt. Shared by `boot_snapshot_and_branch` and `resume_and_branch`.
+fn run_branches(
+    universe: &baud_snapshot::Universe,
+    tape_suffixes: Vec<Vec<u8>>,
+) -> Result<Vec<BranchOutcome>, String> {
     let mut outcomes = Vec::with_capacity(tape_suffixes.len());
     for (i, suffix) in tape_suffixes.into_iter().enumerate() {
-        let mut branch = baud_multiverse::linux::Multiverse::branch(&universe, suffix, WORK_CLOCK_K, None)
+        let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix, WORK_CLOCK_K, None)
             .map_err(|e| format!("branch {i} error: {e}"))?;
         let outcome = branch
             .run_to_first_halt()
             .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
         outcomes.push((outcome.console_output, outcome.ram_hash));
     }
+    Ok(outcomes)
+}
+
+fn boot_snapshot_and_branch(
+    kernel_path: &Path,
+    cmdline: &str,
+    tape_suffixes: Vec<Vec<u8>>,
+    persist: Option<(&SnapshotStore, &str)>,
+) -> Result<(Vec<BranchOutcome>, Option<PersistedRef>), String> {
+    let universe = boot_and_snapshot(kernel_path, cmdline)?;
+    let persisted = match persist {
+        Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
+        None => None,
+    };
+    let outcomes = run_branches(&universe, tape_suffixes)?;
     Ok((outcomes, persisted))
+}
+
+/// One driver-generated branch's result: the tape `Driver::draw_bits` produced for it, its
+/// outcome, the observations scored back into the driver, and whether it was "interesting"
+/// (goal reached or a real guest-reported crash).
+struct GeneratedBranchOutcome {
+    tape_hex: String,
+    console_output: Vec<u8>,
+    ram_hash: String,
+    observations: Vec<(String, f64)>,
+    interesting: bool,
+}
+
+struct DriverRunSummary {
+    generations: u64,
+    goal_reached: bool,
+    best_tape_hex: String,
+}
+
+fn boot_snapshot_and_generate(
+    kernel_path: &Path,
+    cmdline: &str,
+    spec: DriverGenerateSpec,
+    persist: Option<(&SnapshotStore, &str)>,
+) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary, Option<PersistedRef>), String> {
+    let universe = boot_and_snapshot(kernel_path, cmdline)?;
+    let persisted = match persist {
+        Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
+        None => None,
+    };
+    let (outcomes, summary) = run_driver_generated_branches(&universe, spec)?;
+    Ok((outcomes, summary, persisted))
+}
+
+/// The snapshot-tree exploration loop (todo.md §6: "expand a branch point, fork N continuations,
+/// score, keep interesting ones") applied to one shared branch point: draw a tape with
+/// `Driver::draw_bits`, fork+run it, score it from its drained tape-device records
+/// (`observations_from_records`), and feed the score back via `Driver::end_run` before drawing the
+/// next tape.
+fn run_driver_generated_branches(
+    universe: &baud_snapshot::Universe,
+    spec: DriverGenerateSpec,
+) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
+    let mut driver = baud_driver::Driver::new(spec.seed, spec.strategy, baud_driver::TacticsSpec::default());
+    let mut outcomes = Vec::with_capacity(spec.count);
+    let mut goal_reached = false;
+    for i in 0..spec.count {
+        driver.begin_run();
+        let mut suffix = Vec::with_capacity(spec.tape_len_bytes as usize);
+        for _ in 0..spec.tape_len_bytes {
+            suffix.push(driver.draw_bits(8)[0]);
+        }
+        let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix.clone(), WORK_CLOCK_K, None)
+            .map_err(|e| format!("branch {i} error: {e}"))?;
+        let outcome = branch
+            .run_to_first_halt()
+            .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
+        let records = branch.drain_tape_records();
+        let (observations, crashed) = observations_from_records(&records, outcome.console_output.len());
+        driver.end_run(&observations);
+        let branch_goal = driver.is_goal_reached(&observations);
+        goal_reached |= branch_goal;
+        outcomes.push(GeneratedBranchOutcome {
+            tape_hex: hex_encode(&suffix),
+            console_output: outcome.console_output,
+            ram_hash: outcome.ram_hash,
+            observations,
+            interesting: branch_goal || crashed,
+        });
+    }
+    let summary = DriverRunSummary {
+        generations: spec.count as u64,
+        goal_reached,
+        best_tape_hex: hex_encode(&driver.best_tape().tape_bytes()),
+    };
+    Ok((outcomes, summary))
+}
+
+/// Turns one branch's drained tape-device records (`Multiverse::drain_tape_records`,
+/// `baud_proto::Msg`) into `(probe, value)` observations `Driver::end_run`/`is_goal_reached`
+/// accept, plus whether the guest reported a crash (`Msg::Outcome(Outcome::Crash{..})`). Every
+/// branch always carries a built-in `console_len` observation — no in-tree guest fixture emits a
+/// real `Msg::Observe` probe yet (todo.md §14's tape-device entry: "no real guest ever writes to
+/// this port range"), so a `strategy.maximize` pointed at `console_len` still drives real,
+/// differentiated scoring today; any `Msg::Observe` records a guest does emit are additive on top
+/// of it, so this keeps working unchanged once a probe-emitting guest exists.
+fn observations_from_records(records: &[baud_proto::Msg], console_len: usize) -> (Vec<(String, f64)>, bool) {
+    let mut observations = vec![("console_len".to_owned(), console_len as f64)];
+    let mut crashed = false;
+    for record in records {
+        match record {
+            baud_proto::Msg::Observe(obs) => {
+                if let Some(value) = probe_value_as_f64(&obs.value) {
+                    observations.push((obs.probe.clone(), value));
+                }
+            }
+            baud_proto::Msg::Outcome(baud_proto::Outcome::Crash { .. }) => crashed = true,
+            _ => {}
+        }
+    }
+    (observations, crashed)
+}
+
+fn probe_value_as_f64(value: &baud_proto::Value) -> Option<f64> {
+    match value {
+        baud_proto::Value::U64(v) => Some(*v as f64),
+        baud_proto::Value::I64(v) => Some(*v as f64),
+        _ => None,
+    }
+}
+
+fn generated_outcome_to_json(outcome: GeneratedBranchOutcome) -> Value {
+    json!({
+        "tape_hex": outcome.tape_hex,
+        "console_output_hex": hex_encode(&outcome.console_output),
+        "ram_hash": outcome.ram_hash,
+        "observations": outcome.observations.into_iter()
+            .map(|(probe, value)| json!({ "probe": probe, "value": value }))
+            .collect::<Vec<_>>(),
+        "interesting": outcome.interesting,
+    })
 }
 
 /// Persist a captured branch-point [`baud_snapshot::Universe`] into `store` under `run_id`: every
@@ -331,16 +543,7 @@ fn resume_and_branch(
     })
     .map_err(|e| format!("reconstruct error: {e}"))?;
 
-    let mut outcomes = Vec::with_capacity(tape_suffixes.len());
-    for (i, suffix) in tape_suffixes.into_iter().enumerate() {
-        let mut branch = baud_multiverse::linux::Multiverse::branch(&universe, suffix, WORK_CLOCK_K, None)
-            .map_err(|e| format!("branch {i} error: {e}"))?;
-        let outcome = branch
-            .run_to_first_halt()
-            .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
-        outcomes.push((outcome.console_output, outcome.ram_hash));
-    }
-    Ok(outcomes)
+    run_branches(&universe, tape_suffixes)
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
@@ -467,6 +670,118 @@ mod tests {
         let err = resume_and_branch(&store, "no-such-run", &"00".repeat(32), vec![vec![1, 2, 3, 4]])
             .expect_err("resuming an unknown run must fail, not silently proceed");
         assert!(!err.is_empty());
+    }
+
+    /// Pure logic, no KVM: `observations_from_records` must extract a `(probe, value)` pair per
+    /// `Msg::Observe`, always include the built-in `console_len` fallback signal, and detect a
+    /// `Msg::Outcome(Outcome::Crash{..})` as `crashed`, ignoring message kinds that carry no score
+    /// (`MarkBranch`/`Log`/`Eof`/`GoalReached`).
+    #[test]
+    fn observations_from_records_extracts_probes_and_crash() {
+        let records = vec![
+            baud_proto::Msg::Observe(baud_proto::Observation {
+                probe: "depth".into(),
+                node: 0,
+                value: baud_proto::Value::U64(7),
+                step: 1,
+            }),
+            baud_proto::Msg::MarkBranch { step: 2 },
+            baud_proto::Msg::Outcome(baud_proto::Outcome::Crash {
+                node: None,
+                invariant: None,
+                signal: None,
+                detail: "planted bug".into(),
+            }),
+        ];
+        let (observations, crashed) = observations_from_records(&records, 3);
+        assert!(crashed, "a Crash outcome must be detected");
+        assert!(observations.contains(&("console_len".to_owned(), 3.0)));
+        assert!(observations.contains(&("depth".to_owned(), 7.0)));
+        assert_eq!(observations.len(), 2, "MarkBranch must not contribute an observation");
+
+        let (observations, crashed) = observations_from_records(&[], 5);
+        assert!(!crashed);
+        assert_eq!(observations, vec![("console_len".to_owned(), 5.0)]);
+    }
+
+    /// `/run/kvm/branch`'s driver-generated mode (`DriverGenerateSpec`), exercised at this route's
+    /// own function level (`run_driver_generated_branches`, minus only axum/JSON plumbing) — the
+    /// generate-mode analogue of `run_kvm_branch_produces_independent_and_deterministic_branches`
+    /// above. Proves: (1) reproducibility — same seed + same guest replies (tape-echo-guest always
+    /// echoes exactly what it's given, so the "replies" are fixed) draws byte-identical tapes
+    /// across two fully independent runs (`Driver`'s own `same_seed_same_replies_same_tape`
+    /// property, now exercised end-to-end against a real guest); (2) independence — every branch's
+    /// console output equals exactly its own generated tape, the same no-cross-branch-bleed
+    /// construction the fixed-tape test uses.
+    #[test]
+    fn run_kvm_branch_generate_is_reproducible_and_independent() {
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let make_spec = || DriverGenerateSpec {
+            seed: 42,
+            count: 5,
+            tape_len_bytes: 4,
+            strategy: baud_driver::StrategySpec { maximize: vec!["console_len".into()], ..Default::default() },
+        };
+
+        let universe1 = boot_and_snapshot(&kernel, cmdline).expect("boot 1");
+        let (outcomes1, summary1) =
+            run_driver_generated_branches(&universe1, make_spec()).expect("generate 1");
+
+        let universe2 = boot_and_snapshot(&kernel, cmdline).expect("boot 2");
+        let (outcomes2, summary2) =
+            run_driver_generated_branches(&universe2, make_spec()).expect("generate 2");
+
+        assert_eq!(outcomes1.len(), 5);
+        let tapes1: Vec<&String> = outcomes1.iter().map(|o| &o.tape_hex).collect();
+        let tapes2: Vec<&String> = outcomes2.iter().map(|o| &o.tape_hex).collect();
+        assert_eq!(tapes1, tapes2, "same seed must generate identical tape suffixes");
+        for (o1, o2) in outcomes1.iter().zip(outcomes2.iter()) {
+            assert_eq!(o1.console_output, o2.console_output, "reproducible branch outcomes");
+            assert_eq!(o1.ram_hash, o2.ram_hash);
+        }
+        for o in &outcomes1 {
+            assert_eq!(
+                hex_encode(&o.console_output),
+                o.tape_hex,
+                "tape-echo-guest must echo exactly its own generated tape suffix"
+            );
+        }
+        assert_eq!(summary1.generations, 5);
+        assert_eq!(summary1.best_tape_hex, summary2.best_tape_hex, "reproducible driver summary");
+    }
+
+    /// A driver-generated branch point must persist and later resume exactly like a fixed-tape one
+    /// — `boot_snapshot_and_generate`'s `persist` path shares `persist_universe` with
+    /// `boot_snapshot_and_branch`, so this closes the same gap
+    /// `persisted_universe_resumes_and_branches_without_reboot` closes, for the generate entry
+    /// point.
+    #[test]
+    fn generated_branch_point_persists_and_resumes() {
+        let kernel = tape_echo_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "generate-persist-test";
+
+        let spec = DriverGenerateSpec {
+            seed: 7,
+            count: 3,
+            tape_len_bytes: 4,
+            strategy: baud_driver::StrategySpec::default(),
+        };
+        let (_outcomes, _summary, persisted) =
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)))
+                .expect("boot_snapshot_and_generate with persist failed");
+        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        assert_eq!(returned_run_id, run_id);
+
+        let resumed = resume_and_branch(&store, run_id, &node_id_hex, vec![vec![9, 8, 7, 6]])
+            .expect("resume_and_branch failed");
+        assert_eq!(
+            resumed[0].0,
+            vec![9, 8, 7, 6],
+            "resumed branch must echo exactly its own suffix"
+        );
     }
 
     #[test]
