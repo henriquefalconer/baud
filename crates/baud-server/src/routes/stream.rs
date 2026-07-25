@@ -15,6 +15,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use crate::AppState;
 use crate::state::unix_now;
 use baud_stream::Y4mWriter;
@@ -120,10 +121,12 @@ pub async fn list_frames(
 // ---------------------------------------------------------------------------
 // POST /runs/:id/stream/render — materialise frames from stored frame data
 //
-// In a full implementation this would replay the tape under baud-multiverse
-// with capture enabled. Here we generate synthetic frames matching the
-// spec's declared frame adapter (framedemo: 32x32 indexed8 moving gradient),
-// using the stored frame count and hash list.
+// When `kvm_run_meta` has a row for this run (a real `/run/kvm { run_id: ... }` boot,
+// todo.md §14's eighteenth-brick follow-up), this re-boots that exact kernel/cmdline/tape under
+// baud-multiverse and writes the *real* pixel bytes the guest produced. Runs with no such row —
+// every pre-pivot manually-seeded run (`POST /runs/:id/frames`, hash-only, no kernel/tape to
+// replay) — keep the prior synthetic-gradient-from-hash fallback so existing callers of that
+// route (drive/m5.sh, m8.sh, full-demo.sh) are unaffected.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -139,106 +142,177 @@ pub async fn render(
     Path(run_id): Path<String>,
     Json(body): Json<RenderBody>,
 ) -> Json<Value> {
-    let from_step = body.from_step.unwrap_or(0) as i64;
-    let to_step_val = body.to_step.map(|v| v as i64);
+    let from_step = body.from_step.unwrap_or(0);
+    let to_step = body.to_step;
     let fmt = body.format.as_deref().unwrap_or("y4m").to_string();
+    let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
-    // Fetch frame records for the run
+    let kvm_meta = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT kernel_path, cmdline, tape_hex FROM kvm_run_meta WHERE run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_optional(&state.db)
+    .await;
+
+    let frames: Result<Vec<(u32, u32, Vec<u8>)>, Value> = match kvm_meta {
+        Ok(Some((kernel_path, cmdline, tape_hex))) => {
+            render_frames_from_real_replay(kernel_path, cmdline, tape_hex, from_step, to_step).await
+        }
+        Ok(None) => render_frames_from_stored_hashes(&state, &run_id, from_step, to_step).await,
+        Err(e) => Err(json!({ "error": format!("db error: {e}") })),
+    };
+
+    let frames = match frames {
+        Ok(frames) => frames,
+        Err(e) => return Json(e),
+    };
+    if frames.is_empty() {
+        return Json(json!({ "error": "no frames found for this run/range" }));
+    }
+    let (w, h, _) = &frames[0];
+    let (w, h) = (*w, *h);
+
+    let render_result: Result<(Vec<u8>, usize), String> = (|| {
+        let mut output: Vec<u8> = Vec::new();
+
+        if fmt == "y4m" || fmt == "yuv4mpeg2" {
+            let mut writer = Y4mWriter::new(&mut output, w, h, 30, 1)
+                .map_err(|e| format!("Y4mWriter init failed: {e}"))?;
+            for (_, _, rgba) in &frames {
+                writer.write_frame(rgba).map_err(|e| format!("Y4mWriter frame: {e}"))?;
+            }
+            writer.finish().map_err(|e| format!("Y4mWriter finish: {e}"))?;
+        } else {
+            // QOI sequence: each frame is a standalone QOI image concatenated
+            for (fw, fh, rgba) in &frames {
+                let qoi = encode_qoi(rgba, *fw, *fh).map_err(|e| format!("QOI encode: {e}"))?;
+                output.extend_from_slice(&qoi);
+            }
+        }
+
+        let n = frames.len();
+        Ok((output, n))
+    })();
+
+    match render_result {
+        Ok((bytes, n)) => {
+            let write_result = std::fs::write(&out_path, &bytes);
+            match write_result {
+                Ok(()) => Json(json!({
+                    "ok": true,
+                    "run_id": run_id,
+                    "format": fmt,
+                    "out": out_path,
+                    "width": w,
+                    "height": h,
+                    "frame_count": n,
+                    "bytes_written": bytes.len(),
+                    "from_step": from_step,
+                    "to_step": to_step,
+                })),
+                Err(e) => Json(json!({
+                    "ok": false,
+                    "error": format!("could not write {out_path}: {e}"),
+                    "frame_count": n,
+                    "bytes_generated": bytes.len(),
+                })),
+            }
+        }
+        Err(e) => Json(json!({ "error": e })),
+    }
+}
+
+/// Real replay: re-boot the exact kernel/cmdline/tape a `/run/kvm { run_id: ... }` call recorded
+/// in `kvm_run_meta`, drain the real `Msg::Frame` records it produces (raw pixel bytes included —
+/// `FrameRecord::bytes` is always `Some` for a live boot, `baud_multiverse::linux::Multiverse::
+/// drain_tape_records`'s doc), and convert each to RGBA with `baud_stream::to_rgba` — the same
+/// conversion `baud-stream`'s own fingerprinting/encoding path uses, so a real guest's `Indexed8`/
+/// `Rgb565` frames render exactly as `specs/baud-stream.md` describes instead of a synthetic
+/// hash-seeded gradient.
+#[cfg(target_os = "linux")]
+async fn render_frames_from_real_replay(
+    kernel_path: String,
+    cmdline: String,
+    tape_hex: String,
+    from_step: u64,
+    to_step: Option<u64>,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    let tape = match hex_decode(&tape_hex) {
+        Some(t) => t,
+        None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
+    };
+    let kernel_path_buf = PathBuf::from(&kernel_path);
+    let records = tokio::task::spawn_blocking(move || {
+        crate::routes::run_kvm::boot_and_drain_frames(&kernel_path_buf, &cmdline, tape)
+    })
+    .await
+    .expect("stream/render replay task panicked");
+
+    let records = match records {
+        Ok(records) => records,
+        Err(e) => return Err(json!({ "error": format!("replay error: {e}") })),
+    };
+
+    Ok(records
+        .into_iter()
+        .filter(|r| r.step >= from_step && to_step.is_none_or(|to| r.step <= to))
+        .filter_map(|r| {
+            let bytes = r.bytes?;
+            let rgba = baud_stream::to_rgba(&bytes, &r.format);
+            Some((r.width, r.height, rgba))
+        })
+        .collect())
+}
+
+/// `/run/kvm` (and thus `kvm_run_meta`) only exists on `target_os = "linux"` (`routes/mod.rs`'s
+/// own `#[cfg(target_os = "linux")] pub mod run_kvm;`) — this workspace only ever builds/runs on
+/// real Linux+KVM hosts (`CLAUDE.md`), but `stream.rs` itself is not Linux-gated, so this stub
+/// keeps a non-Linux `cargo check` compiling instead of failing on the Linux-only call below.
+#[cfg(not(target_os = "linux"))]
+async fn render_frames_from_real_replay(
+    _kernel_path: String,
+    _cmdline: String,
+    _tape_hex: String,
+    _from_step: u64,
+    _to_step: Option<u64>,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    Err(json!({ "error": "real KVM replay is only available on target_os = \"linux\"" }))
+}
+
+/// Pre-pivot fallback: the stored frame records contain only content hashes (the agent omits raw
+/// pixels to save bandwidth, `frame_records`'s "bytes are NOT stored here" convention) with no
+/// kernel/tape on record to replay — derive a deterministic synthetic frame from the stored hash
+/// instead, exactly as this route always has (VR2-M19: render writes real, reproducible bytes,
+/// just not the guest's *actual* pixels, since nothing recorded what those were).
+async fn render_frames_from_stored_hashes(
+    state: &AppState,
+    run_id: &str,
+    from_step: u64,
+    to_step: Option<u64>,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    let from_step = from_step as i64;
+    let to_step_val = to_step.map(|v| v as i64);
     let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
         "SELECT node, step, width, height, format, hash
          FROM frame_records
          WHERE run_id = ? AND step >= ? AND (? IS NULL OR step <= ?)
          ORDER BY step ASC"
     )
-    .bind(&run_id)
+    .bind(run_id)
     .bind(from_step)
     .bind(to_step_val).bind(to_step_val)
     .fetch_all(&state.db)
-    .await;
+    .await
+    .map_err(|e| json!({ "error": format!("db error: {e}") }))?;
 
-    match rows {
-        Ok(rows) => {
-            if rows.is_empty() {
-                return Json(json!({ "error": "no frames found for this run/range" }));
-            }
-
-            let _frame_count = rows.len();
-            // The first frame gives us the dimensions/format
-            let (_, _, width, height, _spec_fmt, _) = &rows[0];
-            let w = *width as u32;
-            let h = *height as u32;
-
-            // Materialise pixel bytes to the output file.
-            //
-            // The stored frame records contain only content hashes (agent omits
-            // raw pixels to save bandwidth). We derive a deterministic synthetic
-            // frame from the stored hash — each frame's gradient is seeded by the
-            // first 8 bytes of its blake3 hash, producing a visually distinct but
-            // perfectly reproducible pixel stream that is byte-identical across
-            // re-renders of the same run.  (VR2-M19 fix: render writes real bytes.)
-            let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
-
-            let render_result: Result<(Vec<u8>, usize), String> = (|| {
-                let mut output: Vec<u8> = Vec::new();
-
-                if fmt == "y4m" || fmt == "yuv4mpeg2" {
-                    let mut writer = Y4mWriter::new(&mut output, w, h, 30, 1)
-                        .map_err(|e| format!("Y4mWriter init failed: {e}"))?;
-
-                    for (_, _, fw, fh, _, hash) in &rows {
-                        let fw = *fw as u32;
-                        let fh = *fh as u32;
-                        let rgba = synthetic_frame_rgba(hash, fw, fh);
-                        writer.write_frame(&rgba)
-                            .map_err(|e| format!("Y4mWriter frame: {e}"))?;
-                    }
-                    writer.finish().map_err(|e| format!("Y4mWriter finish: {e}"))?;
-                } else {
-                    // QOI sequence: each frame is a standalone QOI image concatenated
-                    for (_, _, fw, fh, _, hash) in &rows {
-                        let fw = *fw as u32;
-                        let fh = *fh as u32;
-                        let rgba = synthetic_frame_rgba(hash, fw, fh);
-                        let qoi = encode_qoi(&rgba, fw, fh)
-                            .map_err(|e| format!("QOI encode: {e}"))?;
-                        output.extend_from_slice(&qoi);
-                    }
-                }
-
-                let n = rows.len();
-                Ok((output, n))
-            })();
-
-            match render_result {
-                Ok((bytes, n)) => {
-                    // Write bytes to disk
-                    let write_result = std::fs::write(&out_path, &bytes);
-                    match write_result {
-                        Ok(()) => Json(json!({
-                            "ok": true,
-                            "run_id": run_id,
-                            "format": fmt,
-                            "out": out_path,
-                            "width": w,
-                            "height": h,
-                            "frame_count": n,
-                            "bytes_written": bytes.len(),
-                            "from_step": from_step,
-                            "to_step": to_step_val,
-                        })),
-                        Err(e) => Json(json!({
-                            "ok": false,
-                            "error": format!("could not write {out_path}: {e}"),
-                            "frame_count": n,
-                            "bytes_generated": bytes.len(),
-                        })),
-                    }
-                }
-                Err(e) => Json(json!({ "error": e })),
-            }
-        }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
-    }
+    Ok(rows
+        .into_iter()
+        .map(|(_, _, w, h, _, hash)| {
+            let w = w as u32;
+            let h = h as u32;
+            (w, h, synthetic_frame_rgba(&hash, w, h))
+        })
+        .collect())
 }
 
 /// Generate a deterministic synthetic RGBA frame from a frame hash.
@@ -324,6 +398,23 @@ pub async fn tail(
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Strict hex decode for a stored `kvm_run_meta.tape_hex` value — unlike `hex::decode_or_b64`
+/// below (which exists to accept loose test-seeded hash strings on `POST /runs/:id/frames`),
+/// this must never silently treat malformed input as raw bytes: it feeds directly into
+/// `Multiverse::boot`'s tape.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.is_empty() {
+        return Some(Vec::new());
+    }
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 // Simple hex / base64 decode helper

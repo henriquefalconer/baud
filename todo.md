@@ -2215,11 +2215,13 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     end-to-end on real `/dev/kvm`, zero regressions (including `drive/m5.sh`, the only drive script
     that already exercised `baud-stream`'s pre-pivot synthetic-frame HTTP path — untouched by this
     iteration and still 100% passing); `full-demo.sh` "32/32 CHECKS PASSED".
-  - **Not yet done**: this closes the framebuffer stream's *transport* — a real guest can now
-    produce a real, deterministic `Msg::Frame` — but nothing in `baud-server`/`baud-cli` consumes it
-    yet. Two concrete gaps remain, both scoped follow-ups, not further transport work: (1) no
-    `/run/kvm*` boot route drains `Msg::Frame` records and persists their hashes into the
-    `frame_records` table the way `POST /runs/:id/frames` (the pre-pivot manual-seed endpoint) does
+  - **Not yet done (at the time this entry was written — the frame-persistence and replay-render
+    gaps closed by the nineteenth brick below)**: this closes the framebuffer stream's *transport*
+    — a real guest can now produce a real, deterministic `Msg::Frame` — but nothing in
+    `baud-server`/`baud-cli` consumes it yet. Two concrete gaps remain, both scoped follow-ups, not
+    further transport work: (1) no `/run/kvm*` boot route drains `Msg::Frame` records and persists
+    their hashes into the `frame_records` table the way `POST /runs/:id/frames` (the pre-pivot
+    manual-seed endpoint) does
     — a real KVM boot's frames are captured in-process but never reach the DB `baud stream frames`
     reads from; (2) `POST /runs/:id/stream/render` (`crates/baud-server/src/routes/stream.rs`) is
     still an explicit stub — its own header comment says "In a full implementation this would replay
@@ -2233,3 +2235,42 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     Also still open, untouched by this iteration: the enforced-regime KVM module (RDTSC-compliance
     under *enforced* regime — bit-exact, forced-exiting; only the cooperative-regime half closed,
     per the fifteenth brick).
+- **M-series — nineteenth brick: real `Msg::Frame` persistence into `frame_records` + real
+  replay-based `POST /runs/:id/stream/render`, both gaps flagged as open in the eighteenth
+  brick's "Not yet done", are now closed.** `POST /run/kvm`'s `RunKvmBody` gained an optional
+  `run_id` field (`crates/baud-server/src/routes/run_kvm.rs`); when set, the boot's
+  kernel_path/cmdline/tape_hex are persisted into a new `kvm_run_meta` table
+  (`migrations/0010_kvm_run_meta.sql`, upserted) and every real `Msg::Frame` the guest emits
+  (drained via the route's new `boot_run_and_drain`/`boot_and_drain_frames` helpers, which wrap
+  `Multiverse::drain_tape_records`) is inserted into `frame_records` — closing "a real KVM boot's
+  frames are captured in-process but never reach the DB". `stream::render`
+  (`crates/baud-server/src/routes/stream.rs`) now checks `kvm_run_meta` first: if a row exists for
+  the run, it re-boots that exact kernel/cmdline/tape under `Multiverse`
+  (`render_frames_from_real_replay`, Linux-gated with a `cfg(not(target_os = "linux"))` stub for
+  portability), drains the real `Msg::Frame` records, and converts them to RGBA with
+  `baud_stream::to_rgba` — real guest pixels in the Y4M/QOI output, not a hash-seeded synthetic
+  gradient. Runs with no `kvm_run_meta` row (every pre-pivot manually-seeded run via
+  `POST /runs/:id/frames`, which never had a kernel/tape to replay) fall through unchanged to the
+  prior synthetic-gradient-from-hash path (`render_frames_from_stored_hashes`) — `drive/m5.sh`,
+  `m8.sh`, `full-demo.sh` still exercise exactly that path and are unaffected.
+  - New test `run_kvm::tests::boot_and_drain_frames_is_deterministic_and_carries_real_pixels`
+    (real `/dev/kvm`, `framebuffer-guest` fixture) proves the server-level wrapper preserves real
+    pixel bytes and determinism across two boots. New `drive/m11.sh` (5 checks) exercises the full
+    HTTP path against a real `baud-server` process: real boot → `frames_recorded=1` → real frame
+    row in the DB → `stream/render` output whose QOI bytes decode (via a hand-rolled QOI decoder
+    in the drive script) to the guest's actual pixels `(10,10,10),(20,20,20),(30,30,30),(40,40,40)`
+    — not a synthetic gradient — → re-render is byte-identical (real replay is deterministic) →
+    the pre-pivot synthetic-fallback path still renders a manually-seeded run with no
+    `kvm_run_meta` row.
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing`
+    `aya::Bpf` deprecation warnings). `cargo clippy --workspace --all-targets` — zero warnings on
+    `run_kvm.rs`/`stream.rs`, the only files this iteration touched (every other warning shown is
+    pre-existing, on lines this iteration never touched). `cargo test --workspace`: 100% green, 0
+    failed across every crate. All 20 `drive/*.sh` scripts (`h0.sh`-`h6.sh`, `m0.sh`-`m11.sh`,
+    `full-demo.sh`) run individually end-to-end on real `/dev/kvm`, zero regressions;
+    `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: the enforced-regime KVM module (RDTSC-compliance under *enforced* regime —
+    bit-exact, forced-exiting) remains the sole open item in this file — a real out-of-tree kernel
+    patch, not something any prior iteration has attempted; everything else the M-series crate map
+    (§8) and milestone list (§10) originally scoped is now built and wired end-to-end on real
+    hardware.

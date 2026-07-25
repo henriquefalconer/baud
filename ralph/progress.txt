@@ -3208,3 +3208,47 @@ All 19 drive/*.sh scripts (h0-h6, m0-m10, full-demo) re-run individually end-to-
     full-demo.sh 32/32
 ---
 
+
+Post-push verification: local HEAD (2f4c4ac) matches origin/main, working tree clean. todo.md has no separate post-push verification protocol beyond the build/clippy/test/drive-scripts suite already run green against this exact commit's content pre-push. todo.md still carries two open items (enforced-regime KVM module; real Frame persistence + replay-based render()), so this iteration ends with NEXT.
+
+## 2026-07-25T11:26:19 UTC - Session usage — build-25 [sonnet]
+- cost $7.9713001 (exact, from claude -p)
+- context 227,252 tok peak of 1M (23%) across 107 inference calls, monotonic
+- models sonnet-5 $7.0546 (in 214 / out 54,135 / cache-read 16,735,312) · opus-5[1m] $0.9136 · haiku-4-5 $0.0031
+- subagents (1) opus-5 x1
+- transcript: ralph/.run/028-build-25.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 26
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+
+Chose Frame persistence + replay-based render() (todo.md tail), the last open item that fits in one iteration; the enforced-regime KVM module needs a real out-of-tree kernel patch and stays deferred as before.
+
+Found the design: /run/kvm gets an optional run_id, persists kernel/cmdline/tape metadata + real drained Frame records into the DB; render() replays for real when that metadata exists, falls back to synthetic for pre-pivot manually-seeded runs (drive/m5.sh, m8.sh, full-demo.sh still use that path and must keep passing). Implementing now.
+
+Wired /run/kvm run_id param, kvm_run_meta migration, real Frame persistence into frame_records, and real replay-based render() in stream.rs with synthetic fallback preserved for pre-pivot manual-seed runs. Building now.
+
+cargo build --workspace clean. Running clippy...
+
+clippy clean on run_kvm.rs and stream.rs (zero new warnings, only pre-existing unrelated ones). Adding tests for the new /run/kvm run_id persistence + real replay render, then running cargo test.
+
+baud-server: 19/19 tests pass, including the new boot_and_drain_frames_is_deterministic_and_carries_real_pixels test. Running full workspace cargo test now.
+
+cargo test --workspace: 100% green, 0 failed across every crate (69/69 baud-multiverse, 19/19 baud-server, etc). Writing drive/m11.sh to exercise the real /run/kvm -> frame_records -> stream/render replay path end-to-end.
+
+Wrote drive/m11.sh: real /run/kvm run_id boot -> frame_records -> real-replay stream/render, with a QOI decoder verifying the actual guest pixels (not synthetic), determinism check, and synthetic-fallback regression check. Running it now.
+
+drive/m11.sh: ALL M11 CHECKS PASSED (5/5). Now running the full existing drive-script suite (h0-h6, m0-m10, full-demo) one at a time to confirm zero regressions.
+
+h0-h6 all pass with zero regressions. Running m0-m10 + full-demo next.
+
+m0-m8 all pass, including m5/m8 which directly exercise the render() route I modified (synthetic-fallback path). Running m9, m10, full-demo now.
+
+m9, m10 pass. Running full-demo.sh (32-check comprehensive suite) now.
+
+full-demo.sh: 32/32 CHECKS PASSED. All 20 drive/*.sh scripts (h0-h6, m0-m11, full-demo) green, zero regressions. Updating todo.md now, then committing.
+
+todo.md updated: nineteenth brick entry appended documenting the frame-persistence + real-replay-render work, eighteenth brick cross-referenced closed. Sole remaining open item: the enforced-regime KVM module. Committing now.

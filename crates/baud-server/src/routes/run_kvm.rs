@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use crate::state::unix_now;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +33,13 @@ pub struct RunKvmBody {
     /// tape device runs the same either way).
     #[serde(default)]
     pub tape_hex: String,
+    /// When set, this boot's kernel/cmdline/tape and any `Msg::Frame` records it produces are
+    /// persisted under this run id (`kvm_run_meta` + `frame_records`) — the closing half of
+    /// todo.md §14's eighteenth-brick gap ("a real KVM boot's frames are captured in-process but
+    /// never reach the DB `baud stream frames` reads from"). Omitted/`None` keeps this route's
+    /// prior stateless behaviour exactly (no DB writes at all).
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 fn default_cmdline() -> String {
@@ -39,26 +47,123 @@ fn default_cmdline() -> String {
 }
 
 /// POST /run/kvm — boot `kernel_path` and run it to its first `Hlt`/`Shutdown`.
-pub async fn run(Json(body): Json<RunKvmBody>) -> Json<Value> {
+pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) -> Json<Value> {
     let tape = match hex_decode(&body.tape_hex) {
         Some(t) => t,
         None => return Json(json!({ "error": "tape_hex must be a valid hex string" })),
     };
     let kernel_path = PathBuf::from(&body.kernel_path);
-    let cmdline = body.cmdline;
+    let cmdline = body.cmdline.clone();
+    let tape_hex = body.tape_hex.clone();
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
-    let result = tokio::task::spawn_blocking(move || boot_and_run(&kernel_path, &cmdline, tape))
+    let result = tokio::task::spawn_blocking(move || boot_run_and_drain(&kernel_path, &cmdline, tape))
         .await
         .expect("run/kvm task panicked");
 
     match result {
-        Ok((console_output, ram_hash, _mark_branch_step, _node_id)) => Json(json!({
-            "ok": true,
-            "console_output_hex": hex_encode(&console_output),
-            "ram_hash": ram_hash,
-        })),
+        Ok(((console_output, ram_hash, _mark_branch_step, _node_id), records)) => {
+            let mut response = json!({
+                "ok": true,
+                "console_output_hex": hex_encode(&console_output),
+                "ram_hash": ram_hash,
+            });
+            if let Some(run_id) = &body.run_id {
+                match persist_kvm_run(
+                    &state,
+                    run_id,
+                    &body.kernel_path,
+                    &body.cmdline,
+                    &tape_hex,
+                    &records,
+                )
+                .await
+                {
+                    Ok(frames_recorded) => response["frames_recorded"] = json!(frames_recorded),
+                    Err(e) => response["persist_error"] = json!(e),
+                }
+            }
+            Json(response)
+        }
         Err(e) => Json(json!({ "error": e })),
+    }
+}
+
+/// Persist a `/run/kvm` boot's replay inputs (`kvm_run_meta`, upserted) and every `Msg::Frame`
+/// record it produced (`frame_records`, hash-only — the pixel bytes stay in-process and are
+/// regenerated on demand by `stream::render`'s real-replay path, `frame_records`'s own "bytes are
+/// NOT stored here" convention, `migrations/0005_stream.sql`). `runs` gets an `INSERT OR IGNORE`
+/// placeholder row first so this works standalone, without requiring a prior `POST /runs` call —
+/// `frame_records`/`kvm_run_meta` both carry a `REFERENCES runs(id)` and sqlx's SQLite pool
+/// enforces foreign keys by default.
+async fn persist_kvm_run(
+    state: &AppState,
+    run_id: &str,
+    kernel_path: &str,
+    cmdline: &str,
+    tape_hex: &str,
+    records: &[baud_proto::Msg],
+) -> Result<usize, String> {
+    let now = unix_now() as i64;
+    sqlx::query(
+        "INSERT OR IGNORE INTO runs (id, spec_hash, created_at, updated_at) VALUES (?, '', ?, ?)",
+    )
+    .bind(run_id)
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| format!("persist runs row error: {e}"))?;
+
+    sqlx::query(
+        "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET
+            kernel_path = excluded.kernel_path,
+            cmdline = excluded.cmdline,
+            tape_hex = excluded.tape_hex,
+            created_at = excluded.created_at",
+    )
+    .bind(run_id)
+    .bind(kernel_path)
+    .bind(cmdline)
+    .bind(tape_hex)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| format!("persist kvm_run_meta error: {e}"))?;
+
+    let mut frames_recorded = 0usize;
+    for record in records {
+        if let baud_proto::Msg::Frame(frame) = record {
+            sqlx::query(
+                "INSERT INTO frame_records (run_id, node, step, width, height, format, hash, recorded_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(run_id)
+            .bind(frame.node as i64)
+            .bind(frame.step as i64)
+            .bind(frame.width as i64)
+            .bind(frame.height as i64)
+            .bind(pixfmt_str(&frame.format))
+            .bind(frame.hash.0.to_vec())
+            .bind(now)
+            .execute(&state.db)
+            .await
+            .map_err(|e| format!("persist frame_records error: {e}"))?;
+            frames_recorded += 1;
+        }
+    }
+    Ok(frames_recorded)
+}
+
+/// The `frame_records.format` string convention already used by `stream::append_frame`'s callers
+/// (`migrations/0005_stream.sql`'s own comment: `"rgba8888" | "rgb565" | "indexed8"`).
+fn pixfmt_str(format: &baud_proto::PixFmt) -> &'static str {
+    match format {
+        baud_proto::PixFmt::Rgba8888 => "rgba8888",
+        baud_proto::PixFmt::Rgb565 => "rgb565",
+        baud_proto::PixFmt::Indexed8 => "indexed8",
     }
 }
 
@@ -76,11 +181,44 @@ type BranchOutcome = (Vec<u8>, String, Option<u64>, Option<String>);
 /// from a persisted universe later.
 type PersistedRef = (String, String);
 
+#[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
+    boot_run_and_drain(kernel_path, cmdline, tape).map(|(outcome, _records)| outcome)
+}
+
+/// Boot `kernel_path`, run to first `Hlt`/`Shutdown`, then drain every tape-device record the
+/// guest emitted along the way (`Multiverse::drain_tape_records`) — the same boot `boot_and_run`
+/// does, plus the drain `/run/kvm`'s `run()` handler needs to persist real `Msg::Frame` records
+/// (previously captured in-process and immediately dropped, todo.md §14's eighteenth-brick gap).
+fn boot_run_and_drain(
+    kernel_path: &Path,
+    cmdline: &str,
+    tape: Vec<u8>,
+) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     let mut mv = baud_multiverse::linux::Multiverse::boot(kernel_path, cmdline, 0, 1, tape, None)
         .map_err(|e| format!("boot error: {e}"))?;
     let outcome = mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?;
-    Ok((outcome.console_output, outcome.ram_hash, None, None))
+    let records = mv.drain_tape_records();
+    Ok(((outcome.console_output, outcome.ram_hash, None, None), records))
+}
+
+/// Re-boot a real KVM guest and return only the `Msg::Frame` records it produced, in order — the
+/// primitive `stream::render`'s real-replay path uses to regenerate actual pixels for a run that
+/// `/run/kvm` persisted (`kvm_run_meta`), instead of fabricating a synthetic gradient from a
+/// stored hash.
+pub(crate) fn boot_and_drain_frames(
+    kernel_path: &Path,
+    cmdline: &str,
+    tape: Vec<u8>,
+) -> Result<Vec<baud_proto::FrameRecord>, String> {
+    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape)?;
+    Ok(records
+        .into_iter()
+        .filter_map(|m| match m {
+            baud_proto::Msg::Frame(frame) => Some(frame),
+            _ => None,
+        })
+        .collect())
 }
 
 /// The work-clock constant this route uses for every boot/branch — a run-level constant
@@ -912,6 +1050,44 @@ mod tests {
     fn tape_echo_guest_kernel_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../baud-multiverse/tests/fixtures/tape-echo-guest/bzImage")
+    }
+
+    fn framebuffer_guest_kernel_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/framebuffer-guest/bzImage")
+    }
+
+    /// Server-level analogue of `baud-multiverse`'s own
+    /// `framebuffer_guest_frame_is_reproducible_across_boots`, exercised through this route's own
+    /// `boot_and_drain_frames` — the exact primitive `stream::render`'s real-replay path
+    /// (`render_frames_from_real_replay`) calls — instead of `Multiverse` directly. Confirms the
+    /// server-level wrapper preserves both the frame's real pixel bytes and their determinism
+    /// across two boots, and that `baud_stream::to_rgba` (what `render_frames_from_real_replay`
+    /// feeds the encoder) converts them exactly as `framebuffer-guest`'s own fixture doc expects.
+    #[test]
+    fn boot_and_drain_frames_is_deterministic_and_carries_real_pixels() {
+        let kernel = framebuffer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![]).expect("first boot failed");
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![]).expect("second boot failed");
+
+        assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
+        assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
+
+        let frame = &first[0];
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.height, 2);
+        assert_eq!(frame.format, baud_proto::PixFmt::Indexed8);
+        assert_eq!(frame.bytes.as_deref(), Some([10u8, 20, 30, 40].as_slice()));
+        assert_eq!(first[0].hash, second[0].hash, "frame hash must be identical across two boots");
+        assert_eq!(first[0].bytes, second[0].bytes, "raw pixel bytes must be identical across two boots");
+
+        // What `render_frames_from_real_replay` actually feeds the Y4M/QOI encoder: real,
+        // guest-produced pixels converted with baud-stream's own format conversion — not a
+        // synthetic hash-seeded gradient.
+        let rgba = baud_stream::to_rgba(frame.bytes.as_ref().unwrap(), &frame.format);
+        assert_eq!(rgba.len(), 2 * 2 * 4, "2x2 Indexed8 frame must expand to 16 RGBA bytes");
     }
 
     /// Server-level analogue of `baud-multiverse`'s own `double_boot_memory_identical`
