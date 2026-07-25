@@ -20,6 +20,7 @@ The deterministic VMM and everything execution reproducibility depends on.
 |------|------|---------|
 | [baud-multiverse.md](./baud-multiverse.md) | [crates/baud-multiverse](../crates/baud-multiverse/) | Deterministic KVM/VT-x VMM (first deliverable) |
 | [baud-vcpu.md](./baud-vcpu.md) | [crates/baud-vcpu](../crates/baud-vcpu/) | Single-vCPU state machine + exit dispatch + interrupt injection |
+| [baud-boot.md](./baud-boot.md) | [crates/baud-multiverse/src/linux](../crates/baud-multiverse/src/linux/) | Deterministic Linux boot: zero page, E820, cmdline, `SETUP_RNG_SEED`, shutdown |
 | [baud-tape-device.md](./baud-tape-device.md) | [crates/baud-tape-device](../crates/baud-tape-device/) | Paravirtual device — the sole nondeterministic-input channel |
 | [baud-snapshot.md](./baud-snapshot.md) | [crates/baud-snapshot](../crates/baud-snapshot/) | Universe capture/restore + userfaultfd CoW branching + rewind |
 | [baud-snapshot-store.md](./baud-snapshot-store.md) | [crates/baud-snapshot-store](../crates/baud-snapshot-store/) | Durable branch tree of universes (age-encrypted) — supersedes the journal |
@@ -38,7 +39,8 @@ The deterministic VMM and everything execution reproducibility depends on.
 
 | Spec | Code | Purpose |
 |------|------|---------|
-| [baud-packages.md](./baud-packages.md) | [crates/baud-packages](../crates/baud-packages/) | Builds reproducible bootable guest images (kernel + rootfs + agent) |
+| [baud-packages.md](./baud-packages.md) | [crates/baud-packages](../crates/baud-packages/) | Builds reproducible bootable guest images (kernel + initramfs + software + agent) |
+| [baud-guest-harness.md](./baud-guest-harness.md) | examples/*/harness | The generic in-guest harness contract (tape ↔ SUT; probes/goal/frames out) |
 
 ## Observation
 
@@ -60,6 +62,7 @@ The deterministic VMM and everything execution reproducibility depends on.
 | Spec | Code | Purpose |
 |------|------|---------|
 | [baud-raftlet.md](./baud-raftlet.md) | examples/raftlet (guest image) | Validation target (planted-bug distributed toy) |
+| [baud-mario.md](./baud-mario.md) | examples/mario (guest image) | Validation target (FCEUX in Linux driven to game completion) |
 
 ## Superseded
 

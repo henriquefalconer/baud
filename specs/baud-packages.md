@@ -206,7 +206,11 @@ build-time instrumentation required:
   single canonical boolean Kconfig symbol as clean as HPET/RTC's (PIT is usually compiled in as
   part of the core x86 platform code, not a separately toggleable driver) — tracked as a follow-up
   once a real guest kernel `.config` is available to check what actually needs gating.
-- No real Nix guest-image build pipeline (kernel + rootfs + agent, §4's "prebaked Daytona snapshot
-  image") exists yet — `lint_kernel_config` operates on a `.config` text handed to it; nothing yet
-  produces that `.config` from a `spec.toml`-style guest-image spec. That is the natural next step
-  once there is a real kernel build to lint the output of.
+- **The real guest-image pipeline is specified in `todo.md` §4 and consumed by `specs/baud-boot.md`**:
+  a minimal builtin kernel + reproducible initramfs (`Buildroot qemu_x86_64_defconfig` → pinned Nix
+  `linux_6_12.override` + `makeInitrdNG`), a static `/init`, and the harness
+  (`specs/baud-guest-harness.md`), with image identity = `sha256(bzImage ‖ initramfs.gz)`. This
+  replaces the old single-static-musl-binary output. `lint_kernel_config` today operates on a
+  `.config` text handed to it; the build side that produces that `.config` plus the two artifacts from
+  a `spec.toml` is the next step (`todo.md` §14 next-action 1). `baud-boot` then writes the boot_params
+  / E820 / `SETUP_RNG_SEED` / deterministic cmdline for whatever image this pipeline emits.

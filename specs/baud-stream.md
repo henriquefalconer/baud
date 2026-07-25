@@ -97,6 +97,14 @@ length against the declared geometry is this crate's job (§4).
 | Sequence      | Y4M (raw, pipeable → user's ffmpeg for mp4) |
 | Live          | `--stream` runs and `stream render` forward `FrameRecord`s over `baud-tape-agent`'s stream transport; server re-serves via SSE |
 
+The frame source is the guest harness (`specs/baud-guest-harness.md` §6) writing the `FRAME` opcode; this
+crate is transport-and-render only. **Live window (mandatory for the Mario example, every run):** `baud stream
+tail --run <id> --format y4m` emits a Y4M stream (NES `256×240`, framerate `60000:1001`) that pipes straight
+into `ffplay -f yuv4mpegpipe -i - -an -framedrop -infbuf -x <w> -y <h> -left 40 -top 40`, sized to ~25% of the
+screen on the desktop via WSLg (`todo.md` §11.7). Because frames are re-derived from the tape (§5), the
+centralized README GIF is produced from the winning tape alone: `baud stream tail … | ffmpeg -i - -vf
+"fps=30,scale=512:-1:flags=neighbor" -loop 0 docs/mario.gif`.
+
 ### Commands
 
 ```
