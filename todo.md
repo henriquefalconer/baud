@@ -643,15 +643,37 @@ snapshot, not a duplicate of it.
   only exercised against synthetic hand-built ELF fixtures (`crates/baud-packages` tests) plus the small
   hand-assembled `tests/fixtures/rdseed-guest/` boot fixture — not yet run against a real linked
   kernel/userspace ELF; do that before relying on it for a real guest image.
+  **`RdseedRewriteReport` → boot wiring is now closed**: `RdseedSite` carries a real `gpr_index` (decoded
+  from the instruction's own ModRM `rm` field + `REX.B`, `crates/baud-packages/src/rdseed.rs`, tested against
+  a non-`eax` register and a `REX.B`-extended one, not just the fixture's `eax` case); `baud image
+  rewrite-rdseed` writes a `<output>.rdseed-sites.json` sidecar next to the patched image
+  (`crates/baud-cli/src/cmds/image.rs`); `baud-server`'s new `rdseed_sites` module
+  (`crates/baud-server/src/rdseed_sites.rs`) loads that sidecar and threads its sites into
+  `Multiverse::boot_with_rdseed_sites` at both real production boot call sites (`boot_run_and_drain`,
+  `boot_and_snapshot` in `routes/run_kvm.rs`) — a missing sidecar (the common case) yields the same empty
+  table `Multiverse::boot` always passed, a malformed one fails loud. Verified end-to-end with a real ELF
+  (`as`/`ld`, `rdseed eax` + `rdseed r8d`) run through the live CLI against a live server: patched image has
+  `UD2`+`NOP` at both sites, sidecar JSON carries the correct address/gpr_index (0 and 8)/length for both.
+  The one remaining caller still hardcoding its site is `rdseed_enforced_regime_is_bit_exact_across_boots`,
+  because `tests/fixtures/rdseed-guest/` is a hand-assembled flat binary that never goes through the
+  ELF-based rewrite pass at all (see that fixture's `BUILD.md`) — a real ELF-based guest image now gets the
+  sidecar automatically.
 - **Next actions (this rewrite)**:
   1. **OS-entropy determinism** — pin `SETUP_RNG_SEED` (type 9) `setup_data` in the `boot_params` baud already
      builds; make virtio-rng tape-fed (an ever-ready FIFO, never a plain file) or omitted; confirm the
      deterministic-TSC + exact-interrupt seeding covers the initial CRNG state. Add
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
-     `virtio_rng_reseed_is_deterministic`. No guest-kernel patch. **Prerequisite gap found**: no fixture in
-     the test suite boots a real Linux kernel yet (hello/rdrand/rdtsc/rdseed-guest are all hand-assembled
-     non-Linux flat binaries with no IDT/scheduler); these tests cannot be written non-vacuously without
-     first building a real-kernel guest image — a larger antecedent task than the phrasing here implies.
+     `virtio_rng_reseed_is_deterministic`. No guest-kernel patch. **Prerequisite gap found (confirmed by a
+     dedicated survey)**: no fixture in the test suite boots a real Linux kernel yet (hello/rdrand/rdtsc/
+     rdseed-guest are all hand-assembled non-Linux flat binaries with no IDT/scheduler — an earlier version
+     of `hello-guest` tried a real kernel and hung forever in `calibrate_delay()` waiting on a jiffies tick,
+     since interrupt injection (H4) isn't wired into this crate's boot path); `baud-packages` has real Nix
+     infra for building one static-musl binary (`flake.rs`) but **zero code** that assembles a bootable
+     kernel+rootfs image (`specs/baud-packages.md` §9.4 confirms this is spec-only); and `bootparams.rs` has
+     no `setup_data`/`SETUP_RNG_SEED` or virtio-rng code at all yet. This is a genuine multi-day, multi-step
+     effort (land H4 interrupt injection → build a real Nix kernel/initramfs pipeline → wire
+     `SETUP_RNG_SEED`/virtio-rng into `bootparams.rs` → only then write the three tests), not a single
+     iteration — split it into its own sub-steps before attempting it.
   2. **Model cleanup** — remove the two-mode `Regime` enum and its branches from
      `baud-multiverse`/`baud-vcpu`/`baud-host`/`baud-snapshot-store`; there is one determinism model
      (§13). `host probe` reports capabilities. (Note: the enforced/cooperative-style kernel-module swap-in
@@ -659,14 +681,24 @@ snapshot, not a duplicate of it.
      *reporting*/API-surface split, not about removing that mechanism. `enforced_module_present()`
      (`crates/baud-host/src/linux.rs`) still correctly returns `false` outside a `drive/h3-enforced-*.sh` swap
      window — wiring it to a real runtime check needs a new `KVM_CHECK_EXTENSION` the patches don't add yet.)
+     **Scoping survey done**: the enum lives in `crates/baud-host/src/lib.rs:39-52`
+     (`Enforced`/`Cooperative`/`Rejected`), decided by `checks.rs:8,39-88`'s `compute_probe`; consumers are
+     `baud-server/routes/host.rs` (JSON `regime` field), `baud-cli/src/cmds/host.rs` (`--require`/
+     `regime_satisfies`), one `baud-multiverse` hardware-test assertion, and 7 `drive/h0.sh`-`h6.sh` scripts
+     that `grep` the JSON `regime` field — `baud-vcpu` and `baud-snapshot-store` turned out to have **zero**
+     enum usage already (the latter deliberately uses a plain `String`). This is a real API/wire-schema
+     redesign (what replaces the tri-state summary field), not a pure mechanical rename, but is centralized
+     enough (~250-400 changed lines across ~12-14 files) to fit in one focused session once the replacement
+     schema is decided up front.
   3. **Super Mario Bros validation (§11)** — `examples/mario/` guest image + strategy/tactics + `drive/mario.sh`
      completion gate + the mandatory ~25% WSLg live window (`baud stream tail | ffplay`). The current
-     `examples/mario/` predates the KVM pivot (a static-musl-process spec, not a bootable guest image) and
-     will need to be rebuilt from scratch under the new model.
-  4. **`RdseedRewriteReport` → boot wiring** — nothing yet plumbs a real `baud image build`'s rewrite-site
-     table into `Multiverse::boot_with_rdseed_sites`; the enforced-RDSEED test hardcodes the hand-verified
-     site of the fixed `tests/fixtures/rdseed-guest/` fixture. Needed before a real, non-fixture guest image
-     can use enforced RDSEED end-to-end.
+     `examples/mario/` predates the KVM pivot (a static-musl-process spec — `nes_bridge.c`, a hand-rolled
+     "CPU + PPU + APU stub" run as a host process reading stdin, not a bootable guest image) and will need to
+     be rebuilt from scratch under the new model. **Confirmed by survey to share item 1's prerequisite gap**:
+     there is no real-Linux-kernel-guest-image boot pipeline yet anywhere in the repo, and Mario needs exactly
+     that (plus its own emulator payload rewritten as an in-guest agent reading the tape device instead of
+     stdin — no Rust NES emulator crate is vendored, so this vendors or ports one). Do not attempt before item
+     1's boot pipeline lands, to avoid building the same missing capability twice.
 - **Specs to update alongside**: `specs/baud-multiverse.md` and `specs/README.md` (one model, entropy-by-
   input-control, `rdseed` rewrite), `specs/baud-packages.md` (rewrite pass — now implemented, update from
   planned to built), `specs/baud-host.md` (`host probe` reports capabilities), a new `specs/baud-stream.md`

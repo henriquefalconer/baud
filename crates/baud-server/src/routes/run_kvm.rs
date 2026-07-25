@@ -195,8 +195,17 @@ fn boot_run_and_drain(
     cmdline: &str,
     tape: Vec<u8>,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
-    let mut mv = baud_multiverse::linux::Multiverse::boot(kernel_path, cmdline, 0, 1, tape, None)
-        .map_err(|e| format!("boot error: {e}"))?;
+    let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
+    let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
+        kernel_path,
+        cmdline,
+        0,
+        1,
+        tape,
+        None,
+        rdseed_sites,
+    )
+    .map_err(|e| format!("boot error: {e}"))?;
     let outcome = mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?;
     let records = mv.drain_tape_records();
     Ok(((outcome.console_output, outcome.ram_hash, None, None), records))
@@ -422,8 +431,17 @@ fn branch_outcome_to_json((console_output, ram_hash, mark_branch_step, node_id):
 /// Boot + snapshot the shared branch point, shared by every `/run/kvm/branch` flavor (fixed-tape
 /// and driver-generated alike).
 fn boot_and_snapshot(kernel_path: &Path, cmdline: &str) -> Result<baud_snapshot::Universe, String> {
-    let mut boot = baud_multiverse::linux::Multiverse::boot(kernel_path, cmdline, 0, WORK_CLOCK_K, vec![], None)
-        .map_err(|e| format!("boot error: {e}"))?;
+    let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
+    let mut boot = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
+        kernel_path,
+        cmdline,
+        0,
+        WORK_CLOCK_K,
+        vec![],
+        None,
+        rdseed_sites,
+    )
+    .map_err(|e| format!("boot error: {e}"))?;
     let mut page_store = baud_snapshot::PageStore::new();
     boot.snapshot(&mut page_store).map_err(|e| format!("snapshot error: {e}"))
 }

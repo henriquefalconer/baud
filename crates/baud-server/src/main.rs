@@ -9,6 +9,8 @@
 //   - Run orchestration and sandbox-minute budget
 
 mod routes;
+#[cfg(target_os = "linux")]
+mod rdseed_sites;
 mod state;
 
 use anyhow::Result;

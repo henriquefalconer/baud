@@ -3843,3 +3843,35 @@ drive/m10.sh: ALL CHECKS PASSED. Running drive/m11.sh next.
 drive/m10.sh and m11.sh: ALL CHECKS PASSED. Additionally did a manual end-to-end smoke test: built a real ELF with rdseed eax + rdseed r8d via as/ld, ran 'baud image rewrite-rdseed' against a live baud-server -- confirmed the patched ELF has UD2+NOP at both sites and the .rdseed-sites.json sidecar carries the correct address/gpr_index(0 and 8)/length for both a plain and a REX.B-extended register. This closes todo.md §14's 'RdseedRewriteReport -> boot wiring' item end-to-end. Updating todo.md now before committing.
 
 todo.md §14 updated: folded RdseedRewriteReport->boot wiring into 'built and hardware-tested' with full implementation details; enriched the remaining 3 next-action items (OS-entropy, Regime cleanup, Mario) with this iteration's survey findings so future iterations don't re-derive the same scoping. Committing now.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... first inspecting uncommitted working-tree changes (image.rs, linux/mod.rs, rdseed.rs, main.rs, run_kvm.rs, new rdseed_sites.rs) to understand whether prior work is complete or mid-flight before picking a todo.md item.
+
+Uncommitted work found in the tree already implements the exact 'RdseedRewriteReport -> boot wiring' item todo.md's Build status describes as done (image.rs sidecar write, rdseed_sites.rs loader module, run_kvm.rs threading sites into boot_with_rdseed_sites, gpr_index decoding in rdseed.rs, updated fixture BUILD.md/tests). This looks like a previous session's finished work that never got committed/pushed. Verifying it builds and passes tests before committing it as this iteration's step. Starting cargo build --workspace...
+
+cargo build --workspace passed clean. Running cargo clippy --workspace --all-targets next...
+
+cargo clippy --workspace --all-targets: no errors, only pre-existing warnings unrelated to the rdseed-sites change. Running cargo test --workspace next...
+
+cargo test --workspace: all green, zero failures. Checking rdseed_sites and rdseed.rs test names specifically to confirm the new tests ran...
+
+New unit tests confirmed green (rdseed_sites::tests::*, rdseed::tests::gpr_index_names_the_real_destination_register). Now running drive/h1.sh (boot) to sanity-check end-to-end boot path is unaffected...
+
+drive/h1.sh: ALL CHECKS PASSED (real KVM boot, regime=cooperative). Running drive/h2.sh next...
+
+drive/h2.sh: ALL CHECKS PASSED. Running drive/h3.sh next (entropy/randomness — closest area to the rdseed sidecar change)...
+
+drive/h3.sh: ALL CHECKS PASSED. Running drive/h4.sh (interrupt boundary) next for milestone continuity...
+
+drive/h4.sh: ALL CHECKS PASSED. Running drive/h5.sh (snapshot/branch/restore) next -- this is the one that exercises boot_and_snapshot, the other production call site I changed...
+
+Chose to finish and land the already-implemented 'RdseedRewriteReport -> boot wiring' (todo.md §14), it's the last missing piece of item 15 in the problem/spec/test matrix (§12) and was left uncommitted by a prior session that appears to have been cut off right before 'git commit'.
+
+drive/h5.sh: ALL CHECKS PASSED (real hardware, ~4min incl. the 1000-branch fork test) -- this exercises boot_and_snapshot, the other production call site now threading rdseed sidecar sites through Multiverse::boot_with_rdseed_sites. Verification protocol (cargo build/clippy/test workspace-wide + drive/h1-h5.sh on real /dev/kvm) is green. Committing now.

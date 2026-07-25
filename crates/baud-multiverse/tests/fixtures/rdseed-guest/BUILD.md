@@ -43,9 +43,11 @@ see `kernel-module/baud-enforced/ud2-enforce.patch`.
 
 ## Where the UD2 is (the numbers the Rust test hardcodes)
 
-There is no automatic image-build pipeline wiring a `RdseedRewriteReport` into
-`WorkClock::with_rdseed_sites` yet — that is a deliberate scope cut (todo.md §14). Like
-`rdtsc-guest`/`rdrand-guest`, this is a fixed, hand-verified binary, so the site table is
+`baud-server`'s `rdseed_sites` module now wires a real `RdseedRewriteReport` sidecar into
+`WorkClock::with_rdseed_sites` for any real `/run/kvm*` boot (todo.md §14). That pipeline reads an
+ELF's `SHF_EXECINSTR` sections (`baud_packages::rewrite_rdseed`) — this fixture is a hand-assembled
+**flat binary**, never an ELF, so it never goes through that pass and has no sidecar of its own.
+Like `rdtsc-guest`/`rdrand-guest`, this is a fixed, hand-verified binary, so the site table stays
 hardcoded in the test from the values `build.py` prints on every regeneration:
 
 | | value | derivation |

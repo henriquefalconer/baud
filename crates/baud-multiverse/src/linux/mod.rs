@@ -570,10 +570,17 @@ impl Multiverse {
     /// as they would with no patch loaded. Passing an empty table (what [`boot`](Self::boot) does)
     /// is therefore always safe, never a silent "serve a guess for every `#UD`".
     ///
-    /// There is no automatic wiring from an image build to this table yet: `baud image build`
-    /// produces the report, but nothing plumbs it into a boot (todo.md §14). Callers — today, only
-    /// `rdseed_enforced_regime_is_bit_exact_across_boots` — pass the hand-verified sites of a fixed
-    /// fixture image, recorded in that fixture's own `BUILD.md`.
+    /// The end-to-end wiring from an image build to this table (todo.md §14's "`RdseedRewriteReport`
+    /// -> boot wiring") lives in `baud-server`: `baud image rewrite-rdseed`
+    /// (`baud_packages::rewrite_rdseed`) writes a `<image>.rdseed-sites.json` sidecar next to the
+    /// patched image, and `baud-server`'s `rdseed_sites::load_rdseed_sites` reads it back into
+    /// exactly the `(u64, EnforcedRdseedSite)` shape this function wants for every real
+    /// `/run/kvm*` boot — this crate itself stays image-format-agnostic and takes the table as a
+    /// plain argument. The one remaining hand-verified caller is
+    /// `rdseed_enforced_regime_is_bit_exact_across_boots`, which passes the sites of a fixed,
+    /// hand-assembled flat-binary fixture that never goes through the ELF-based rewrite pass at all
+    /// (see `tests/fixtures/rdseed-guest/BUILD.md`), so it still hardcodes its one site rather than
+    /// reading a sidecar.
     pub fn boot_with_rdseed_sites(
         kernel_path: &Path,
         cmdline: &str,
@@ -1441,9 +1448,11 @@ mod tests {
     /// and derived in `tests/fixtures/rdseed-guest/BUILD.md`'s "Where the UD2 is" table
     /// (`layout::KERNEL_LOAD_ADDR + layout::KERNEL_64BIT_ENTRY_OFFSET + 0x07`); `build.py` re-prints
     /// the same three numbers on every regeneration of that image. Hardcoded rather than derived
-    /// from an image build because nothing plumbs `RdseedRewriteReport` into a boot yet (todo.md
-    /// §14) — the same "fixed, hand-verified binary" arrangement `rdtsc-guest`/`rdrand-guest`
-    /// already use.
+    /// from a real image build because `rdseed-guest` is a hand-assembled flat binary, not the ELF
+    /// `baud_packages::rewrite_rdseed` parses — it never produces a `RdseedRewriteReport`/sidecar
+    /// of its own for `baud-server`'s `rdseed_sites` loader (todo.md §14) to pick up, unlike a real
+    /// ELF-based guest image now would. Same "fixed, hand-verified binary" arrangement
+    /// `rdtsc-guest`/`rdrand-guest` already use.
     const RDSEED_GUEST_UD2_ADDR: u64 = 0x0020_0207;
     /// `gpr_index: 0` == `RAX`/`EAX` (the `0F C7 F8` encoding's ModRM `rm` field);
     /// `length: 3` == the original `RDSEED r32` encoding, so a served value resumes at

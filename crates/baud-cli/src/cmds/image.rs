@@ -68,6 +68,21 @@ pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
             let out_path = output.unwrap_or_else(|| path.clone());
             std::fs::write(&out_path, &patched)
                 .map_err(|e| anyhow::anyhow!("failed to write patched image '{}': {}", out_path, e))?;
+
+            // Persist the rewrite-site table as a sidecar next to the patched image (todo.md §14's
+            // "RdseedRewriteReport -> boot wiring" gap): `baud-server`'s boot routes look up
+            // `<kernel_path>.rdseed-sites.json` and, if present, thread its sites into
+            // `Multiverse::boot_with_rdseed_sites` so a real `rdseed`-rewritten guest can actually
+            // have its `UD2` sites served a value, not just the hand-built test fixtures. Always
+            // written (even with zero sites) so a later boot never falls back to a stale sidecar
+            // from a previous build of the same path.
+            let sites = v.get("sites").cloned().unwrap_or_else(|| json!([]));
+            let sidecar_path = format!("{out_path}.rdseed-sites.json");
+            let sidecar = json!({ "sites": sites });
+            std::fs::write(&sidecar_path, serde_json::to_vec_pretty(&sidecar)?).map_err(|e| {
+                anyhow::anyhow!("failed to write rdseed-sites sidecar '{}': {}", sidecar_path, e)
+            })?;
+
             // Echo the server's report (sites rewritten, count) rather than the (now redundant)
             // patched-image payload — a human/script wants to know what changed, not re-see the
             // bytes it just told the CLI to write to disk.
@@ -75,6 +90,7 @@ pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
             if let Some(obj) = report.as_object_mut() {
                 obj.remove("patched_base64");
                 obj.insert("output_path".to_string(), json!(out_path));
+                obj.insert("rdseed_sites_path".to_string(), json!(sidecar_path));
             }
             fmt::print(&report, json);
         }

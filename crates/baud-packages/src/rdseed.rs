@@ -35,6 +35,23 @@ pub struct RdseedSite {
     /// (REX.W-prefixed) or `RDSEED r16` (0x66-prefixed) -- whatever Capstone actually decoded,
     /// never assumed.
     pub length: u8,
+    /// Destination GPR, in the same 0=RAX..15=R15 numbering `baud-vcpu`'s `gpr_for_index` (and
+    /// `EnforcedRdseedSite::gpr_index`) use -- decoded from the instruction's own ModRM byte (`rm`
+    /// field, extended by `REX.B` when present), not assumed to be a fixed register. This is what
+    /// lets a `RdseedSite` be converted directly into a `baud_vcpu::EnforcedRdseedSite` for
+    /// `Multiverse::boot_with_rdseed_sites` (todo.md §14's "`RdseedRewriteReport` -> boot wiring").
+    pub gpr_index: u8,
+}
+
+/// Decode the destination GPR of a register-direct `RDSEED` encoding (`ModRM.mod == 11`, no
+/// SIB/displacement bytes) straight from its raw bytes: the ModRM byte is always the last byte of
+/// the instruction, and its `rm` field (low 3 bits), extended by `REX.B` (bit 0 of a `0x40..=0x4F`
+/// prefix byte, if the first byte is one) to reach `r8..r15`, names the register -- the exact
+/// numbering `gpr_for_index` (`baud-vcpu`) already uses for `RDRAND`'s destination.
+fn gpr_index_from_modrm(bytes: &[u8]) -> u8 {
+    let modrm = bytes[bytes.len() - 1];
+    let rex_b = if (0x40..=0x4F).contains(&bytes[0]) { bytes[0] & 0x1 } else { 0 };
+    (modrm & 0x7) | (rex_b << 3)
 }
 
 /// Report of a [`rewrite_rdseed`] pass: every site found (and patched).
@@ -104,6 +121,7 @@ pub fn scan_rdseed_opcodes(elf_bytes: &[u8]) -> Result<Vec<RdseedSite>> {
                     file_offset: file_off + insn_off,
                     address: insn.address(),
                     length: insn.bytes().len() as u8,
+                    gpr_index: gpr_index_from_modrm(insn.bytes()),
                 });
             }
         }
@@ -283,6 +301,8 @@ mod tests {
     // Hand-assembled x86-64 opcodes (Intel encodings, from the SDM):
     const RDSEED_EAX: [u8; 3] = [0x0F, 0xC7, 0xF8]; // rdseed eax  (ModRM /7, reg=eax)
     const RDSEED_RAX: [u8; 4] = [0x48, 0x0F, 0xC7, 0xF8]; // rdseed rax  (REX.W)
+    const RDSEED_ECX: [u8; 3] = [0x0F, 0xC7, 0xF9]; // rdseed ecx  (ModRM /7, rm=ecx)
+    const RDSEED_R8D: [u8; 4] = [0x41, 0x0F, 0xC7, 0xF8]; // rdseed r8d  (REX.B, rm=eax|B -> r8d)
     const RDRAND_EAX: [u8; 3] = [0x0F, 0xC7, 0xF0]; // rdrand eax  (ModRM /6, reg=eax)
     const NOP: [u8; 1] = [0x90];
 
@@ -376,6 +396,28 @@ mod tests {
         let (patched, report) = rewrite_rdseed(&elf).unwrap();
         assert_eq!(report.count(), 0);
         assert_eq!(patched, elf);
+    }
+
+    /// Spec test (todo.md §14's `RdseedRewriteReport` -> boot wiring): the reported `gpr_index`
+    /// names the *actual* destination register of each site -- `eax`/`rax` (index 0), a non-`eax`
+    /// 32-bit register (`ecx`, index 1), and a `REX.B`-extended register (`r8d`, index 8) -- not a
+    /// value hardcoded to whatever the fixture happens to use, since `Multiverse::boot_with_rdseed_sites`
+    /// trusts this field verbatim to pick which guest register to serve a value into.
+    #[test]
+    fn gpr_index_names_the_real_destination_register() {
+        let mut code = Vec::new();
+        code.extend_from_slice(&RDSEED_EAX);
+        code.extend_from_slice(&RDSEED_ECX);
+        code.extend_from_slice(&RDSEED_R8D);
+        code.extend_from_slice(&RDSEED_RAX);
+
+        let elf = build_minimal_elf(&[(".text", EXEC, &code)]);
+        let sites = scan_rdseed_opcodes(&elf).unwrap();
+        assert_eq!(sites.len(), 4);
+        assert_eq!(sites[0].gpr_index, 0, "rdseed eax -> RAX");
+        assert_eq!(sites[1].gpr_index, 1, "rdseed ecx -> RCX");
+        assert_eq!(sites[2].gpr_index, 8, "rdseed r8d -> R8 (REX.B-extended)");
+        assert_eq!(sites[3].gpr_index, 0, "rdseed rax -> RAX (REX.W, rm unextended)");
     }
 
     /// Multiple executable sections (e.g. a kernel image's `.text` plus a userspace binary's own
