@@ -31,6 +31,12 @@ guarantee and the test that proves it.
   deterministic by controlling the machine underneath it — under VT-x `cpuid` always exits, `rdtsc`/`rdrand`
   are trapped, the one instruction the host virtualization can't trap (`rdseed`) is rewritten out of the
   guest image at build time, and the guest kernel's own entropy inputs are therefore all deterministic.
+- **The generic shape.** Under baud, every program has the same shape as Super Mario Bros: a deterministic
+  system that takes an input tape and has states worth reaching. Point baud at any program on its
+  deterministic Linux, mark the states that matter — a reached condition, a violated invariant, a crash —
+  and its fuzzer searches the input tape until the program hits one, then reproduces that run exactly. Super
+  Mario Bros is one such program; its target state is the end of the game. The engine that does this is
+  generic (§3–§10); §11 is a worked example of it, with every game-specific line confined to `examples/`.
 
 ## 1. Hard constraints
 
@@ -205,14 +211,14 @@ modes. Full component detail in `specs/baud-multiverse.md`; the single-vCPU stat
     applies to an x86_64 **direct kernel boot**: the `SETUP_RNG_SEED` (type 9) `setup_data` node, which the
     kernel mixes via `add_bootloader_randomness()` (then zeroes). baud writes a **fixed tape-derived 32-byte
     seed** there (or omits the node); it must never pass a firmware/host-derived seed through. Crediting a
-    deterministic boot seed also makes the CRNG *ready early*, so the blocking jitter path (below) never runs.
+    deterministic boot seed also makes the CRNG *ready early*, so the jitter path (below) never runs.
     The EFI `EFI_RNG_PROTOCOL` seed and the device-tree `/chosen/rng-seed` are **not reachable on x86
     direct-boot without UEFI/DT**, so they do not apply here (they would matter only under an OVMF/UEFI boot).
   - **`rdtsc` / `rdrand`** — hardware-trapped and served tape-derived values (§3.2, §3.3), so the kernel's
     `arch_get_random_*` seeding reads and every `random_get_entropy()` (RDTSC) read are deterministic.
-  - **Jitter dance** (`try_to_generate_entropy`) — a CPU-timing entropy collector on the `getrandom()`
-    blocking path. It is deterministic under baud's already-deterministic TSC, and in practice never even runs
-    because the pinned boot seed makes the CRNG ready before any caller blocks.
+  - **Jitter dance** (`try_to_generate_entropy`) — a CPU-timing entropy collector the kernel runs only while
+    the CRNG is not yet ready. It is deterministic under baud's already-deterministic TSC, and in practice
+    never even runs because the pinned boot seed makes the CRNG ready before any caller reaches it.
   - **Interrupt timing** (`add_interrupt_randomness`) — folds `random_get_entropy()` + IP/IRQ into the pool
     and credits it. This drives the **initial** CRNG init (EMPTY→EARLY→READY), not just later reseeds, so
     baud's exact-boundary interrupt injection (§3.4) plus the deterministic TSC make the initial CRNG state
@@ -254,6 +260,10 @@ modes. Full component detail in `specs/baud-multiverse.md`; the single-vCPU stat
   the build-time rewrite for `rdseed` here; on a host that exposes the control it may additionally trap
   `rdseed` like `rdrand`, and the rewrite becomes belt-and-suspenders. The guest runs deterministically
   either way.
+- **Proven end-to-end at H7**: on the real Linux guest (§4, §10), with RDRAND CPUID-cleared + hardware-trapped,
+  `rdseed` rewritten, `CRYPTO_JITTERENTROPY=n`, deterministic interrupt timing, and the pinned `SETUP_RNG_SEED`,
+  an unmodified guest's `getrandom`/`/dev/urandom` is byte-identical across boots — the whole entropy story is
+  a claim baud can demonstrate, not just assert.
 - **Test** (`entropy_guest_is_deterministic`): a guest that reads `getrandom`/`/dev/urandom` N times — via
   both the syscall and, on glibc 2.41+, the vDSO path — produces a byte-identical sequence across two boots on
   the same tape.
@@ -273,16 +283,83 @@ modes. Full component detail in `specs/baud-multiverse.md`; the single-vCPU stat
 - **Test** (`amd_host_is_deferred`): on an AMD host, baud returns exit `1` with "AMD support deferred
   (Intel-first)" rather than running with unverified intercepts.
 
-## 4. Guests and workloads (the contract is on the image)
+## 4. Guests and the deterministic Linux boot pipeline
 
-- A workload is a **bootable guest image**: a small Linux (or unikernel) + the software under test + a tiny
-  in-guest agent that speaks to the tape device.
-- Threads, dynamic linking, multiple processes, arbitrary binaries are all supported — determinism is at the
-  machine layer, and the guest kernel is unmodified (§3.8).
-- **Spec (image contract)**: the guest routes external input through the tape device (a boot-time shim /
-  small driver) and carries no real hardware timers baud did not model; and `baud-packages` applies the
-  build-time **`rdseed`→trap rewrite** to every executable section (kernel + userspace). Entropy determinism
-  is the hypervisor's job (§3.8), not the image's — nothing in the guest's RNG logic is changed.
+baud's deterministic machine (§3) is generic — it boots any `bzImage` + initramfs and moves opaque bytes on
+the tape device. A workload adds only a **guest image** and a tiny **harness**. Keep three layers strictly
+separate: the **machine** (§3, workload-agnostic), the **image** (kernel + initramfs + software-under-test +
+agent, built once and byte-identical every boot), and the **harness** (the in-guest agent bridging the
+software to the tape device — the only workload-aware code). Threads, dynamic linking, multiple processes,
+and arbitrary binaries are all supported; the guest kernel is unmodified (§3.8). Full detail in
+`specs/baud-packages.md`.
+
+### 4.1 Minimal deterministic kernel
+
+- Build a fully-builtin (no modules) x86_64 `bzImage`, Firecracker-lineage config.
+- **Required `=y`**: `X86_64`, `PRINTK`, `TTY`, `SERIAL_8250` + `SERIAL_8250_CONSOLE`, `BLK_DEV_INITRD` +
+  `RD_GZIP`, `BINFMT_ELF`, `DEVTMPFS` (+ `_MOUNT`), and one tape transport (`VIRTIO` + `VIRTIO_MMIO` +
+  `VIRTIO_CONSOLE`, or none when the endpoint is raw PIO — §4.4).
+- **Disable**: `MODULES`, `PCI` (use virtio-mmio / PIO), `ACPI` (unless S5-shutdown detection is used, §4.3),
+  `EFI`, `RANDOMIZE_BASE` / `RANDOMIZE_MEMORY`, `HPET`, `RTC_*`, `SERIO_I8042`, sound / USB / net / fb, and
+  `CRYPTO_JITTERENTROPY`.
+- **Test** (`guest_kernel_boots_to_userspace`): the built bzImage reaches `/init` and prints a marker.
+
+### 4.2 Direct boot + deterministic command line + boot_params
+
+- baud already loads the bzImage (`linux-loader`) and writes the zero page; add: copy the image setup_header
+  into `boot_params.hdr@0x1F1`; `type_of_loader=0xFF`; `loadflags` bit0 `LOADED_HIGH` + bit7 `CAN_USE_HEAP`;
+  `cmd_line_ptr`; `ramdisk_image`/`ramdisk_size` → initramfs; **fill `e820_table`/`e820_entries`** (omitting
+  the E820 map is the classic from-scratch-VMM silent hang); 64-bit entry at load + `0x200`, `%rsi =
+  boot_params`.
+- **Deterministic command line**: `console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable
+  no-kvmclock no_timer_check pci=off acpi=off reboot=t panic=-1 quiet loglevel=1 printk.time=0
+  random.trust_cpu=off random.trust_bootloader=on i8042.noaux i8042.nomux i8042.nopnp 8250.nr_uarts=1
+  nomodule rdinit=/init` (single vCPU, TSC-only time, no probing of hardware baud does not model, immediate
+  deterministic exit).
+- **Pin the boot RNG seed**: write `struct setup_data{ next, type = SETUP_RNG_SEED (9), len = 32, data =
+  <tape-derived 32 bytes> }` into guest RAM and put its physical address in `boot_params.hdr.setup_data@0x250`
+  (chain any existing node); re-place it every boot (the kernel zeroes it). With `random.trust_bootloader=on`
+  the CRNG is seeded synchronously and identically, so the `getrandom()` wait path never runs.
+- **Test** (`boot_params_seed_is_pinned`): two boots write an identical seed node; early CRNG init is
+  reproducible.
+
+### 4.3 initramfs + `/init`
+
+- Reproducible newc cpio: `touch -h -d '@1'`; `find -print0 | sort -z | cpio -o -H newc -R +0:+0
+  --reproducible --null | gzip -9n`.
+- A static `/init` as PID 1: optionally mount `proc`/`sys`/`dev`, exec the software-under-test / harness, then
+  `sync()` + `reboot(RB_POWER_OFF)`; `reboot=t` guarantees a triple-fault fallback the VMM traps as shutdown
+  (or trap ACPI S5 `PM1a` if that path is enabled).
+- **Test** (`init_powers_off_deterministically`): a clean VMM-detected shutdown at an identical exit point
+  across two boots.
+
+### 4.4 The guest tape endpoint
+
+- The software talks to the tape device through one of, simplest-first: **(A, bring-up)** userspace PIO —
+  `iopl(3)` then `inb`/`outb` from PID 1, zero driver, interrupt-free; **(B)** a ~100-line builtin char shim
+  exposing `/dev/tape` over `ioread8`/`iowrite8`; **(C, standard)** virtio-serial (`/dev/vport0pN`) with clean
+  synchronous `read`/`write` — best for a byte-per-frame protocol and for separate input / observation ports.
+- **Test** (`guest_tape_roundtrip`): the guest reads tape bytes and writes probes back through the endpoint;
+  changing one tape byte changes the output.
+
+### 4.5 Reproducible image build (`baud-packages`)
+
+- **Path 1 (bring-up): Buildroot** — `qemu_x86_64_defconfig` + a fragment (`BR2_TARGET_ROOTFS_CPIO_GZIP`,
+  `BR2_REPRODUCIBLE`, package selections) + a rootfs overlay for `/init` and the harness → emits `bzImage` +
+  `rootfs.cpio.gz`; dynamic linking works because the whole rootfs is in the cpio.
+- **Path 2 (final): pinned Nix flake** — `linux_6_12.override { structuredExtraConfig, autoModules = false }`
+  for the bzImage + `makeInitrdNG` for the initramfs, flake-locked nixpkgs rev, content-addressed. Replaces
+  the old single-musl-binary builder.
+- Image identity = `sha256(bzImage ‖ initramfs.gz)` — the environmental identity, warmed into the snapshot
+  store.
+- **Test** (`image_build_is_reproducible`): two builds of one spec produce an identical image hash.
+
+### 4.6 `rdseed` rewrite pass and image lint (built, hardware-tested)
+
+- **Image contract**: the guest routes external input through the tape device and carries no real hardware
+  timers baud did not model; `baud-packages` applies the build-time **`rdseed`→trap rewrite** to every
+  executable section (kernel + userspace). Entropy determinism is the machine's job (§3.8), not the image's —
+  nothing in the guest's RNG logic is changed.
 - **The `rdseed` rewrite pass (real instructions)**: `baud-packages` disassembles each `SHF_EXECINSTR`
   section with a real decoder (Capstone; match `X86_INS_RDSEED` with `ModRM.reg = 7` and `mod = 11b` — never
   byte-grep `0F C7`, which is a group opcode where `/6` is RDRAND and `/1` is CMPXCHG8B/16B). Each `rdseed` is
@@ -307,9 +384,6 @@ modes. Full component detail in `specs/baud-multiverse.md`; the single-vCPU stat
   RTC/HPET enabled, fails `baud image lint` with a specific reason.
 - **Test** (`image_rewrites_rdseed`): `baud image build` rewrites every `rdseed` opcode; a follow-up scan
   (`no_rdseed_opcode_survives_in_image`) finds none.
-- **`baud-packages` builds guest images** reproducibly with pinned Nix (kernel + rootfs + agent), applies the
-  rewrite pass, and warms them into the snapshot store; the image hash is the environmental identity. Full
-  detail in `specs/baud-packages.md`.
 
 ## 5. Snapshot-branch multiverse (replaces replay-from-zero)
 
@@ -383,16 +457,20 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
 - **`baud-tape-device`** — the paravirtual device model + guest-side driver contract. `specs/baud-tape-device.md`.
 - **`baud-host`** — the KVM-capable host manager: fleet of single-vCPU VMs, core pinning, capacity
   accounting, `host probe`. `specs/baud-host.md`.
-- **`baud-packages`** — builds reproducible guest images, applies the `rdseed`-rewrite pass, warms the store.
-  `specs/baud-packages.md`.
-- **`baud-driver`** — tape/fuzzing engine + snapshot-tree exploration. `specs/baud-driver.md`.
+- **`baud-packages`** — builds a real reproducible Linux guest image (kernel + initramfs + software + agent;
+  Buildroot → pinned Nix, §4.5), applies the `rdseed`-rewrite pass, warms the store. `specs/baud-packages.md`.
+- **`baud-driver`** — tape/fuzzing engine + snapshot-tree exploration; the exploration primitives (grid
+  buckets, reservoir, correlated/"sticky" input tactic, shrink) are workload-agnostic and selected per run.
+  `specs/baud-driver.md`.
 - **`baud-proto`** — wire types incl. hypercall/tape-device probe + outcome messages. `specs/baud-proto.md`.
 - **`baud-server`, `baud-cli`** — orchestration + command surface; adds `snapshot`/`branch`/`rewind`/
   `shell-into`/`host`/`image`/`stream` verbs.
 - **`baud-tracing`, `baud-stream`, `baud-secret`, `baud-identity`, `baud-keys`** — carry over; `baud-stream`
-  captures and renders the guest framebuffer (a whole OS runs, so a real display exists — §11).
-- **Targets** (`baud-raftlet`, the NES emulator for §11, parser) become **guest images** under `examples/`,
-  not in-tree simulations.
+  captures any guest's framebuffer over the tape-device frame channel and renders/streams it (RGB → y4m),
+  workload-agnostic (§11.7).
+- **Every crate under `crates/` stays generic** — no crate carries workload-specific (game / NES / emulator)
+  knowledge. Targets (`baud-raftlet`, the emulator example, parser) live as **guest images + harnesses** under
+  `examples/`, never in-tree (§11.0).
 
 ## 9. Infrastructure (`infra/`) — the host substrate
 
@@ -450,6 +528,20 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   `shell_into_universe_resumes`, `restore_refuses_mismatched_cpu`.
 - **H6 — multi-VM fleet.** Many single-vCPU VMs pinned across cores explore in parallel on one host. Drive
   `drive/h6.sh`: aggregate throughput, `capacity_refuses_sibling_split`, no cross-VM interference.
+- **H7 — real Linux guest: boot → double-boot → OS-entropy.** Build a real Linux image (§4) and boot it on
+  the deterministic machine, then walk the validation ladder. Drive `drive/h7.sh`:
+  `guest_kernel_boots_to_userspace` (reaches `/init`, prints a marker, clean shutdown);
+  `double_boot_ram_hash_identical` (two boots on the same tape hash the same guest RAM + vCPU state at a
+  **guest-driven checkpoint** — the workload issues an `outb`/hypercall the VMM traps and hashes there, never
+  a wall-clock or raw-instruction-count point); `os_entropy_is_deterministic` (a static C probe calling
+  `getrandom()` ×4 and reading `/dev/urandom` ×4 prints byte-identical bytes across two boots — both the
+  syscall and, on glibc 2.41+, the vDSO path). This proves an unmodified Linux CRNG is a pure function of the
+  tape, end-to-end.
+- **H8 — an interactive program driven to a goal, inside Linux (the §11 example).** Run an interactive
+  program (the emulator example) inside the H7 Linux guest, driven only by the tape, and drive it to a defined
+  goal with the framebuffer streamed live. Drive `drive/mario.sh` (§11.8):
+  `interactive_probe_stream_is_identical` + `framebuffer_hashes_identical` across two boots, goal reachability,
+  shrink+replay, and the mandatory ~25%-screen live window. H8 is the flagship acceptance of the whole stack.
 - **M-series** rebuild server/CLI/driver/store/stream on this core: tape-tree exploration
   (`driver_is_reproducible`, `shrink_reproduces_from_nearest_snapshot`), strategy/tactics over guest probes,
   snapshot-store reconstruction/shrinking, the framebuffer stream (§11), a distributed target as a **guest
@@ -457,51 +549,81 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   planted-bug interleaving test), and the **Super Mario Bros validation** (§11) as the flagship end-to-end
   proof.
 
-## 11. Super Mario Bros — arbitrary-system validation
+## 11. Super Mario Bros — a worked example of the generic loop
 
-The flagship end-to-end proof that baud can drive a black-box, chaotic, history-dependent interactive system
-to a goal state purely by exploring the tape — the same capability that finds bugs in real systems. baud
-makes a headless NES emulator, running as a guest under the VMM, **complete Super Mario Bros** from
-controller input alone, and shows the emulator live in a window on the desktop.
+This section is an **example**, not a feature: it exercises the generic engine (§3–§10) on one arbitrary
+interactive program — the FCEUX NES emulator running **inside the H7 Linux guest** — and drives it to a goal
+(complete Super Mario Bros) from controller input alone, streaming the emulator live in a ~25%-screen window.
+It is the visible instance of §0's claim: any program on baud's deterministic Linux is a system baud's fuzzer
+explores to a chosen state, reproducibly.
 
-### 11.1 Guest and bridge
+### 11.0 What is generic, what is the example
 
-- **Guest image** (`examples/mario/`): a headless NES emulator built by `baud-packages` as a bootable guest
-  image, started from a fixed savestate at the beginning of world 1-1 past the title screen (a baud design
-  choice for a stable start, not a required detail).
-- **ROM + savestate are user-supplied paths, never bundled** (copyright). CI uses a free homebrew ROM with a
-  reduced completion goal.
-- **Bridge (in-guest harness)**: an emulator script that, each 1/60 s frame, (1) reads one **controller byte**
-  from the tape device, (2) applies it to joypad 1, (3) advances exactly one frame, (4) writes the probe
-  values (§11.2) out the tape-device channel. The controller byte is `A | B<<1 | Select<<2 | Start<<3 |
-  Up<<4 | Down<<5 | Left<<6 | Right<<7`. The emulator is itself deterministic (its own PRNG is seeded and
-  captured), and touches no entropy instruction, so the whole guest is a pure function of the tape.
+- **Generic (baud core — gains zero game knowledge):** `baud-multiverse` boots any bzImage+initramfs;
+  `baud-packages` builds any deterministic Linux image; the tape device + `/dev/vport` endpoint move opaque
+  bytes; `baud-driver` supplies the exploration primitives (grid buckets, reservoir, correlated/"sticky"
+  input, shrink); `baud-stream` streams any framebuffer; the CLI verbs (`image build/lint`, `run`, `obs`,
+  `stream`, `shrink`, `snapshot`/`branch`, `verify determinism`) are workload-agnostic.
+- **The example (`examples/mario/` — the ONLY place emulator / NES specifics appear):** `spec.toml` (the
+  Linux image = kernel + initramfs + the emulator + a Lua harness + `/init`); `harness.lua` (maps the tape's
+  controller bytes ↔ the emulator's joypad, drives it one frame at a time, reads the RAM probes, emits probes
+  + frames); `probes.toml` (which RAM addresses are progress/goal); `strategy.toml` (objective = maximize the
+  `x` probe; selects the generic sticky-mask tactic + grid); the user-supplied ROM path.
+- **The contract that keeps it generic:** baud offers a *byte-tape-in / probes-and-frames-out* interface over
+  a deterministic program. Swapping this example for another program = a new `examples/<name>/` with its own
+  image spec + harness + probes — **zero core changes**.
+- **Test** (`no_workload_specifics_in_core`): a lint asserts no crate under `crates/` references
+  emulator/game/NES symbols or the example's probe addresses; all of that lives under `examples/`.
 
-### 11.2 Probes
+### 11.1 Guest image
 
-Read from NES RAM by the bridge each frame:
+- **`examples/mario/spec.toml`** builds (via `baud-packages`, §4.5) a real Linux image containing the FCEUX
+  NES emulator, a Lua interpreter, the harness, and a static `/init` that launches the emulator headless and
+  powers off on exit. It boots on the deterministic machine exactly like any H7 guest.
+- **ROM + savestate are user-supplied paths, never bundled** (copyright). CI uses a free homebrew ROM.
+- Pin FCEUX's own determinism seams: `RAMInitOption ∈ {0,1,2}` (fixed power-on RAM, not the random option),
+  start from power-on or a fixed savestate, so its emulation is a pure function of (ROM, input tape) — and the
+  whole guest is therefore a pure function of the tape.
 
-- `x = mem[0x006D] * 256 + mem[0x0086]` — global horizontal position (`0x0086` = on-screen x, `0x006D` =
-  screen page). **Confirmed** against the SMB RAM map; the primary progress signal.
-- `y = mem[0x00CE]` — on-screen vertical position. **Confirmed**; the grid's second dimension.
-- **Progress / end-state probes — verify each address against a reference SMB RAM map before use.** Commonly
-  cited but *not yet confirmed here*: world (commonly `0x075F`), level/area (commonly `0x075C`), a
-  game-completed flag (address TBD — "past world 8-4" is the narrative end state, not a known address), and
-  `lives`. `baud image lint` requires these addresses be pinned in `examples/mario/probes.toml` and validated
+### 11.2 In-guest harness (`examples/mario/harness.lua`)
+
+- **Headless launch** from `/init`: `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy fceux --no-config 1 --sound 0
+  --loadlua /harness.lua /game.nes` (fallback `xvfb-run` if the dummy video backend refuses a surface).
+- **Frame loop**: `emu.speedmode("maximum")`; each frame — read **one controller byte** from the input port
+  (synchronous `io.read(1)` on `/dev/vport0p1`, which paces the emulator to the tape) → decode to `joypad.set(1,
+  {A=,B=,select=,start=,up=,down=,left=,right=})` (baud's byte layout `A | B<<1 | Select<<2 | Start<<3 |
+  Up<<4 | Down<<5 | Left<<6 | Right<<7`, mapped in the harness) → `emu.frameadvance()` → read the §11.3 RAM
+  probes with `memory.readbyte` → write them + the frame out the observation port with `:flush()`.
+- **Channel**: two virtio-serial ports (`/dev/vport0p1` in, `/dev/vport0p2` out), backed by baud's tape device
+  (§4.4); input and observations do not interleave. The harness is the only workload-aware code; the emulator
+  underneath is unmodified.
+
+### 11.3 Probes (`examples/mario/probes.toml`)
+
+Read from NES RAM by the harness each frame (all confirmed against the SMB RAM map + the 6502 disassembly):
+
+- `x = mem[0x006D] * 256 + mem[0x0086]` — global horizontal position (`0x0086` on-screen x, `0x006D` page);
+  the primary progress signal.
+- `y = mem[0x00CE]` — on-screen vertical position; the grid's second dimension.
+- `world = mem[0x075F]` (0-based), `area = mem[0x0760]`, `lives = mem[0x075A]`, `oper_mode = mem[0x0770]`
+  (game mode: `01` normal play, `02` end-of-world, `03` end/dead).
+- **Completion is a derived condition, not a single flag** — SMB has no "game-completed" byte. The end state
+  is `world == 7` (world 8, 0-based) cleared through the final castle, detected via the `oper_mode`/`area`
+  transition. Encoded as the goal predicate in `probes.toml`; `baud image lint` validates every address
   against the reference map, never hard-coded on faith.
 
-### 11.3 Strategy (progress = "how far into the game")
+### 11.4 Strategy (progress = "how far into the game")
 
 - **Objective**: maximize global `x` — the run is scored purely by how far right it has driven the character,
   because farther right is farther into the game and the victory state is the maximum `x` of the final world.
-- **Nothing beyond the score belongs here.** The strategy is only this progress score over the §11.2 probes.
+- **Nothing beyond the score belongs here.** The strategy is only this progress score over the §11.3 probes.
   The exploration that spends the score — which prefixes to keep, which to extend — is baud's existing tape
   engine (§6, `baud-driver`), reused unchanged; the Mario example adds none of its own. If a run appears to
   need exploration behaviour the driver lacks, add it to the driver so every workload inherits it — never
   encode workload-specific search here.
-- **Goal**: reach the game's victory / end state (the completion probe of §11.2).
+- **Goal**: reach the game's victory / end state (the completion predicate of §11.3).
 
-### 11.4 Tactics (input distribution)
+### 11.5 Tactics (input distribution)
 
 - **Sticky flip-mask**: `next_byte = prev_byte XOR low_probability_mask` — each controller bit flips with a
   small per-frame probability (tuned), so buttons stay held across many frames. Correlate input across frames;
@@ -511,60 +633,66 @@ Read from NES RAM by the bridge each frame:
 - **Pure per-frame random** is kept only as a negative control — its reachable-position heat-map decays fast
   near the spawn.
 
-### 11.5 Why this validates baud
+### 11.6 Why this validates baud
 
-- **Completion is an instrumental objective — the real goal is finding bugs.** Beating the game is not the
-  point; it is the proof that the tape engine explores a state space effectively, and that same capacity for
-  efficient state-space exploration is what finds bugs in real systems. Reaching completion requires getting
-  "sequentially lucky" hundreds of frames in a row — strictly harder than the 2–4-step interleavings of a
-  typical distributed-systems bug — so a system that can beat the game can explore anything.
-- **Unknown-unknowns.** The same exploration surfaces emergent glitches no scripted test would write a check
-  for — e.g. a spot where the character gets stuck and **clips through a wall**. baud's invariant/goal probes
-  (§7) flag these as anomalies, not just the win condition.
+- **Reaching completion proves the exploration works.** Beating the game requires getting "sequentially lucky"
+  hundreds of frames in a row — far deeper than a few-step interleaving — so a run that reaches it shows baud's
+  tape engine can drive an arbitrary program to a deep target state through input exploration alone, then
+  replay that run exactly. That is the whole capability, shown on a program anyone can watch.
 - **Non-fragility (a required test, not a nicety).** The **unchanged** setup — zero re-tuning — must also make
   progress on a much harder hand-authored ROM variant. A pre-recorded input tape would desync instantly on a
   changed ROM; baud's exploration adapts because nothing is scripted. `drive/mario.sh` runs this variant as a
   second, non-gating case.
 
-### 11.6 Acceptance test (`drive/mario.sh`)
+### 11.7 Live display, baud-stream, and the README GIF
 
-1. `baud image build examples/mario` (applies the `rdseed`-rewrite pass — a no-op here, the emulator has
-   none) and `baud image lint` (verifies the probe addresses of §11.2).
-2. `baud verify determinism` — the same tape twice yields an identical probe stream and identical framebuffer
-   hashes.
-3. **Negative control**: `baud run --tactics random` — positions plateau near spawn (the fast-decaying
-   heat-map), checked via `baud obs`.
-4. **Main run**: `baud run --strategy examples/mario/strategy.toml --tactics sticky-mask` — the max-`x` score
-   climbs run over run until the character reaches the victory state.
-5. Mid-run `baud tape kill` + `baud tape reconstruct` + resume — proves journal-free reconstruction on this
-   workload.
-6. Terminates with `GoalReached` on the completion probe (§11.2); the winning tape is journaled and exported
-   as a replayable input movie.
-7. `baud shrink` → `baud replay` of the shrunk tape still completes.
-8. **Non-fragility case (non-gating)**: the same command on a harder hand-authored ROM variant still makes
-   progress and, if it gets stuck, reports the anomaly (§11.5) rather than crashing the harness.
-- **Release gate**: full completion on the base ROM. **CI variant**: until the completion-probe address is
-  verified (§11.2), CI gates on `x` progress past the first world within budget.
-
-### 11.7 Live display (mandatory, every run)
-
-- `baud-stream` captures the emulator framebuffer. The frames are a **derived artifact of the tape**: replay
-  the tape through the emulator to regenerate identical frames on demand (fits `baud-stream`'s render-on-
-  demand — no video is stored, only the tape).
-- Every Super Mario Bros run renders a live window on the **Windows desktop via WSLg** (a Linux viewer
-  launched from WSL2 appears as an ordinary Windows window), sized to **~25% of the screen** and updated live:
+- **Per-frame capture (in the harness)**: each frame `gui.gdscreenshot()` returns the 256×240 screen (GD
+  truecolor); the harness emits `[format tag][width:2][height:2][pixels]` on a frame port and `baud-stream`
+  forwards it. Frames are a **derived artifact of the tape** — a pure function of (ROM, input) — so baud stores
+  only the tape and regenerates identical frames on demand by replaying it (`fceux -playmovie` / re-run the
+  harness). No video is stored.
+- **Live window (mandatory, every run), ~25% of the screen**, on the Windows desktop via WSLg:
   ```bash
-  # ~25% area = half width × half height; NES 256:240 aspect preserved
   SW=$(powershell.exe -NoProfile -Command '[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width' | tr -d '\r')
-  XW=$((SW/2)); YH=$((XW*240/256))
+  XW=$((SW/2)); YH=$((XW*240/256))          # NES 256:240 aspect preserved
   baud stream tail --run "$RUN" --format y4m \
     | ffplay -f yuv4mpegpipe -i - -an -framedrop -infbuf \
-        -x "$XW" -y "$YH" -left 40 -top 40 -window_title "baud: mario"
+        -x "$XW" -y "$YH" -left 40 -top 40 -window_title "baud"
   ```
-  (A small in-crate SDL viewer is the alternative to `ffplay`, with identical placement/sizing.) Concurrent
-  runs render as separate tiled WSLg windows — one per branch being watched.
-- **Test** (`mario_stream_window_is_live`): during a run, `baud stream tail` produces frames at ~60 fps and a
-  re-render from the tape is byte-identical to the live frames (derived-artifact property).
+  (baud-stream produces the y4m via `ffmpeg -f rawvideo -pix_fmt rgb24 -s 256x240 -r 60000/1001` internally, or
+  emits y4m directly; a small in-crate SDL viewer is the alternative to `ffplay`.) Concurrent runs render as
+  separate tiled windows.
+- **`README.md` hero + centralized GIF** (a `drive/mario-gif.sh` step): from the winning run,
+  `baud stream tail --run <winning> --format y4m | ffmpeg -i - -vf "fps=30,scale=512:-1:flags=neighbor" -loop 0
+  docs/mario.gif`, committed under `docs/` and embedded at the very top of `README.md` as the single centered
+  reference. Because the GIF is re-derived from the winning tape it is a reproducible artifact of the run
+  (regenerable from the tape hash), not a hand-recorded screencast.
+- **README hero copy** (describe the environment generically — never name the OS): *"**baud beats Super Mario
+  Bros — and your program is no different.** baud runs any program inside a fully-deterministic environment it
+  controls end to end, turns that program's entire input into one replayable tape, and lets its fuzzer explore
+  the tape until the program reaches the state you care about — a win or a completed task — every time,
+  reproducibly. Mark what \"winning\" looks like for your program; baud's fuzzer finds the inputs that reach it
+  and replays them identically. Super Mario Bros is one program among them."*
+- **Test** (`mario_stream_is_live_and_rederivable`): during a run `baud stream tail` produces frames at ~60 fps
+  and a re-render from the tape is byte-identical to the live frames.
+
+### 11.8 Acceptance test (`drive/mario.sh`)
+
+1. `baud image build examples/mario` (real Linux image, §4.5; the `rdseed`-rewrite pass is a no-op here) and
+   `baud image lint` (validates the §11.3 probe addresses and the tape-device path).
+2. `baud verify determinism` — the same tape twice yields an identical probe stream and identical framebuffer
+   hashes (`interactive_probe_stream_is_identical`, `framebuffer_hashes_identical`).
+3. **Negative control**: `baud run --tactics random` — positions plateau near spawn, checked via `baud obs`.
+4. **Main run**: `baud run --strategy examples/mario/strategy.toml --tactics sticky-mask` — the max-`x` score
+   climbs run over run until the program reaches the end state (§11.3).
+5. Mid-run `baud tape kill` + `baud tape reconstruct` + resume — journal-free reconstruction on this workload.
+6. Terminates with `GoalReached` on the completion predicate (§11.3); the winning tape is journaled and the
+   README GIF (§11.7) is regenerated from it.
+7. `baud shrink` → `baud replay` of the shrunk tape still reaches the goal.
+8. **Non-fragility case (non-gating)**: the same command on a harder hand-authored ROM variant still makes
+   progress and, if it gets stuck, reports the anomaly rather than crashing the harness.
+- **Release gate**: full completion on the base ROM. **CI variant**: gates on `x` progress into the second
+  world within budget.
 
 ## 12. Problem → specification → test matrix
 
@@ -597,6 +725,10 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 | 23 | Journal/observations in plaintext at rest | `baud-snapshot-store` age-encrypts universes + tapes | `snapshot_store_bodies_are_ciphertext` |
 | 24 | Two-plane cross-check is counts-only, misses ordering | Compare ordered exit sequences | `planes_agree_on_healthy_run` |
 | 25 | `rdseed`-exiting unavailable under nested virt (WSL2) | An L0 Hyper-V mask, not a CPU limit — MSR `0x48B` bit 48 (RDSEED-exiting) absent while bit 43 (RDRAND-exiting) is present; handled by the build-time rewrite; both trappable on bare-metal Intel | H0 records both bits (`rdmsr -f 48:48`/`-f 43:43 0x48B`); `no_rdseed_opcode_survives_in_image` |
+| 26 | No real Linux guest exists yet — only hand-assembled payloads | A real image pipeline: minimal builtin kernel + deterministic cmdline + boot_params (E820, `SETUP_RNG_SEED`) + reproducible initramfs + `/init` + a tape endpoint, built by `baud-packages` (§4) | `guest_kernel_boots_to_userspace`; `boot_params_seed_is_pinned`; `init_powers_off_deterministically`; `image_build_is_reproducible` |
+| 27 | OS-entropy determinism must be shown, not asserted | Boot a real Linux guest and prove the CRNG is a pure function of the tape end-to-end (§4, §3.8) | `os_entropy_is_deterministic` (H7); `double_boot_ram_hash_identical` |
+| 28 | An arbitrary interactive program must be driven to a goal, reproducibly, inside Linux | The emulator example (§11) runs inside the H7 guest; identical probe + framebuffer streams across boots; goal reached; shrink+replay holds | `interactive_probe_stream_is_identical`; `framebuffer_hashes_identical`; `mario_stream_is_live_and_rederivable` |
+| 29 | Example specifics could leak into core crates | The engine stays generic; all workload code lives under `examples/` (§11.0) | `no_workload_specifics_in_core` |
 
 ## 13. Migration map (from the current userspace plan)
 
@@ -662,32 +794,26 @@ snapshot, not a duplicate of it.
   `baud-host`, replaced by capability booleans plus `Probe::is_runnable()` / `Probe::is_enforced_capable()`;
   `GET /host/probe` and all 7 `drive/h0.sh`-`h6.sh` scripts now read the renamed JSON fields
   (`enforced_module_present`/`runnable`/`enforced_capable`) instead of a `"regime"` string.
-- **Next actions (this rewrite)**:
-  1. **OS-entropy determinism** — pin `SETUP_RNG_SEED` (type 9) `setup_data` in the `boot_params` baud already
-     builds; make virtio-rng tape-fed (an ever-ready FIFO, never a plain file) or omitted; confirm the
-     deterministic-TSC + exact-interrupt seeding covers the initial CRNG state. Add
+- **Next actions (this rewrite)** — a sequence, each step enabling the next:
+  1. **Guest boot pipeline (§4)** — the enabling milestone. Wire H4 interrupt injection into the boot path
+     (an earlier real-kernel attempt hung in `calibrate_delay()` waiting on a jiffies tick because injection
+     wasn't wired in), then build the real image pipeline in `baud-packages`: a minimal builtin kernel
+     (Buildroot → pinned Nix, §4.5), the deterministic cmdline (§4.2), `bootparams.rs` gaining
+     `setup_data`/`SETUP_RNG_SEED` + `e820` + initramfs fields, a reproducible initramfs + static `/init`, and
+     the `/dev/vport` (or PIO) tape endpoint. Tests `guest_kernel_boots_to_userspace`,
+     `boot_params_seed_is_pinned`, `init_powers_off_deterministically`, `image_build_is_reproducible`.
+  2. **H7 — OS-entropy end-to-end (rides on #1)** — boot the real Linux guest and prove the CRNG is a pure
+     function of the tape: `os_entropy_is_deterministic`, `double_boot_ram_hash_identical`,
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
-     `virtio_rng_reseed_is_deterministic`. No guest-kernel patch. **Prerequisite gap found (confirmed by a
-     dedicated survey)**: no fixture in the test suite boots a real Linux kernel yet (hello/rdrand/rdtsc/
-     rdseed-guest are all hand-assembled non-Linux flat binaries with no IDT/scheduler — an earlier version
-     of `hello-guest` tried a real kernel and hung forever in `calibrate_delay()` waiting on a jiffies tick,
-     since interrupt injection (H4) isn't wired into this crate's boot path); `baud-packages` has real Nix
-     infra for building one static-musl binary (`flake.rs`) but **zero code** that assembles a bootable
-     kernel+rootfs image (`specs/baud-packages.md` §9.4 confirms this is spec-only); and `bootparams.rs` has
-     no `setup_data`/`SETUP_RNG_SEED` or virtio-rng code at all yet. This is a genuine multi-day, multi-step
-     effort (land H4 interrupt injection → build a real Nix kernel/initramfs pipeline → wire
-     `SETUP_RNG_SEED`/virtio-rng into `bootparams.rs` → only then write the three tests), not a single
-     iteration — split it into its own sub-steps before attempting it.
-  2. **Super Mario Bros validation (§11)** — `examples/mario/` guest image + strategy/tactics + `drive/mario.sh`
-     completion gate + the mandatory ~25% WSLg live window (`baud stream tail | ffplay`). The current
-     `examples/mario/` predates the KVM pivot (a static-musl-process spec — `nes_bridge.c`, a hand-rolled
-     "CPU + PPU + APU stub" run as a host process reading stdin, not a bootable guest image) and will need to
-     be rebuilt from scratch under the new model. **Confirmed by survey to share item 1's prerequisite gap**:
-     there is no real-Linux-kernel-guest-image boot pipeline yet anywhere in the repo, and Mario needs exactly
-     that (plus its own emulator payload rewritten as an in-guest agent reading the tape device instead of
-     stdin — no Rust NES emulator crate is vendored, so this vendors or ports one). Do not attempt before item
-     1's boot pipeline lands, to avoid building the same missing capability twice.
-- **Specs to update alongside**: `specs/baud-multiverse.md` and `specs/README.md` (one model, entropy-by-
-  input-control, `rdseed` rewrite), `specs/baud-packages.md` (rewrite pass — now implemented, update from
-  planned to built), `specs/baud-host.md` (`host probe` reports capabilities), a new `specs/baud-stream.md`
-  note on the WSLg live window.
+     `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted). No
+     guest-kernel patch.
+  3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
+     real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
+     retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window
+     (`baud stream tail | ffplay`), and the README hero + centralized GIF. All NES specifics stay under
+     `examples/` (`no_workload_specifics_in_core`).
+  4. **Generic-core guardrail** — add `no_workload_specifics_in_core`; keep the exploration primitives in
+     `baud-driver`, never in the example.
+- **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
+  `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
+  `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).
