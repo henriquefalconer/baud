@@ -470,7 +470,7 @@ controller input alone, and shows the emulator live in a window on the desktop.
   image, started from a fixed savestate at the beginning of world 1-1 past the title screen (a baud design
   choice for a stable start, not a required detail).
 - **ROM + savestate are user-supplied paths, never bundled** (copyright). CI uses a free homebrew ROM with a
-  simplified goal.
+  reduced completion goal.
 - **Bridge (in-guest harness)**: an emulator script that, each 1/60 s frame, (1) reads one **controller byte**
   from the tape device, (2) applies it to joypad 1, (3) advances exactly one frame, (4) writes the probe
   values (§11.2) out the tape-device channel. The controller byte is `A | B<<1 | Select<<2 | Start<<3 |
@@ -492,18 +492,13 @@ Read from NES RAM by the bridge each frame:
 
 ### 11.3 Strategy (progress = "how far into the game")
 
-- **Objective**: **maximize global `x`** — "go right as far as you can"; the victory state sits at maximum `x`
-  in the final world.
-- **Novelty grid**: discretize the **`(x, y)`** state into cells, keep the best input tape reaching each cell,
-  and equalize exploration across cells (a MAP-Elites-style archive). This escapes the doomed-mid-air-jump
-  local maximum (once airborne you can't change your fate, so "furthest `x` so far" gets stuck) and discovers
-  the pipe/warp-zone route a pure go-right metric never would — the warp that jumps straight to a later world
-  falls out of the grid, not out of a hand-written objective. (Bucketing `x` into screen pages and `y` into
-  bands is baud's own discretization of the grid, tuned to cell count; the grid dimensions themselves are
-  `(x, y)`.)
-- **Less-greedy reservoir**: to extend a run, usually pick the frontier cell but sometimes an earlier one —
-  "usually choose the best, but sometimes choose an earlier one" — trading a little speed for escaping dead
-  ends.
+- **Objective**: maximize global `x` — the run is scored purely by how far right it has driven the character,
+  because farther right is farther into the game and the victory state is the maximum `x` of the final world.
+- **Nothing beyond the score belongs here.** The strategy is only this progress score over the §11.2 probes.
+  The exploration that spends the score — which prefixes to keep, which to extend — is baud's existing tape
+  engine (§6, `baud-driver`), reused unchanged; the Mario example adds none of its own. If a run appears to
+  need exploration behaviour the driver lacks, add it to the driver so every workload inherits it — never
+  encode workload-specific search here.
 - **Goal**: reach the game's victory / end state (the completion probe of §11.2).
 
 ### 11.4 Tactics (input distribution)
@@ -540,8 +535,8 @@ Read from NES RAM by the bridge each frame:
    hashes.
 3. **Negative control**: `baud run --tactics random` — positions plateau near spawn (the fast-decaying
    heat-map), checked via `baud obs`.
-4. **Main run**: `baud run --strategy examples/mario/strategy.toml --tactics sticky-mask` — the max-`x` metric
-   climbs and the `(x, y)` grid fills; warp-zone jumps to a later world fall out of the grid, not a script.
+4. **Main run**: `baud run --strategy examples/mario/strategy.toml --tactics sticky-mask` — the max-`x` score
+   climbs run over run until the character reaches the victory state.
 5. Mid-run `baud tape kill` + `baud tape reconstruct` + resume — proves journal-free reconstruction on this
    workload.
 6. Terminates with `GoalReached` on the completion probe (§11.2); the winning tape is journaled and exported
