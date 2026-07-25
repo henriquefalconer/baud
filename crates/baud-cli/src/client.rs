@@ -18,6 +18,18 @@ impl Client {
         }
     }
 
+    /// `path`'s full `ws://`/`wss://` URL against this client's configured server — `--server`'s
+    /// `http`/`https` scheme swapped for the WebSocket equivalent, everything else (host, port)
+    /// unchanged. Used by `baud shell-into` (`cmds/shell_into.rs`), the first command in this
+    /// crate to speak WebSocket instead of one-shot REST.
+    pub fn ws_url(&self, path: &str) -> String {
+        let ws_base =
+            if let Some(rest) = self.base.strip_prefix("https://") { format!("wss://{rest}") }
+            else if let Some(rest) = self.base.strip_prefix("http://") { format!("ws://{rest}") }
+            else { self.base.clone() };
+        format!("{ws_base}{path}")
+    }
+
     pub async fn get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let resp = self.http.get(&url).send().await

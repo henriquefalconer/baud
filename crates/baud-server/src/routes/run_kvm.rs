@@ -86,7 +86,7 @@ fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<Bran
 /// The work-clock constant this route uses for every boot/branch — a run-level constant
 /// (`virtual_tsc = base + k * rcb`, `Multiverse::restore`'s doc), not part of captured state, so
 /// every branch of the same request must share the value the branch point was booted with.
-const WORK_CLOCK_K: u64 = 1;
+pub(crate) const WORK_CLOCK_K: u64 = 1;
 
 /// Real per-branch cost is one full `KVM_CREATE_VM`/vCPU/guest-RAM-region lifecycle
 /// (`Multiverse::branch`'s doc — the spec's documented small-N `fork()` fallback, not yet the
@@ -219,7 +219,16 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
         };
     }
 
-    if body.branch_tapes_hex.is_empty() {
+    // An empty `branch_tapes_hex` is only a caller error when there is nothing else useful for
+    // this call to do; with `persist_run_id` set it is instead "persist-only" mode — boot,
+    // snapshot, and persist the branch point without forking any continuations from it, so a
+    // later `POST /shell-into/{run_id}/{node_id}` (or `/run/kvm/resume`) has a node to resume
+    // into for a guest with no `MARK_BRANCH` checkpoint of its own (e.g. an interactive-console
+    // fixture like `shell-guest` that never halts and never calls `MARK_BRANCH`, so it has no
+    // other way to reach the store via this route). `boot_snapshot_and_branch` already handles an
+    // empty `tape_suffixes` correctly (`run_branches` returns `Ok(vec![])` for zero suffixes) —
+    // only this HTTP-level guard needed relaxing.
+    if body.branch_tapes_hex.is_empty() && persist.is_none() {
         return Json(json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }));
     }
     if body.branch_tapes_hex.len() > MAX_BRANCHES_PER_REQUEST {
@@ -805,7 +814,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
 /// stuck exactly here, `age::primitives::stream::Stream::decrypt_chunk`, confirmed via `gdb -p
 /// <pid> -batch -ex 'thread apply all bt'` on an actually-hung manual end-to-end check — not a
 /// deadlock, a real O(total pages) instead of O(distinct pages) cost).
-fn reconstruct_universe(
+pub(crate) fn reconstruct_universe(
     store: &SnapshotStore,
     run_id: &str,
     node_id_hex: &str,

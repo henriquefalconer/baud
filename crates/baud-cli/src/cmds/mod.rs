@@ -12,6 +12,7 @@ pub mod obs;
 pub mod replay;
 pub mod run;
 pub mod server;
+pub mod shell_into;
 pub mod shrink;
 pub mod spec;
 pub mod stream;

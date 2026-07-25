@@ -3048,3 +3048,103 @@ todo.md updated with the sixteenth-brick entry, consensus-cluster coupling item 
   - Cleaned up fuzz.rs's stale header comment (removed the never-implemented `/runs/fuzz/:id/step` claim; pointed at `/run/kvm/branch`/`/run/kvm/resume`'s generate-mode persistence instead)
   - Updated todo.md with the sixteenth-brick entry; removed the now-fixed item from "Not yet done"
 ---
+
+Committed 2dbc5d9. Pushing to origin/main...
+
+Pushed 2dbc5d9 to origin/main. Verifying push (git fetch + confirm HEAD matches origin, working tree clean)...
+
+Verified: local HEAD (2dbc5d9) == origin/main, working tree clean apart from this progress note. Re-reading todo.md: still pending — the enforced-regime KVM module, baud shell-into CLI/server surface (needs new WebSocket infra), and the framebuffer stream (needs a new guest display device model first). This iteration's step (fixing the consensus-cluster fuzz loop's random-tactics/Driver-scheduler coupling, with regression tests) is closed, committed, pushed, and verified green. Emitting NEXT.
+
+## 2026-07-25T09:44:45 UTC - Session usage — build-23 [sonnet]
+- cost $5.150841350000002 (exact, from claude -p)
+- context 162,512 tok peak of 1M (16%) across 81 inference calls, monotonic
+- models sonnet-5 $5.1478 (in 222 / out 52,957 / cache-read 10,081,932) · haiku-4-5 $0.0031
+- subagents (5) sonnet-5 x5
+- transcript: ralph/.run/025-build-23.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 24
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+Read todo.md (2119 lines): three items remain open — enforced-regime KVM module (needs custom kernel module, likely out of scope), baud shell-into CLI/server surface (needs ws route + CLI + auth, but crate-level restore/PTY groundwork reportedly already passes), and the framebuffer stream (blocked on a new guest display device model). Dispatching a research subagent to survey exactly what exists for shell-into before committing to it as this iteration's target...
+
+Waiting on research subagent survey of shell-into groundwork (console PTY wiring, server routes/auth patterns, CLI subcommand patterns, snapshot-store lookup-by-id) to decide the concrete scope for this iteration...
+
+Server-side WS route drafted: crates/baud-server/src/routes/shell_into.rs bridges a restored Multiverse's console to a WebSocket via mpsc channels on a blocking task; relaxed /run/kvm/branch to support persist-only mode (needed since shell-guest never halts/MARK_BRANCHes, so it has no other way to reach the SnapshotStore). Building baud-server now to check for compile errors before writing the CLI side...
+
+CLI shell-into command drafted (crates/baud-cli/src/cmds/shell_into.rs): interactive mode pipes stdin lines / stdout bytes over the WS; --input-hex mode does one scripted send-then-collect round trip for drive-script use. Building baud-cli now...
+
+Both crates compile cleanly. Running full workspace build now...
+
+Added a unit test (drive_shell_session_echoes_queued_input_and_stops_on_disconnect) exercising the new interactive-session loop directly against a real booted shell-guest fixture, bypassing the store/WS layers. Building and running it now against real /dev/kvm...
+
+Unit test passes against real /dev/kvm (0.06s). Running the full baud-server test suite to check for regressions from the /run/kvm/branch persist-only-mode validation change...
+
+Wrote drive/m10.sh: persist-only /run/kvm/branch mode + baud shell-into scripted round trip + repeatability + error-handling checks over real HTTP/WebSocket against real /dev/kvm. Running it now...
+
+drive/m10.sh passes end-to-end: shell-into round trip, repeatability, and error handling all green against real /dev/kvm. Smoke-testing the interactive (non --input-hex) CLI mode manually before full verification...
+
+Found and fixed a real protocol bug via manual interactive-mode testing: tokio-tungstenite auto-replies to an incoming Close the instant it is read (before app code can flush pending output), so a client-sent Close raced the servers own pending output and caused "Sending after closing" -> connection reset. Fixed by having the client signal "no more input" with an empty Binary frame (never a real Close) and letting only the server send the actual Close once its output queue drains. Rebuilding and re-testing...
+
+Found and fixed the actual root cause: drive_shell_session returned as soon as input_rx drained to Disconnected, even when that same drain pass had just enqueued real input the guest never got a single step_exit to react to (a real client sending input then immediately disconnecting lost its own input). Fixed with a bounded post-disconnect settle window (200k exits) that only ends the session once nothing new has arrived for a while. Added a deterministic regression test reproducing the exact ordering. Rebuilding and testing...
+
+Root cause confirmed and fixed: full interactive transcript now arrives correctly ("$ hi\n$ bye\n$ ") verified via manual hex-dump smoke test against real /dev/kvm. Removing temporary debug instrumentation from both CLI and server before final verification...
+
+Debug instrumentation removed, code clean. Starting full verification protocol: cargo build --workspace...
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets...
+
+clippy clean on all touched files. Running cargo test --workspace...
+
+Running full workspace test suite in background to check for any FAILED results across all crates (first pass already showed baud-server/baud-vcpu/etc all green; confirming nothing failed elsewhere)...
+
+## 2026-07-25T10:32:17 UTC - Session usage — build-24 [sonnet]
+- cost $17.082749850000006 (exact, from claude -p)
+- context 364,289 tok peak of 1M (36%) across 182 inference calls, monotonic
+- models sonnet-5 $17.0797 (in 382 / out 141,397 / cache-read 41,884,712) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/026-build-24.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 24
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and current git status to understand in-progress work.
+
+Reviewed the uncommitted shell-into implementation (CLI cmds/shell_into.rs, server routes/shell_into.rs, drive/m10.sh) left from the prior session — code looks complete: WebSocket route bridging a blocking KVM guest-loop thread to the client, CLI interactive + scripted --input-hex modes, regression tests for the disconnect-race bug already baked in. Starting fresh verification protocol: cargo build --workspace.
+
+cargo build --workspace clean (5.6s, only pre-existing baud-tracing aya::Bpf deprecation warnings, nothing touching shell-into code). Running cargo clippy --workspace --all-targets...
+
+clippy clean on all touched files (shell_into.rs x2, client.rs, run_kvm.rs) — every warning shown is pre-existing in unrelated files (baud-tape/journal/proto/secret/driver/tracing/identity/stream). Running cargo test --workspace (this will take a while, watching for FAILED)...
+
+cargo test --workspace: 100% green, 0 failed across every crate (41 test binaries). New routes::shell_into::tests (both regression tests) pass; baud-server 18/18. Now running all drive/*.sh scripts individually per the verification protocol, starting with the new drive/m10.sh.
+
+drive/m10.sh passes end-to-end on real /dev/kvm: all M10.1-M10.4 checks green. Running remaining drive scripts one at a time (h0-h6, m0-m9, full-demo)...
+
+h0-h5 all pass end-to-end on real /dev/kvm (h5's 1000-branch test took 229s as expected). Continuing with h6 and the m-series...
+
+h6, m0-m4 all pass. Continuing through m5-m9 and full-demo...
+
+m5-m9 all pass. Running the final drive script: full-demo.sh (chains M0-M9, ~32 checks)...
+
+ALL 19 drive scripts (h0-h6, m0-m10, full-demo) pass end-to-end on real /dev/kvm, zero regressions, full-demo.sh 32/32 CHECKS PASSED. Verification protocol complete: build clean, clippy clean, cargo test 100% green, every drive script green. Updating todo.md to close the shell-into item, then committing and pushing.
+
+Dispatched a Sonnet subagent to append a build-status entry to todo.md closing the shell-into item and updating the Not-yet-done trailer. Waiting for it to finish before committing.
+
+(Accidentally launched a stray placeholder agent while waiting — it did no work and completed immediately, ignoring.) Still waiting on the real todo.md-update subagent.
+
+todo.md updated cleanly (39-line append-only diff, seventeenth-brick entry closing the shell-into item, historical mentions untouched). Appending final progress block and committing everything.
+
+## 2026-07-25T10:49:25 UTC - Changes committed.
+- Implemented `baud shell-into`: closes the "M-series shell-into CLI/server surface" item open since the eleventh brick.
+- Files changed: crates/baud-server/src/routes/shell_into.rs (new), crates/baud-cli/src/cmds/shell_into.rs (new), drive/m10.sh (new), crates/baud-cli/src/client.rs, crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/mod.rs, crates/baud-server/src/main.rs, crates/baud-cli/src/cmds/mod.rs, crates/baud-cli/src/main.rs, Cargo.toml, crates/baud-cli/Cargo.toml, crates/baud-server/Cargo.toml, Cargo.lock, todo.md.
+- **Brief description of changes:**
+  - New `GET /shell-into/{run_id}/{node_id}` axum WebSocket route: reconstructs a persisted Universe, restores it into a live Multiverse, bridges its console to the client over a WebSocket via a spawn_blocking guest loop + mpsc channels.
+  - New `baud shell-into <run_id> <node_id>` CLI command: real interactive stdin/stdout mode, plus `--input-hex` scripted mode for drive scripts.
+  - Two real protocol bugs found and fixed via manual interactive testing: tokio-tungstenite auto-replying to a client Close before pending output flushed (fixed with an empty-Binary "no more input" sentinel instead of Close); the session loop returning immediately on channel disconnect even when input was still pending a guest reaction (fixed with a bounded post-disconnect settle window). Both covered by regression tests.
+  - `POST /run/kvm/branch` gained a persist-only mode (empty branch_tapes_hex + persist_run_id) so guests with no MARK_BRANCH checkpoint can still reach the SnapshotStore.
+  - New drive/m10.sh (4 checks, all green) and todo.md updated to close the item.
+  - Verification: cargo build/clippy clean, cargo test --workspace 100% green (41 binaries), all 19 drive/*.sh scripts pass individually on real /dev/kvm, full-demo.sh 32/32.
+---

@@ -2117,3 +2117,42 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
     framebuffer/VGA/virtio-gpu device today, an explicit spec non-goal per
     `specs/baud-multiverse.md` — before `baud-stream`, otherwise essentially complete per
     `specs/baud-stream.md`'s named tests, has anything real to capture).
+- **M-series — seventeenth brick: `baud shell-into` CLI/server surface, flagged as open in every
+  "Not yet done" list since the eleventh brick, is now closed.** `crates/baud-server/src/routes/shell_into.rs`
+  adds `GET /shell-into/{run_id}/{node_id}`, an axum WebSocket route (new `ws` feature on the workspace
+  `axum` dep) that reconstructs a persisted `Universe` via the same `reconstruct_universe` helper
+  `/run/kvm/resume` already used (now `pub(crate)` in `run_kvm.rs`, alongside `WORK_CLOCK_K`), restores it
+  into a live `Multiverse`, and bridges the guest's console to the socket. The guest loop runs on a
+  dedicated `spawn_blocking` thread doing real synchronous `KVM_RUN` ioctls, bridged to the WebSocket
+  through two `tokio::sync::mpsc` channels. `crates/baud-cli/src/cmds/shell_into.rs` adds the matching
+  `baud shell-into <run_id> <node_id>` command (new `tokio-tungstenite` CLI dep) with a real interactive
+  mode (stdin line-by-line until stdin closes) and a scripted `--input-hex <hex>` mode that sends once and
+  collects output until `--idle-timeout-ms` idle, printing `{"ok":true,"output_hex":...}` for drive scripts
+  that have no real TTY. `crates/baud-cli/src/client.rs` gained a `Client::ws_url()` helper.
+  - Two real bugs surfaced during manual interactive testing and are fixed and documented in
+    `shell_into.rs`'s own header doc: (1) `tokio-tungstenite` auto-replies to a client-sent `Close` frame
+    before the app can flush pending output, so the wire protocol now uses an empty `Binary` frame as the
+    "no more input" sentinel instead of a `Close` frame — only the server ever sends the real `Close`; (2)
+    the session loop used to return as soon as the input channel drained to `Disconnected`, even when that
+    same drain pass had just enqueued real input the guest never got a `step_exit` to react to — fixed with
+    a bounded post-disconnect settle window (`POST_DISCONNECT_SETTLE_EXITS = 200_000` guest-side exits).
+    Two regression tests cover both scenarios: `drive_shell_session_echoes_queued_input_and_stops_on_disconnect`
+    and `drive_shell_session_echoes_input_sent_immediately_before_disconnect`.
+  - `POST /run/kvm/branch` also gained a "persist-only" mode: an empty `branch_tapes_hex` is now accepted
+    (not an error) when `persist_run_id` is set, so a guest that never calls `MARK_BRANCH` and never halts
+    (like the new `shell-guest` fixture) can still reach the `SnapshotStore` via this route — boot, snapshot,
+    persist, fork zero branches.
+  - `drive/m10.sh` (new), 4 checks: M10.1 persist-only branch; M10.2 scripted shell-into round trip
+    (byte-exact transcript `$ hi\n$ ` against `shell-guest`); M10.3 repeatability (same node twice →
+    identical transcript); M10.4 error handling (unknown `run_id`/`node_id` reports an in-band error, no
+    hang or crash, server stays healthy).
+  - **Verification**: `cargo build --workspace` clean (only pre-existing unrelated `baud-tracing` `aya::Bpf`
+    deprecation warnings). `cargo clippy --workspace --all-targets` — zero warnings on any touched file.
+    `cargo test --workspace`: 100% green, 0 failed, across all 41 test binaries (`baud-server` now 18/18, up
+    from 16, including the two new `shell_into` regression tests). All 19 `drive/*.sh` scripts (`h0.sh`-`h6.sh`,
+    `m0.sh`-`m10.sh`, `full-demo.sh`) re-run individually end-to-end on real `/dev/kvm`, zero regressions;
+    `drive/m10.sh` itself all M10.1-M10.4 checks passed; `full-demo.sh` "32/32 CHECKS PASSED".
+  - **Not yet done**: the enforced-regime KVM module (RDTSC-compliance under *enforced* regime — bit-exact,
+    forced-exiting; only the cooperative-regime half closed, per the fifteenth brick), and the framebuffer
+    stream (still blocked on building an entirely new guest display device model first — `baud-multiverse`
+    has no framebuffer/VGA/virtio-gpu device today, an explicit spec non-goal per `specs/baud-multiverse.md`).

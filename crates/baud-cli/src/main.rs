@@ -69,6 +69,8 @@ pub enum Commands {
     Fuzz(cmds::fuzz::FuzzCmd),
     /// Budget accounting
     Budget,
+    /// Restore a persisted universe into a live, interactive console session
+    ShellInto(cmds::shell_into::ShellIntoArgs),
 }
 
 #[tokio::main]
@@ -104,6 +106,7 @@ async fn main() {
         Commands::Replay(args) => cmds::replay::run(args, &c, json).await,
         Commands::Fuzz(cmd) => cmds::fuzz::run(cmd, &c, json).await,
         Commands::Budget => cmds::budget::run(&c, json).await,
+        Commands::ShellInto(args) => cmds::shell_into::run(args, &c, json).await,
     };
 
     if let Err(e) = result {

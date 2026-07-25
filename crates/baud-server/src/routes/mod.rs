@@ -15,6 +15,8 @@ pub mod runs;
 #[cfg(target_os = "linux")]
 pub mod run_kvm;
 pub mod server;
+#[cfg(target_os = "linux")]
+pub mod shell_into;
 pub mod shrink;
 pub mod spec;
 pub mod stream;
