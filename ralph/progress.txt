@@ -3152,3 +3152,5 @@ todo.md updated cleanly (39-line append-only diff, seventeenth-brick entry closi
 Committed (c13ba1a) and pushed to origin/main successfully (2dbc5d9..c13ba1a). Running post-push verification: re-checking out the pushed tip is unnecessary (working tree already IS the pushed tip, git status clean) — re-running the two fastest/most targeted checks (drive/m10.sh + full-demo.sh) against the actual pushed commit to confirm green.
 
 Post-push verification GREEN: drive/m10.sh re-run against the pushed tip (c13ba1a) — all M10.1-M10.4 checks pass on real /dev/kvm. Step closed. Checking todo.md for remaining pending items to decide NEXT vs COMPLETE...
+
+todo.md still has two pending items (enforced-regime KVM module, framebuffer stream) — not zero. Emitting <promise>NEXT</promise>.
