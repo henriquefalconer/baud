@@ -1033,7 +1033,13 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   still does not pass here, but for a different, not-yet-diagnosed reason (the server did not come
   up within the script's health-check loop; not investigated further as it is unrelated to this
   iteration's H2 work) — the `python3`-missing gap specifically is resolved by the new environment,
-  but M1 itself needs a fresh look, not assumed fixed.
+  but M1 itself needs a fresh look, not assumed fixed. **Root-caused and fixed in a later iteration**
+  (see the "`drive/m1.sh` was fundamentally broken" entry at the very end of this section): the
+  health-check-loop failure was never a `python3`/environment issue at all — `drive/m1.sh` alone
+  among every `drive/h*.sh`/`drive/m*.sh` script started the server with `cargo run -q --bin
+  baud-server &` (real cold-start cost ~15.7s, timed directly) while budgeting only `20 * sleep 0.2 =
+  4s` in its own health-check loop before giving up, so it failed on a timing race every single run,
+  4-5x too early, regardless of `python3` or any other environmental factor.
 - **Found while re-verifying `drive/h0.sh`/`drive/m0.sh` this iteration (environmental, not a code
   bug — not fixed, documented for the next person who hits it)**: on this Windows dev machine, a
   drive script's `trap cleanup EXIT` → `kill "$SERVER_PID"` does not reliably terminate the
@@ -1070,4 +1076,59 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
   underlying `baud tape create` call itself succeeds (valid JSON with an `id` field came back).
   Needs either installing `python3` on this dev machine or rewriting those parses in
   `jq`/shell — whichever a future iteration picks, audit all of `drive/m*.sh` and
-  `drive/full-demo.sh` for the same pattern.
+  `drive/full-demo.sh` for the same pattern. **Superseded by a later iteration**: this `python3`
+  gap was specific to an older, since-replaced dev environment (the current WSL2 host has
+  `python3` at `/usr/bin/python3`, per the "Learned this iteration" entry above), and separately,
+  `drive/m1.sh`'s actual failure on the current host turned out to be the unrelated `cargo run`
+  cold-start/health-check-timeout race documented and fixed in the "`drive/m1.sh` was fundamentally
+  broken" entry at the very end of this section — `drive/m1.sh` now passes end-to-end on this
+  machine, so neither the `python3` parsing question nor a `jq`/shell rewrite is blocking it
+  today (though auditing `drive/m*.sh`/`drive/full-demo.sh` for the same JSON-parsing pattern is
+  still worth doing if a `python3`-less host is ever targeted again).
+- **This iteration picked "fix the broken M-series drive scripts" as its task**, after an
+  investigation agent confirmed `vm_creation_refuses_multiple_vcpus` and
+  `capacity_refuses_sibling_split` (todo.md §12's test matrix) were already implemented and
+  unit-tested (pure logic only — no real-KVM exercise needed for either), and re-confirmed
+  `crates/baud-server` still has zero WebSocket/streaming infrastructure, so `baud shell-into` still
+  has no server-side surface (already documented above in the H5 `shell_into_universe_resumes`
+  entry's "Not yet done" — no change needed there). Two real bugs were found and fixed, both in
+  `drive/*.sh` shell scripts, not Rust code:
+  - **`drive/m1.sh` was fundamentally broken and had never actually passed as it was written.**
+    Root cause: unlike every other `drive/h*.sh`/`drive/m*.sh` script — which all `cargo build` up
+    front and then exec the pre-built `target/debug/baud-server` binary directly (sub-1s start) —
+    `drive/m1.sh` alone started the server with `cargo run -q --bin baud-server &` (a cold-start
+    costing ~15.7s, confirmed by direct timing) while its own health-check loop only budgeted
+    `20 * sleep 0.2 = 4s` before giving up, so it failed with "baud-server did not start" on every
+    run, 4-5x too early. This finally root-causes the previously-vague "Learned this iteration"/
+    "Known gap" entries above (old text: "the server did not come up within the script's health-
+    check loop; not investigated further") — both have been corrected in place rather than left as
+    an open mystery. Fixed: `drive/m1.sh` now defines `SCRIPT_DIR`/`REPO_ROOT` (matching
+    `drive/m0.sh`'s existing pattern), sets `BAUD="$REPO_ROOT/target/debug/baud"` and
+    `BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"`, and execs `"$BAUD_SERVER_BIN"` directly
+    instead of `cargo run -q --bin baud-server`. Verified: `bash drive/m1.sh` now passes end-to-end
+    twice in a row (M1.1 through M1.8 all PASS, "M1 milestone: ALL CHECKS PASSED").
+  - **`drive/full-demo.sh` (the M9 "full system demonstration" chaining M0-M8, `FD.1`-`FD.10`)
+    silently aborted after step FD.1c ("baud keys show") on every run, in ~6.6s, exit 1, no error
+    message.** Root cause: `set -euo pipefail` is active, and FD.1d assigned
+    `DOCTOR=$(BAUD_SERVER=... "$BAUD" doctor --json 2>&1)` with no `|| true` guard — `baud doctor
+    --json` itself exits 1 whenever an optional local tool (sops/age) isn't installed, which is true
+    on this dev machine (confirmed: its own JSON output reports `age.ok=false`, `sops.ok=false` —
+    a real, expected environmental fact, not a bug). Under `set -e`, that nonzero exit from inside a
+    bare command-substitution assignment killed the whole script immediately and silently (no
+    `fail()` message, since the script died before the `[[ -n "$DOCTOR" ]]` check ever ran).
+    `drive/m0.sh` already knew about and handled this exact same command's nonzero exit
+    (`"$BAUD" doctor --json || true`, with a comment noting "may fail if sops/age not installed") —
+    `drive/full-demo.sh` was simply missing that same guard. Fixed by adding the identical `|| true`
+    to `drive/full-demo.sh`'s `DOCTOR=$(...)` line, with an explanatory comment. Verified:
+    `bash drive/full-demo.sh` now runs to completion, "Checks passed: 32 / 32", "ALL 32 CHECKS
+    PASSED" — the first time in this project's history (as far as this log shows) that
+    `drive/full-demo.sh` has been confirmed passing end-to-end on real hardware.
+  - Both fixes are shell-script-only, so no new Rust unit tests were added (nothing to unit-test in
+    bash timing/guard logic), but full re-verification is completely green: `cargo build
+    --workspace`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` all pass
+    with zero regressions (only pre-existing warnings in unrelated files: `baud-tracing`'s
+    deprecated `aya::Bpf`, and test-only lints in `baud-proto`/`baud-secret`/`baud-driver`/
+    `baud-journal`/`baud-stream`). Every one of the 16 `drive/*.sh` scripts now passes end-to-end on
+    this real `/dev/kvm` host in one sitting: `drive/h0.sh` through `drive/h5.sh`, `drive/m0.sh`
+    through `drive/m8.sh`, and `drive/full-demo.sh` — the first time this project's full
+    drive-script suite has been all-green together.

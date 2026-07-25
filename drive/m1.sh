@@ -14,10 +14,13 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 JSON_FLAG="${1:-}"
-BAUD="cargo run -q --bin baud --"
+BAUD="$REPO_ROOT/target/debug/baud"
+BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
 SERVER_PID=""
 DB_FILE="$(mktemp -t baud-m1-XXXXXX.sqlite)"
 # Windows/git-bash: sqlite:// URIs need a native Windows path (posix /tmp/... is not
@@ -45,7 +48,7 @@ cargo build -q --bin baud-server --bin baud
 
 log "Starting baud-server (DB: $DB_FILE)..."
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" BAUD_LOG=warn \
-    cargo run -q --bin baud-server &
+    "$BAUD_SERVER_BIN" &
 SERVER_PID=$!
 
 # Wait for server to be ready

@@ -108,7 +108,9 @@ KEYS=$(BAUD_SERVER=http://127.0.0.1:7734 "$BAUD" keys show --json 2>&1)
 [[ -n "$KEYS" ]] && { TOTAL_CHECKS=$((TOTAL_CHECKS+1)); PASSED_CHECKS=$((PASSED_CHECKS+1)); pass "FD.1c: baud keys show"; } \
     || fail "FD.1c: baud keys show"
 
-DOCTOR=$(BAUD_SERVER=http://127.0.0.1:7734 "$BAUD" doctor --json 2>&1)
+# doctor exits nonzero whenever an optional local tool (sops/age) is missing — that's an
+# environmental fact, not a determinism failure (drive/m0.sh treats it the same way, `|| true`).
+DOCTOR=$(BAUD_SERVER=http://127.0.0.1:7734 "$BAUD" doctor --json 2>&1 || true)
 [[ -n "$DOCTOR" ]] && { TOTAL_CHECKS=$((TOTAL_CHECKS+1)); PASSED_CHECKS=$((PASSED_CHECKS+1)); pass "FD.1d: baud doctor"; } \
     || fail "FD.1d: baud doctor"
 

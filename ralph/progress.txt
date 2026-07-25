@@ -1927,3 +1927,90 @@ All drive scripts h0.sh-h5.sh pass end-to-end on real /dev/kvm, zero regressions
   - Added cpuid.rs unit test initial_apic_id_is_pinned_on_leaf_1; confirmed fix with 30/30 consecutive real-hardware reruns (was ~1/7 flaky before)
   - drive/h2.sh gained H2.7 running the new real-hardware test; todo.md updated
 ---
+
+Committed e6eb971. Pushing to origin/main...
+
+Post-push verification GREEN: local HEAD (e6eb971) == origin/main, and this tip already passed full cargo build/test/clippy --workspace + drive/h0.sh-h5.sh before commit (no changes since). This closes the cpuid_leaves_are_fixed real-hardware readback gap for H2. todo.md still has pending items (Snapshot::branch's O(write-set) memfd/UFFDIO_CONTINUE work, the baud shell-into CLI/server verb, H3's RDTSC-compliant-guest half, H6, the whole M-series), so this iteration ends with NEXT.
+
+## 2026-07-24T23:55:55 UTC - Session usage — build-5 [sonnet]
+- cost $3.4703702999999995 (exact, from claude -p)
+- context 150,247 tok peak of 1M (15%) across 66 inference calls, monotonic
+- models sonnet-5 $3.4673 (in 132 / out 29,704 / cache-read 7,540,141) · haiku-4-5 $0.0031
+- transcript: ralph/.run/007-build-5.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 6
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md and recent git history.
+
+Studied todo.md build-status log (H0-H5 all have real-hardware closures for their core named tests). Checking test-matrix rows not yet confirmed done (capacity_refuses_sibling_split, vm_creation_refuses_multiple_vcpus) and drive/m1.sh status before picking this iteration's item...
+
+Waiting on investigation agent to report status of vm_creation_refuses_multiple_vcpus, capacity_refuses_sibling_split, drive/m1.sh, and shell-into infra before committing to this iteration's target.
+
+Note: waiting on the investigation agent's report (checking vm_creation_refuses_multiple_vcpus, capacity_refuses_sibling_split, drive/m1.sh failure cause, shell-into infra) before picking this iteration's target item.
+
+(placeholder agent finished, ignore - real investigation agent still running)
+
+Still waiting on the investigation agent (checking todo.md test-matrix gaps: vm_creation_refuses_multiple_vcpus, capacity_refuses_sibling_split, drive/m1.sh, shell-into infra).
+
+Pausing tool calls to let the investigation agent's completion notification arrive.
+
+Investigation back. drive/m1.sh has a real, precisely-diagnosed bug: uses 'cargo run' (~15.7s startup) inside a 4s health-check-loop budget, while every other drive/m*.sh execs the pre-built binary directly. Also confirmed vm_creation_refuses_multiple_vcpus and capacity_refuses_sibling_split are implemented+pure-unit-tested only; shell-into has zero server infra. Picking drive/m1.sh fix as this iteration's item: small, root-caused, high-value (unblocks the M-series drive script).
+
+drive/m1.sh fixed: root cause was 'cargo run --bin baud-server' (~15.7s cold start) racing a 4s health-check loop. Now execs the pre-built $REPO_ROOT/target/debug/baud-server binary directly, matching m0.sh/m2.sh's pattern. Re-ran drive/m1.sh standalone: ALL CHECKS PASSED (M1.1-M1.8). Scanning other drive/m*.sh scripts for the same 'cargo run' race before moving to full verification...
+
+No other drive/*.sh uses cargo run in its startup path — m1.sh was the sole outlier. Starting full pre-push verification: cargo build --workspace...
+
+cargo build --workspace: green (pre-existing baud-tracing deprecation warnings only). Running cargo clippy --workspace --all-targets...
+
+cargo clippy --workspace --all-targets: green, only pre-existing warnings in unrelated files (baud-tracing/baud-proto/baud-secret/baud-driver/baud-journal/baud-stream), none in drive/m1.sh (not Rust) or anything touched this iteration. Running cargo test --workspace...
+
+cargo test --workspace: all green, 0 failures (baud-multiverse 63/63 incl. real-hardware tests). Running drive/h0.sh...
+
+drive/h0.sh: PASS. Running drive/h1.sh...
+
+drive/h1.sh: PASS. Running drive/h2.sh...
+
+drive/h2.sh: PASS. Running drive/h3.sh...
+
+drive/h3.sh: PASS. Running drive/h4.sh...
+
+drive/h4.sh: PASS. Running drive/h5.sh (this is the longest one, includes the 1000-branch test, expect ~4 min)...
+
+drive/h5.sh: PASS (all H0-H5 green, zero regressions). Now running drive/m0.sh...
+
+drive/m0.sh: PASS. Running drive/m1.sh (the fixed script) once more for final confirmation...
+
+drive/m1.sh: PASS again (confirmed the fix is stable, not a fluke). Running drive/m2.sh...
+
+drive/m2.sh: PASS. Running drive/m3.sh...
+
+drive/m3.sh: PASS. Running drive/m4.sh...
+
+drive/m4.sh: PASS. Running drive/m5.sh...
+
+drive/m5.sh: PASS. Running drive/m6.sh...
+
+drive/m6.sh: PASS. Running drive/m7.sh...
+
+drive/m7.sh: PASS. Running drive/m8.sh...
+
+drive/m8.sh: PASS. All 15 numbered drive/h*.sh and drive/m*.sh scripts green with zero regressions. Checking drive/full-demo.sh (the 16th script) before wrapping up...
+
+drive/full-demo.sh (FD.1-FD.10, chains all milestones) hung after FD.1c ('baud keys show') — next line is 'baud doctor --json'. Investigating whether doctor hangs (possibly an unbounded network call, e.g. daytona_reachable check)...
+
+Fixed drive/full-demo.sh FD.1d: wrapped 'baud doctor --json' with '|| true' (doctor exits 1 when sops/age aren't installed on this dev machine — expected, not a determinism bug — mirrors drive/m0.sh's existing handling of the same command). Re-running full-demo.sh to see how far it gets now...
+
+drive/full-demo.sh: now PASSES end-to-end (32/32 checks) after the fix — was silently aborting via 'set -e' at FD.1d before. Full verification suite complete and green: cargo build/test/clippy --workspace + all 16 drive/*.sh scripts (h0-h5, m0-m8, full-demo). Updating todo.md with this iteration's findings, then committing.
+
+
+## 2026-07-25T00:21:17 UTC - Changes committed.
+- Fixed two real, previously-undiscovered bugs in drive/*.sh scripts (no Rust code changed)
+- Files changed: drive/m1.sh, drive/full-demo.sh, todo.md
+- **Brief description of changes:**
+  - drive/m1.sh: was the sole drive script starting baud-server via 'cargo run' (~15.7s cold start) inside a 4s health-check budget, so it failed every single run — fixed to exec the pre-built target/debug/baud-server binary directly, matching every other drive script's pattern
+  - drive/full-demo.sh: silently aborted under 'set -e' at FD.1d because 'baud doctor --json' exits 1 when sops/age aren't installed (expected on this host) inside an unguarded $(...) assignment — fixed with the same '|| true' guard drive/m0.sh already uses for the identical command
+  - todo.md updated: root-caused two previously-vague 'not yet diagnosed' notes, documented both fixes
+  - Full verification: cargo build/test/clippy --workspace all green, zero regressions; all 16 drive/*.sh scripts (h0-h5, m0-m8, full-demo) pass end-to-end on real /dev/kvm hardware in one sitting — first time for full-demo.sh and m1.sh both
+---
