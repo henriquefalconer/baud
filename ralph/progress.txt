@@ -3795,3 +3795,51 @@ Updated todo.md §14 (build status + next actions, item 1 removed/folded into ha
     a new item 4 (RdseedRewriteReport -> boot wiring, the one remaining explicit scope cut); updated the
     problem-matrix row 15 with the corrected mechanism and the two new test names.
 ---
+
+Post-push verification: origin/main == local HEAD (b3ef3d2), working tree clean, stock kvm_intel/kvm module confirmed loaded with no /dev/kvm holder. todo.md re-read: still has pending items (OS-entropy determinism, Regime-enum cleanup, Mario validation, RdseedRewriteReport->boot wiring) -- emitting NEXT.
+
+## 2026-07-25T21:48:07 UTC (9min) - Session usage — build-1 [sonnet]
+- cost $1.9282 (from claude -p)
+- context 122,447 tok peak of 1M (12%) across 37 inference calls, monotonic
+- models sonnet-5 $1.9251 (in 74 / out 14,694 / cache-read 3,706,394) · haiku-4-5 $0.0031
+- transcript: ralph/.run/20260725T213906Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying ralph/progress.txt tail and git log to see what iteration 1 (via prior commits) already completed before picking the next todo.md item.
+
+Dispatched 4 parallel Sonnet research subagents to scope the remaining todo.md next-action items (Regime-enum cleanup, RdseedRewriteReport boot-wiring, OS-entropy determinism prerequisite, Mario rebuild scope) before picking which one to tackle this iteration. Waiting on their reports.
+
+2/4 research reports back: OS-entropy determinism and Mario validation both confirmed multi-day efforts gated on the same missing real-Linux-kernel guest-boot pipeline in baud-packages -- not viable this iteration. Waiting on Regime-enum cleanup and RdseedRewriteReport boot-wiring reports to pick between those two smaller candidates.
+
+3/4 reports back: Regime-enum cleanup confirmed as a tractable single-session task (~250-400 lines across ~12-14 files, logic centralized in baud-host::checks::compute_probe). Waiting on the final report (RdseedRewriteReport boot-wiring) before choosing between it and the Regime cleanup.
+
+
+Chose RdseedRewriteReport -> boot wiring (todo.md §14 next-action item 4), it's the highest-value remaining gap in the core determinism model -- the other 3 candidates (OS-entropy determinism, Mario) are multi-day efforts gated on an unbuilt real-Linux-kernel guest-boot pipeline, and Regime-enum cleanup is pure API refactoring with no new capability. This item completes real end-to-end usability of the just-hardware-validated RDSEED enforcement path.
+
+baud-packages/src/rdseed.rs: added gpr_index decoding (real ModRM/REX.B decode, not hardcoded) to RdseedSite, with a new unit test proving non-eax and REX.B-extended registers decode correctly. cargo test -p baud-packages green (24 tests). Moving to CLI sidecar persistence + baud-server boot wiring.
+
+CLI+server compile clean: sidecar rdseed-sites.json writer wired into 'baud image rewrite-rdseed', new baud-server::rdseed_sites module loads it and threads sites into Multiverse::boot_with_rdseed_sites at both real production boot call sites (boot_run_and_drain, boot_and_snapshot in run_kvm.rs). Running cargo test -p baud-server next.
+
+Doc comments updated (linux/mod.rs boot_with_rdseed_sites + rdseed-guest fixture comments now describe the real sidecar mechanism instead of claiming no wiring exists). Starting full pre-push validation: cargo build --workspace.
+
+cargo build --workspace green. cargo clippy --workspace --all-targets: 0 errors, only pre-existing warnings in unrelated files (confirmed none touch rdseed.rs/rdseed_sites.rs/image.rs). Running cargo test --workspace next.
+
+cargo test --workspace: 2 failures in baud-multiverse (rdtsc_guest_reproduces_high_bits_across_boots, timer_tick_lands_at_identical_instruction) -- both are hardware-timing-jitter tests unrelated to rdseed/sidecar code (prior iteration already diagnosed the rdtsc one as a CPU-contention flake). Re-running both in isolation to confirm they're flakes, not regressions from this iteration's changes.
+
+Confirmed both failures are pre-existing hardware-timing-jitter flakes (CPU contention from parallel test execution) -- both pass cleanly in isolation, neither touches rdseed/sidecar code. Running remaining workspace crates' tests to finish validation.
+
+cargo test --workspace --no-fail-fast: fully green, zero failures across all crates (baud-multiverse 74/74 incl. the previously-flaky rdtsc test, baud-packages 23/23 with new gpr_index test, baud-server 22/22 with new rdseed_sites tests). Pre-push validation complete. Running drive/h3-enforced-rdseed.sh next as the closest existing hardware-gated regression check for the rdseed enforcement path this work touches.
+
+Running drive/m9.sh (exercises POST /run/kvm, /run/kvm/branch, /run/kvm/resume over real HTTP+KVM -- exactly the boot_run_and_drain/boot_and_snapshot call sites this iteration rewired to load_rdseed_sites) as the real regression check for this change.
+
+drive/m9.sh: ALL CHECKS PASSED on real /dev/kvm (deterministic double-boot ram_hash, branch/resume flows unaffected by the new load_rdseed_sites lookup on kernels with no sidecar). Running drive/m10.sh next.
+
+drive/m10.sh: ALL CHECKS PASSED. Running drive/m11.sh next.
+
+drive/m10.sh and m11.sh: ALL CHECKS PASSED. Additionally did a manual end-to-end smoke test: built a real ELF with rdseed eax + rdseed r8d via as/ld, ran 'baud image rewrite-rdseed' against a live baud-server -- confirmed the patched ELF has UD2+NOP at both sites and the .rdseed-sites.json sidecar carries the correct address/gpr_index(0 and 8)/length for both a plain and a REX.B-extended register. This closes todo.md §14's 'RdseedRewriteReport -> boot wiring' item end-to-end. Updating todo.md now before committing.
+
+todo.md §14 updated: folded RdseedRewriteReport->boot wiring into 'built and hardware-tested' with full implementation details; enriched the remaining 3 next-action items (OS-entropy, Regime cleanup, Mario) with this iteration's survey findings so future iterations don't re-derive the same scoping. Committing now.

@@ -34,6 +34,14 @@
 #   -h, --help
 set -uo pipefail
 
+# Job control in a script: every background job gets its OWN process group, and
+# anything it spawns inherits that group. That is what makes a session's whole
+# tree — including subagents it launched — addressable as one unit, both to wait
+# for and to kill. Verified: a grandchild of a backgrounded job stays alive after
+# `wait` on that job returns, which is precisely how an Opus subagent outlived a
+# ralph iteration and reported in long after the script had moved on.
+set -m
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
@@ -52,6 +60,7 @@ WATCHDOG="${RALPH_WATCHDOG_SECS:-2700}"
 BUDGET_USD="${RALPH_MAX_BUDGET_USD:-}"
 BUDGET_TOTAL_USD="${RALPH_BUDGET_TOTAL_USD:-}"
 BUDGET_RESERVE_USD="${RALPH_BUDGET_RESERVE_USD:-2.00}"
+GROUP_WAIT_MAX="${RALPH_GROUP_WAIT_MAX:-900}"    # seconds to wait for leftover session work
 BUILD_ONLY=0
 
 while [[ $# -gt 0 ]]; do
@@ -143,6 +152,61 @@ spent = sum(float(l) for l in open('$COST_FILE') if l.strip())
 sys.exit(0 if (float('$BUDGET_TOTAL_USD') - spent) < float('$BUDGET_RESERVE_USD') else 1)"
 }
 
+# Every session process group started this run, so cleanup can reap all of them.
+SESSION_PGIDS=""
+
+# Stopping ralph must take its sessions with it. Without this a SIGTERM to the
+# loop leaves the in-flight `claude -p` — and any subagent it spawned — running
+# and reparented to init, still writing to the repo with nothing supervising it.
+# Killing the process GROUP rather than the pid is what reaches the subagents.
+group_members() { # <pgid> -> pids still alive in that group
+  [ -n "${1:-}" ] || return 0
+  pgrep -g "$1" 2>/dev/null | tr '\n' ' '
+}
+
+reap_sessions() {
+  local pgid members
+  for pgid in $SESSION_PGIDS; do
+    members="$(group_members "$pgid")"
+    [ -n "$members" ] || continue
+    say "stopping session group $pgid (${members% })"
+    kill -TERM -"$pgid" 2>/dev/null || true
+  done
+  sleep 2
+  for pgid in $SESSION_PGIDS; do
+    [ -n "$(group_members "$pgid")" ] && kill -KILL -"$pgid" 2>/dev/null || true
+  done
+}
+trap 'reap_sessions; exit 130' INT
+trap 'reap_sessions; exit 143' TERM
+trap 'reap_sessions' EXIT
+
+
+# After a session's own claude exits, subagents it spawned can still be running.
+# Wait for them: their work lands in the repo, and letting the next iteration
+# start on top of a half-written tree is how uncommitted work goes missing.
+await_group() { # <pgid> <label>
+  local pgid="${1:-}" label="${2:-}" waited=0 members
+  [ -n "$pgid" ] || return 0
+  members="$(group_members "$pgid")"
+  [ -n "$members" ] || return 0
+  say "session [$label] exited but left work running (${members% }) — waiting"
+  note "[ralph] session [$label] exited with subagent work still running; waiting for it before the next iteration."
+  while [ -n "$(group_members "$pgid")" ]; do
+    sleep 5
+    waited=$(( waited + 5 ))
+    if (( waited >= GROUP_WAIT_MAX )); then
+      say "still running after ${waited}s — terminating group $pgid"
+      note "[ralph] leftover work in session [$label] did not finish within ${waited}s; terminated."
+      kill -TERM -"$pgid" 2>/dev/null || true
+      sleep 5
+      kill -KILL -"$pgid" 2>/dev/null || true
+      return 0
+    fi
+  done
+  say "leftover work in [$label] finished after ${waited}s"
+}
+
 watchdog() { # <pid> <label>
   local pid="$1" label="$2" start last now idle
   start=$(date +%s)
@@ -156,7 +220,9 @@ watchdog() { # <pid> <label>
     if (( idle > WATCHDOG )); then
       say "watchdog: no $PROGRESS append in ${idle}s — terminating [$label]"
       note "[ralph watchdog] no progress append in ${idle}s — session [$label] SIGTERMed mid-work."
-      kill -TERM "$pid" 2>/dev/null; sleep 20; kill -KILL "$pid" 2>/dev/null
+      local wpg; wpg="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+      if [ -n "$wpg" ]; then kill -TERM -"$wpg" 2>/dev/null; sleep 20; kill -KILL -"$wpg" 2>/dev/null
+      else kill -TERM "$pid" 2>/dev/null; sleep 20; kill -KILL "$pid" 2>/dev/null; fi
       return 1
     fi
   done
@@ -261,8 +327,11 @@ root = os.path.join(os.path.expanduser("~"), ".claude", "projects",
 # $16.5541. Print the headline figure, and say so when the two disagree rather
 # than emitting two contradictory numbers in one entry.
 total = meta.get("total_cost_usd", 0) or 0
-mu_sum = sum((m.get("costUSD") or 0) for m in (meta.get("modelUsage") or {}).values())
-if abs(mu_sum - total) >= 0.005:
+mu = meta.get("modelUsage") or {}
+mu_sum = sum((m.get("costUSD") or 0) for m in mu.values())
+# Only meaningful when per-model data exists — an absent modelUsage sums to 0
+# and would otherwise report the whole cost as a discrepancy.
+if mu and abs(mu_sum - total) >= 0.005:
     print(f"- cost ${total:.4f} (from claude -p; per-model sums to ${mu_sum:.4f}, "
           f"differs by ${mu_sum - total:+.4f})")
 else:
@@ -316,7 +385,7 @@ PY
 # run_session <label> <prompt-file> — writes the session's final text to
 # $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
 run_session() {
-  local label="$1" pf="$2" out rc pid t0
+  local label="$1" pf="$2" out rc pid pgid t0
   SESSION_N=$((SESSION_N + 1))
   t0=$(date +%s)
   out="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.json"
@@ -324,8 +393,12 @@ run_session() {
   say "session $SESSION_N [$label] starting (model=$MODEL)"
   claude "${CLAUDE_ARGS[@]}" < "$pf" > "$out" 2> "$out.err" &
   pid=$!
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ -n "$pgid" ] && SESSION_PGIDS="$SESSION_PGIDS $pgid"
   watchdog "$pid" "$label"
   wait "$pid"; rc=$?
+  # `wait` returns when THIS claude exits; subagents it spawned live on.
+  await_group "$pgid" "$label"
   SESSION_SECS=$(( $(date +%s) - t0 ))   # read by log_usage for the header
   log_usage "$label" "$out"
   (( rc != 0 )) && say "session [$label] exited rc=$rc — see $out.err"
