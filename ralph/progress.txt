@@ -5785,3 +5785,5 @@ New drive/pkg-virtio-rng-branch-resume-cli.sh (comprehensive real-hardware end-t
   - New real-hardware-verified unit tests in both crates, plus a new drive/pkg-virtio-rng-branch-resume-cli.sh proving the whole feature end-to-end over real HTTP.
   - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh, and the new pkg-virtio-rng-branch-resume-cli.sh all PASS on real /dev/kvm.
 ---
+
+Post-push verification: git push was a clean fast-forward (2ceff4e..7d91a90), working tree clean, origin/main matches local main exactly. All verification (build/clippy/test/drive gate, including the new pkg-virtio-rng-branch-resume-cli.sh) was run against this exact commit before pushing.
