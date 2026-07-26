@@ -23,9 +23,13 @@
 #
 # Usage:   N=20 bash tools/pauseresume_ab.sh        # default N=20; bump to 50 if borderline
 #
-# Verdict:
-#   Arm B PASS ≈ Arm A PASS (both near N)  -> pause/resume is REDUNDANT given the raw event.
-#   Arm B PASS materially lower            -> pause/resume is LOAD-BEARING; keep it.
+# Verdict (judged on EVERY gated check the drive runs, not just os_entropy — that test is too
+# lenient to reveal a small work-clock drift):
+#   Arm B matches Arm A on all checks               -> pause/resume REDUNDANT given the raw event.
+#   Arm B breaks a check that passed WITH it         -> pause/resume LOAD-BEARING; keep it.
+#     (Observed: os_entropy stays 20/20 both ways, but rdtsc_enforced_regime_is_bit_exact_across_
+#      boots PASSes with pause/resume and FAILs without it — the served RCB-derived TSC drifts by a
+#      few host-dispatch branches — so the bracketing is load-bearing for bit-exact work-clock time.)
 
 set -uo pipefail
 
@@ -106,34 +110,46 @@ PA="$(pass_count "$LOGA")"; FA="$(fail_count "$LOGA")"
 PB="$(pass_count "$LOGB")"; FB="$(fail_count "$LOGB")"
 PA=${PA:-0}; FA=${FA:-0}; PB=${PB:-0}; FB=${FB:-0}
 
+# os_entropy_is_deterministic is too LENIENT to reveal a small work-clock drift (the CRNG key is
+# fixed before a few-branch RCB difference matters), so DON'T judge on it alone. The same drive
+# also runs the stricter gated check rdtsc_enforced_regime_is_bit_exact_across_boots (which reads
+# the served work-clock value directly and compares bit-for-bit) and prints "ALL CHECKS PASSED"
+# only if every gated check passed. Fold those in — they're what actually catch host contamination.
+grep -q 'ALL CHECKS PASSED' "$LOGA" && A_ALL=yes || A_ALL=no
+grep -q 'ALL CHECKS PASSED' "$LOGB" && B_ALL=yes || B_ALL=no
+grep -q '\[PASS\] rdtsc_enforced_regime_is_bit_exact_across_boots' "$LOGA" && A_TSC=pass || A_TSC=fail
+grep -q '\[PASS\] rdtsc_enforced_regime_is_bit_exact_across_boots' "$LOGB" && B_TSC=pass || B_TSC=fail
+
 echo
 echo "================== A/B RESULT (N=$N) =================="
-printf "  Arm A  raw event + pause/resume :  PASS=%s  FAIL=%s\n" "$PA" "$FA"
-printf "  Arm B  raw event, NO pause/resume:  PASS=%s  FAIL=%s\n" "$PB" "$FB"
+printf "  Arm A  raw event + pause/resume :  os_entropy=%s/%s  rdtsc_bit_exact=%s  all_checks=%s\n" "$PA" "$N" "$A_TSC" "$A_ALL"
+printf "  Arm B  raw event, NO pause/resume:  os_entropy=%s/%s  rdtsc_bit_exact=%s  all_checks=%s\n" "$PB" "$N" "$B_TSC" "$B_ALL"
 echo   "------------------------------------------------------"
 
 incomplete=0
-[[ $((PA + FA)) -eq "$N" ]] || { echo "  [warn] Arm A logged $((PA+FA))/$N runs — drive script may have aborted early."; incomplete=1; }
-[[ $((PB + FB)) -eq "$N" ]] || { echo "  [warn] Arm B logged $((PB+FB))/$N runs — drive script may have aborted early."; incomplete=1; }
-
-if [[ "$incomplete" -eq 1 ]]; then
-    echo "  VERDICT: INCONCLUSIVE — a run didn't complete N boots; inspect the logs:"
-    echo "           Arm A: $LOGA"
-    echo "           Arm B: $LOGB"
-    exit 0
-fi
+[[ $((PA + FA)) -eq "$N" ]] || { echo "  [warn] Arm A logged $((PA+FA))/$N entropy runs — drive may have aborted early."; incomplete=1; }
+[[ $((PB + FB)) -eq "$N" ]] || { echo "  [warn] Arm B logged $((PB+FB))/$N entropy runs — drive may have aborted early."; incomplete=1; }
 
 DELTA=$((PA - PB))
-if [[ "$PA" -lt $((N - 1)) ]]; then
-    echo "  VERDICT: INCONCLUSIVE — Arm A itself is flaky ($PA/$N); the raw-event baseline"
-    echo "           should be ~$N/$N. Investigate before judging pause/resume."
-elif [[ "$DELTA" -le 1 ]]; then
-    echo "  VERDICT: REDUNDANT — Arm B matches Arm A within noise (delta=$DELTA)."
-    echo "           The raw 0x11c4 event subsumes what pause/resume bought; the bracketing"
-    echo "           can be simplified/removed. (Bump N=50 to tighten if delta=1.)"
+if [[ "$incomplete" -eq 1 && "$B_TSC" == pass ]]; then
+    echo "  VERDICT: INCONCLUSIVE — a run didn't complete N boots for a reason other than the"
+    echo "           bit-exact check; inspect the logs below."
+elif [[ "$PA" -lt $((N - 1)) || "$A_ALL" != yes ]]; then
+    echo "  VERDICT: INCONCLUSIVE — the WITH-pause/resume baseline (Arm A) is not clean"
+    echo "           (os_entropy $PA/$N, all_checks=$A_ALL). Fix the baseline before judging."
+elif [[ "$A_TSC" == pass && "$B_TSC" != pass ]] || [[ "$A_ALL" == yes && "$B_ALL" != yes ]]; then
+    echo "  VERDICT: LOAD-BEARING — removing pause/resume broke a gated determinism check that"
+    echo "           passed WITH it (rdtsc_bit_exact ${A_TSC}->${B_TSC}, all_checks ${A_ALL}->${B_ALL})."
+    echo "           NOTE: os_entropy_is_deterministic is too lenient to show it ($PA/$N vs $PB/$N);"
+    echo "           the bit-exact RDTSC check catches the few-branch host contamination the"
+    echo "           bracketing exists to exclude. KEEP pause/resume."
+elif [[ "$DELTA" -le 1 && "$B_ALL" == yes ]]; then
+    echo "  VERDICT: REDUNDANT — Arm B matches Arm A on EVERY gated check (os_entropy delta=$DELTA,"
+    echo "           rdtsc_bit_exact=$B_TSC, all_checks=$B_ALL). The raw 0x11c4 event subsumes what"
+    echo "           pause/resume bought; the bracketing can be simplified/removed. (Bump N=50 to tighten.)"
 else
-    echo "  VERDICT: LOAD-BEARING — removing pause/resume dropped PASS by $DELTA (=$PA -> $PB)."
-    echo "           The bracketing does real work even with the raw event; keep it."
+    echo "  VERDICT: LOAD-BEARING — removing pause/resume degraded results (os_entropy $PA->$PB,"
+    echo "           rdtsc_bit_exact ${A_TSC}->${B_TSC}). Keep it."
 fi
 echo "  logs: Arm A=$LOGA  Arm B=$LOGB"
 echo "======================================================"
