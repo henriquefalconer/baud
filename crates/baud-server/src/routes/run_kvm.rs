@@ -26,7 +26,10 @@ use crate::AppState;
 pub struct RunKvmBody {
     /// Path to a bzImage kernel on this host's filesystem.
     pub kernel_path: String,
-    /// Kernel command line. Defaults to the console-only line every fixture in this workspace uses.
+    /// Kernel command line. Defaults to spec §4.2's exact deterministic cmdline
+    /// (`bootparams::DETERMINISTIC_CMDLINE`) when omitted — the production default, not a
+    /// bring-up placeholder; every hand-assembled fixture in this workspace still passes its own
+    /// explicit `"console=ttyS0"` and is unaffected.
     #[serde(default = "default_cmdline")]
     pub cmdline: String,
     /// The run's whole tape, hex-encoded (empty tape if omitted — a guest that never reads the
@@ -89,7 +92,7 @@ fn default_max_ticks() -> u32 {
 }
 
 fn default_cmdline() -> String {
-    "console=ttyS0".to_owned()
+    baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.to_owned()
 }
 
 /// Read `path`'s bytes off the server host's filesystem, wrapping the I/O error with the path that
@@ -367,7 +370,8 @@ pub struct RunKvmBranchBody {
     /// point (a snapshot taken immediately after boot, before any guest instruction runs, mirroring
     /// `thousand_branches_are_independent_and_deterministic`'s own branch point).
     pub kernel_path: String,
-    /// Kernel command line. Defaults to the console-only line every fixture in this workspace uses.
+    /// Kernel command line. Defaults to spec §4.2's exact deterministic cmdline
+    /// (`bootparams::DETERMINISTIC_CMDLINE`) when omitted — see `RunKvmBody::cmdline`'s doc.
     #[serde(default = "default_cmdline")]
     pub cmdline: String,
     /// One hex-encoded tape suffix per branch — each is forked independently from the shared branch
@@ -1380,6 +1384,26 @@ mod tests {
     fn framebuffer_guest_kernel_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../baud-multiverse/tests/fixtures/framebuffer-guest/bzImage")
+    }
+
+    /// Pure deserialization, no KVM needed. Closes todo.md §14's "production callers default to a
+    /// bare `console=ttyS0`, never `DETERMINISTIC_CMDLINE`" gap: an omitted `cmdline` field must
+    /// resolve to the spec §4.2 string, not the bring-up placeholder.
+    #[test]
+    fn omitted_cmdline_defaults_to_the_deterministic_cmdline() {
+        let body: RunKvmBody =
+            serde_json::from_value(json!({ "kernel_path": "/does/not/matter" })).unwrap();
+        assert_eq!(body.cmdline, baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE);
+
+        let branch_body: RunKvmBranchBody = serde_json::from_value(json!({
+            "kernel_path": "/does/not/matter",
+            "branch_tapes_hex": [],
+        }))
+        .unwrap();
+        assert_eq!(
+            branch_body.cmdline,
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE
+        );
     }
 
     /// Server-level analogue of `baud-multiverse`'s own

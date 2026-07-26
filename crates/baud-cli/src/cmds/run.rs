@@ -70,9 +70,10 @@ pub enum RunAction {
         /// Path to a bzImage kernel on the server host's filesystem.
         #[arg(long)]
         kernel: String,
-        /// Kernel command line.
-        #[arg(long, default_value = "console=ttyS0")]
-        cmdline: String,
+        /// Kernel command line. Omit to use the server's spec §4.2 deterministic default
+        /// (`bootparams::DETERMINISTIC_CMDLINE`).
+        #[arg(long)]
+        cmdline: Option<String>,
         /// The run's whole tape, hex-encoded.
         #[arg(long, default_value = "")]
         tape_hex: String,
@@ -103,9 +104,10 @@ pub enum RunAction {
         /// Path to a bzImage kernel on the server host's filesystem.
         #[arg(long)]
         kernel: String,
-        /// Kernel command line.
-        #[arg(long, default_value = "console=ttyS0")]
-        cmdline: String,
+        /// Kernel command line. Omit to use the server's spec §4.2 deterministic default
+        /// (`bootparams::DETERMINISTIC_CMDLINE`).
+        #[arg(long)]
+        cmdline: Option<String>,
         /// A hex-encoded tape suffix for one branch. Repeat for multiple branches. Ignored when
         /// `--generate-seed`/`--generate-count` are set instead.
         #[arg(long = "branch-tape-hex", required_unless_present = "generate_seed")]
@@ -272,10 +274,12 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
-                "cmdline": cmdline,
                 "tape_hex": tape_hex,
                 "initramfs_path": initramfs,
             });
+            if let Some(cmdline) = cmdline {
+                body["cmdline"] = json!(cmdline);
+            }
             if let Some(period_rcb) = periodic_timer_period_rcb {
                 body["periodic_timer"] = json!({
                     "period_rcb": period_rcb,
@@ -307,10 +311,12 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
-                "cmdline": cmdline,
                 "persist_run_id": persist_run_id,
                 "initramfs_path": initramfs,
             });
+            if let Some(cmdline) = cmdline {
+                body["cmdline"] = json!(cmdline);
+            }
             if let Some(period_rcb) = periodic_timer_period_rcb {
                 body["periodic_timer"] = json!({
                     "period_rcb": period_rcb,

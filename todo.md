@@ -1105,10 +1105,34 @@ snapshot, not a duplicate of it.
      themselves are still not implemented — this and the prior iteration both took the pragmatic
      from-source `make bzImage` third option instead; a `nix`/`nix-env` toolchain is still not installed
      in this dev sandbox and Buildroot remains unevaluated. The `/dev/vport` (or PIO) tape endpoint
-     (§4.4) is still not implemented. `bootparams::DETERMINISTIC_CMDLINE` still isn't wired as any
-     *production* caller's default (it's now used by this iteration's new test and drive script, but
-     `guest_kernel_boots_to_userspace` and the enforced-regime tests in `baud-multiverse` were already
-     using it from a prior iteration). **`/run/kvm/branch` and `/run/kvm/resume` now also accept
+     (§4.4) is still not implemented — confirmed non-blocking (ralph iteration 17 research): every
+     currently-gating test (`all_input_is_tape_derived`, the H7 entropy/checkpoint work, `MARK_BRANCH`)
+     already runs entirely over raw PIO, and no open-items entry conditions on virtio-serial/`/dev/vport`.
+     `bootparams::DETERMINISTIC_CMDLINE` **is now wired as the production default, closed in ralph
+     iteration 17**: `default_cmdline()` (`crates/baud-server/src/routes/run_kvm.rs`, shared by
+     `RunKvmBody`/`RunKvmBranchBody`'s `#[serde(default = "default_cmdline")]`) returned a bare
+     `"console=ttyS0"` for every real `POST /run/kvm`/`/run/kvm/branch` call that omitted `cmdline` —
+     the actual production HTTP entry points, as distinct from the tests/drive-scripts that already
+     passed `DETERMINISTIC_CMDLINE` explicitly. Now returns `baud_multiverse::linux::bootparams::
+     DETERMINISTIC_CMDLINE` instead. `crates/baud-cli/src/cmds/run.rs`'s `--cmdline` flag on `Kvm`/
+     `KvmBranch` changed from a required `String` with a duplicated `"console=ttyS0"` `default_value`
+     to `Option<String>`; when unset, the CLI omits the `cmdline` key from the JSON body entirely
+     (mirroring the existing `periodic_timer` pattern) rather than sending an explicit value, so the
+     server's new default applies uniformly — no cmdline string is duplicated across crates. New pure-
+     deserialization test `omitted_cmdline_defaults_to_the_deterministic_cmdline`
+     (`crates/baud-server/src/routes/run_kvm.rs`) asserts both body types default correctly. Every
+     existing caller that already passes an explicit `cmdline` (every drive script, every hand-assembled
+     fixture test) is unaffected — confirmed via a full `cargo build`/`clippy`/`test --workspace` (0
+     failures) plus `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m12.sh` (4/4), and
+     `drive/pkg-boot-cli.sh` (which exercises the CLI's explicit `--cmdline` path directly), all PASS on
+     real `/dev/kvm` with no regressions. Three other candidate next-steps were researched and ruled out
+     as out-of-scope for one iteration: virtio-rng (no `virtqueue`/feature-negotiation infra exists
+     anywhere — genuinely multi-day, and even a simpler non-virtio MMIO device would still need an
+     already-built-in guest driver x86 direct-boot has no ACPI/DT path to attach), and `/run/kvm/resume`'s
+     lineage gap (confirmed genuinely bigger: `SnapshotStore`'s `Node` has parent pointers and byte-offset
+     `tape_range` metadata, but no per-node tape-suffix bytes are persisted anywhere — `put_tape`/
+     `get_tape` exist but no route ever calls them — so closing it needs new per-node tape storage, not
+     just a lineage walk). **`/run/kvm/branch` and `/run/kvm/resume` now also accept
      `initramfs_path`/`periodic_timer`, closing the gap named here last iteration.** `RunKvmBranchBody`
      gained `initramfs_path: Option<String>` and `periodic_timer: Option<PeriodicTimerSpec>` (both
      `#[serde(default)]`, so existing callers are unaffected); `RunKvmResumeBody` gained `periodic_timer`

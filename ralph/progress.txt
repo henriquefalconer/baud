@@ -5077,3 +5077,64 @@ todo.md §14 updated by subagent to close the /run/kvm/branch half of the kvm_ru
   - Fixed two new clippy warnings this iteration introduced along the way (too_many_arguments on the persist helper, resolved by reusing KvmBootParams instead of unpacked fields; type_complexity on the widened branch return types, resolved via the new BranchRecords alias).
   - Full verification green: cargo build/clippy/test --workspace all clean (0 failures); drive/h0.sh-h7.sh (8/8), drive/m9.sh/m10.sh/m11.sh (no regressions), and the new drive/m12.sh (4/4) all pass on real /dev/kvm.
 ---
+
+Post-push verification: local main (9e56093) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle (fuser exit 1, no process attached). Summary: this iteration closed the /run/kvm/branch half of todo.md §14 item 1's kvm_run_meta gap -- a branch-originated real Linux-guest run now persists a kvm_run_meta row (both fixed-tape frame_run_ids and generate-mode frame_run_id_prefix), so stream::render's real-replay path can replay its frames for real instead of falling back to a synthetic gradient. Key insight: boot_and_snapshot always snapshots the branch point with an empty tape, so a branch's own tape suffix is its whole replay tape from cold boot, letting the existing persist_kvm_run/KvmBootParams machinery be reused as-is. /run/kvm/resume stays deliberately open (no kernel_path/cmdline to reboot from) and now rejects frame_run_id_prefix explicitly rather than silently no-op'ing. New drive/m12.sh proves the design end-to-end on real /dev/kvm (4/4). Full verification green: cargo build/clippy/test --workspace clean (0 failures, fixed two new clippy warnings introduced along the way), h0.sh-h7.sh (8/8) and m9/m10/m11 (no regressions) and the new m12.sh (4/4) all pass on real hardware. todo.md still has pending items (Buildroot/Nix image builders, /dev/vport tape endpoint, DETERMINISTIC_CMDLINE not wired as production default, H7 os-entropy/RAM-hash residual jitter, virtio-rng device, H8 Mario rebuild, and /run/kvm/resume's still-open kvm_run_meta gap) -- emitting NEXT.
+
+## 2026-07-26T11:11:38 UTC (38min) - Session usage — build-16 [sonnet]
+- cost $11.2692 (from claude -p)
+- context 276,210 tok peak of 1M (28%) across 123 inference calls, monotonic
+- models sonnet-5 $11.2660 (in 343 / out 99,126 / cache-read 26,060,549) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/016-build-16.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 17
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Studied todo.md section 14 (Build status). Key open items: Buildroot/Nix image builder, /dev/vport tape endpoint, DETERMINISTIC_CMDLINE production default wiring, virtio-rng device, H7 residual RCB jitter (heavily invested, diminishing returns), H8 Mario (blocked), /run/kvm/resume kvm_run_meta gap (needs SnapshotStore lineage). Dispatching subagents to check current code state before picking.
+
+Dispatched 4 parallel Explore subagents to check current state of: DETERMINISTIC_CMDLINE production wiring, virtio-rng device feasibility, /dev/vport tape endpoint necessity, and /run/kvm/resume lineage-tracking scope. Awaiting results before picking this iteration's item.
+
+Result 1/4: DETERMINISTIC_CMDLINE confirmed NOT wired -- run_kvm.rs default_cmdline() and CLI --cmdline both hardcode a bare "console=ttyS0" fallback instead of the spec string (crates/baud-server/src/routes/run_kvm.rs:91-93, crates/baud-cli/src/cmds/run.rs:73-75/106-108). Clean, bounded fix. Awaiting other 3 agents.
+
+Idling until remaining 3 background research agents report back.
+
+Result 2/4: virtio-rng confirmed multi-day/from-scratch -- zero virtio code exists anywhere (Bus trait is flat PIO/MMIO register-window model, no virtqueue/feature-negotiation). A simpler non-virtio MMIO device would still need an in-guest driver already built into an unmodified kernel (e.g. timeriomem-rng via ACPI/DT), which x86 direct-boot doesn't have wired either -- so this stays out of scope for one iteration. Awaiting 2 more agents.
+
+Still idling for the last 2 research agents (vport tape endpoint necessity, /run/kvm/resume lineage scope).
+
+Paused, no further action until the last 2 research agents report.
+
+Result 3/4: vport tape endpoint confirmed non-blocking -- raw PIO (option A) already satisfies every currently-gating test; option C would need a whole new virtio Bus front-end with no test depending on it. Ruled out for this iteration. Awaiting final agent (resume lineage scope).
+
+All 4 research agents reported back. Decision: DETERMINISTIC_CMDLINE production wiring is the clear pick -- bounded, well-defined, real spec-compliance gap (production /run/kvm & /run/kvm/branch default to bare "console=ttyS0" instead of the spec cmdline). virtio-rng (multi-day, no Bus infra), /dev/vport (non-blocking, no test needs it), and /run/kvm/resume lineage (genuine new data-model work) are all out of scope for one iteration. Reading the relevant files now.
+
+Made the fix: default_cmdline() in run_kvm.rs now returns bootparams::DETERMINISTIC_CMDLINE instead of bare console=ttyS0; CLI --cmdline for kvm/kvm-branch is now optional (Option<String>), omitting the JSON key entirely when unset so the server's spec default applies. Added a pure-deserialization unit test. Building now...
+
+cargo build --workspace: clean. Running clippy...
+
+clippy clean (only pre-existing unrelated warnings elsewhere in the workspace, none touching run_kvm.rs or cmds/run.rs). Running cargo test --workspace...
+
+cargo test --workspace: clean (0 failures across all crates), including the new omitted_cmdline_defaults_to_the_deterministic_cmdline test. Running drive/h0.sh...
+
+drive/h0.sh through h6.sh: all PASS on real /dev/kvm, no regressions. Running h7.sh...
+
+drive/h7.sh: PASS. Running m9/m10/m11/m12 regression scripts...
+
+m9/m10/m11/m12: all PASS, no regressions. Running pkg-boot-cli.sh (exercises the CLI --cmdline path directly)...
+
+pkg-boot-cli.sh: PASS (explicit --cmdline CLI path also confirmed still working). Full verification green: build/clippy/test --workspace clean, h0-h7 (8/8), m9-m12 (4/4), pkg-boot-cli.sh all PASS on real /dev/kvm. Updating todo.md to close the DETERMINISTIC_CMDLINE production-wiring gap.
+
+
+## 2026-07-26T11:35:03 UTC - Changes committed.
+- Wired bootparams::DETERMINISTIC_CMDLINE as the real production default for guest kernel cmdlines.
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-cli/src/cmds/run.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - default_cmdline() (shared by RunKvmBody/RunKvmBranchBody) now returns baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE instead of a bare "console=ttyS0" -- production POST /run/kvm and /run/kvm/branch calls that omit cmdline now get the full spec §4.2 deterministic cmdline, not a bring-up placeholder.
+  - CLI's --cmdline flag on `baud run kvm`/`kvm-branch` changed from a required String (duplicating "console=ttyS0") to Option<String>; when unset, the CLI omits the cmdline JSON key entirely so the server's new default applies, avoiding a duplicated cmdline string across crates.
+  - Added omitted_cmdline_defaults_to_the_deterministic_cmdline, a pure-deserialization unit test asserting both body types default correctly.
+  - Researched (4 parallel Explore subagents) and ruled out three other candidate next-steps as out-of-scope for one iteration: virtio-rng (no virtqueue/Bus infra exists, genuinely multi-day), /dev/vport tape endpoint (confirmed non-blocking -- no currently-gating test needs it), and /run/kvm/resume's lineage gap (confirmed genuinely bigger -- no per-node tape-suffix bytes are persisted anywhere today).
+  - Updated todo.md to close the DETERMINISTIC_CMDLINE production-wiring gap and record the ruled-out alternatives with citations.
+---
