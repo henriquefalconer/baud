@@ -32,6 +32,7 @@ mod spec;
 mod flake;
 mod image;
 mod rdseed;
+mod workload_lint;
 
 pub use spec::{WorkloadSpec, WorkloadPackage};
 pub use flake::FlakeTemplate;
@@ -40,6 +41,9 @@ pub use image::{
     FORBIDDEN_REAL_TIMERS, TAPE_DEVICE_CONFIG,
 };
 pub use rdseed::{rewrite_rdseed, scan_rdseed_opcodes, RdseedRewriteReport, RdseedSite};
+pub use workload_lint::{
+    scan_crates_for_workload_leaks, WorkloadLeak, FORBIDDEN_WORKLOAD_TERMS,
+};
 
 // ---------------------------------------------------------------------------
 // Pinned nixpkgs revision (the single source of truth)

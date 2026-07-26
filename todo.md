@@ -836,6 +836,7 @@ snapshot, not a duplicate of it.
   (exit dispatch, single-step interrupt injection), `baud-multiverse` (KVM boot flow, CPUID mask, work-clock,
   console, tape bus, dirty-ring reset), `baud-tape-device`, `baud-snapshot` (capture/restore, userfaultfd
   branching, dirty-ring), `baud-snapshot-store`, `baud-packages` guest-image contract + `baud image lint` +
+  the `no_workload_specifics_in_core` generic-core guardrail (`crates/baud-packages/src/workload_lint.rs`) +
   the build-time `rdseed`→`UD2`(+`NOP`) rewrite pass (`crates/baud-packages/src/rdseed.rs`, wired end-to-end
   via `POST /image/rewrite-rdseed` and `baud image rewrite-rdseed <path>`), and the patched `kvm_intel`
   module that hardware-traps `rdtsc`/`rdrand` and serves them from the work-clock / tape **and** now serves
@@ -1197,8 +1198,21 @@ snapshot, not a duplicate of it.
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window
      (`baud stream tail | ffplay`), and the README hero + centralized GIF. All NES specifics stay under
      `examples/` (`no_workload_specifics_in_core`).
-  4. **Generic-core guardrail** — add `no_workload_specifics_in_core`; keep the exploration primitives in
-     `baud-driver`, never in the example.
+  4. **Generic-core guardrail — done.** New `crates/baud-packages/src/workload_lint.rs`: a
+     `FORBIDDEN_WORKLOAD_TERMS` list (Mario/NES-specific terms per `specs/baud-mario.md` §4 — `fceux`,
+     `joypad`, `harness.lua`, `game.nes`, `oper_mode`, `super_mario`, `mario_bros`, plus the six Mario
+     RAM-probe hex addresses — deliberately excluding bare "nes"/"smb" as too short and false-positive-prone,
+     a documented deviation from `specs/baud-guest-harness.md` §8's own illustrative-but-noisy "nes" example)
+     and `scan_crates_for_workload_leaks(crates_dir: &Path)`, which recursively walks `.rs` files under
+     `crates/` (skipping `target/` and its own defining file) for case-insensitive hits, exposed from
+     `crates/baud-packages/src/lib.rs`. 4 new tests pass, including the spec-named `no_workload_specifics_in_core`
+     itself, which scans the real `crates/` tree and currently finds zero leaks. Closes test #29 in the §12
+     matrix. `cargo build`/`clippy`/`test --workspace` clean; `drive/h0.sh`-`h7.sh` all PASS (stock module; this
+     change touches no KVM/VMM runtime code). **Known pre-existing gap this lint does not catch**:
+     `crates/baud-raftlet` already lives directly under `crates/` in violation of §8's "targets live as guest
+     images under `examples/`, never in-tree" — it predates the KVM pivot and references no Mario/NES terms, so
+     it doesn't trip this lint. Moving it into an `examples/`-based guest image is real, separate future work
+     (§10's M-series distributed target), not part of this item.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

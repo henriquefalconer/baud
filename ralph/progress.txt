@@ -4754,3 +4754,61 @@ Stock kvm_intel/kvm confirmed loaded from /lib/modules/.../kernel/arch/x86/kvm/,
   - Unexpected real-hardware finding recorded in todo.md: this cmdline change alone raised double_boot_ram_hash_identical's pass rate from 0/8 (twice, prior iteration) to 4/8 in a fresh H7_CHECKPOINT_REPEATS=8 batch -- a substantial, verified improvement (plausibly less boot-time printk/branch noise before the checkpoint), not a full fix; still open, now with a new lever to investigate
   - Full verification green: cargo build/clippy --all-targets/test --workspace all clean (0 failures); drive/h4.sh, h5.sh, h7.sh (stock module) all pass; drive/h7-enforced-entropy.sh passes (os_entropy_is_deterministic byte-identical, no regression); drive/h7-enforced-checkpoint.sh passes its RDTSC regression gate (double_boot_ram_hash_identical itself remains non-gating, 4/8 this run); stock kvm_intel/kvm module confirmed restored and /dev/kvm confirmed idle after every real-hardware run
 ---
+
+Pushed c0f7629 to origin/main. Running post-push verification (fetch + rev-parse comparison)...
+
+Post-push verification: local main (c0f7629) matches origin/main exactly (fetch + rev-parse confirmed), stock kvm_intel/kvm module confirmed loaded and /dev/kvm confirmed idle. Summary: this iteration closed todo.md's documented DETERMINISTIC_CMDLINE reconciliation gap by wiring the spec-exact cmdline into all three real-linux-guest tests (guest_kernel_boots_to_userspace, os_entropy_is_deterministic, double_boot_ram_hash_identical), replacing three hand-diverged inline strings. Verified on real hardware: guest_kernel_boots_to_userspace still passes; h7-enforced-entropy.sh's os_entropy_is_deterministic still byte-identical with no RDTSC regression; h7-enforced-checkpoint.sh's RDTSC regression gate still passes. Unexpected finding recorded in todo.md: the cmdline change alone raised double_boot_ram_hash_identical's pass rate from 0/8 (twice, prior iteration, 16 boots) to 4/8 in a fresh 8-repeat batch -- a real, substantial, but incomplete improvement, plausibly from reduced boot-time console/printk noise narrowing the jitter-sensitive static_call trampoline's timing window. cargo build/clippy --all-targets/test --workspace all green (0 failures); drive/h4.sh, h5.sh, h7.sh (stock) all pass. todo.md still has pending items (driving the residual checkpoint jitter the rest of the way to 100%, the baud-packages automated image pipeline, H8 Mario rebuild, the generic-core guardrail, virtio-rng, H9 Ubuntu, entropy_guest_is_deterministic/initial_crng_state_is_reproducible as documented aliases, and more per section 14) -- emitting NEXT.
+
+## 2026-07-26T07:46:30 UTC (22min) - Session usage — build-10 [sonnet]
+- cost $2.7730 (from claude -p)
+- context 141,317 tok peak of 1M (14%) across 41 inference calls, monotonic
+- models sonnet-5 $2.7698 (in 102 / out 27,771 / cache-read 4,993,624) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/010-build-10.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 11
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick up where iteration 10 left off.
+
+Chose todo.md §14 next-actions item 4 (generic-core guardrail, no_workload_specifics_in_core) -- it's the one open next-action explicitly flagged unblocked/quick, unlike item 1 (blocked on a missing kernel-build toolchain) and item 2/3 (deep in progress or blocked on 1). Implemented crates/baud-packages/src/workload_lint.rs: scans every .rs file under crates/ for Mario/NES-example-specific terms (fceux, joypad, RAM probe hex addresses, etc per specs/baud-mario.md §4) and fails loud on any leak. Baseline confirmed clean via grep before writing the lint. Running cargo test -p baud-packages now.
+
+workload_lint tests pass (4/4), including the real no_workload_specifics_in_core scan against crates/. Now running the full pre-push protocol: cargo build --workspace.
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets.
+
+cargo clippy --workspace --all-targets exits 0 (pre-existing unrelated warnings only). Running cargo test --workspace.
+
+cargo test --workspace all green (0 failures across all crates). Running drive scripts one at a time now: h0, h1, h2, h3, h4, h5, h6, h7.
+
+This change (workload_lint.rs) is a pure static-analysis addition to baud-packages -- new function + tests, no existing caller/runtime path touched (no KVM/VMM/server/CLI code modified). Running drive/h0.sh through h7.sh (stock module) as the hardware verification pass; skipping enforced-module and m-series scripts as out of scope for this change per established precedent for narrowly-scoped non-KVM changes.
+
+drive/h0.sh PASS. Running drive/h1.sh...
+
+drive/h1.sh PASS. Running drive/h2.sh...
+
+drive/h2.sh PASS. Running drive/h3.sh...
+
+drive/h3.sh PASS. Running drive/h4.sh...
+
+drive/h4.sh PASS. Running drive/h5.sh (includes the ~200s 1000-branch test)...
+
+drive/h5.sh PASS (1000-branch test took ~216s). Running drive/h6.sh...
+
+drive/h6.sh PASS. Running drive/h7.sh (real linux-guest fixture boot)...
+
+drive/h7.sh PASS. Full verification protocol green: cargo build/clippy/test --workspace all clean; drive/h0.sh through h7.sh (stock module) all pass on real /dev/kvm. Updating todo.md via subagent to record the no_workload_specifics_in_core guardrail as closed, then committing.
+
+## 2026-07-26T08:09:28 UTC - Changes committed.
+- Implemented todo.md §14 next-actions item 4: the generic-core guardrail (`no_workload_specifics_in_core`)
+- Files changed: crates/baud-packages/src/workload_lint.rs (new), crates/baud-packages/src/lib.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New `crates/baud-packages/src/workload_lint.rs`: `FORBIDDEN_WORKLOAD_TERMS` (Mario/NES-specific terms per specs/baud-mario.md §4 -- fceux, joypad, harness.lua, game.nes, oper_mode, super_mario, mario_bros, plus the six Mario RAM-probe hex addresses) and `scan_crates_for_workload_leaks(crates_dir: &Path)`, which recursively scans every `.rs` file under `crates/` (skipping `target/` and its own defining file) for case-insensitive hits
+  - Deliberately excluded bare "nes"/"smb" from the term list -- they are too short and false-positive on ordinary identifiers (e.g. "guest_kernel", "openness"); confirmed via grep before finalizing. This is a documented, deliberate deviation from specs/baud-guest-harness.md §8's own illustrative pseudocode, which used the literal (unusably noisy) term "nes"
+  - Exposed from crates/baud-packages/src/lib.rs; 4 new tests pass, including the spec-named `no_workload_specifics_in_core` itself, which scans the real crates/ tree and currently finds zero leaks -- confirming the generic core stayed generic. Closes test #29 in the §12 problem/spec/test matrix and the crate-map guarantee in §8
+  - Recorded a known pre-existing gap this lint does NOT catch: `crates/baud-raftlet` already lives directly under `crates/` in violation of §8's "targets live as guest images under examples/, never in-tree" -- it predates the KVM pivot and references no Mario/NES terms, so it doesn't trip this lint. Moving it into an examples/-based guest image is separate, real future M-series work (§10), not part of this item -- documented in todo.md, not attempted this iteration
+  - Full verification green: cargo build/clippy --all-targets/test --workspace all clean (0 failures); drive/h0.sh through drive/h7.sh (stock module) all PASS on real /dev/kvm. Enforced-module and M-series drive scripts were not re-run since this change touches zero KVM/VMM runtime code (a pure static-analysis addition, no existing caller/runtime path modified)
+---
