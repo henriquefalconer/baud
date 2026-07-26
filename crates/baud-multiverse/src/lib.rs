@@ -35,6 +35,7 @@ pub mod dirty;
 pub mod layout;
 pub mod tape_bus;
 pub mod timesource;
+pub mod virtio_mmio;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

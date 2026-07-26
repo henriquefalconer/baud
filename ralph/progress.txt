@@ -5406,3 +5406,91 @@ All drive scripts h0-h7 and m9-m13 PASSED on real /dev/kvm (m13 new, m9-m12 regr
     warnings); `drive/h0.sh` through `drive/h7.sh` (8/8) and `drive/m9.sh` through `drive/m13.sh`
     (5/5, including the new m13) all PASS on real `/dev/kvm`, no regressions.
 ---
+
+Post-push verification: git push succeeded (5ea5f84..b7b9ca6 main -> main); local HEAD (b7b9ca6) matches origin/main tip exactly; working tree clean. The full build/clippy/test/drive-script suite was run against this exact commit content before pushing (fast-forward push, no server-side transform), so the pushed tip is verified green. todo.md still has pending items (H8/FCEUX, virtio-rng, H9 Ubuntu, Buildroot/Nix pipeline) -- emitting NEXT.
+
+## 2026-07-26T14:43:46 UTC (45min) - Session usage — build-22 [sonnet]
+- cost $13.5755 (from claude -p)
+- context 323,716 tok peak of 1M (32%) across 115 inference calls, monotonic
+- models sonnet-5 $13.5723 (in 9,480 / out 126,158 / cache-read 29,731,644) · haiku-4-5 $0.0031
+- subagents (4) sonnet-5 x4
+- transcript: ralph/.run/20260726T004845Z/022-build-22.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 23
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Read todo.md fully. Remaining pending items are: H8 Mario (blocked on FCEUX Qt5/SDL2 packaging - confirmed large, needs Buildroot/Nix or offscreen QPA validation), virtio-rng device model (confirmed multi-day, no Device/Bus impl exists), H9 Ubuntu (not started), and duplicate entropy tests (confirmed non-actionable). Scoping which is tractable for one iteration...
+
+No nix/buildroot toolchain present; libqt5gui5t64 offscreen plugin package not yet installed. Spawned a research agent to scope virtio-rng device model feasibility (current DeviceBus is PIO-only, zero virtio-mmio code) against the goal of closing virtio_rng_reseed_is_deterministic. Waiting on that report before committing to this iteration's scope.
+
+Research back: full virtio-rng (virtqueue+IRQ routing+real driver) is confirmed multi-day - too many stacked unknowns (ring parsing, IRQ routing with no in-kernel irqchip) for one session. Scoping down to a real, non-stub slice: the virtio-mmio v2 transport-layer register block (magic/version/device-id/status FSM/feature negotiation/queue registers) as a generic, reusable Bus impl - a genuine spec-compliant building block for virtio-rng AND future virtio-blk (H9), not yet wired to a real virtqueue/driver. Reading current Bus/DeviceBus code to implement.
+
+Writing crates/baud-multiverse/src/virtio_mmio.rs: a real, spec-compliant virtio-mmio v2 transport register block (magic/version/device-id/vendor-id, feature negotiation, per-queue registers, status FSM) implementing Bus - the reusable building block virtio-rng (and later virtio-blk for H9) both need on top of. Not yet wired to a real virtqueue or interrupt delivery (documented as the explicit next step) - deliberately scoped to what's genuinely completable and hardware-independently testable this session.
+
+virtio_mmio.rs written (transport register block: magic/version/device-id/vendor-id, feature negotiation, per-queue registers, status FSM), wired into DeviceBus as an opt-in enable_virtio_rng() slot, plus a DeviceBus-level wiring test. Running cargo build -p baud-multiverse to check compilation before the full workspace run.
+
+baud-multiverse crate: cargo build clean, cargo test --lib clean (98 passed, 8 ignored as expected/enforced-regime, 0 failed) - all 8 new virtio_mmio unit tests plus the DeviceBus wiring test pass, no regressions. Running clippy on the crate next.
+
+baud-multiverse clippy clean of new warnings (pre-existing warnings in lib.rs/timesource.rs confirmed unrelated to this change, none touch virtio_mmio.rs/console.rs/layout.rs). Running full cargo build --workspace next.
+
+cargo clippy --workspace --all-targets: zero new warnings (all pre-existing, matching iteration 21's already-documented list in lib.rs/timesource.rs/transport.rs/fuzz.rs/replay.rs/tracing.rs). Running cargo test --workspace now.
+
+cargo test --workspace: ALL GREEN (0 failed across every crate). Running drive/h0.sh through h7.sh and m9.sh-m13.sh sequentially, one Bash call each, per verification protocol.
+
+drive/h0.sh through h5.sh all PASSED on real /dev/kvm, no regressions. Continuing with h6.sh, h7.sh, m9-m13.
+
+h6.sh, h7.sh PASSED. Continuing with m9-m13.sh.
+
+All drive scripts h0-h7 and m9-m13 PASSED on real /dev/kvm, no regressions. Updating todo.md with this iteration's finding (virtio-mmio transport register block implemented and tested; virtqueue/interrupt-delivery/CLI-boot wiring still open, confirmed genuinely separate next steps) before committing.
+
+todo.md updated with ralph iteration 23's finding: virtio-mmio v2 transport register block (crates/baud-multiverse/src/virtio_mmio.rs) implemented, tested (8 new unit tests + DeviceBus wiring test), and wired opt-in into DeviceBus; stale prior claims ("zero virtqueue/virtio-mmio code anywhere", "no trait Device/Bus impl for it") corrected with pointers to the new work; virtqueue ring parsing + interrupt delivery + boot/CLI wiring documented as the still-open remainder. Appending final progress block and committing.
+
+## 2026-07-26T15:17:33 UTC - Changes committed.
+- Implemented a real, spec-compliant virtio-mmio v2 transport-layer register block (magic/version/
+  device-id/vendor-id, feature negotiation, per-queue registers, status FSM), the reusable
+  building block virtio-rng (and later virtio-blk for H9) both need — not yet wired to a real
+  virtqueue ring or interrupt delivery, both confirmed genuinely separate next-session work by a
+  dedicated scoping investigation before this was written.
+- Files changed: crates/baud-multiverse/src/virtio_mmio.rs (new), crates/baud-multiverse/src/
+  console.rs, crates/baud-multiverse/src/layout.rs, crates/baud-multiverse/src/lib.rs, todo.md.
+- **Brief description of changes:**
+  - A Sonnet research agent first re-verified todo.md'\''s premise that virtio-rng needs a
+    multi-day device-model effort: confirmed `DeviceBus` had zero MMIO dispatch at all
+    (`mmio_read`/`mmio_write` unconditionally fell through to `OpenBusFallback`), and — the
+    key finding — that a *complete* virtio-rng (real virtqueue ring parsing + interrupt delivery)
+    remains multi-day because this host registers no in-kernel irqchip
+    (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called), so which vector a
+    `virtio_mmio.device=` cmdline IRQ resolves to is unverified. Scoped down to the largest
+    genuinely non-stub slice completable without touching that unknown: the transport register
+    window alone.
+  - New `crates/baud-multiverse/src/virtio_mmio.rs`: `VirtioMmioTransport` implements `Bus`
+    over the full virtio-mmio v2 register set (spec 1.1 §4.2.2) — magic/version/device-id/
+    vendor-id (read-only), feature negotiation across both 32-bit words of a 64-bit bitmap,
+    per-queue selection/sizing/readiness/ring-address registers, `QueueNotify` recorded (not
+    yet acted on), and a real status-FSM reset (writing 0 clears driver-negotiated state, device
+    identity persists). Device id/features/queue-count/queue-max are constructor parameters
+    (`new_rng` is one instantiation), keeping the module reusable for a future virtio-blk and
+    clean of the `workload_lint` generic-core guardrail.
+  - New `crate::layout::VIRTIO_MMIO_RNG_BASE`/`VIRTIO_MMIO_RNG_LEN` place the device window at
+    `0xd000_0000`, outside `GUEST_RAM_SIZE` (a new static assertion enforces this — any address
+    inside registered RAM never reaches a VM exit), matching the `virtio_mmio.device=<size>@
+    <base>:<irq>` cmdline convention Firecracker/crosvm use for direct-boot guests with no
+    ACPI/PCI/DT.
+  - `DeviceBus` (console.rs) gained an opt-in `enable_virtio_rng()` method; every existing
+    constructor (`Default`/`with_tape`/`restore`) leaves the slot unset, so no existing boot
+    path'\''s MMIO behavior changes — confirmed via a new wiring test plus the full h0-h7/m9-m13
+    regression run.
+  - 8 new `virtio_mmio` unit tests (including a full driver probe/negotiate/queue-setup/
+    DRIVER_OK sequence walked end-to-end through the register interface) plus 1 new
+    `DeviceBus`-level wiring test — all hardware-independent, no KVM/perf touched.
+  - todo.md updated: corrected two stale claims ("zero virtqueue/virtio-mmio code anywhere",
+    "no trait Device/Bus impl for it") with pointers to this work, and documented the still-open
+    remainder (real ring parsing, interrupt delivery, boot/CLI wiring) precisely.
+  - Verification: `cargo build`/`clippy`/`test --workspace` all clean (0 failures, 0 new
+    clippy warnings — confirmed via targeted grep against the new files); `drive/h0.sh` through
+    `drive/h7.sh` (8/8) and `drive/m9.sh` through `drive/m13.sh` (5/5) all PASS on real
+    `/dev/kvm`, no regressions.
+---

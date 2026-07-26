@@ -125,6 +125,18 @@ pub fn build_flat_gdt() -> [u64; 3] {
     [NULL_DESCRIPTOR, CODE_DESCRIPTOR, DATA_DESCRIPTOR]
 }
 
+/// MMIO device windows — deliberately **outside** [`GUEST_RAM_SIZE`], since any address KVM has a
+/// registered memory region for is served straight from guest RAM and never reaches a VM exit at
+/// all; a device window must sit somewhere `KVM_SET_USER_MEMORY_REGION` never claims so a guest
+/// access to it always traps. Matches the address an unmodified Linux kernel is told to probe via
+/// the `virtio_mmio.device=<size>@<base>:<irq>` cmdline parameter (the same convention Firecracker
+/// and crosvm use for a direct-boot guest with no ACPI/PCI/DT to auto-discover devices through —
+/// todo.md §3.8's virtio-rng entry). One 512-byte (`0x200`) window comfortably covers every
+/// register `virtio_mmio.rs`'s [`crate::virtio_mmio::VirtioMmioTransport`] defines, config space
+/// included, with room to spare (virtio-mmio v2, specs/baud-multiverse.md §3's determinism table).
+pub const VIRTIO_MMIO_RNG_BASE: u64 = 0xd000_0000;
+pub const VIRTIO_MMIO_RNG_LEN: u64 = 0x200;
+
 /// The command line must fit before the kernel load address, and the kernel must load at or above
 /// high memory — both sides of each comparison are `const`, so this is checked once at compile
 /// time rather than as a runtime assertion on values that can never change without recompiling
@@ -135,6 +147,7 @@ const _STATIC_LAYOUT_INVARIANTS: () = {
     assert!(RNG_SEED_SETUP_DATA_ADDR + RNG_SEED_SETUP_DATA_LEN <= PML4_ADDR);
     assert!(INITRAMFS_ADDR > KERNEL_LOAD_ADDR);
     assert!((INITRAMFS_ADDR as usize) < GUEST_RAM_SIZE);
+    assert!(VIRTIO_MMIO_RNG_BASE >= GUEST_RAM_SIZE as u64);
 };
 
 const PAGE_TABLE_ENTRY_COUNT: usize = 512;

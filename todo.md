@@ -1305,6 +1305,57 @@ snapshot, not a duplicate of it.
      the same missing virtio-rng infra (the third) — deliberately not added, since they would add
      zero new coverage while costing multi-minute enforced-regime real-hardware boots each; H9
      Ubuntu still not started.
+     **This iteration (ralph iteration 23): the "zero virtqueue/virtio-mmio code anywhere" gap
+     just above is now partly closed — a real, spec-compliant virtio-mmio v2 *transport-layer*
+     register block exists and is hardware-independently tested, though `virtio_rng_reseed_is_
+     deterministic` itself is still not reachable.** Before writing code, a Sonnet research agent
+     was asked to re-verify the premise above and scope the smallest genuinely non-stub next
+     slice; it confirmed `DeviceBus` (`crates/baud-multiverse/src/console.rs`) really was a
+     hardcoded PIO-only if/else chain with `mmio_read`/`mmio_write` unconditionally falling
+     through to `OpenBusFallback`, and — critically — flagged that a *complete* virtio-rng (real
+     virtqueue descriptor/avail/used-ring parsing over `vm-memory`, plus interrupt delivery) is
+     still genuinely multi-day: this host registers no in-kernel irqchip at all
+     (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called anywhere in `linux/mod.rs`), so which
+     vector a `virtio_mmio.device=` cmdline IRQ number would even resolve to is unverified and
+     needs its own investigation, not a same-session add. New `crates/baud-multiverse/src/
+     virtio_mmio.rs` implements the *transport* register window alone — deliberately the
+     boundary the agent identified as the largest piece completable without touching that
+     unknown: `VirtioMmioTransport` (device-id/feature-bitmap/queue-count/queue-max-size are
+     constructor parameters, not hardcoded, so it is reusable for a future virtio-blk on the same
+     transport per §4.7/H9, not virtio-rng-specific code in the generic core) implements `Bus`
+     over the full virtio-mmio v2 register set (spec 1.1 §4.2.2 Table 4.1): magic/version/
+     device-id/vendor-id (read-only, `VIRTIO_DEVICE_ID_RNG = 4`), feature negotiation across both
+     32-bit words of a 64-bit bitmap (`VIRTIO_F_VERSION_1` for `new_rng`), queue selection/
+     sizing/readiness/ring-address registers (desc/driver/device, low+high halves) stored
+     verbatim per queue, `QueueNotify` recorded via `notify_count()`/`last_notified_queue()`, and
+     a real status-register reset FSM (writing `0` clears all driver-negotiated state — feature
+     acceptance, queue state, notify counters — while device identity/queue-count/max persist,
+     spec 1.1 §2.1). New `crate::layout::VIRTIO_MMIO_RNG_BASE`/`VIRTIO_MMIO_RNG_LEN` place the
+     device window at `0xd000_0000`, deliberately outside `GUEST_RAM_SIZE` (any address inside
+     the registered RAM region is served straight from guest RAM and never reaches a VM exit at
+     all — a `_STATIC_LAYOUT_INVARIANTS` assertion now checks this) — the same
+     `virtio_mmio.device=<size>@<base>:<irq>` cmdline convention Firecracker/crosvm use for a
+     direct-boot guest with no ACPI/PCI/DT to auto-discover devices through. Wired into
+     `DeviceBus` as a new opt-in `enable_virtio_rng()` method (every existing constructor —
+     `Default`, `with_tape`, `restore` — leaves the slot `None`, so no existing boot path's MMIO
+     behavior changes at all: confirmed via a new `device_bus_mmio_falls_through_to_open_bus_
+     until_virtio_rng_is_enabled` test plus the full h0-h7/m9-m13 regression run below). 8 new
+     `virtio_mmio` unit tests, including one that walks a real driver's actual probe/negotiate/
+     queue-setup/`DRIVER_OK` sequence (spec 1.1 §3.1) end-to-end through the register interface
+     and asserts each stage's read-back, an "unavailable queue index reports zero max and never
+     leaks into another queue's state" test, and a reset test proving driver-negotiated state
+     clears while device identity persists — all hardware-independent (pure register-state
+     machine, no KVM/perf touched, same convention as `console.rs`'s own `vm_superio`-based
+     tests). **What this explicitly does not do yet, matching the research agent's scoping**: no
+     descriptor/avail/used ring is ever read from guest memory (`QueueNotify` only counts that a
+     notification arrived), `InterruptStatus` always reads `0` (no interrupt is ever raised), and
+     nothing wires this into a real boot's cmdline/CLI/server route yet — `virtio_rng_reseed_is_
+     deterministic` still cannot pass until a follow-up session adds real ring parsing plus
+     resolves the interrupt-routing question above. `cargo build`/`clippy`/`test --workspace` all
+     clean (0 failures; confirmed zero *new* clippy warnings via a `grep` over the new files
+     specifically, distinct from the pre-existing warning list already documented in prior
+     iterations); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all still PASS on
+     real `/dev/kvm`, no regressions from the widened `DeviceBus`.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-
@@ -1564,8 +1615,14 @@ snapshot, not a duplicate of it.
      `os_entropy_is_deterministic`; per a prior iteration's research, the first two would only ever
      duplicate `os_entropy_is_deterministic` against the same real-Linux fixture (no minimal-kernel
      entropy fixture exists), and `virtio_rng_reseed_is_deterministic` needs an actual virtio-rng
-     device model, which does not exist yet (no `trait Device`/`Bus` impl for it) — a multi-day
-     effort, not a quick add. No guest-kernel patch.
+     device model — ralph iteration 23 closed the transport-register-layer sub-piece of this
+     (`crates/baud-multiverse/src/virtio_mmio.rs`, a real `Bus` impl for the full virtio-mmio v2
+     register window, wired into `DeviceBus` behind opt-in `enable_virtio_rng()`; see item 1's
+     ralph-iteration-23 note above for the full detail), but real virtqueue ring parsing over
+     `vm-memory`, interrupt delivery (this host registers no in-kernel irqchip at all, so which
+     vector a `virtio_mmio.device=` IRQ resolves to is unverified), and boot/cmdline/CLI wiring
+     are all still open — still a multi-day effort in total, just a smaller remaining slice than
+     before. No guest-kernel patch.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

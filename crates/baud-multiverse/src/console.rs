@@ -22,6 +22,7 @@
 // `cpuid.rs`/`layout.rs`/`baud-vcpu`'s `boundary.rs` use.
 
 use crate::tape_bus::TapeBus;
+use crate::virtio_mmio::VirtioMmioTransport;
 use baud_vcpu::{Bus, OpenBusFallback, OPEN_BUS_BYTE};
 use std::cell::Cell;
 use std::convert::Infallible;
@@ -220,6 +221,14 @@ pub struct DeviceBus {
     pub console: Console,
     pub tape: TapeBus,
     cmos: Cmos,
+    /// The virtio-rng transport register block (`crate::virtio_mmio`), `None` until
+    /// [`Self::enable_virtio_rng`] is called — every existing constructor (`Default`,
+    /// [`Self::with_tape`], [`Self::restore`]) leaves it unset, so no existing boot path's MMIO
+    /// behavior changes: an unset slot falls straight through to `fallback` exactly as before this
+    /// device existed. Not yet wired into any real boot's cmdline/CLI (todo.md-tracked next step —
+    /// this transport has no virtqueue-ring or interrupt-delivery implementation yet, see that
+    /// module's doc).
+    virtio_rng: Option<VirtioMmioTransport>,
     fallback: OpenBusFallback,
 }
 
@@ -230,6 +239,13 @@ impl DeviceBus {
     /// from outside `console.rs`).
     pub fn with_tape(tape: Vec<u8>) -> Self {
         DeviceBus { tape: TapeBus::new(tape), ..Default::default() }
+    }
+
+    /// Installs a virtio-rng transport at [`crate::layout::VIRTIO_MMIO_RNG_BASE`] — opt-in (no
+    /// existing caller does this yet), so [`Bus::mmio_read`]/[`Bus::mmio_write`] start dispatching
+    /// that address window to it instead of [`OpenBusFallback`].
+    pub fn enable_virtio_rng(&mut self) {
+        self.virtio_rng = Some(VirtioMmioTransport::new_rng(crate::layout::VIRTIO_MMIO_RNG_BASE));
     }
 
     /// A [`DeviceBus`] reconstructed from a `Universe` snapshot's device row
@@ -246,6 +262,7 @@ impl DeviceBus {
             console: Console::with_output(console_output),
             tape: tape_bus,
             cmos: Cmos,
+            virtio_rng: None,
             fallback: OpenBusFallback,
         }
     }
@@ -277,10 +294,22 @@ impl Bus for DeviceBus {
     }
 
     fn mmio_read(&mut self, addr: u64, data: &mut [u8]) {
+        if let Some(virtio_rng) = self.virtio_rng.as_mut() {
+            if virtio_rng.in_range(addr).is_some() {
+                virtio_rng.mmio_read(addr, data);
+                return;
+            }
+        }
         self.fallback.mmio_read(addr, data);
     }
 
     fn mmio_write(&mut self, addr: u64, data: &[u8]) {
+        if let Some(virtio_rng) = self.virtio_rng.as_mut() {
+            if virtio_rng.in_range(addr).is_some() {
+                virtio_rng.mmio_write(addr, data);
+                return;
+            }
+        }
         self.fallback.mmio_write(addr, data);
     }
 }
@@ -380,6 +409,25 @@ mod tests {
 
         bus.pio_write(TAPE_DEVICE_BASE + reg::CONTROL, &[ControlOp::MarkBranch as u8]);
         assert_eq!(bus.tape.device_mut().drain_records().len(), 1);
+    }
+
+    #[test]
+    fn device_bus_mmio_falls_through_to_open_bus_until_virtio_rng_is_enabled() {
+        let mut bus = DeviceBus::default();
+        let mut data = [0u8; 4];
+        bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE, &mut data);
+        assert_eq!(data, [OPEN_BUS_BYTE; 4], "no MMIO device is modeled until opted in");
+
+        bus.enable_virtio_rng();
+        bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE, &mut data);
+        assert_eq!(
+            u32::from_le_bytes(data),
+            crate::virtio_mmio::VIRTIO_MMIO_MAGIC,
+            "once enabled, the window must route to the real transport, not open bus"
+        );
+        // An address just past the device's window still falls through to open bus.
+        bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE + crate::layout::VIRTIO_MMIO_RNG_LEN, &mut data);
+        assert_eq!(data, [OPEN_BUS_BYTE; 4]);
     }
 
     #[test]
