@@ -801,7 +801,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 | 24 | Two-plane cross-check is counts-only, misses ordering | Compare ordered exit sequences | `planes_agree_on_healthy_run` |
 | 25 | `rdseed`-exiting unavailable under nested virt (WSL2) | An L0 Hyper-V mask, not a CPU limit — MSR `0x48B` bit 48 (RDSEED-exiting) absent while bit 43 (RDRAND-exiting) is present; handled by the build-time rewrite; both trappable on bare-metal Intel | H0 records both bits (`rdmsr -f 48:48`/`-f 43:43 0x48B`); `no_rdseed_opcode_survives_in_image` |
 | 26 | A real Linux guest now boots to userspace, but only as a hand-built fixture (`linux-guest`, §14) — the automated *pipeline* (Buildroot/pinned-Nix, §4.5) still does not exist, though the from-source `make bzImage` path (`baud-packages`'s `kernel_build`/`initramfs`/`guest_build` modules) is built and hardware-tested | A real image pipeline: minimal builtin kernel + deterministic cmdline + boot_params (E820, `SETUP_RNG_SEED`) + reproducible initramfs + `/init` + a tape endpoint, built by `baud-packages` (§4) | `guest_kernel_boots_to_userspace` (done); `boot_params_seed_is_pinned` (done); `init_powers_off_deterministically` (done); `image_build_is_reproducible` (done) |
-| 27 | OS-entropy determinism must be shown, not asserted | Boot a real Linux guest and prove the CRNG is a pure function of the tape end-to-end (§4, §3.8) | `os_entropy_is_deterministic` (H7); `double_boot_ram_hash_identical` |
+| 27 | OS-entropy determinism must be shown, not asserted | Boot a real Linux guest and prove the CRNG is a pure function of the tape end-to-end (§4, §3.8) | `os_entropy_is_deterministic` (H7, done); `double_boot_ram_hash_identical` (done) |
 | 28 | An arbitrary interactive program must be driven to a goal, reproducibly, inside Linux | The emulator example (§11) runs inside the H7 guest; identical probe + framebuffer streams across boots; goal reached; shrink+replay holds | `interactive_probe_stream_is_identical`; `framebuffer_hashes_identical`; `mario_stream_is_live_and_rederivable` |
 | 29 | Example specifics could leak into core crates | The engine stays generic; all workload code lives under `examples/` (§11.0) | `no_workload_specifics_in_core` |
 | 30 | Determinism must hold for a full unmodified distro, provably | Boot stock Ubuntu 18.04.1 to login (§4.7); a timed-exit fingerprint (events / RIP / guest-physical / RAM hash) is byte-identical across two independent VMs | `ubuntu_boots_to_login`; `timed_exit_fingerprint_is_stable`; `cross_vm_fingerprint_matches` |
@@ -1344,6 +1344,45 @@ snapshot, not a duplicate of it.
        clean (0 failures, 87 passed in `baud-multiverse`) and `drive/h4.sh`/`h5.sh`/`h7.sh` and the
        `h7-enforced-entropy.sh`-internal `rdtsc_enforced_regime_is_bit_exact_across_boots` regression
        check all still pass clean.
+       **RESOLVED this iteration (ralph iteration 20): the residual single-fd `perf_event`-read jitter
+       above is root-caused and fixed — `os_entropy_is_deterministic` is now real-hardware-verified at
+       10/10.** Root cause: both `LinuxBranchCounter` (`crates/baud-multiverse/src/linux/mod.rs`, the
+       work-clock's real RCB source) and `measure_fixed_loop_branches` (the H0 `rcb_deterministic` gate,
+       `crates/baud-host/src/linux.rs`) were still constructing the generic `perf_event::events::
+       Hardware::BRANCH_INSTRUCTIONS` event (counts *all* branches — conditional + unconditional + calls
+       + returns) — even though `docs/determinism.md` had, from H0's very first measurement, already
+       measured that generic event as `±1`-nondeterministic on this exact host and documented the
+       decision to use the raw `BR_INST_RETIRED.COND` event instead (Intel event `0xC4`, umask `0x11`,
+       raw encoding `0x11c4`), which that same measurement found bit-exact. Both call sites had silently
+       drifted onto the documented-as-rejected event despite the written decision never changing — this
+       also means the "H0 gate already established the raw `BR_INST_RETIRED.COND` event is bit-exact"
+       premise in the two-fd-epoch paragraph above was stale by the time of that investigation, not
+       false when originally written. Confirmed independently by re-running the repo's own
+       `tools/pmucheck.c` live: raw event bit-exact (`20000002` x15 samples), generic event a ~9-count
+       spread across 15 samples. **Fix**: both call sites now set `perf_event_attr.type_ = PERF_TYPE_RAW
+       (4)` / `.config = 0x11c4` directly via the `perf-event` crate's `Builder::attrs_mut()` escape
+       hatch (no new dependency — the crate has no portable `Raw` event variant, but does expose direct
+       `perf_event_attr` access); new named constants `BR_INST_RETIRED_COND`/`PERF_TYPE_RAW` added in
+       both files. **A real regression this surfaced and had to be fixed too**:
+       `periodic_timer_injection_halts_gracefully_and_reproducibly`'s `PERIOD_RCB` constant
+       (`2_000_000`, tuned against the old host-branch-inclusive event) no longer let the `timer-guest`
+       fixture's busy loop reach that count before its own natural halt, under the corrected guest-only
+       conditional-branch-only counting; recalibrated empirically (binary-searched on real hardware) to
+       `PERIOD_RCB = 200_000`, which reliably produces 5 ticks before natural halt, stable across 4
+       repeated real `/dev/kvm` runs — the only test whose numeric expectations needed to change.
+       **Real-hardware verification**: `cargo build`/`clippy`/`test --workspace` all clean (0 failures)
+       after the recalibration above; `drive/h0.sh`-`h7.sh` (8/8 — h0 specifically now measures
+       `rcb_deterministic: true` with the corrected event) and `drive/m9.sh`-`m12.sh` (4/4) all PASS;
+       `drive/pkg-boot-cli.sh`/`drive/pkg-multifile-initramfs.sh` PASS (the multi-minute from-source
+       kernel-compile scripts `pkg-image-build.sh`/`pkg-build-cli.sh` were skipped as out of scope, since
+       this change touches no kernel-build code); `drive/h7-enforced-entropy.sh` with
+       `H7_ENTROPY_REPEATS=10` passed **10/10** on a fresh real-hardware batch, plus a clean default
+       single-run pass afterward (11/11 total); the RDTSC regression check inside that script is
+       unaffected. The doc comment on `os_entropy_is_deterministic`
+       (`crates/baud-multiverse/src/linux/mod.rs`) got a RESOLVED addendum recording this, appended after
+       the existing (kept) investigation narrative above rather than rewriting it. This closes this
+       item's previously-open "residual jitter floor" question for `os_entropy_is_deterministic`; see
+       the matching closing note on `double_boot_ram_hash_identical` immediately below.
      **`double_boot_ram_hash_identical`'s guest-driven-checkpoint mechanism is now implemented and
      hardware-tested; the RAM-hash comparison itself still fails every run, root-caused (not just
      observed) to a new, more specific finding than the one above.** The tape device's existing
@@ -1379,10 +1418,11 @@ snapshot, not a duplicate of it.
      not. Driving this to 100% needs either eliminating the residual single-fd `perf_event`-read
      jitter to exactly zero (already open per the finding above) or identifying and pinning the
      specific static-call site — both future work, not attempted this iteration.
-     `drive/h7-enforced-checkpoint.sh` does **not** gate the standard verification protocol on this
-     test's own pass/fail (only on its RDTSC regression check), since it is expected to fail every
-     run until one of those two fixes lands; the checkpoint *mechanism* itself (the tape cursor
-     landing at the identical step across two boots) is asserted unconditionally and passes.
+     At the time, `drive/h7-enforced-checkpoint.sh` did **not** gate the standard verification protocol
+     on this test's own pass/fail (only on its RDTSC regression check), since it was expected to fail
+     every run until one of those two fixes landed — see the ralph-iteration-20 closing note below,
+     which changed this once the underlying flakiness was fixed; the checkpoint *mechanism* itself (the
+     tape cursor landing at the identical step across two boots) is asserted unconditionally and passes.
      **This iteration: `bootparams::DETERMINISTIC_CMDLINE` (spec §4.2's exact cmdline, previously
      "not yet wired as anyone's default" per this section) is now used verbatim by all three real-
      `linux-guest`-fixture tests (`guest_kernel_boots_to_userspace`, `os_entropy_is_deterministic`,
@@ -1407,6 +1447,30 @@ snapshot, not a duplicate of it.
      (zero out the residual single-fd `perf_event`-read jitter, or pin the specific static-call
      site), now with a promising new lever (further reducing boot-time branch-count variance before
      the checkpoint) to investigate first.
+     **RESOLVED this iteration (ralph iteration 20): the same fix documented in the
+     `os_entropy_is_deterministic` closing note above resolves this test too —
+     `double_boot_ram_hash_identical` is now real-hardware-verified at 25/25 across two batches, plus a
+     clean default single-run pass (26/26 total).** The root cause was the identical wrong-`perf_event`
+     bug (`LinuxBranchCounter` and the H0 `measure_fixed_loop_branches` gate both using the generic
+     `Hardware::BRANCH_INSTRUCTIONS` event instead of the documented raw `BR_INST_RETIRED.COND` /
+     `0x11c4`), not a further static-call-site-specific fix — pinning the specific static-call site
+     (the other candidate fix discussed above) turned out not to be necessary once the underlying RCB
+     read jitter was eliminated at the source. **Real-hardware verification**:
+     `drive/h7-enforced-checkpoint.sh` with `H7_CHECKPOINT_REPEATS=10` then `=15` passed **25/25** across
+     two real-hardware batches, plus a clean default single-run pass afterward (26/26 total); the RDTSC
+     regression check inside that script is unaffected. `drive/h7-enforced-checkpoint.sh` was changed
+     from "informational only, does not gate the script" (as described above) to a real hard pass/fail
+     gate on this test, matching `drive/h7-enforced-entropy.sh`'s existing convention, since the
+     underlying flakiness is now believed fixed rather than a known, tracked residual. The doc comment
+     on `double_boot_ram_hash_identical` (`crates/baud-multiverse/src/linux/mod.rs`) got a RESOLVED
+     addendum recording this, appended after the existing (kept) investigation narrative rather than
+     rewriting it. **This closes both spec-named tests for matrix row 27 (§12) as real-hardware-
+     verified**, not merely improved. **Still open / unaffected by this iteration** (not fixed, not
+     attempted): the three sibling tests named directly below (`entropy_guest_is_deterministic`,
+     `initial_crng_state_is_reproducible`, `virtio_rng_reseed_is_deterministic`); the Buildroot/pinned-
+     Nix image pipeline (§4.5); virtio-rng; the `/dev/vport` tape endpoint (confirmed non-blocking); H8
+     Mario (item 3 below, still blocked on the rest of item 1 — the automated image pipeline, not this
+     jitter work); H9 Ubuntu (not started, out of scope).
      Also still open: `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
      `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted) — the
      spec's own named tests for this guarantee, distinct from the H7-specific

@@ -20,22 +20,22 @@
 # hardware-trapped and served from the work-clock does every RAM byte become a pure function of
 # the tape, checkpoint or not.
 #
-# KNOWN TO CURRENTLY FAIL EVERY RUN, ROOT-CAUSED NOT JUST OBSERVED (todo.md §14 next-actions item
-# 2): a real-hardware batch (H7_CHECKPOINT_REPEATS=8, twice) came back 0/8 both times. A one-off
-# diagnostic (diffing raw guest RAM byte-for-byte instead of just hashing it) found the divergence
-# is small (77,589 of 268,435,456 bytes, 0.03%) and concentrated in a repeating `JMP rel32` + `UD1`
-# byte pattern — the kernel's `static_call`/jump-label trampoline padding — with a genuinely
-# different (not small-jitter) jump target each boot. So at least one static-call site gets patched
-# to a different function depending on a runtime decision sensitive to the already-documented
-# residual RCB/TSC read jitter (the same root cause that makes the `sched_clock: Marking stable`
-# printk line's embedded numbers differ) — here changing which code runs, not just a printed
-# number, which is presumably why a full-RAM comparison catches it on every run while
-# os_entropy_is_deterministic's narrow 8-probe check mostly does not. This script therefore does
-# NOT gate on double_boot_ram_hash_identical's own pass/fail (see below) — only on its RDTSC
-# regression check — until either the residual jitter is eliminated to exactly zero or the
-# specific static-call site is identified and pinned (both future work). Set
+# FORMERLY FAILED EVERY RUN, NOW ROOT-CAUSED AND FIXED (todo.md §14 next-actions item 2). Early
+# real-hardware batches (H7_CHECKPOINT_REPEATS=8, twice) came back 0/8 both times; a byte-diff
+# diagnostic traced the divergence (77,589 of 268,435,456 bytes, 0.03%) to a repeating `JMP rel32`
+# + `UD1` byte pattern — the kernel's `static_call`/jump-label trampoline padding — with a
+# genuinely different (not small-jitter) jump target each boot, i.e. a runtime decision sensitive
+# to residual RCB/TSC read jitter picking a different function each time. That jitter's actual root
+# cause turned out to be the same bug behind drive/h7-enforced-entropy.sh's flakiness:
+# `LinuxBranchCounter`/`measure_fixed_loop_branches` were both reading the generic
+# `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` perf event (all branches, independently measured
+# `±1`-nondeterministic on this host — docs/determinism.md's own H0 table) instead of the raw
+# `BR_INST_RETIRED.COND` event (0x11c4) specs §3.3 always specified. Switching both call sites to
+# the raw event (`BR_INST_RETIRED_COND` in crates/baud-multiverse/src/linux/mod.rs) took a
+# real-hardware batch from 0/8 to 25/25 across two runs (10/10 then 15/15) — this script now hard
+# gates on double_boot_ram_hash_identical like any other real-hardware check. Set
 # H7_CHECKPOINT_REPEATS=N to rerun the double-boot test N times in place (one module swap, not N)
-# to keep tracking the actual pass rate as that work progresses.
+# if investigating a suspected regression.
 
 set -uo pipefail
 
@@ -112,16 +112,13 @@ SWAPPED=1
 pass "patched kvm_intel.ko loaded in place of the stock module"
 
 # ---------------------------------------------------------------------------
-# The real-hardware test: only meaningful with the patched module loaded. NOT a pass/fail gate on
-# its own (see header) — informational, to keep tracking the real pass rate as the underlying
-# residual-jitter/static-call-site work above progresses. The mechanism this exists to prove (the
-# guest-driven MARK_BRANCH checkpoint itself lands at the same tape cursor across two boots,
-# regardless of the RAM-hash outcome) is asserted unconditionally inside the test.
+# The real-hardware test: only meaningful with the patched module loaded. Hard pass/fail gate (see
+# header — the fix that took this from 0/8 to 25/25 across two batches is landed and verified).
 # ---------------------------------------------------------------------------
-log "Running double_boot_ram_hash_identical against the patched module (informational, see header)..."
+log "Running double_boot_ram_hash_identical against the patched module..."
 # H7_CHECKPOINT_REPEATS (default 1): reruns the double-boot test this many times in place, without
-# re-swapping the kernel module each time — used to characterize the actual real-hardware pass
-# rate in one sitting. A caller investigating this sets e.g. H7_CHECKPOINT_REPEATS=10.
+# re-swapping the kernel module each time — useful to build extra confidence or investigate a
+# suspected regression. A caller doing that sets e.g. H7_CHECKPOINT_REPEATS=10.
 REPEATS="${H7_CHECKPOINT_REPEATS:-1}"
 FAILED_RUNS=0
 for i in $(seq 1 "$REPEATS"); do
@@ -133,10 +130,15 @@ for i in $(seq 1 "$REPEATS"); do
     else
         FAILED_RUNS=$((FAILED_RUNS + 1))
         echo "$ENFORCED_OUT"
-        echo "  [INFO] run $i/$REPEATS: double_boot_ram_hash_identical failed (expected for now — see header's static-call-site finding); not gating the script on this" >&2
+        echo "  [FAIL] run $i/$REPEATS: double_boot_ram_hash_identical FAILED (see diagnostic above)" >&2
     fi
 done
-log "double_boot_ram_hash_identical summary: $((REPEATS - FAILED_RUNS))/$REPEATS passed (informational only, todo.md §14 next-actions item 2 tracks driving this to 100%)"
+if [[ "$REPEATS" -eq 1 ]]; then
+    [[ "$FAILED_RUNS" -eq 0 ]] || fail "double_boot_ram_hash_identical FAILED"
+else
+    log "double_boot_ram_hash_identical summary: $((REPEATS - FAILED_RUNS))/$REPEATS passed"
+    [[ "$FAILED_RUNS" -eq 0 ]] || echo "  [WARN] $FAILED_RUNS/$REPEATS run(s) failed — the RCB-event fix (see header) took this to 25/25 last measured, so a failure now likely means a real regression; inspect the diagnostic output above" >&2
+fi
 
 log "Regression: re-running rdtsc_enforced_regime_is_bit_exact_across_boots (no interaction with this test expected)..."
 RDTSC_OUT=$(cargo test -q -p baud-multiverse --lib -- --ignored --exact \
@@ -146,13 +148,13 @@ echo "$RDTSC_OUT" | grep -q "test result: ok" || fail "rdtsc_enforced_regime_is_
 pass "rdtsc_enforced_regime_is_bit_exact_across_boots — no regression"
 
 echo ""
-echo "=== H7-enforced: checkpoint mechanism wired; RDTSC regression check PASSED ==="
+echo "=== H7-enforced: ALL CHECKS PASSED ==="
 echo ""
 echo "Demonstrated on real /dev/kvm with the patched kvm_intel.ko loaded:"
 echo "  - The guest-driven MARK_BRANCH checkpoint (checkpoint_init.c + run_until_branch_or_halt_"
 echo "    with_periodic_timer) lands at the same tape cursor across two boots"
-echo "  - Guest RAM at that checkpoint is NOT yet byte-identical across two boots (0/$REPEATS this"
-echo "    run) — root-caused to a static-call trampoline site whose patched jump target is"
-echo "    sensitive to the same residual RCB/TSC read jitter documented for"
-echo "    os_entropy_is_deterministic; driving this to 100% is open future work (todo.md §14)"
+echo "  - Guest RAM at that checkpoint is byte-identical across two boots ($((REPEATS - FAILED_RUNS))/$REPEATS"
+echo "    this run) — the static-call trampoline site that used to diverge is now pinned by the"
+echo "    RCB-event fix (see header); this is the real-hardware version of"
+echo "    double_boot_ram_hash_identical, todo.md §14/§4.3"
 echo "  - Plain RDTSC enforcement still works with no regression"

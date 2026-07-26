@@ -31,7 +31,6 @@ use kvm_bindings::{
     KVM_MAX_CPUID_ENTRIES, KVM_MEM_LOG_DIRTY_PAGES,
 };
 use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd, VmFd};
-use perf_event::events::Hardware;
 use perf_event::{Builder, Counter};
 use std::io;
 use std::path::Path;
@@ -387,12 +386,30 @@ fn configure_msr_filter(vm: &VmFd) -> Result<(), kvm_ioctls::Error> {
     vm.set_msr_filter(MsrFilterDefaultAction::ALLOW, &ranges)
 }
 
-/// The work-clock's real RCB source: a free-running `perf_event_open` counter over
-/// `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`, read on every `IA32_TSC` access (specs/baud-multiverse.md
-/// §4's work-clock row) and, since todo.md §14 next-actions item 2(c)'s counter-reconciliation
-/// fix, also the *only* RCB source `baud_vcpu::linux::pmu::LinuxPmuStepper` polls when arming/
-/// stepping toward an interrupt-injection target (specs/baud-vcpu.md §5) — it no longer owns a
-/// second, independently-epoched `perf_event` fd of its own for that (see
+/// `PERF_TYPE_RAW` (perf_event_open(2)); there is no portable `Event` variant for a raw
+/// `type`+`config` pair in the `perf-event` 0.4 crate, so this is set directly via
+/// [`Builder::attrs_mut`] rather than `Builder::kind`.
+const PERF_TYPE_RAW: u32 = 4;
+
+/// Intel `BR_INST_RETIRED.COND` (event `0xC4`, umask `0x11`) — the Skylake..Ice-Lake encoding,
+/// confirmed on this project's own Tiger Lake dev host by `tools/pmucheck.c` and recorded in
+/// `docs/determinism.md`. **Not** `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` (all branches): that generic
+/// event was measured `±1` across identical trials on this exact host (`docs/determinism.md`'s own
+/// table — `20000009`/`20000007`/`20000008`/… vs. the raw event's bit-exact `20000002`/`20000002`/
+/// `20000002`) and specs §3.3 forbids it by name for exactly this reason. `LinuxBranchCounter` and
+/// `crates/baud-host/src/linux.rs`'s `measure_fixed_loop_branches` had both drifted onto the
+/// generic event despite that documented decision — the root cause (found via `tools/pmucheck.c`,
+/// re-run live) of the residual single-fd RCB jitter that made `os_entropy_is_deterministic` and
+/// `double_boot_ram_hash_identical` intermittently disagree by 1-2 counts even after the two-fd
+/// epoch-disagreement bug (todo.md §14 next-actions item 2(c)) was already fixed.
+const BR_INST_RETIRED_COND: u64 = 0x11c4;
+
+/// The work-clock's real RCB source: a free-running `perf_event_open` counter over the raw
+/// `BR_INST_RETIRED.COND` event (see [`BR_INST_RETIRED_COND`]), read on every `IA32_TSC` access
+/// (specs/baud-multiverse.md §4's work-clock row) and, since todo.md §14 next-actions item 2(c)'s
+/// counter-reconciliation fix, also the *only* RCB source `baud_vcpu::linux::pmu::LinuxPmuStepper`
+/// polls when arming/stepping toward an interrupt-injection target (specs/baud-vcpu.md §5) — it no
+/// longer owns a second, independently-epoched `perf_event` fd of its own for that (see
 /// `crates/baud-vcpu/src/linux/pmu.rs`'s module doc).
 pub struct LinuxBranchCounter {
     counter: Counter,
@@ -417,7 +434,9 @@ impl LinuxBranchCounter {
         // cause) the caller side pauses/resumes this counter around every `KVM_RUN` ioctl
         // (`run_and_convert_rcb_bracketed`), which achieves the same "guest-plus-vmexit time
         // only" property manually, without needing `exclude_host` to work at all.
-        let mut builder = Builder::new().kind(Hardware::BRANCH_INSTRUCTIONS);
+        let mut builder = Builder::new();
+        builder.attrs_mut().type_ = PERF_TYPE_RAW;
+        builder.attrs_mut().config = BR_INST_RETIRED_COND;
         // `pinned(true)`: same fix as `crates/baud-host/src/linux.rs`'s
         // `measure_fixed_loop_branches` (todo.md §14/H3) — keeps this counter resident on the PMU
         // instead of occasionally being multiplexed off mid-measurement under this project's own
@@ -2105,14 +2124,20 @@ mod tests {
     fn periodic_timer_injection_halts_gracefully_and_reproducibly() {
         let kernel = timer_guest_kernel_path();
         let cmdline = "console=ttyS0";
-        // Small enough relative to `timer-guest`'s ~340,000-branch busy loop (BUILD.md) that the
-        // guest survives a handful of ticks before its own `hlt`, exercising the open-ended path
-        // -- not just the "exactly N pre-known ticks" path `run_with_timer_ticks` already covers
-        // -- while keeping the tick count low: each tick independently carries the same real
-        // hardware branch-counter read jitter `timer_tick_lands_at_identical_instruction` already
-        // documents (`RCB_HARDWARE_JITTER_TOLERANCE`), so many more ticks than needed would just
-        // multiply the chance any single one exceeds that per-tick tolerance under load.
-        const PERIOD_RCB: u64 = 2_000_000;
+        // Small enough relative to `timer-guest`'s busy loop (BUILD.md) that the guest survives a
+        // handful of ticks before its own `hlt`, exercising the open-ended path -- not just the
+        // "exactly N pre-known ticks" path `run_with_timer_ticks` already covers -- while keeping
+        // the tick count low: each tick independently carries the same real hardware
+        // branch-counter read jitter `timer_tick_lands_at_identical_instruction` already documents
+        // (`RCB_HARDWARE_JITTER_TOLERANCE`), so many more ticks than needed would just multiply the
+        // chance any single one exceeds that per-tick tolerance under load. Empirically calibrated
+        // (5 ticks, stable across repeated real-hardware runs) against the raw `BR_INST_RETIRED.
+        // COND` event `LinuxBranchCounter`/`measure_fixed_loop_branches` now both use (see
+        // `BR_INST_RETIRED_COND`'s doc) -- this constant was `2_000_000` under the previously
+        // wrongly-used generic `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` event, which counted host-side
+        // branches this raw guest-only budget does not include, so the two numbers are not
+        // comparable.
+        const PERIOD_RCB: u64 = 200_000;
         const MAX_TICKS: u32 = 20;
 
         let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
@@ -2505,6 +2530,19 @@ mod tests {
     /// disagreement at a specific tick (the case observed, above), or neither (the divergence would
     /// be invisible to the tick stream and must originate elsewhere — within a `KVM_RUN` window,
     /// RDTSCP's TSC_AUX half, or the CRNG-mixing layer itself).
+    ///
+    /// **The residual floor above is now RESOLVED, not just narrowed.** It was never irreducible
+    /// hardware imprecision: `LinuxBranchCounter` (this file) and `crates/baud-host/src/
+    /// linux.rs`'s `measure_fixed_loop_branches` were both still reading the generic
+    /// `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` perf event (all branches) instead of the raw
+    /// `BR_INST_RETIRED.COND` event (`0x11c4`) specs §3.3 and `docs/determinism.md`'s own H0
+    /// measurement always specified — that generic event was independently measured
+    /// `±1`-nondeterministic on this exact host (`docs/determinism.md`'s table), which is exactly
+    /// the few-count landing-RCB jitter this doc spent several iterations chasing. Switching both
+    /// call sites to the raw event (see [`BR_INST_RETIRED_COND`]) took a real-hardware
+    /// `H7_ENTROPY_REPEATS=10` batch to 10/10 (`drive/h7-enforced-entropy.sh`), and the sibling
+    /// `double_boot_ram_hash_identical` test below — same root cause, previously 0/8-4/8 — to
+    /// 25/25 across two batches (`drive/h7-enforced-checkpoint.sh`).
     #[test]
     #[ignore]
     fn os_entropy_is_deterministic() {
@@ -2719,12 +2757,20 @@ mod tests {
     /// residual single-fd `perf_event`-read jitter to exactly zero (open per
     /// `os_entropy_is_deterministic`'s own doc) or identifying and pinning the specific
     /// static-call site involved -- both future work, not attempted this iteration. Kept
-    /// `#[ignore]`d and wired into `drive/h7-enforced-checkpoint.sh` as a diagnostic, not a gate
-    /// the standard build is expected to pass yet (that script does not hard-fail the whole
-    /// workspace verification on this specific test's outcome, only on its RDTSC regression
-    /// check) -- the guest-driven-checkpoint *mechanism* this test exists to prove
-    /// (`run_until_branch_or_halt_with_periodic_timer`, the third `checkpoint_init.c` fixture
-    /// variant) is complete and correctly wired regardless of this residual finding.
+    /// `#[ignore]`d and wired into `drive/h7-enforced-checkpoint.sh`.
+    ///
+    /// **RESOLVED.** The "residual single-fd `perf_event`-read jitter" above was never irreducible
+    /// hardware imprecision -- it was `LinuxBranchCounter` (this file) and `crates/baud-host/src/
+    /// linux.rs`'s `measure_fixed_loop_branches` both still reading the generic `PERF_COUNT_HW_
+    /// BRANCH_INSTRUCTIONS` perf event (all branches) instead of the raw `BR_INST_RETIRED.COND`
+    /// event (`0x11c4`, see [`BR_INST_RETIRED_COND`]) specs §3.3 and `docs/determinism.md`'s own H0
+    /// measurement always specified -- the generic event was independently measured
+    /// `±1`-nondeterministic on this exact host, exactly matching the jitter that let the
+    /// `static_call` trampoline's runtime decision resolve differently each boot. Switching both
+    /// call sites to the raw event took a real-hardware batch from 0/8 to 25/25 across two runs
+    /// (10/10 then 15/15, `drive/h7-enforced-checkpoint.sh`), and the identical fix took
+    /// `os_entropy_is_deterministic` above from ~70-90% to 10/10. `drive/h7-enforced-checkpoint.sh`
+    /// now hard-gates on this test like any other real-hardware check.
     #[test]
     #[ignore]
     fn double_boot_ram_hash_identical() {

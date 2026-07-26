@@ -26,26 +26,24 @@
 # `handle_baud_rdtsc_exit` (kind 0), and `baud-vcpu` serves EDX:EAX from the same work-clock plus
 # ECX from `IA32_TSC_AUX` (`WorkClock::serve_enforced_tsc_aux`). That crash is gone for good.
 #
-# KNOWN FLAKINESS, IMPROVED AND NOW ROOT-CAUSED, STILL NOT FULLY FIXED (todo.md §14 next-actions
-# item 2): a prior iteration root-caused and fixed the largest source of divergence — WorkClock's
-# RCB perf_event counter accumulated host-side dispatch branches between guest exits (exclude_host
-# doesn't work on this nested-virtualized dev host), not just guest branches. Fixed by
-# pausing/resuming that counter around each KVM_RUN ioctl
-# (crates/baud-vcpu/src/linux/mod.rs's run_and_convert_rcb_bracketed). Measured effect on real
-# hardware: observed pass rate rose from ~25-50% to ~75% (15/20 across two batches) — real, verified
-# improvement, not a full fix. This iteration's os_entropy_is_deterministic tick diagnostic caught a
-# divergent pair with the SAME tick count and the SAME landing rip on both boots, but a 34-count
-# disagreement in the landing RCB overshoot — that overshoot IS the served virtual-TSC value at the
-# interrupt, and Linux's own add_interrupt_randomness() folds it (uncredited but still mixed) into
-# the CRNG pool on every interrupt, so a same-instruction interrupt still seeds the CRNG differently
-# each boot. Confirms (not just hypothesizes) that WorkClock's long-lived pinned counter and
-# LinuxPmuStepper's per-tick freshly-created pinned counter disagree on exactly when the
-# arm-early-then-single-step engine judges the target crossed — see os_entropy_is_deterministic's
-# own doc comment for the full mechanism. Reconciling the two into one shared pinned fd is the
-# concrete next fix, not yet attempted (a real architectural change, deferred to a future
-# iteration). A FAIL here is still expected some fraction of runs until that fix lands — not a sign
-# this script is broken. Set H7_ENTROPY_REPEATS=N to rerun the double-boot test N times in place
-# (one module swap, not N) to gather more diverging pairs' diagnostic output in one sitting.
+# FORMERLY FLAKY, NOW ROOT-CAUSED AND FIXED (todo.md §14 next-actions item 2). Two independent
+# fixes landed across prior iterations: (1) WorkClock's RCB perf_event counter accumulated
+# host-side dispatch branches between guest exits (exclude_host doesn't work on this
+# nested-virtualized dev host), not just guest branches — fixed by pausing/resuming that counter
+# around each KVM_RUN ioctl (crates/baud-vcpu/src/linux/mod.rs's run_and_convert_rcb_bracketed),
+# which raised the observed pass rate from ~25-50% to ~75%. (2) The residual ~25% divergence was
+# then root-caused to LinuxBranchCounter/measure_fixed_loop_branches both using the generic
+# `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` perf event (all branches) instead of the raw
+# `BR_INST_RETIRED.COND` event (0x11c4) specs §3.3 and this project's own docs/determinism.md
+# always specified — the generic event was independently measured `±1`-nondeterministic on this
+# exact host (docs/determinism.md's own H0 table), which is exactly the few-count landing-RCB
+# jitter that let a same-instruction interrupt still seed the CRNG differently each boot via
+# Linux's add_interrupt_randomness(). Switching both call sites to the raw event
+# (crates/baud-multiverse/src/linux/mod.rs's `BR_INST_RETIRED_COND` constant) took the measured
+# real-hardware pass rate to 10/10 (and a second, independent batch of double_boot_ram_hash_
+# identical in drive/h7-enforced-checkpoint.sh — the same root cause — to 25/25). Set
+# H7_ENTROPY_REPEATS=N to rerun the double-boot test N times in place (one module swap, not N) to
+# keep an eye on this; a FAIL now is a real regression, not expected residual flakiness.
 #
 #   Reuses `tests/fixtures/linux-guest/` (H7's boot-to-userspace fixture) — `entropy_init.c` /
 #   `entropy_initramfs.cpio.gz` are a second `/init` for the *same* already-built kernel (no
@@ -159,7 +157,7 @@ if [[ "$REPEATS" -eq 1 ]]; then
     [[ "$FAILED_RUNS" -eq 0 ]] || fail "os_entropy_is_deterministic FAILED"
 else
     log "os_entropy_is_deterministic summary: $((REPEATS - FAILED_RUNS))/$REPEATS passed"
-    [[ "$FAILED_RUNS" -eq 0 ]] || echo "  [WARN] $FAILED_RUNS/$REPEATS run(s) failed — known residual flakiness, todo.md §14 next-actions item 2; inspect the diagnostic output above for correlation with a specific tick" >&2
+    [[ "$FAILED_RUNS" -eq 0 ]] || echo "  [WARN] $FAILED_RUNS/$REPEATS run(s) failed — the RCB-event fix (see header) took this to 10/10 last measured, so a failure now likely means a real regression; inspect the diagnostic output above for correlation with a specific tick" >&2
 fi
 
 log "Regression: re-running rdtsc_enforced_regime_is_bit_exact_across_boots (RDTSCP handling layered on the same patch)..."

@@ -5229,3 +5229,42 @@ Full verification green: build/clippy/test --workspace clean, h0-h7 (8/8), m9-m1
 ---
 
 Post-push verification: local main (2366ae5) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle. This iteration real-hardware-verified the initramfs builder's multi-file capacity (build_reproducible_initramfs with 2+ distinct files), closing the concrete gap named in todo.md §14 item 1 across prior iterations. Full verification green: cargo build/clippy/test --workspace clean, drive/h0.sh-h7.sh (8/8), drive/m9.sh-m12.sh (4/4), drive/pkg-boot-cli.sh, and the new drive/pkg-multifile-initramfs.sh all PASS on real /dev/kvm. todo.md still has pending items (Buildroot/pinned-Nix image pipeline, virtio-rng device, /dev/vport endpoint (non-blocking), H7 residual RCB/perf_event jitter for os_entropy_is_deterministic/double_boot_ram_hash_identical, H8 Mario blocked on the rest of item 1) -- emitting NEXT.
+
+## 2026-07-26T12:28:11 UTC (27min) - Session usage — build-19 [sonnet]
+- cost $5.5651 (from claude -p)
+- context 197,994 tok peak of 1M (20%) across 80 inference calls, monotonic
+- models sonnet-5 $5.5619 (in 3,335 / out 35,953 / cache-read 12,604,159) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/019-build-19.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 20
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and specs/*...
+
+Chose to continue closing H7 residual entropy-determinism jitter (todo.md section 14 item 2): os_entropy_is_deterministic (~70-90% pass) and double_boot_ram_hash_identical (~50% pass) are the two remaining named tests in matrix row 27, still open after several iterations of incremental fixes. Buildroot/Nix image pipeline and virtio-rng were both ruled out as genuinely multi-day efforts by prior research; H8 Mario is blocked on those. Dispatching an Opus subagent to diagnose the current RCB-read architecture and propose the next concrete fix for the documented residual single-fd jitter floor before implementing.
+
+Implemented the fix: crates/baud-multiverse/src/linux/mod.rs LinuxBranchCounter and crates/baud-host/src/linux.rs measure_fixed_loop_branches both switched from the generic PERF_COUNT_HW_BRANCH_INSTRUCTIONS event (independently confirmed +/-1 nondeterministic on this host by docs/determinism.md own H0 measurement) to the raw BR_INST_RETIRED.COND event (0x11c4) that specs/todo.md always specified but two call sites had silently drifted away from. cargo build --workspace clean. Running clippy next.
+
+clippy clean (only pre-existing, unrelated warnings in other files; nothing new in the two files touched, no errors). Running cargo test --workspace next.
+
+Root-caused a regression from the RCB event-fix: periodic_timer_injection_halts_gracefully_and_reproducibly (timer-guest fixture) used a PERIOD_RCB=2,000,000 tuned for the old (wrong, host-inclusive) generic branch-instructions event; under the corrected guest-only conditional-branch event the guest never reached that target before its own natural halt. Empirically recalibrated to PERIOD_RCB=200,000 (5 ticks, stable across 4 repeated real /dev/kvm runs). Re-running full cargo test --workspace to confirm everything is green now.
+
+cargo test --workspace all green (0 failures across the board, baud-multiverse 89 passed/7 ignored). Re-running clippy to confirm still clean, then h0-h7 + m9-m12 + pkg drive scripts.
+
+h0-h7 all PASS on real /dev/kvm with the corrected RCB event (h0.probe reports rcb_deterministic=true using the raw event now). Running m9-m12 next.
+
+m9-m12 all PASS on real /dev/kvm. Running the fast opt-in pkg drive scripts (pkg-boot-cli, pkg-multifile-initramfs) next since they exercise the real boot path this change touches; skipping the multi-minute from-source kernel-compile scripts (pkg-image-build/pkg-build-cli) since this change touches no kernel-build code.
+
+pkg-boot-cli and pkg-multifile-initramfs both PASS on real /dev/kvm with the corrected RCB event. Now running the enforced-regime H7 entropy/checkpoint batches (module swap dance, real hardware) to measure whether the RCB event fix actually improved the residual jitter pass rate this iteration targeted.
+
+HUGE result: os_entropy_is_deterministic now passes 10/10 on real hardware (was ~70-90% before this fix). The wrong-PMU-event bug was the actual root cause of the residual jitter. Running the double_boot_ram_hash_identical checkpoint batch next (was ~50% before).
+
+double_boot_ram_hash_identical also came back 10/10 on real hardware (was 0/8-4/8 before this fix) -- the static-call-trampoline jitter this test was chasing for several prior iterations appears to be the exact same root cause as the entropy test, both now fixed by the same RCB-event correction. Running one more confirmation batch (15 more real double-boots) before updating the drive script gating and todo.md, since a single 10/10 batch is promising but not yet conclusive proof of full determinism.
+
+Confirmed 25/25 total on double_boot_ram_hash_identical across two real-hardware batches (10/10 + 15/15) -- rewrote drive/h7-enforced-checkpoint.sh to hard-gate on this test now (was informational-only) and drive/h7-enforced-entropy.sh header to record the fix, since both were flaky for the identical root cause. Running one more single-repeat pass of each script to confirm the new gating logic itself works correctly.
+
+Updated the stale in-code doc comments on os_entropy_is_deterministic and double_boot_ram_hash_identical (crates/baud-multiverse/src/linux/mod.rs) to record the fix and its real-hardware verification, and rewrote both enforced-regime drive scripts headers/closing text/gating accordingly. Re-running full build/clippy/test to confirm the doc-only changes did not break anything before committing.
+
+todo.md updated (section 14 next-actions item 2 and §12 matrix row 27) to record this fix and its real-hardware verification, without deleting the historical investigation narrative. Reviewed the subagent diff for accuracy -- correct and well-cited. Staging everything and committing.

@@ -73,10 +73,15 @@ impl CapabilityChecks for LinuxChecks {
     }
 
     /// A fixed userspace loop's retired-conditional-branch count must be identical across two
-    /// runs (todo.md §3.7: "validated, not assumed"). Uses `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`
-    /// via the `perf-event` crate — the same event family baud-multiverse's work-clock reads on
-    /// the vCPU thread (specs/baud-multiverse.md §4), just measured here in host userspace before
-    /// any guest exists.
+    /// runs (todo.md §3.7: "validated, not assumed"). Uses the raw `BR_INST_RETIRED.COND` event
+    /// (`PERF_TYPE_RAW`, config `0x11c4`) via the `perf-event` crate's `attrs_mut` escape hatch —
+    /// the same raw event `baud-multiverse`'s work-clock reads on the vCPU thread
+    /// (`crates/baud-multiverse/src/linux/mod.rs`'s `LinuxBranchCounter`), just measured here in
+    /// host userspace before any guest exists. **Not** the generic `PERF_COUNT_HW_BRANCH_
+    /// INSTRUCTIONS` (all branches): `docs/determinism.md`'s own H0 measurement found that event
+    /// `±1`-nondeterministic on this exact host, which is exactly why specs §3.3 requires the raw
+    /// event by name — this function and `LinuxBranchCounter` had both drifted onto the generic
+    /// one despite that documented decision (todo.md §14 next-actions item 2(c) follow-up).
     ///
     /// Real-hardware finding on this machine (a nested-virtualized WSL2 host): even with the
     /// counter `pinned` to the PMU, one-off PMU-scheduling multiplexing hiccups occasionally
@@ -174,8 +179,16 @@ fn fixed_branch_workload() -> u64 {
     std::hint::black_box(acc)
 }
 
+/// `PERF_TYPE_RAW` (perf_event_open(2)) and Intel `BR_INST_RETIRED.COND` (event `0xC4`, umask
+/// `0x11`) — see `rcb_deterministic`'s doc above and `crates/baud-multiverse/src/linux/mod.rs`'s
+/// matching `BR_INST_RETIRED_COND` constant for why this, not the generic `HW_BRANCH_INSTRUCTIONS`.
+const PERF_TYPE_RAW: u32 = 4;
+const BR_INST_RETIRED_COND: u64 = 0x11c4;
+
 fn measure_fixed_loop_branches() -> Option<u64> {
-    let mut builder = perf_event::Builder::new().kind(perf_event::events::Hardware::BRANCH_INSTRUCTIONS);
+    let mut builder = perf_event::Builder::new();
+    builder.attrs_mut().type_ = PERF_TYPE_RAW;
+    builder.attrs_mut().config = BR_INST_RETIRED_COND;
     // Under WSL2 (a nested-virtualized host), the PMU is contended enough that an unpinned
     // counter is occasionally multiplexed off the PMU for part of the measurement window,
     // undercounting and making two back-to-back measurements of the *same* fixed loop
