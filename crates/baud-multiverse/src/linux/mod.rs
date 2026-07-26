@@ -163,6 +163,7 @@ fn pin_tsc_value(vcpu: &VcpuFd, value: u64) -> Result<(), BootError> {
 pub fn boot_guest(
     kernel_path: &Path,
     cmdline: &str,
+    tape: &[u8],
     dirty_ring_entries: Option<u32>,
 ) -> Result<(BootedGuest, Option<baud_snapshot::linux::DirtyRing>), BootError> {
     let (guest, dirty_ring) = create_vm_vcpu_shell(dirty_ring_entries)?;
@@ -173,11 +174,14 @@ pub fn boot_guest(
     pagetables::write_gdt(&guest.guest_mem).map_err(BootError::PageTables)?;
     guest.vcpu.set_sregs(&pagetables::long_mode_sregs())?;
 
+    // Must come before `LinuxBranchCounter::new()` — see `rng_seed_from_tape`'s doc.
+    let rng_seed = rng_seed_from_tape(tape);
     let loader_result = bootparams::load_kernel_and_write_boot_params(
         &guest.guest_mem,
         kernel_path,
         cmdline,
         layout::GUEST_RAM_SIZE,
+        &rng_seed,
     )?;
 
     let mut regs = guest.vcpu.get_regs()?;
@@ -528,6 +532,48 @@ fn entropy_seed_from_tape(tape: &[u8]) -> u64 {
     u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("blake3 hash is at least 8 bytes"))
 }
 
+/// Derive the `SETUP_RNG_SEED` `setup_data` seed (specs/baud-multiverse.md §3.8's "Boot RNG seed")
+/// from the run's own tape — same tape-determinism guarantee as [`entropy_seed_from_tape`], but a
+/// domain-separated hash (a distinct prefix, not a shared cursor) so the boot seed and the
+/// `rdrand`/`rdseed` entropy substream never draw from the same stream. Called from [`boot_guest`],
+/// which — like `entropy_seed_from_tape` — must run before [`LinuxBranchCounter::new`] for the same
+/// first-call-blake3-jitter reason documented there.
+fn rng_seed_from_tape(tape: &[u8]) -> [u8; bootparams::RNG_SEED_LEN] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"baud:setup-data:rng-seed:v1");
+    hasher.update(tape);
+    *hasher.finalize().as_bytes()
+}
+
+#[cfg(test)]
+mod rng_seed_from_tape_tests {
+    use super::*;
+
+    #[test]
+    fn same_tape_reproduces_the_identical_seed() {
+        let tape = b"a tape byte stream".to_vec();
+        assert_eq!(rng_seed_from_tape(&tape), rng_seed_from_tape(&tape));
+    }
+
+    #[test]
+    fn one_changed_tape_byte_changes_the_seed() {
+        let seed_a = rng_seed_from_tape(b"tape-a");
+        let seed_b = rng_seed_from_tape(b"tape-b");
+        assert_ne!(seed_a, seed_b);
+    }
+
+    #[test]
+    fn is_domain_separated_from_the_rdrand_entropy_substream() {
+        // Same tape, but `entropy_seed_from_tape` and `rng_seed_from_tape` must draw from
+        // independent hash domains (a distinct prefix) — otherwise the boot RNG seed would leak
+        // the entropy substream's first 8 bytes (or vice versa).
+        let tape = b"shared tape".to_vec();
+        let entropy_seed = entropy_seed_from_tape(&tape);
+        let rng_seed = rng_seed_from_tape(&tape);
+        assert_ne!(entropy_seed.to_le_bytes(), rng_seed[..8]);
+    }
+}
+
 impl Multiverse {
     /// Run [`boot_guest`] and wire up the work-clock (`base + k * rcb`, specs/baud-multiverse.md
     /// §4), console, and tape (specs/baud-tape-device.md) devices the run loop needs. `base` is
@@ -590,7 +636,7 @@ impl Multiverse {
         dirty_ring_entries: Option<u32>,
         rdseed_sites: impl IntoIterator<Item = (u64, baud_vcpu::EnforcedRdseedSite)>,
     ) -> Result<Self, BootError> {
-        let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, dirty_ring_entries)?;
+        let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, &tape, dirty_ring_entries)?;
         // Must come before `LinuxBranchCounter::new()` — see `entropy_seed_from_tape`'s doc.
         let entropy_seed = entropy_seed_from_tape(&tape);
         let counter = LinuxBranchCounter::new()?;
@@ -1100,6 +1146,55 @@ mod tests {
             second_outcome.ram_hash, first_outcome.ram_hash,
             "guest RAM at first Hlt must be byte-identical across two boots (boot nondeterminism is a bug)"
         );
+    }
+
+    /// specs/baud-multiverse.md §3.8's "Boot RNG seed", wired end-to-end through the real
+    /// `Multiverse::boot` flow (not just `bootparams`'s own unit tests): the `SETUP_RNG_SEED`
+    /// `setup_data` node baud writes must (1) actually land in real guest RAM at the address
+    /// `hdr.setup_data` points to, with the tape-derived seed bytes intact, and (2) be a pure
+    /// function of the tape — same tape twice reproduces the identical seed, a different tape
+    /// changes it — the same `all_input_is_tape_derived` guarantee applied to this boot-time input.
+    #[test]
+    fn rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived() {
+        use vm_memory::Bytes;
+
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let tape_a = b"tape A".to_vec();
+        let tape_b = b"tape B".to_vec();
+
+        let read_seed_via_hdr = |mv: &Multiverse| -> [u8; bootparams::RNG_SEED_LEN] {
+            let mut zero_page = vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
+            mv.guest
+                .guest_mem
+                .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
+                .expect("read back the zero page from real guest RAM");
+            let params: linux_loader::loader::bootparam::boot_params =
+                unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const _) };
+            let setup_data_addr = params.hdr.setup_data;
+            assert_eq!(
+                setup_data_addr,
+                layout::RNG_SEED_SETUP_DATA_ADDR,
+                "hdr.setup_data must point at the fixed RNG-seed node address"
+            );
+            let mut seed = [0u8; bootparams::RNG_SEED_LEN];
+            mv.guest
+                .guest_mem
+                .read_slice(&mut seed, GuestAddress(setup_data_addr + 16))
+                .expect("read back the seed bytes from real guest RAM");
+            seed
+        };
+
+        let boot_a1 = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None).expect("boot A1 failed");
+        let seed_a1 = read_seed_via_hdr(&boot_a1);
+
+        let boot_a2 = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a, None).expect("boot A2 failed");
+        let seed_a2 = read_seed_via_hdr(&boot_a2);
+        assert_eq!(seed_a1, seed_a2, "the same tape must reproduce the identical RNG seed");
+
+        let boot_b = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b, None).expect("boot B failed");
+        let seed_b = read_seed_via_hdr(&boot_b);
+        assert_ne!(seed_a1, seed_b, "a different tape must change the RNG seed");
     }
 
     /// specs/baud-multiverse.md §4 / todo.md §3.2's `cpuid_leaves_are_fixed`, closed for real

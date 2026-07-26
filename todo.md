@@ -871,14 +871,30 @@ snapshot, not a duplicate of it.
   `baud-host`, replaced by capability booleans plus `Probe::is_runnable()` / `Probe::is_enforced_capable()`;
   `GET /host/probe` and all 7 `drive/h0.sh`-`h6.sh` scripts now read the renamed JSON fields
   (`enforced_module_present`/`runnable`/`enforced_capable`) instead of a `"regime"` string.
+  **`SETUP_RNG_SEED` boot-RNG-seed `setup_data` node is wired end-to-end**: `crates/baud-multiverse/src/layout.rs`
+  adds `RNG_SEED_SETUP_DATA_ADDR` (right after the zero page) and `RNG_SEED_SETUP_DATA_LEN`, plus a static
+  assertion that the node fits before `PML4_ADDR`. `crates/baud-multiverse/src/linux/bootparams.rs` adds the
+  `SETUP_RNG_SEED = 9` constant, `RNG_SEED_LEN = 32`, a `write_rng_seed_setup_data` helper that writes the
+  `{next: 0, type: 9, len: 32, data: seed}` node into guest memory, and `load_kernel_and_write_boot_params` now
+  takes a `rng_seed: &[u8; 32]` param and points `hdr.setup_data` at the node it writes.
+  `crates/baud-multiverse/src/linux/mod.rs`'s `boot_guest` now takes a `tape: &[u8]` and derives the seed via a
+  new `rng_seed_from_tape` (blake3 with a domain-separation prefix `"baud:setup-data:rng-seed:v1"`, distinct
+  from `entropy_seed_from_tape`'s, so the boot seed and the rdrand/rdseed entropy substream never share a hash
+  stream); `Multiverse::boot` threads its own `tape` through. Hardware-verified end-to-end
+  (`rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived`, real `/dev/kvm` boot of the hello-guest
+  fixture): same tape reproduces the identical seed, a changed tape byte changes it, and the node lands in real
+  guest RAM at the address `hdr.setup_data` points to. Still open: the virtio-rng tape-fed device, and proving
+  the deterministic-TSC + exact-interrupt seeding covers the initial CRNG state on a real Linux kernel guest
+  (blocked on the boot-pipeline prerequisite in step 1 below).
 - **Next actions (this rewrite)** — a sequence, each step enabling the next:
   1. **Guest boot pipeline (§4)** — the enabling milestone. Wire H4 interrupt injection into the boot path
      (an earlier real-kernel attempt hung in `calibrate_delay()` waiting on a jiffies tick because injection
      wasn't wired in), then build the real image pipeline in `baud-packages`: a minimal builtin kernel
      (Buildroot → pinned Nix, §4.5), the deterministic cmdline (§4.2), `bootparams.rs` gaining
-     `setup_data`/`SETUP_RNG_SEED` + `e820` + initramfs fields, a reproducible initramfs + static `/init`, and
-     the `/dev/vport` (or PIO) tape endpoint. Tests `guest_kernel_boots_to_userspace`,
-     `boot_params_seed_is_pinned`, `init_powers_off_deterministically`, `image_build_is_reproducible`.
+     `e820` + initramfs fields (`setup_data`/`SETUP_RNG_SEED` is now done — see the bullet above), a
+     reproducible initramfs + static `/init`, and the `/dev/vport` (or PIO) tape endpoint. Tests
+     `guest_kernel_boots_to_userspace`, `boot_params_seed_is_pinned`, `init_powers_off_deterministically`,
+     `image_build_is_reproducible`.
   2. **H7 — OS-entropy end-to-end (rides on #1)** — boot the real Linux guest and prove the CRNG is a pure
      function of the tape: `os_entropy_is_deterministic`, `double_boot_ram_hash_identical`,
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,

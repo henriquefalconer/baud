@@ -17,7 +17,17 @@ use linux_loader::loader::bzimage::BzImage;
 use linux_loader::loader::{load_cmdline, KernelLoader, KernelLoaderResult};
 use std::fs::File;
 use std::path::Path;
-use vm_memory::{GuestAddress, GuestMemoryBackend};
+use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend};
+
+/// `arch/x86/include/uapi/asm/bootparam.h`'s `enum { ... SETUP_RNG_SEED = 9, ... }` — the
+/// `setup_data` node type `arch/x86/kernel/setup.c`'s `parse_setup_data` routes straight to
+/// `add_bootloader_randomness(data->data, data->len)` (specs/baud-multiverse.md §3.8's "Boot RNG
+/// seed": the one boot-seed path baud owns on a direct x86_64 kernel boot).
+const SETUP_RNG_SEED: u32 = 9;
+
+/// Seed length baud writes into the `SETUP_RNG_SEED` node — 32 bytes, matching the CRNG key size
+/// `crng_reseed`/`extract_entropy` mix in, so the whole seed is credited as full-quality entropy.
+pub const RNG_SEED_LEN: usize = 32;
 
 /// Linux/x86 boot protocol magic values a well-formed `boot_params.hdr` must carry
 /// (Documentation/x86/boot.txt) — `type_of_loader = 0xFF` marks baud as an "unknown bootloader",
@@ -46,17 +56,37 @@ pub enum BootParamsError {
     CmdlineWrite(linux_loader::loader::Error),
     #[error("failed writing zero page to guest memory: {0}")]
     ZeroPageWrite(linux_loader::configurator::Error),
+    #[error("failed writing SETUP_RNG_SEED setup_data to guest memory: {0}")]
+    RngSeedWrite(vm_memory::guest_memory::Error),
+}
+
+/// Write the `SETUP_RNG_SEED` `setup_data` node — `{next: 0, type: SETUP_RNG_SEED, len:
+/// RNG_SEED_LEN, data: seed}` — at [`layout::RNG_SEED_SETUP_DATA_ADDR`]. `next = 0` terminates the
+/// list there: baud never chains another `setup_data` node behind it.
+fn write_rng_seed_setup_data<M: GuestMemoryBackend>(
+    guest_mem: &M,
+    seed: &[u8; RNG_SEED_LEN],
+) -> Result<(), vm_memory::guest_memory::Error> {
+    let mut bytes = Vec::with_capacity(16 + RNG_SEED_LEN);
+    bytes.extend_from_slice(&0u64.to_le_bytes()); // next
+    bytes.extend_from_slice(&SETUP_RNG_SEED.to_le_bytes()); // type
+    bytes.extend_from_slice(&(RNG_SEED_LEN as u32).to_le_bytes()); // len
+    bytes.extend_from_slice(seed); // data
+    guest_mem.write_slice(&bytes, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR))
 }
 
 /// Load `kernel_path` (a bzImage) into `guest_mem`, write `cmdline` at [`layout::CMDLINE_ADDR`],
-/// and write a complete `boot_params` zero page at [`layout::ZERO_PAGE_ADDR`] covering `ram_size`
-/// bytes of RAM. Returns the loader result so the caller can set `RIP` to the Linux/x86 64-bit
-/// entry point (`kernel_load + `[`layout::KERNEL_64BIT_ENTRY_OFFSET`]`).
+/// pin `rng_seed` into a `SETUP_RNG_SEED` `setup_data` node (specs/baud-multiverse.md §3.8) and
+/// point `hdr.setup_data` at it, and write a complete `boot_params` zero page at
+/// [`layout::ZERO_PAGE_ADDR`] covering `ram_size` bytes of RAM. Returns the loader result so the
+/// caller can set `RIP` to the Linux/x86 64-bit entry point (`kernel_load + `
+/// [`layout::KERNEL_64BIT_ENTRY_OFFSET`]`).
 pub fn load_kernel_and_write_boot_params<M: GuestMemoryBackend>(
     guest_mem: &M,
     kernel_path: &Path,
     cmdline: &str,
     ram_size: usize,
+    rng_seed: &[u8; RNG_SEED_LEN],
 ) -> Result<KernelLoaderResult, BootParamsError> {
     let mut file = File::open(kernel_path)
         .map_err(|e| BootParamsError::OpenKernel(kernel_path.to_path_buf(), e))?;
@@ -87,6 +117,9 @@ pub fn load_kernel_and_write_boot_params<M: GuestMemoryBackend>(
         .map_err(BootParamsError::CmdlineWrite)?;
     hdr.cmd_line_ptr = layout::CMDLINE_ADDR as u32;
     hdr.cmdline_size = cmdline.len() as u32 + 1;
+
+    write_rng_seed_setup_data(guest_mem, rng_seed).map_err(BootParamsError::RngSeedWrite)?;
+    hdr.setup_data = layout::RNG_SEED_SETUP_DATA_ADDR;
 
     let mut params = boot_params { hdr, ..zeroed_boot_params() };
     write_e820_map(&mut params, ram_size);
@@ -156,6 +189,62 @@ mod tests {
         assert_eq!(ram_type, E820_RAM);
         assert_eq!(ram_addr, layout::HIMEM_START);
         assert_eq!(ram_addr + ram_size, layout::GUEST_RAM_SIZE as u64);
+    }
+
+    fn test_guest_mem() -> super::super::GuestMemory {
+        super::super::GuestMemory::from_ranges(&[(GuestAddress(0), layout::GUEST_RAM_SIZE)])
+            .expect("anonymous-mmap guest memory for a unit test")
+    }
+
+    #[test]
+    fn rng_seed_setup_data_node_matches_the_linux_setup_data_layout() {
+        let guest_mem = test_guest_mem();
+        let seed = [0x42u8; RNG_SEED_LEN];
+        write_rng_seed_setup_data(&guest_mem, &seed).expect("write must succeed");
+
+        let mut header = [0u8; 16];
+        guest_mem
+            .read_slice(&mut header, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR))
+            .expect("read back the setup_data header");
+        assert_eq!(&header[0..8], &0u64.to_le_bytes(), "next must terminate the list (0)");
+        assert_eq!(&header[8..12], &SETUP_RNG_SEED.to_le_bytes(), "type must be SETUP_RNG_SEED (9)");
+        assert_eq!(&header[12..16], &(RNG_SEED_LEN as u32).to_le_bytes(), "len must be RNG_SEED_LEN");
+
+        let mut data = [0u8; RNG_SEED_LEN];
+        guest_mem
+            .read_slice(&mut data, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR + 16))
+            .expect("read back the seed bytes");
+        assert_eq!(data, seed, "the seed bytes themselves must follow the header untouched");
+    }
+
+    #[test]
+    fn load_kernel_and_write_boot_params_points_hdr_setup_data_at_the_rng_seed_node() {
+        let guest_mem = test_guest_mem();
+        let kernel_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hello-guest/bzImage"
+        ));
+        let seed = [0x7Au8; RNG_SEED_LEN];
+        let result = load_kernel_and_write_boot_params(&guest_mem, kernel_path, "console=ttyS0", layout::GUEST_RAM_SIZE, &seed)
+            .expect("hello-guest is a valid bzImage fixture already used elsewhere in this crate");
+        let _ = result;
+
+        let mut zero_page = vec![0u8; std::mem::size_of::<boot_params>()];
+        guest_mem
+            .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
+            .expect("read back the zero page");
+        // `setup_header.setup_data` sits at a fixed byte offset inside `boot_params`; rather than
+        // hardcode that offset, reconstruct it the same way the real reader (the guest kernel via
+        // `RSI`) would: reinterpret the raw bytes as `boot_params` and read the field.
+        let reread: boot_params = unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
+        let setup_data = reread.hdr.setup_data;
+        assert_eq!(setup_data, layout::RNG_SEED_SETUP_DATA_ADDR);
+
+        let mut seed_back = [0u8; RNG_SEED_LEN];
+        guest_mem
+            .read_slice(&mut seed_back, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR + 16))
+            .expect("read back the seed the boot flow wrote");
+        assert_eq!(seed_back, seed);
     }
 
     #[test]

@@ -3964,3 +3964,77 @@ All 7 H-series drive scripts (h0-h6) PASSED against real /dev/kvm with the new c
   - todo.md updated: item 2 removed from "Next actions" (now renumbered 1-2), noted as done under
     "Built and hardware-tested", and §13's cleanup bullet marked "(Done — see §14.)".
 ---
+
+Post-push verification: origin/main now at b2b4ea9, matching local HEAD exactly (git fetch + rev-parse confirmed). No CI/deploy pipeline exists for this project — the pre-push cargo build/clippy/test --workspace and all 7 drive/h0-h6.sh runs against real /dev/kvm are the verification protocol, and all were green. todo.md still has 2 pending Next-actions items (OS-entropy determinism, Mario validation), both explicitly scoped as multi-day efforts blocked on the same missing real-Linux-kernel-guest-boot-pipeline prerequisite — not attempted this iteration. Emitting NEXT.
+
+## 2026-07-25T23:17:05 UTC (27min) - Session usage — build-2 [sonnet]
+- cost $7.0567 (from claude -p)
+- context 209,412 tok peak of 1M (21%) across 93 inference calls, monotonic
+- models sonnet-5 $7.0536 (in 218 / out 70,587 / cache-read 15,108,963) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260725T223103Z/002-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... Re-reading todo.md §14 next-actions: item 1 (OS-entropy determinism) has a confirmed prerequisite gap (no real-Linux-kernel-guest-boot pipeline exists yet), item 2 (Mario) is blocked on item 1. Studying specs/ and current bootparams.rs/baud-packages state with subagents to find the right sub-step to land this iteration.
+
+Confirmed via subagent: H4 interrupt injection (Multiverse::inject_timer_tick / run_with_timer_ticks) works against a real Multiverse::boot()-ed guest, but nothing wires periodic timer delivery into the boot()/run loop automatically — a caller must manually interleave inject_timer_tick calls (see crates/baud-multiverse/src/linux/mod.rs:899,916). This confirms why an earlier real-kernel boot attempt hung in calibrate_delay(). Still waiting on the baud-packages/bootparams.rs survey agent before picking the scoped sub-step for this iteration.
+
+Chose SETUP_RNG_SEED setup_data pinning (todo.md §14 next-actions item 1, first sub-bullet), it's the smallest self-contained slice of the OS-entropy-determinism work: unlike the full kernel+rootfs Nix boot pipeline or the periodic-timer-scheduler wiring (both confirmed genuinely multi-day by the two research subagents just run), this is pure boot_params/guest-memory plumbing, testable the same way the existing e820-map test already is, with no dependency on a real Linux kernel booting in this iteration.
+
+Implemented SETUP_RNG_SEED (type 9) setup_data pinning: layout::RNG_SEED_SETUP_DATA_ADDR (the free page right after the zero page), bootparams::write_rng_seed_setup_data writes {next=0,type=9,len=32,data=seed} and hdr.setup_data points at it, linux/mod.rs derives the 32-byte seed via a domain-separated blake3(tape) hash (rng_seed_from_tape, distinct from the existing rdrand entropy_seed_from_tape stream) and threads it through boot_guest. Added 8 new tests: 2 pure-function unit tests on the node bytes, 3 on rng_seed_from_tape's determinism/byte-sensitivity/domain-separation, and 1 real-/dev/kvm end-to-end test (rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived) booting the real hello-guest fixture twice and asserting the seed is read back correctly from real guest RAM and is tape-derived. All pass. Now running the full verification protocol (build/clippy/test/drive scripts).
+
+cargo test --workspace surfaced timer_tick_lands_at_identical_instruction failing (rcb disagreement 11-87, exceeds RCB_HARDWARE_JITTER_TOLERANCE=8) when run inside the full 200s+ single-threaded suite, but passing consistently (3/3) in isolation. Verified this is a PRE-EXISTING flake, not caused by my change: git stash'd my diff back to base commit b2b4ea9 and reproduced the identical failure mode (disagreement 87) on unmodified code running the same full single-threaded suite. Restored my changes. This matches the WSL2 PMU-contention flake pattern already documented in a prior commit's progress entry (a different test, rcb_deterministic, flaked the same way). Proceeding with drive/h0.sh through h6.sh, which each run only their own narrow test scope and have historically passed individually.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md, specs/, and uncommitted diffs in layout.rs/bootparams.rs/mod.rs left from a prior session.
+
+Chose to finish the in-progress SETUP_RNG_SEED boot-time wiring (todo.md next-action item 1, first sub-step): uncommitted diffs in layout.rs/bootparams.rs/linux/mod.rs already implement it and cargo build is clean. Now running the targeted unit tests before the full suite.
+
+Targeted rng_seed tests all pass (6/6), including a real-KVM boot integration test. Running full pre-push validation now: cargo build (done), cargo clippy next.
+
+Clippy clean (only pre-existing warnings unrelated to this change). Running full cargo test --workspace next.
+
+Full suite: 78 passed, 2 failed (rdtsc_guest_reproduces_high_bits_across_boots, timer_tick_lands_at_identical_instruction) - both look like hardware timing/jitter tests unrelated to the rng_seed change. Re-running them in isolation to check for flakiness before deciding how to handle.
+
+Both isolated re-runs passed — confirms known transient hardware-timing flakiness under parallel test contention (rdtsc_guest_reproduces_high_bits_across_boots and timer_tick_lands_at_identical_instruction), extensively documented in prior ralph/progress.txt entries as pre-existing, unrelated to code changes. Re-running full suite once more with --no-fail-fast to confirm overall green.
+
+Full workspace test suite: 100%% green on rerun (80/80 in baud-multiverse, all other crates passing too) - confirms both failures were transient hardware-timing flakes, not regressions. Running drive/*.sh scripts individually next.
+
+Running drive/h0.sh (host capability probe)...
+
+h0 PASS. Running drive/h1.sh...
+
+h1 PASS. Running drive/h2.sh...
+
+h2 PASS. Running drive/h3.sh...
+
+h3 PASS. Running drive/h4.sh...
+
+h4 PASS. Running drive/h5.sh...
+
+h5 PASS (thousand_branches test took ~217s but passed). Running drive/h6.sh...
+
+h6 PASS — H0-H6 all green on real /dev/kvm. todo.md updated via subagent to record the SETUP_RNG_SEED milestone. Appending final progress block and committing.
+
+
+## 2026-07-26T00:45:39 UTC - Changes committed.
+- Wired the SETUP_RNG_SEED (type 9) setup_data boot-RNG-seed node end-to-end into the real KVM boot path
+- Files changed: crates/baud-multiverse/src/layout.rs, crates/baud-multiverse/src/linux/bootparams.rs, crates/baud-multiverse/src/linux/mod.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - layout.rs: added RNG_SEED_SETUP_DATA_ADDR/RNG_SEED_SETUP_DATA_LEN constants + a static layout-invariant assertion
+  - bootparams.rs: added SETUP_RNG_SEED=9, RNG_SEED_LEN=32, write_rng_seed_setup_data(), and load_kernel_and_write_boot_params() now takes rng_seed and points hdr.setup_data at the written node
+  - linux/mod.rs: boot_guest() now takes tape and derives the seed via a domain-separated rng_seed_from_tape() (distinct blake3 prefix from entropy_seed_from_tape so the two streams never overlap); Multiverse::boot threads tape through
+  - Added 6 new unit/integration tests, including a real-/dev/kvm end-to-end boot test proving the node lands in guest RAM and the seed is a pure function of the tape (same tape -> same seed, different tape -> different seed)
+  - Verified: cargo build/clippy/test --workspace all green (two transient hardware-timing-jitter test failures on first run were confirmed pre-existing/non-regressions via isolated reruns and a full-suite rerun that passed 100%); drive/h0.sh through drive/h6.sh all PASS on real /dev/kvm
+  - todo.md updated to record this milestone under §14 Build status and narrow the corresponding Next-actions item
+---

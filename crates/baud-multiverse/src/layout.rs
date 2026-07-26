@@ -35,8 +35,21 @@ pub const KERNEL_LOAD_ADDR: u64 = 0x0020_0000;
 pub const KERNEL_64BIT_ENTRY_OFFSET: u64 = 0x200;
 
 /// The "zero page" (`struct boot_params`) address — low memory, below the kernel and any page
-/// tables, per convention shared with Firecracker's `arch::x86_64::layout::ZERO_PAGE_START`.
+/// tables, per convention shared with Firecracker's `arch::x86_64::layout::ZERO_PAGE_START`. The
+/// zero page itself is one 4 KiB page (`struct boot_params` is exactly `PAGE_SIZE`), so the next
+/// free page is `ZERO_PAGE_ADDR + 0x1000`.
 pub const ZERO_PAGE_ADDR: u64 = 0x0000_7000;
+
+/// The Linux/x86 `SETUP_RNG_SEED` (type 9) `setup_data` node baud pins (specs/baud-multiverse.md
+/// §3.8's "Boot RNG seed"): a `struct setup_data { next: u64; type: u32; len: u32; data: [u8] }`
+/// with `type = 9` and `data` holding the tape-derived seed, which `arch/x86/kernel/setup.c`'s
+/// `parse_setup_data` feeds straight to `add_bootloader_randomness()`. Sits in the free page
+/// right after the zero page, well before [`PML4_ADDR`].
+pub const RNG_SEED_SETUP_DATA_ADDR: u64 = ZERO_PAGE_ADDR + 0x1000;
+
+/// Total on-the-wire size of the `setup_data` node at [`RNG_SEED_SETUP_DATA_ADDR`]: the 16-byte
+/// `{next: u64, type: u32, len: u32}` header plus a 32-byte seed.
+pub const RNG_SEED_SETUP_DATA_LEN: u64 = 16 + 32;
 
 /// Kernel command line: also low memory, sized generously for the tape-device driver's boot
 /// arguments (specs/baud-tape-device.md's guest-side driver contract).
@@ -98,6 +111,7 @@ pub fn build_flat_gdt() -> [u64; 3] {
 const _STATIC_LAYOUT_INVARIANTS: () = {
     assert!(CMDLINE_ADDR + CMDLINE_MAX_SIZE as u64 <= KERNEL_LOAD_ADDR);
     assert!(KERNEL_LOAD_ADDR >= HIMEM_START);
+    assert!(RNG_SEED_SETUP_DATA_ADDR + RNG_SEED_SETUP_DATA_LEN <= PML4_ADDR);
 };
 
 const PAGE_TABLE_ENTRY_COUNT: usize = 512;
