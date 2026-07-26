@@ -388,13 +388,12 @@ fn configure_msr_filter(vm: &VmFd) -> Result<(), kvm_ioctls::Error> {
 }
 
 /// The work-clock's real RCB source: a free-running `perf_event_open` counter over
-/// `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`, read (never armed/overflow-driven — that is
-/// `baud_vcpu::linux::pmu::LinuxPmuStepper`'s separate concern for interrupt injection,
-/// specs/baud-vcpu.md §5) on every `IA32_TSC` access (specs/baud-multiverse.md §4's work-clock
-/// row). This is a distinct perf-event fd from `LinuxPmuStepper`'s armed counter; reconciling the
-/// two into a single counter source is deferred until `baud-multiverse`'s thread model actually
-/// exists and can be exercised on real perf/KVM hardware (see `crates/baud-vcpu/src/linux/pmu.rs`'s
-/// module doc for the sibling scope note on this same "not yet exercised" boundary).
+/// `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`, read on every `IA32_TSC` access (specs/baud-multiverse.md
+/// §4's work-clock row) and, since todo.md §14 next-actions item 2(c)'s counter-reconciliation
+/// fix, also the *only* RCB source `baud_vcpu::linux::pmu::LinuxPmuStepper` polls when arming/
+/// stepping toward an interrupt-injection target (specs/baud-vcpu.md §5) — it no longer owns a
+/// second, independently-epoched `perf_event` fd of its own for that (see
+/// `crates/baud-vcpu/src/linux/pmu.rs`'s module doc).
 pub struct LinuxBranchCounter {
     counter: Counter,
     /// The last successfully read value — served on a transient read failure instead of `0`, so a
@@ -958,17 +957,16 @@ impl Multiverse {
     /// into a real guest's run loop for the first time): reads the work-clock's current RCB
     /// (`WorkClock::current_rcb`), builds a `baud_vcpu::linux::pmu::LinuxPmuStepper` over this
     /// `Multiverse`'s own vCPU/bus/time-source handles (so every exit taken while arming/stepping
-    /// toward the target is still served deterministically, never skipped), anchors that
-    /// stepper's own armed counter to the same RCB space via `with_baseline_rcb` (see that
-    /// method's doc for why the two counters would otherwise disagree), then calls
+    /// toward the target is still served deterministically, never skipped, and so the stepper
+    /// polls this same `WorkClock`-backed RCB space directly rather than a second, independently-
+    /// epoched counter of its own — todo.md §14 next-actions item 2(c)), then calls
     /// `boundary::inject_at`. Returns the exact `(rip, rcb)` the interrupt landed at — the tuple
     /// `timer_tick_lands_at_identical_instruction` compares across a double-run.
     pub fn inject_timer_tick(&mut self, period_rcb: u64, vector: u8) -> Result<TimerTick, DeterminismHole> {
         let baseline = self.time.current_rcb();
         let target_rcb = baseline.saturating_add(period_rcb);
         let mut stepper =
-            baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
-                .with_baseline_rcb(baseline);
+            baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
         let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         match outcome {
@@ -1034,8 +1032,7 @@ impl Multiverse {
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
             let mut stepper =
-                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
-                    .with_baseline_rcb(baseline);
+                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
             let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
                 .map_err(|e| DeterminismHole(e.to_string()))?;
             match outcome {
@@ -1889,7 +1886,9 @@ mod tests {
     /// capable of wedging every future `KVM_RUN` on the vCPU; a fixture forced-exit interval
     /// coarser than `boundary::MARGIN`, which silently skipped the single-step phase every time),
     /// and `exclude_host`/`.pinned(true)` were both tried and ruled out or found insufficient (see
-    /// `LinuxBranchCounter::new`'s and `LinuxPmuStepper::arm_overflow`'s docs). What remains is
+    /// `LinuxBranchCounter::new`'s doc — the only pinned RCB fd left after todo.md §14 next-actions
+    /// item 2(c)'s counter-reconciliation fix removed `LinuxPmuStepper`'s own separate one). What
+    /// remains is
     /// consistent with the same *precision*, not *determinism*, limitation this project already
     /// hardened around once before (`crates/baud-host/src/linux.rs`'s `rcb_deterministic`'s own
     /// majority-of-3 vote, "still a heuristic, not a proof"): guest RAM and console output below
@@ -2192,12 +2191,27 @@ mod tests {
     /// judges the target crossed — a two-fd epoch/scheduling disagreement, not raw single-fd
     /// hardware imprecision (§3.7's own H0 gate already established the raw `BR_INST_RETIRED.COND`
     /// event is bit-exact on a single always-running fd, so 34 counts of *landing-precision* jitter
-    /// implicates the second fd, not the counted event itself). **Not yet fixed**: the concrete next
-    /// step is reconciling the two into one shared pinned fd (`WorkClock::current_rcb`'s own doc
-    /// already flagged this as deferred work) so the interrupt-injection engine's "is the target
-    /// crossed yet" reads and the work-clock's own served value come from the identical epoch:
-    /// deferred to a future iteration as a real architectural change, not rushed in alongside this
-    /// diagnostic. On divergence this test now reports, instead of a bare byte-diff, whether the two
+    /// implicates the second fd, not the counted event itself). **Fixed this iteration, and
+    /// confirmed on real hardware**: `LinuxPmuStepper` no longer owns a second `perf_event` fd at
+    /// all — `arm_overflow`/`current_rcb` (`crates/baud-vcpu/src/linux/pmu.rs`) now read
+    /// `TimeSource::current_rcb` directly, the same single pinned fd `WorkClock` owns, so the
+    /// interrupt-injection engine's "is the target crossed yet" reads and the work-clock's own
+    /// served value are, by construction, the identical read of the identical fd — no second
+    /// epoch left to disagree with. A real-hardware `H7_ENTROPY_REPEATS=10` batch
+    /// (`drive/h7-enforced-entropy.sh`) after this fix (and after also fixing `SPURIOUS_LAPIC_LINE`
+    /// below, a second, independent bug this fix's improved timing precision exposed at a much
+    /// higher rate) passed 7/10, and every one of the 3 failures showed the *same* tick count and
+    /// a **1-2 count** RCB-delta disagreement (down from the pre-fix 34) with a bit-identical
+    /// landing `rip` — squarely inside [`RCB_HARDWARE_JITTER_TOLERANCE`]'s already-documented
+    /// single-fd hardware-read-precision floor, not a further cross-fd epoch bug. The two-fd
+    /// architectural disagreement this section originally diagnosed is confirmed eliminated; what
+    /// remains is irreducible real-hardware `perf_event` read jitter that `add_interrupt_
+    /// randomness()`'s zero-tolerance CRNG mixing (any nonzero jitter changes the mixed-in value)
+    /// is uniquely sensitive to, unlike the ±8-count-tolerant `rip`-equality tests elsewhere in
+    /// this file. Whether that residual floor can be driven lower (e.g. a `perf_event` read
+    /// technique with less inherent jitter than a plain `read()` syscall) is future work, not
+    /// re-litigated here. On divergence this test now reports, instead of a bare byte-diff, whether
+    /// the two
     /// boots' `run_to_first_halt_with_periodic_timer` tick streams (rip + cumulative rcb per tick)
     /// took a different number of ticks (would indicate a genuine control-flow divergence, e.g. a
     /// TSC-calibration loop like `calibrate_delay()` iterating a different number of times — not
@@ -2232,7 +2246,20 @@ mod tests {
         // kernel's diagnostic text is itself fixed and deterministic, so stripping every occurrence of
         // it before line-splitting reassembles the probe line exactly as the guest's own outb sequence
         // produced it, with no effect on the entropy bytes themselves.
-        const SPURIOUS_LAPIC_LINE: &str = "Spurious LAPIC timer interrupt on cpu 0\n";
+        //
+        // BUG FOUND AND FIXED (todo.md §14 next-actions item 2(c)'s counter-reconciliation fix made
+        // this land far more consistently, exposing that the strip below was a silent no-op all
+        // along): every kernel `printk` line on this fixture's serial console is terminated `\r\n`,
+        // not a bare `\n` (the 8250 driver's own CRLF translation) -- confirmed by inspecting the
+        // raw captured bytes (`cat -A`: every kernel line ends `^M$`, i.e. `\r\n`). The guest's own
+        // *userspace* `outb` writes (this probe's hex lines, `ENTROPY_MARKER`) bypass that driver
+        // entirely and use a bare `\n`, so only the kernel-sourced diagnostic needs the `\r`. Before
+        // this fix `.replace(SPURIOUS_LAPIC_LINE, "")` below never matched anything (the pattern's
+        // trailing `\n` never lined up with the real `\r\n`), so every interleaved occurrence
+        // silently survived into `probes`, corrupting a probe line at the exact hex.len()==64 check
+        // whenever a tick happened to land mid-write -- previously mistaken for run-to-run RCB
+        // divergence in a fraction of failures, since both bugs manifest as the same test failing.
+        const SPURIOUS_LAPIC_LINE: &str = "Spurious LAPIC timer interrupt on cpu 0\r\n";
 
         let mut probe_runs = Vec::new();
         // todo.md §14 next-actions item 2's "needed next" step: direct instrumentation of the
@@ -2302,11 +2329,11 @@ mod tests {
             } else {
                 // Same tick count: compare the RCB *delta* between consecutive ticks (should be
                 // ~PERIOD_RCB every time) run-for-run, and report the first tick whose delta
-                // disagrees between the two boots -- pinpointing whether the divergence clusters
-                // at a particular tick (implicating cross-counter PMU contention, which would most
-                // plausibly perturb whichever ticks land during/near a `LinuxPmuStepper` counter
-                // teardown) or is spread uniformly across all ticks (implicating pure hardware
-                // read jitter, RCB_HARDWARE_JITTER_TOLERANCE-class, unrelated to any one tick).
+                // disagrees between the two boots. Pre-fix (todo.md §14 next-actions item 2(c)),
+                // this would have pinpointed whether the divergence clustered at a particular tick
+                // (implicating the now-removed second `LinuxPmuStepper` fd's own epoch) or was
+                // spread uniformly (pure hardware read jitter, RCB_HARDWARE_JITTER_TOLERANCE-class).
+                // Kept as a live diagnostic in case any disagreement still surfaces post-fix.
                 let mut first_divergence = None;
                 for idx in 0..n0 {
                     let d0 = tick_runs[0][idx]

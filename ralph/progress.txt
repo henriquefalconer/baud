@@ -4570,3 +4570,72 @@ Documentation updated (os_entropy_is_deterministic doc comment, drive/h7-enforce
   - Documented the confirmed finding in os_entropy_is_deterministic's own doc comment, drive/h7-enforced-entropy.sh's header, and todo.md §14 item 2 -- the concrete next fix (reconciling WorkClock's and LinuxPmuStepper's counters into one shared pinned fd) is scoped but deliberately deferred to a future iteration as a real architectural change, not rushed in alongside this diagnostic
   - Full verification green: cargo build/clippy/test --workspace clean (0 failures, 87 passed in baud-multiverse; one periodic_timer_injection_halts_gracefully_and_reproducibly failure during the first workspace run was confirmed pre-existing real-hardware RCB read-jitter flakiness unrelated to this change -- passed cleanly on an isolated rerun, and the full workspace suite passed clean on a second full run); drive/h4.sh, h5.sh, h7.sh (stock module) and drive/h3-enforced-rdtsc.sh (enforced-regime regression) all pass clean; stock kvm_intel/kvm module confirmed restored and /dev/kvm confirmed idle after the investigation batch
 ---
+
+Post-push verification: local main (d18bfc3) matches origin/main exactly (fetch + rev-parse confirmed), working tree clean, stock kvm_intel/kvm module loaded and /dev/kvm confirmed idle. Summary: this iteration root-caused (via new tick-level diagnostic instrumentation + a real-hardware batch run) the residual ~25% os_entropy_is_deterministic divergence -- confirmed it is landing-precision RCB jitter between WorkClock's and LinuxPmuStepper's separate pinned perf_event counters, feeding through Linux's own add_interrupt_randomness() into the guest CRNG, not a control-flow divergence or unexplained contamination. The fix itself (reconciling the two counters into one shared fd) is scoped but deliberately deferred as a real architectural change. cargo build/clippy/test --workspace all green; drive/h4.sh, h5.sh, h7.sh, h3-enforced-rdtsc.sh all pass. todo.md still has many pending items (the counter-reconciliation fix itself, double_boot_ram_hash_identical's guest-driven-checkpoint design, the baud-packages automated image pipeline, H8 Mario rebuild, the generic-core guardrail, H9 Ubuntu, and more per section 14) -- emitting NEXT.
+
+## 2026-07-26T05:49:26 UTC (28min) - Session usage — build-7 [sonnet]
+- cost $3.4686 (from claude -p)
+- context 177,090 tok peak of 1M (18%) across 47 inference calls, monotonic
+- models sonnet-5 $3.4654 (in 94 / out 41,986 / cache-read 6,383,292) · haiku-4-5 $0.0031
+- transcript: ralph/.run/20260726T004845Z/007-build-7.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 8
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md, starting by reading current state of todo.md and recent git history...
+
+Chose to reconcile WorkClock's long-lived RCB perf_event counter and LinuxPmuStepper's per-tick freshly-created counter into one shared pinned fd, to close the residual ~25% os_entropy_is_deterministic divergence that was root-caused (not fixed) last iteration -- it's the explicit 'needed next' item in todo.md sec14 item 2, and the current item in the Next-actions ordering.
+
+Launched a Sonnet research subagent (background) to trace WorkClock::current_rcb and LinuxPmuStepper's per-tick counter construction across baud-multiverse/baud-vcpu before attempting the reconciliation fix. Waiting on its report...
+
+Research agent reported back: confirmed LinuxPmuStepper (crates/baud-vcpu/src/linux/pmu.rs) creates its own fresh perf_event Counter every tick in arm_overflow(), never pause/resume-bracketed, while WorkClock's counter IS bracketed via TimeSource::pause_rcb/resume_rcb. Cleanest fix: add TimeSource::current_rcb() trait method (default 0), implement for WorkClock, and have LinuxPmuStepper read RCB through self.time.current_rcb() instead of owning a second perf_event fd -- eliminating the second fd entirely rather than trying to share it (perf-event crate's Counter has no Clone/dup). Implementing now.
+
+Implemented the reconciliation fix: added TimeSource::current_rcb() trait method, WorkClock now exposes it, LinuxPmuStepper no longer owns its own perf_event Counter -- it reads self.time.current_rcb() directly. Removed with_baseline_rcb and both call sites in linux/mod.rs. Updated doc comments describing the old two-fd design. Running cargo build --workspace now...
+
+cargo build --workspace: clean. Running cargo clippy --workspace --all-targets...
+
+cargo clippy --workspace --all-targets: clean, no new warnings (only pre-existing warnings in unrelated files: baud-tracing aya::Bpf deprecation, baud-multiverse Default derives, baud-server routes). Running cargo test --workspace...
+
+cargo test --workspace: 1 failure -- periodic_timer_injection_halts_gracefully_and_reproducibly (tick 0 rcb disagreement 9 vs tolerance 8), same class of real-hardware RCB read jitter documented as pre-existing flakiness in prior iterations. Rerunning in isolation to confirm it's transient, not a regression from the fix...
+
+Confirmed: periodic_timer_injection_halts_gracefully_and_reproducibly passes cleanly in isolation -- transient real-hardware RCB jitter (tick 0 landed 9 counts apart, 1 over the documented tolerance of 8), not a regression from the fix. Running full cargo test --workspace once more for a clean confirmation...
+
+Full cargo test --workspace: clean, 0 failures across all crates (87 passed baud-multiverse). Running drive/h4.sh (timer-tick injection, stock module)...
+
+drive/h4.sh: PASS. Running drive/h5.sh...
+
+drive/h5.sh: PASS. Running drive/h7.sh...
+
+drive/h7.sh: PASS (stock module, boot-to-userspace). Now running the real validation for this fix: drive/h7-enforced-entropy.sh with H7_ENTROPY_REPEATS to hardware-verify the residual os_entropy_is_deterministic divergence is actually gone. This requires the enforced kvm_intel module swap-in/out dance documented in CLAUDE.md...
+
+/dev/kvm confirmed idle, stock kvm_intel/kvm loaded. Running drive/h7-enforced-entropy.sh with H7_ENTROPY_REPEATS=10 to hardware-validate the fix (this swaps in the patched kvm_intel module, runs the double-boot entropy test 10 times, and unconditionally restores the stock module on exit)...
+
+H7_ENTROPY_REPEATS=10 result: 0/10 passed -- worse than the pre-fix ~75%, need to determine whether these are genuine RCB-divergence failures or a different, pre-existing console-capture-race bug now surfacing more often. Capturing full output to a log file for closer analysis (tail truncation hid the actual panic messages)...
+
+ROOT-CAUSED a second, independent bug: SPURIOUS_LAPIC_LINE's stripping constant used a bare '\n' but the kernel's printk driver actually emits '\r\n' for every line (confirmed via cat -A on the raw console capture -- every kernel line ends ^M$, userspace outb writes don't). This console-capture-race strip has been a silent no-op since it was introduced; my RCB-counter fix made timing MORE consistent across boots, so the SAME probe write now gets corrupted on (nearly) every run instead of intermittently, exposing this at 100% failure rate. Fixed the constant to '\r\n'. Rebuilding and re-running the hardware validation...
+
+Real-hardware result after both fixes: 7/10 os_entropy_is_deterministic passes. The 3 failures all show the SAME tick count and TINY RCB-delta disagreements (1, 2, 2 counts) with bit-identical landing rip -- a massive improvement from the pre-fix 34-count cross-fd epoch disagreement, and now consistent with the already-documented +/-8 RCB_HARDWARE_JITTER_TOLERANCE single-fd hardware read-precision floor. This confirms the counter-reconciliation fix eliminated the architectural two-fd disagreement; what remains is irreducible real-hardware perf_event read jitter that add_interrupt_randomness's zero-tolerance CRNG mixing is uniquely sensitive to. Updating the test's doc comment and todo.md with this finding, then re-running full workspace validation...
+
+Updated os_entropy_is_deterministic's doc comment with the confirmed real-hardware outcome (two-fd bug eliminated; residual is 1-2 count hardware-jitter floor). Rebuilding and running full test suite once more (doc-only change since last full validation, but confirming nothing broke)...
+
+cargo test --workspace: clean (87 passed baud-multiverse, 0 failed). Running drive/h4.sh, drive/h5.sh, drive/h7.sh once more (stock module) for final confirmation before committing...
+
+drive/h4.sh, drive/h7.sh: PASS. Running drive/h5.sh (includes the ~4min thousand-branches real-hardware test)...
+
+drive/h5.sh: PASS. All verification green. Now updating todo.md sec14 with this iteration's findings (counter-reconciliation fix + the SPURIOUS_LAPIC_LINE console-race bug it exposed)...
+
+todo.md sec14 updated with the confirmed fix outcome. Proceeding to final progress block, commit, and push.
+
+## 2026-07-26T06:38:33 UTC - Changes committed.
+- Reconciled WorkClock's long-lived RCB perf_event counter and LinuxPmuStepper's per-tick freshly-created counter into one shared pinned fd, closing the architectural two-fd disagreement behind the residual os_entropy_is_deterministic divergence (todo.md §14 next-actions item 2(c), the "needed next" step from the previous iteration)
+- Files changed: crates/baud-vcpu/src/lib.rs, crates/baud-vcpu/src/linux/pmu.rs, crates/baud-multiverse/src/timesource.rs, crates/baud-multiverse/src/linux/mod.rs, todo.md
+- **Brief description of changes:**
+  - Added `TimeSource::current_rcb() -> u64` (default `0`, mirroring the existing `resume_rcb`/`pause_rcb` no-op-default convention) to `crates/baud-vcpu/src/lib.rs`; `WorkClock<C>` implements it as its own inherent `current_rcb()` (`crates/baud-multiverse/src/timesource.rs`)
+  - `LinuxPmuStepper` (`crates/baud-vcpu/src/linux/pmu.rs`) no longer owns a second `perf_event::Counter` of its own: removed the `counter`/`baseline_rcb` fields, the `with_baseline_rcb` builder method, and the per-tick `Builder::new().kind(Hardware::BRANCH_INSTRUCTIONS).pinned(true)` construction in `arm_overflow` — `current_rcb()` now reads `self.time.current_rcb()` directly (the same single pinned fd `WorkClock` owns and already pauses/resumes around every real `KVM_RUN` via `run_and_convert_rcb_bracketed`), so there is only ever one RCB epoch for the whole boot instead of two independently-epoched fds
+  - Dropped the now-meaningless `.with_baseline_rcb(baseline)` chaining at both call sites in `crates/baud-multiverse/src/linux/mod.rs` (`inject_timer_tick`, `run_to_first_halt_with_periodic_timer`)
+  - This exposed a second, independent, pre-existing bug in `os_entropy_is_deterministic`'s console-capture-race handling: `SPURIOUS_LAPIC_LINE` used a bare `\n` but every real kernel `printk` line on this fixture's serial console actually ends `\r\n` (confirmed via `cat -A` on a raw capture — every kernel line shows `^M$`, guest userspace `outb` probe writes do not), so the `.replace(SPURIOUS_LAPIC_LINE, "")` strip had been a silent no-op since it was introduced; the fd fix's improved timing precision made a specific probe write hit this interleaving far more consistently (10/10 in one batch) than before, surfacing it as a 100%-reproducible `hex.len() == 64` assertion failure. Fixed by correcting the constant to end `\r\n`
+  - Real-hardware validation (`H7_ENTROPY_REPEATS=10` via `drive/h7-enforced-entropy.sh`, patched enforced kvm_intel/kvm module swapped in and back out cleanly): with both fixes landed, 7/10 double-boot runs passed, and all 3 failures showed the *same* tick count with only a 1-2 count RCB-delta disagreement (down from the pre-fix 34) and a bit-identical landing `rip` — squarely inside the already-documented `RCB_HARDWARE_JITTER_TOLERANCE` (±8) single-fd hardware-read-precision floor, not a further cross-fd epoch bug; confirms the two-fd architectural disagreement this investigation targeted is eliminated, and re-characterizes the residual flakiness as an irreducible real-hardware jitter floor (future work, not re-litigated this iteration) rather than a design bug
+  - Updated doc comments describing the old two-fd design (`WorkClock::current_rcb`, `LinuxBranchCounter`, `LinuxPmuStepper`'s module doc, `os_entropy_is_deterministic`'s own doc, and its in-test diagnostic comments) and todo.md §14 next-actions item 2(c) to reflect the fix and its confirmed real-hardware outcome
+  - Full verification green: `cargo build`/`clippy --all-targets`/`test --workspace` all clean (0 failures, 87 passed in `baud-multiverse`, one `periodic_timer_injection_halts_gracefully_and_reproducibly` transient real-hardware RCB-jitter failure in the first full run confirmed to pass cleanly in isolation and on a full clean rerun, same pre-existing flakiness class documented in prior iterations); `drive/h4.sh`, `h5.sh`, `h7.sh` (stock module) and `h7-enforced-entropy.sh`'s internal `rdtsc_enforced_regime_is_bit_exact_across_boots` regression check all pass; stock kvm_intel/kvm module confirmed restored and `/dev/kvm` confirmed idle after the investigation
+---

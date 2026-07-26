@@ -995,10 +995,12 @@ snapshot, not a duplicate of it.
      cmdline string inline — see the bullet above for the exact diff) — either wire it as the fixture's
      cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned`,
      `init_powers_off_deterministically`, `image_build_is_reproducible` remain unwritten.
-  2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed;
-     `os_entropy_is_deterministic`'s flakiness is root-caused and substantially (not fully) improved
-     this iteration — real hardware pass rate rose from ~25-50% to ~75%, residual ~25% still open,
-     see below.** `tests/fixtures/linux-guest/
+  2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
+     two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
+     flakiness is now reconciled into a single shared fd, plus a second, independent console-
+     capture-race bug it exposed is fixed — real hardware pass rate is now 7/10, with all residual
+     failures matching the already-documented single-fd hardware-read-jitter floor, not a further
+     design bug; see below.** `tests/fixtures/linux-guest/
      entropy_init.c` (+ `entropy_initramfs.cpio.gz`) is a second `/init` for the *already-built*
      `linux-guest` kernel that calls `getrandom()` ×4 and reads `/dev/urandom` ×4, hex-encoding each
      32-byte read out the same raw-`outb` COM1 endpoint `init.c` uses.
@@ -1085,13 +1087,40 @@ snapshot, not a duplicate of it.
        step engine judges the target crossed — a two-fd epoch/scheduling disagreement, not raw
        single-fd hardware imprecision (§3.7's H0 gate already established the raw
        `BR_INST_RETIRED.COND` event is bit-exact on one always-running fd, so 34 counts of
-       landing-precision jitter implicates the second fd). **Needed next**: reconcile the two into
-       one shared pinned fd (`WorkClock::current_rcb`'s own doc already flags this as deferred work)
-       — a real architectural change (the interrupt-injection engine's "is the target crossed" reads
-       and the work-clock's served value would need to come from the identical epoch), intentionally
-       not rushed into this iteration alongside the diagnostic. Do not re-claim
-       `os_entropy_is_deterministic` as reliably green until that reconciliation lands and a repeat
-       batch (`H7_ENTROPY_REPEATS=N`) shows no further tick-diagnostic disagreements.
+       landing-precision jitter implicates the second fd).
+       **FIXED this iteration and confirmed on real hardware.** `LinuxPmuStepper` no longer owns a
+       second `perf_event` fd at all: `crates/baud-vcpu/src/lib.rs`'s `TimeSource` trait gained a
+       `current_rcb()` method (default `0`, mirroring `resume_rcb`/`pause_rcb`'s no-op-default
+       convention), `WorkClock` implements it as its own inherent `current_rcb()`, and
+       `LinuxPmuStepper` (`crates/baud-vcpu/src/linux/pmu.rs`) now reads `self.time.current_rcb()`
+       directly instead of building its own `Builder::new().kind(Hardware::BRANCH_INSTRUCTIONS)`
+       counter per tick — `arm_overflow`/`with_baseline_rcb`/`baseline_rcb` and the `perf_event`
+       imports are gone entirely from that file. `Multiverse::inject_timer_tick`/
+       `run_to_first_halt_with_periodic_timer` (`crates/baud-multiverse/src/linux/mod.rs`) no
+       longer chain `.with_baseline_rcb(baseline)`. This also **exposed a second, independent,
+       pre-existing bug**: `os_entropy_is_deterministic`'s `SPURIOUS_LAPIC_LINE` console-capture-
+       race strip (`"Spurious LAPIC timer interrupt on cpu 0\n"`) had a bare `\n` but every real
+       kernel `printk` line on this fixture's serial console actually ends `\r\n` (confirmed via
+       `cat -A` on a raw capture: every kernel line shows `^M$`; the guest's own userspace `outb`
+       probe writes do not) — so `.replace(SPURIOUS_LAPIC_LINE, "")` had been a silent no-op since
+       it was introduced, and the improved timing precision from the fd fix made a specific probe
+       write get hit by this interleaving far more consistently (10/10 in one batch) than before,
+       surfacing it as a 100%-reproducible `hex.len() == 64` assertion failure rather than the
+       intended byte-diff panic. Fixed by correcting the constant to end `\r\n`. With both fixes
+       landed, a real-hardware `H7_ENTROPY_REPEATS=10` batch (`drive/h7-enforced-entropy.sh`) passed
+       **7/10**, and all 3 failures showed the *same* tick count with only a **1-2 count** RCB-delta
+       disagreement (down from the pre-fix 34) and a bit-identical landing `rip` — squarely inside
+       the already-documented `RCB_HARDWARE_JITTER_TOLERANCE` (±8) single-fd hardware-read-precision
+       floor, not a further cross-fd epoch bug. The two-fd architectural disagreement this
+       investigation targeted is confirmed eliminated. **Still open**: whether that residual
+       1-2-count single-fd read-jitter floor can be driven lower is unexplored — unlike the
+       ±8-tolerant `rip`-equality tests elsewhere, `add_interrupt_randomness()`'s CRNG mixing has
+       zero tolerance for *any* nonzero jitter, so `os_entropy_is_deterministic` may never reach
+       100% on this real-hardware host without a lower-jitter `perf_event` read technique or a
+       different entropy-seeding mechanism entirely; `cargo build`/`clippy`/`test --workspace` all
+       clean (0 failures, 87 passed in `baud-multiverse`) and `drive/h4.sh`/`h5.sh`/`h7.sh` and the
+       `h7-enforced-entropy.sh`-internal `rdtsc_enforced_regime_is_bit_exact_across_boots` regression
+       check all still pass clean.
      `double_boot_ram_hash_identical` still needs a **guest-driven checkpoint** design (an explicit
      `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first
      attempt at the latter found the two boots differ in exactly one kernel-internal diagnostic line,

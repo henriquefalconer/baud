@@ -177,14 +177,17 @@ impl<C: BranchCounter> WorkClock<C> {
 
     /// The current cumulative retired-conditional-branch count: [`rcb_offset`](WorkClock::
     /// rcb_offset) plus the underlying [`BranchCounter`]'s own raw reading — the same RCB space
-    /// `virtual_tsc` derives from, and the space `Multiverse::inject_timer_tick` (H4,
-    /// specs/baud-vcpu.md §5) anchors a `baud_vcpu::linux::pmu::LinuxPmuStepper`'s own armed
-    /// counter to, so a `target_rcb` computed from "now" means the same thing to both the
-    /// work-clock and the interrupt-injection engine (they are two distinct `perf_event` file
-    /// descriptors counting the identical architectural event on the identical thread — their
-    /// deltas over the same interval agree by construction, only their absolute epochs differ,
-    /// which is exactly what this seeding reconciles) on a fresh boot, and what `rcb_offset`
-    /// reconciles across a restore.
+    /// `virtual_tsc` derives from, and (via the `TimeSource::current_rcb` trait method this
+    /// inherent method backs) the exact space `Multiverse::inject_timer_tick` (H4,
+    /// specs/baud-vcpu.md §5) drives its `baud_vcpu::linux::pmu::LinuxPmuStepper` against.
+    /// `LinuxPmuStepper` used to own a second, independent `perf_event` fd of its own, reconciled
+    /// to this one via a caller-supplied baseline (`with_baseline_rcb`) — found, by direct
+    /// hardware instrumentation (todo.md §14 next-actions item 2(c)), to disagree with this fd by
+    /// a small amount at the instant a target is judged crossed, since pause/resume epochs are
+    /// per-fd even though both fds count the identical hardware event on the identical thread.
+    /// The stepper now has no counter of its own and reads this method directly instead, so there
+    /// is only ever one pinned RCB fd and, by construction, no second epoch to disagree with.
+    /// `rcb_offset` is what reconciles this fd's own zero-based reading across a restore.
     pub fn current_rcb(&mut self) -> u64 {
         self.rcb_offset.saturating_add(self.counter.read())
     }
@@ -269,6 +272,13 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
 
     fn pause_rcb(&mut self) {
         self.counter.pause();
+    }
+
+    fn current_rcb(&mut self) -> u64 {
+        // Resolves to the inherent `WorkClock::current_rcb` above (Rust prefers an inherent
+        // method over a trait method in scope), not infinite recursion — same pattern
+        // `serve_enforced_rdtsc` already uses via `self.virtual_tsc()`.
+        self.current_rcb()
     }
 }
 

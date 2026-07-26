@@ -34,8 +34,6 @@ use crate::boundary::{ExecPoint, PmuStepper};
 use crate::{dispatch_exit, Bus, DispatchOutcome, Exit, TimeSource};
 use kvm_bindings::kvm_regs;
 use kvm_ioctls::VcpuFd;
-use perf_event::events::Hardware;
-use perf_event::{Builder, Counter};
 use std::io;
 
 /// All general-purpose registers in [`ExecPoint::gp_regs`]'s fixed order (RAX..R15). A free
@@ -48,19 +46,23 @@ pub fn gp_regs_from_kvm(r: &kvm_regs) -> [u64; 16] {
     ]
 }
 
-/// The real [`PmuStepper`]: drives one vCPU's `KVM_RUN` loop, arming a `perf_event_open` branch
-/// counter and single-stepping via `KVM_SET_GUEST_DEBUG` to land injection at an exact boundary
-/// (specs/baud-vcpu.md §5). Borrows the same `Bus`/`TimeSource` the ordinary run loop uses, so
-/// exits taken while arming/stepping toward the injection point are still served deterministically
-/// rather than skipped.
+/// The real [`PmuStepper`]: drives one vCPU's `KVM_RUN` loop, polling the caller's own
+/// `TimeSource::current_rcb` (backed by `WorkClock`'s single, long-lived `perf_event` branch
+/// counter — todo.md §14 next-actions item 2(c)) and single-stepping via `KVM_SET_GUEST_DEBUG`
+/// to land injection at an exact boundary (specs/baud-vcpu.md §5). This stepper used to own a
+/// second, independent `perf_event` fd of its own, reconciled to the caller's via a baseline
+/// (`with_baseline_rcb`) — found, by direct hardware instrumentation, to disagree with the
+/// caller's fd by a small amount at the instant a target is judged crossed, since the two fds'
+/// pause/resume epochs (`run_and_convert_rcb_bracketed`) were independent even though both
+/// counted the identical hardware event on the identical thread. Reading `time.current_rcb()`
+/// directly instead means there is only ever one pinned RCB fd for the whole boot, so there is,
+/// by construction, no second epoch left to disagree with. Borrows the same `Bus`/`TimeSource`
+/// the ordinary run loop uses, so exits taken while arming/stepping toward the injection point
+/// are still served deterministically rather than skipped.
 pub struct LinuxPmuStepper<'vcpu, 'io> {
     vcpu: &'vcpu mut VcpuFd,
     bus: &'io mut dyn Bus,
     time: &'io mut dyn TimeSource,
-    counter: Option<Counter>,
-    /// The cumulative RCB the moment the current `counter` was armed — `perf_event`'s raw count
-    /// restarts at 0 per file descriptor, so `baseline_rcb + counter.read()` is the true total.
-    baseline_rcb: u64,
     /// The cumulative RCB `arm_overflow` was asked to overflow at — kept so [`run_until_exit`]
     /// can also poll [`current_rcb`] directly instead of trusting the overflow *signal* alone
     /// (see [`run_until_exit`]'s doc for why: a real PMU overflow interrupt occurring while the
@@ -82,31 +84,16 @@ pub struct LinuxPmuStepper<'vcpu, 'io> {
 
 impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
     pub fn new(vcpu: &'vcpu mut VcpuFd, bus: &'io mut dyn Bus, time: &'io mut dyn TimeSource) -> Self {
-        LinuxPmuStepper { vcpu, bus, time, counter: None, baseline_rcb: 0, poll_target: 0, halted: false }
+        LinuxPmuStepper { vcpu, bus, time, poll_target: 0, halted: false }
     }
 
-    /// Anchor this stepper's own RCB space to an externally-known cumulative branch count (e.g.
-    /// the caller's `WorkClock::current_rcb()`) instead of starting at `0`. This stepper's armed
-    /// counter is a distinct `perf_event` fd from whatever counter feeds a caller's `TimeSource`
-    /// (`arm_overflow` always resets its own file descriptor's count to 0 on creation), so without
-    /// this a `target_rcb` computed in the caller's RCB space would land at entirely the wrong
-    /// point relative to this stepper's counter. Must be called before [`PmuStepper::arm_overflow`]
-    /// — it only takes effect while `counter` is still `None`.
-    pub fn with_baseline_rcb(mut self, baseline_rcb: u64) -> Self {
-        self.baseline_rcb = baseline_rcb;
-        self
-    }
-
-    fn current_rcb(&mut self) -> io::Result<u64> {
-        match &mut self.counter {
-            Some(c) => Ok(self.baseline_rcb + c.read()?),
-            None => Ok(self.baseline_rcb),
-        }
+    fn current_rcb(&mut self) -> u64 {
+        self.time.current_rcb()
     }
 
     fn read_point(&mut self) -> io::Result<ExecPoint> {
         let regs = self.vcpu.get_regs().map_err(io::Error::from)?;
-        let rcb = self.current_rcb()?;
+        let rcb = self.current_rcb();
         Ok(ExecPoint { rip: regs.rip, gp_regs: gp_regs_from_kvm(&regs), rcb, rcx: None, stack_checksum: None })
     }
 }
@@ -115,26 +102,10 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     type Error = io::Error;
 
     fn arm_overflow(&mut self, armed_target: u64) -> io::Result<()> {
-        let baseline = self.current_rcb()?;
-
-        // NOTE: `exclude_host(true)` would be the textbook "guest-filtered" fix here too, but is
-        // non-functional on this dev host — see `LinuxBranchCounter::new`'s doc
-        // (`baud-multiverse::linux::mod`) for why it was tried and reverted. This stepper's own
-        // bookkeeping between `KVM_RUN` calls (this file) must therefore stay free of
-        // data-dependent branching if `target_rcb` is to mean the same thing across two runs.
-        let mut builder = Builder::new().kind(Hardware::BRANCH_INSTRUCTIONS);
-        // `pinned(true)`: same fix as `crates/baud-host/src/linux.rs`'s `measure_fixed_loop_branches`
-        // (todo.md §14/H3) — under this project's own nested-virtualized dev host, an unpinned
-        // counter is occasionally multiplexed off the PMU for part of the measurement window,
-        // undercounting by a small, run-to-run-varying amount. Without this, two boots of the
-        // same image+tape landed an injected tick's `rip` identically but its `rcb` reading off
-        // by ±1-2 — not genuine execution nondeterminism, just this counter losing the PMU.
-        builder.pinned(true);
-        let mut counter = builder.build()?;
-        counter.enable()?;
-
-        self.counter = Some(counter);
-        self.baseline_rcb = baseline;
+        // No counter to create here any more (todo.md §14 next-actions item 2(c)): `current_rcb`
+        // reads the caller's own `WorkClock`-backed `TimeSource` directly, the same single pinned
+        // `perf_event` fd for the whole boot — see this stepper's own doc for why a second,
+        // independently-epoched fd was removed rather than kept reconciled.
         self.poll_target = armed_target;
         Ok(())
     }
@@ -150,7 +121,7 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     /// (`out 0x80, al`, absorbed by `OpenBusFallback`) so this poll always gets a chance to run.
     fn run_until_exit(&mut self) -> io::Result<()> {
         loop {
-            if self.current_rcb()? >= self.poll_target {
+            if self.current_rcb() >= self.poll_target {
                 return Ok(());
             }
             let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
@@ -210,17 +181,13 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     }
 
     fn current_point(&mut self) -> ExecPoint {
-        // Trait is infallible here (mirrors specs/baud-vcpu.md §5's pseudocode); a register/
-        // counter read failure is exceedingly unlikely immediately after a successful exit and
-        // is not itself the guest's fault, so this reports the last-known RCB rather than
-        // panicking a determinism-critical loop. `step`/`arm_overflow` surface real I/O errors.
-        self.read_point().unwrap_or(ExecPoint {
-            rip: 0,
-            gp_regs: [0; 16],
-            rcb: self.baseline_rcb,
-            rcx: None,
-            stack_checksum: None,
-        })
+        // Trait is infallible here (mirrors specs/baud-vcpu.md §5's pseudocode); a register read
+        // failure is exceedingly unlikely immediately after a successful exit and is not itself
+        // the guest's fault, so this reports the last-known RCB (now infallible: `current_rcb`
+        // just reads the caller's `TimeSource`, no fd of its own to fail) rather than panicking a
+        // determinism-critical loop. `step`/`arm_overflow` surface real I/O errors.
+        let rcb = self.current_rcb();
+        self.read_point().unwrap_or(ExecPoint { rip: 0, gp_regs: [0; 16], rcb, rcx: None, stack_checksum: None })
     }
 
     fn step(&mut self) -> io::Result<ExecPoint> {

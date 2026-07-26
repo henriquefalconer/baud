@@ -199,6 +199,21 @@ pub trait TimeSource {
     /// The other half of [`resume_rcb`](Self::resume_rcb) — called the instant a `KVM_RUN` call
     /// returns, before any dispatch/userspace code runs.
     fn pause_rcb(&mut self) {}
+
+    /// The current cumulative retired-conditional-branch count, in this `TimeSource`'s own RCB
+    /// space (todo.md §14 next-actions item 2(c)'s counter-reconciliation fix). `linux::pmu::
+    /// LinuxPmuStepper` used to own a second, independent `perf_event` counter of its own and
+    /// reconcile epochs with a caller-supplied baseline (`with_baseline_rcb`) — found, by direct
+    /// hardware instrumentation, to disagree with this `TimeSource`'s counter by a small
+    /// (~tens-of-counts) amount at the instant a target is judged crossed, since the two are
+    /// separate file descriptors with separate pause/resume epochs even though they count the
+    /// identical hardware event on the identical thread. The fix is for the stepper to have no
+    /// counter of its own at all and read this method instead, so there is only ever one pinned
+    /// RCB fd, one epoch, and by construction no room for the two to disagree. A no-op (`0`)
+    /// default: every non-RCB-backed `TimeSource` (every test double) needs no change.
+    fn current_rcb(&mut self) -> u64 {
+        0
+    }
 }
 
 /// Resolve one exit deterministically (specs/baud-vcpu.md §3's match). Exhaustive over `Exit` —
