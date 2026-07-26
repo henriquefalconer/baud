@@ -105,8 +105,10 @@ pass "image_hash present: $IMAGE_HASH"
 # guest_kernel_boots_to_userspace (drive/h7.sh) against the hand-built fixture bzImage/initramfs —
 # same kernel_src/config_fragment/init.c recipe this script drives through the CLI/server, so a
 # byte-identical bzImage (already proven reproducible by drive/pkg-image-build.sh) is expected
-# here too. `baud run kvm` has no initramfs parameter yet (todo.md §14: still open), so it cannot
-# actually exercise this output further without that separate piece of wiring landing first.
+# here too. `baud run kvm --initramfs ... --periodic-timer-period-rcb ...` now exists
+# (drive/pkg-boot-cli.sh boots the checked-in fixture pair through it end-to-end) — booting this
+# script's own freshly-built OUTPUT_DIR/{bzImage,initramfs.cpio.gz} through it directly, instead
+# of only the checked-in fixture copy, is still open future work.
 
 echo ""
 echo "=== baud image build CLI/server wiring: PASSED ==="

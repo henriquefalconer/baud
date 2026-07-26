@@ -4920,3 +4920,53 @@ Dispatched subagent to update todo.md §14 item 1 with this iteration's findings
   - Full verification green: `cargo build`/`clippy`/`test --workspace` all clean (0 failures — one unrelated pre-existing real-hardware TSC test, `rdtsc_guest_reproduces_high_bits_across_boots`, flaked once under full parallel load then passed clean in isolation and on a full-suite rerun, recorded in todo.md as an observed one-off, not a regression); `drive/h0.sh` through `drive/h7.sh` (stock module) all PASS on real `/dev/kvm`; new `drive/pkg-build-cli.sh` PASSES on real hardware.
   - todo.md §14 item 1 updated: CLI/server wiring gap closed; still-open list trimmed and a new concrete next gap surfaced (`baud run kvm`'s `RunKvmBody` has no `initramfs` field yet, so a `baud image build`-produced image can't be booted through the CLI/server path end-to-end) — Buildroot/pinned-Nix, multi-file rootfs, and the `/dev/vport` tape endpoint remain open as before.
 ---
+
+Post-push verification: local main (508e5b2) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle. Summary: this iteration closed todo.md §14 item 1's CLI/server wiring gap — new baud-packages guest_build.rs composes kernel_build+initramfs into build_guest_image()/hash_image() (spec §4.5's sha256 image identity), exposed via POST /image/build (spawn_blocking) and 'baud image build' CLI, hardware-verified end-to-end via new drive/pkg-build-cli.sh (real gcc-13 kernel build driven entirely through the CLI: ok=true, real bzImage/initramfs.cpio.gz written, well-formed hashes). todo.md still has pending items: item 1's multi-file rootfs / Buildroot / Nix / vport endpoint / DETERMINISTIC_CMDLINE wiring / the newly-surfaced 'baud run kvm has no initramfs param' gap; item 2's H7 residual single-fd perf_event jitter; item 3's H8 Mario rebuild (blocked on item 1) — emitting NEXT.
+
+## 2026-07-26T09:23:04 UTC (35min) - Session usage — build-13 [sonnet]
+- cost $6.1732 (from claude -p)
+- context 195,062 tok peak of 1M (20%) across 87 inference calls, monotonic
+- models sonnet-5 $6.1701 (in 952 / out 63,457 / cache-read 12,902,663) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/013-build-13.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 14
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose todo.md §14 item 1's next-actions gap: 'baud run kvm has no initramfs param', confirmed still open in code (RunKvmBody has no initramfs field). Investigating deeper: the real linux-guest kernel also needs periodic timer-tick injection to boot at all (run_to_first_halt has none — a real kernel hangs in calibrate_delay), so closing this properly requires both initramfs_path AND an opt-in periodic_timer spec on /run/kvm. Implementing now.
+
+Code changes compile clean (baud-server, baud-cli). Running cargo build --workspace next.
+
+Workspace build clean. Running clippy next.
+
+Build + clippy clean. Running the new real-hardware test run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer...
+
+New test passes on real /dev/kvm. Running full baud-server test suite for regressions...
+
+Wrote new drive/pkg-boot-cli.sh (real HTTP through baud CLI + baud-server, real /dev/kvm, checked-in linux-guest fixture). Running it now.
+
+drive/pkg-boot-cli.sh PASSED on real /dev/kvm: 'baud run kvm --initramfs ... --periodic-timer-period-rcb 500000' booted the real linux-guest fixture through the actual CLI binary + real HTTP + real baud-server, guest reached /init. Note: pkill -f 'baud-server' self-matches when the literal pattern text also appears in the OUTER invoking Bash command line (kills the wrapping shell) — must invoke drive scripts as a bare 'bash drive/X.sh' with no pkill in the same outer command. Now running cargo test --workspace.
+
+cargo test --workspace: 100% green, 0 failures across every crate (the flaky TSC test from last iteration passed clean this run too). Running cargo clippy once more, then the h0-h7 drive gate one script at a time.
+
+h0-h4 all PASS on real hardware. drive/h5.sh (snapshot/branch/userfaultfd) is running longer than 180s, auto-backgrounded by the tool; waiting for its completion notification before continuing to h6/h7.
+
+drive/h5.sh PASSED on real /dev/kvm (1000-branch fork test, snapshot/restore, dirty-ring reset, shell-into all green). Continuing to h6.sh and h7.sh.
+
+h6.sh and h7.sh PASSED on real hardware. h0-h7 gate is fully green. Now running m9/m10/m11 (the drive scripts exercising /run/kvm* and stream::render directly) to confirm no regression from the RunKvmBody/persist_kvm_run/stream.rs signature changes.
+
+m9/m10/m11 all PASS on real hardware (no regressions from the RunKvmBody/persist_kvm_run/stream.rs signature changes, including the nullable-column NULL-handling path exercised by m11's framebuffer-guest run with no initramfs/periodic_timer). Dispatching a subagent to update todo.md §14 with this iteration's findings before the final commit.
+
+## 2026-07-26T09:55:30 UTC - Changes committed.
+- Closed todo.md §14 item 1's next-actions gap: `baud run kvm` had no initramfs field, and a deeper related gap (no periodic-timer injection) that would have made a real Linux kernel guest hang forever even with initramfs wired.
+- Files changed: crates/baud-server/migrations/0011_kvm_run_meta_initramfs.sql (new), crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, crates/baud-cli/src/cmds/run.rs, drive/pkg-boot-cli.sh (new), drive/pkg-build-cli.sh, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - RunKvmBody gained optional initramfs_path + periodic_timer (period_rcb/vector/max_ticks) fields, serde-defaulted so every existing caller is unaffected; boot_run_and_drain now calls Multiverse::run_to_first_halt_with_periodic_timer when a periodic_timer is supplied instead of the old plain run_to_first_halt(), which would hang forever on a real Linux kernel's calibrate_delay().
+  - kvm_run_meta migration + persist_kvm_run + stream::render's real-replay path all thread the same two fields through, so a persisted /run/kvm boot replays exactly.
+  - New CLI flags: baud run kvm --initramfs / --periodic-timer-period-rcb / --periodic-timer-vector / --periodic-timer-max-ticks.
+  - New real-hardware test run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer (crates/baud-server/src/routes/run_kvm.rs) and new drive/pkg-boot-cli.sh, both PASS on real /dev/kvm — the latter boots the checked-in linux-guest fixture through the actual baud CLI + baud-server over real HTTP, reaching /init.
+  - Full verification green: cargo build/clippy/test --workspace all clean (0 failures across every crate); drive/h0.sh-h7.sh (8/8) and drive/m9.sh/m10.sh/m11.sh all still PASS on real hardware — no regressions.
+---

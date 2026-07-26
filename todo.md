@@ -1053,6 +1053,49 @@ snapshot, not a duplicate of it.
      `cargo test --workspace` parallel load — high=0x5a768 vs 0x32659f — then passed clean both in
      isolation and on a full-suite rerun; recorded here as an observed one-off real-hardware jitter, not
      chased further since it reproduces neither reliably nor in isolation).
+     **This iteration (ralph iteration 14): the `baud run kvm` initramfs gap above is now closed, plus a
+     second, deeper gap this iteration found in the same area.** New migration `crates/baud-server/
+     migrations/0011_kvm_run_meta_initramfs.sql` adds nullable `initramfs_path`/
+     `periodic_timer_period_rcb`/`periodic_timer_vector`/`periodic_timer_max_ticks` columns to
+     `kvm_run_meta`, so a persisted `/run/kvm` boot can be replayed exactly. `RunKvmBody`
+     (`crates/baud-server/src/routes/run_kvm.rs`) gained `initramfs_path: Option<String>` and
+     `periodic_timer: Option<PeriodicTimerSpec>` (`period_rcb: u64`, `vector: u8` default `0xec`,
+     `max_ticks: u32` default `2000`), both `#[serde(default)]` so every existing caller (`drive/m9.sh`/
+     `m10.sh`/`m11.sh`) is unaffected; a new `read_initramfs` helper is shared by `run()` and
+     `stream::render_frames_from_real_replay`. `boot_run_and_drain` — the exact function the `/run/kvm`
+     handler calls — plus `boot_and_run` and `boot_and_drain_frames` all thread through new
+     `initramfs: Option<&[u8]>` and `periodic_timer: Option<(u64, u8, u32)>` params; when
+     `periodic_timer` is `Some`, `boot_run_and_drain` now calls H4's
+     `Multiverse::run_to_first_halt_with_periodic_timer` instead of the old bare `run_to_first_halt()`.
+     That's the deeper gap this iteration surfaced and closed: even with `initramfs_path` wired, a real
+     Linux kernel guest hangs forever under the old plain call, because its own `calibrate_delay()`
+     needs periodic timer ticks that no hand-assembled fixture in this workspace ever required
+     (documented in `tests/fixtures/linux-guest/BUILD.md`); the fix existed as
+     `run_to_first_halt_with_periodic_timer` from a prior iteration but had never been threaded into any
+     HTTP route until now. `persist_kvm_run` bundles the widened field set into a new
+     `KvmBootParams<'a>` struct to stay under clippy's `too_many_arguments`. `stream::render`'s
+     real-replay path (`crates/baud-server/src/routes/stream.rs`) now selects the four new
+     `kvm_run_meta` columns and reconstructs `periodic_timer` only when all three sub-columns are
+     non-NULL; `drive/m11.sh` (the all-NULL, no-initramfs/no-timer path) still passes, confirming no
+     regression. `crates/baud-cli/src/cmds/run.rs`'s `RunAction::Kvm` gained `--initramfs`,
+     `--periodic-timer-period-rcb` (opt-in — this is what enables periodic-timer injection at all),
+     `--periodic-timer-vector` (default `0xec`), `--periodic-timer-max-ticks` (default `2000`). New test
+     `run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer` boots the real, checked-in
+     `tests/fixtures/linux-guest/` kernel+initramfs through `boot_run_and_drain` directly with
+     `period_rcb=500_000`, `vector=0xec`, `max_ticks=2000`, `cmdline=bootparams::DETERMINISTIC_CMDLINE`,
+     asserting the `/init` marker in the console output — **passed on real `/dev/kvm`**. New
+     `drive/pkg-boot-cli.sh` boots the same checked-in fixture through a real `baud run kvm --initramfs
+     ... --periodic-timer-period-rcb 500000 --periodic-timer-vector 236 --periodic-timer-max-ticks 2000
+     --cmdline "<DETERMINISTIC_CMDLINE>" --json` CLI invocation against a live `baud-server` over real
+     HTTP — **real result: `ok=true`, console output contains `baud-guest: minimal kernel reached
+     /init`**, the project's first real, end-to-end "spec in, guest booted" proof through the actual CLI
+     binary + HTTP server, not a Rust test calling `Multiverse` directly. It runs in seconds (reuses the
+     already-built fixture, no kernel compile), unlike `drive/pkg-build-cli.sh`/`drive/pkg-image-build.sh`
+     — still opt-in, for consistency with that script family, not part of the standard h0-h7 gate.
+     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings, including from the widened
+     `persist_kvm_run` signature); `drive/h0.sh` through `drive/h7.sh` (8/8) and `drive/m9.sh`/
+     `m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no regressions from the schema/signature
+     changes.
      **Still open**: the initramfs builder's multi-file capacity is now mechanism-complete
      (`--initramfs-entry` is repeatable and `InitramfsFileEntry`/`GuestImageBuildConfig` already take a
      slice) but still only exercised with a single `/init`-style entry — no real harness-script/agent-
@@ -1062,15 +1105,19 @@ snapshot, not a duplicate of it.
      themselves are still not implemented — this and the prior iteration both took the pragmatic
      from-source `make bzImage` third option instead; a `nix`/`nix-env` toolchain is still not installed
      in this dev sandbox and Buildroot remains unevaluated. The `/dev/vport` (or PIO) tape endpoint
-     (§4.4) is still not implemented. `bootparams::DETERMINISTIC_CMDLINE` still isn't wired as any real
-     caller's default. **New gap surfaced by this iteration's own drive script**: `baud run kvm`
-     (`crates/baud-server/src/routes/run_kvm.rs`'s `RunKvmBody`) has no `initramfs` field at all, so a
-     `baud image build`-produced image cannot yet be booted through the CLI/server path end-to-end (only
-     `Multiverse::boot_with_rdseed_sites`/`boot_guest`'s own `initramfs: Option<&[u8]>` param, called
-     directly from Rust tests, actually threads one through) — closing that is the next concrete step
-     toward a true "spec in, guest booted" CLI flow, ahead of Buildroot/Nix. Tests
-     `boot_params_seed_is_pinned` and `init_powers_off_deterministically` remain unwritten. H8 (Mario,
-     item 3 below) is still blocked on the rest of item 1, not just this piece.
+     (§4.4) is still not implemented. `bootparams::DETERMINISTIC_CMDLINE` still isn't wired as any
+     *production* caller's default (it's now used by this iteration's new test and drive script, but
+     `guest_kernel_boots_to_userspace` and the enforced-regime tests in `baud-multiverse` were already
+     using it from a prior iteration). **`/run/kvm` (plain boot-to-first-halt) now accepts
+     `initramfs_path`/`periodic_timer`, but `/run/kvm/branch` and `/run/kvm/resume` — and their
+     underlying `boot_and_snapshot`/`boot_snapshot_and_branch`/`boot_snapshot_and_generate`
+     functions — still do not accept either**, so a real Linux guest that needs to be explored via
+     branch/resume (not just booted once to halt) isn't reachable through those routes yet; this was a
+     deliberate scope decision this iteration (the gap as previously written here named `RunKvmBody`/
+     `/run/kvm` specifically, not the branch/resume routes), not an oversight — closing it is the next
+     concrete step in this area. Tests `boot_params_seed_is_pinned` and
+     `init_powers_off_deterministically` remain unwritten. H8 (Mario, item 3 below) is still blocked on
+     the rest of item 1, not just this piece.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-

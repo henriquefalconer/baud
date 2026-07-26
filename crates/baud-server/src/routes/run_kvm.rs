@@ -40,26 +40,90 @@ pub struct RunKvmBody {
     /// prior stateless behaviour exactly (no DB writes at all).
     #[serde(default)]
     pub run_id: Option<String>,
+    /// Path to a reproducible newc-cpio-format initramfs on this host's filesystem (e.g. the
+    /// `initramfs.cpio.gz` `POST /image/build` writes) — loaded at `layout::INITRAMFS_ADDR` and
+    /// pointed to by `hdr.ramdisk_image`/`ramdisk_size` (spec §4.2/§4.3,
+    /// `Multiverse::boot_with_rdseed_sites`'s own `initramfs` param). Like `kernel_path`, resolved
+    /// on the server host and never transferred as request content — a real initramfs can be
+    /// multi-megabyte. `None` (the default) preserves this route's exact prior behavior for every
+    /// hand-assembled fixture in this workspace, none of which ship a separate initramfs. Closes
+    /// todo.md §14 item 1's "`baud run kvm` (`RunKvmBody`) has no `initramfs` field at all" gap.
+    #[serde(default)]
+    pub initramfs_path: Option<String>,
+    /// A real, unmodified Linux kernel's own scheduler calibration (`calibrate_delay`) needs
+    /// periodic timer interrupts to make forward progress at all — `run_to_first_halt`'s plain
+    /// `KVM_RUN` loop injects nothing, so such a guest hangs forever under it
+    /// (`tests/fixtures/linux-guest/BUILD.md`'s documented finding; H4's own
+    /// `run_to_first_halt_with_periodic_timer` exists exactly to solve this, todo.md §14 item 1).
+    /// Every hand-assembled fixture in this workspace before the real Linux guest never needed
+    /// this, so it stays optional and `None` (the default) preserves this route's exact prior
+    /// behavior.
+    #[serde(default)]
+    pub periodic_timer: Option<PeriodicTimerSpec>,
+}
+
+/// See [`RunKvmBody::periodic_timer`]'s doc for why this exists at all.
+#[derive(Debug, Deserialize)]
+pub struct PeriodicTimerSpec {
+    /// Work-clock (retired-conditional-branch) period between ticks — spec §3.4's arm-early-then-
+    /// single-step target. `guest_kernel_boots_to_userspace`'s own real-hardware-tuned value for
+    /// the `linux-guest` fixture is `500_000`.
+    pub period_rcb: u64,
+    /// Interrupt vector to inject at each tick. Defaults to `0xec`, Linux's own
+    /// `LOCAL_TIMER_VECTOR` (`arch/x86/include/asm/irq_vectors.h`) — the value every real-Linux-
+    /// guest test in this workspace uses.
+    #[serde(default = "default_timer_vector")]
+    pub vector: u8,
+    /// Bound on ticks before giving up (`DeterminismHole`, never silent non-termination) — the
+    /// same convention `run_until_console_len`/`run_until_branch_or_halt` already follow.
+    #[serde(default = "default_max_ticks")]
+    pub max_ticks: u32,
+}
+
+fn default_timer_vector() -> u8 {
+    0xec
+}
+
+fn default_max_ticks() -> u32 {
+    2000
 }
 
 fn default_cmdline() -> String {
     "console=ttyS0".to_owned()
 }
 
-/// POST /run/kvm — boot `kernel_path` and run it to its first `Hlt`/`Shutdown`.
+/// Read `path`'s bytes off the server host's filesystem, wrapping the I/O error with the path that
+/// failed — the shared helper `run()` and `stream::render_frames_from_real_replay` both use to
+/// resolve an optional `initramfs_path` before booting.
+pub(crate) fn read_initramfs(path: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("failed to read initramfs_path '{path}': {e}"))
+}
+
+/// POST /run/kvm — boot `kernel_path` (plus an optional `initramfs_path`/`periodic_timer`) and run
+/// it to its first `Hlt`/`Shutdown`.
 pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) -> Json<Value> {
     let tape = match hex_decode(&body.tape_hex) {
         Some(t) => t,
         None => return Json(json!({ "error": "tape_hex must be a valid hex string" })),
     };
+    let initramfs = match &body.initramfs_path {
+        Some(path) => match read_initramfs(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => return Json(json!({ "error": e })),
+        },
+        None => None,
+    };
+    let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
     let tape_hex = body.tape_hex.clone();
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
-    let result = tokio::task::spawn_blocking(move || boot_run_and_drain(&kernel_path, &cmdline, tape))
-        .await
-        .expect("run/kvm task panicked");
+    let result = tokio::task::spawn_blocking(move || {
+        boot_run_and_drain(&kernel_path, &cmdline, tape, initramfs.as_deref(), periodic_timer)
+    })
+    .await
+    .expect("run/kvm task panicked");
 
     match result {
         Ok(((console_output, ram_hash, _mark_branch_step, _node_id), records)) => {
@@ -69,16 +133,14 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                 "ram_hash": ram_hash,
             });
             if let Some(run_id) = &body.run_id {
-                match persist_kvm_run(
-                    &state,
-                    run_id,
-                    &body.kernel_path,
-                    &body.cmdline,
-                    &tape_hex,
-                    &records,
-                )
-                .await
-                {
+                let params = KvmBootParams {
+                    kernel_path: &body.kernel_path,
+                    cmdline: &body.cmdline,
+                    tape_hex: &tape_hex,
+                    initramfs_path: body.initramfs_path.as_deref(),
+                    periodic_timer,
+                };
+                match persist_kvm_run(&state, run_id, &params, &records).await {
                     Ok(frames_recorded) => response["frames_recorded"] = json!(frames_recorded),
                     Err(e) => response["persist_error"] = json!(e),
                 }
@@ -96,12 +158,23 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
 /// placeholder row first so this works standalone, without requiring a prior `POST /runs` call —
 /// `frame_records`/`kvm_run_meta` both carry a `REFERENCES runs(id)` and sqlx's SQLite pool
 /// enforces foreign keys by default.
+/// The subset of a `/run/kvm` request that `kvm_run_meta` persists — bundled so a real replay
+/// (`stream::render_frames_from_real_replay`) can reboot the *exact* same guest, not just the
+/// same kernel+tape (todo.md §14 item 1: `initramfs_path`/`periodic_timer` widened this beyond
+/// the original kernel/cmdline/tape triple, and `clippy::too_many_arguments` is why this is a
+/// struct rather than five more `persist_kvm_run` parameters).
+struct KvmBootParams<'a> {
+    kernel_path: &'a str,
+    cmdline: &'a str,
+    tape_hex: &'a str,
+    initramfs_path: Option<&'a str>,
+    periodic_timer: Option<(u64, u8, u32)>,
+}
+
 async fn persist_kvm_run(
     state: &AppState,
     run_id: &str,
-    kernel_path: &str,
-    cmdline: &str,
-    tape_hex: &str,
+    params: &KvmBootParams<'_>,
     records: &[baud_proto::Msg],
 ) -> Result<usize, String> {
     let now = unix_now() as i64;
@@ -115,19 +188,33 @@ async fn persist_kvm_run(
     .await
     .map_err(|e| format!("persist runs row error: {e}"))?;
 
+    let (period_rcb, vector, max_ticks) = match params.periodic_timer {
+        Some((p, v, m)) => (Some(p as i64), Some(v as i64), Some(m as i64)),
+        None => (None, None, None),
+    };
+
     sqlx::query(
-        "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, created_at)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, initramfs_path, \
+         periodic_timer_period_rcb, periodic_timer_vector, periodic_timer_max_ticks, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
             kernel_path = excluded.kernel_path,
             cmdline = excluded.cmdline,
             tape_hex = excluded.tape_hex,
+            initramfs_path = excluded.initramfs_path,
+            periodic_timer_period_rcb = excluded.periodic_timer_period_rcb,
+            periodic_timer_vector = excluded.periodic_timer_vector,
+            periodic_timer_max_ticks = excluded.periodic_timer_max_ticks,
             created_at = excluded.created_at",
     )
     .bind(run_id)
-    .bind(kernel_path)
-    .bind(cmdline)
-    .bind(tape_hex)
+    .bind(params.kernel_path)
+    .bind(params.cmdline)
+    .bind(params.tape_hex)
+    .bind(params.initramfs_path)
+    .bind(period_rcb)
+    .bind(vector)
+    .bind(max_ticks)
     .bind(now)
     .execute(&state.db)
     .await
@@ -183,17 +270,20 @@ type PersistedRef = (String, String);
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape).map(|(outcome, _records)| outcome)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None).map(|(outcome, _records)| outcome)
 }
 
-/// Boot `kernel_path`, run to first `Hlt`/`Shutdown`, then drain every tape-device record the
-/// guest emitted along the way (`Multiverse::drain_tape_records`) — the same boot `boot_and_run`
-/// does, plus the drain `/run/kvm`'s `run()` handler needs to persist real `Msg::Frame` records
+/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`, see [`RunKvmBody`]'s doc for
+/// why both exist), run to first `Hlt`/`Shutdown`, then drain every tape-device record the guest
+/// emitted along the way (`Multiverse::drain_tape_records`) — the same boot `boot_and_run` does,
+/// plus the drain `/run/kvm`'s `run()` handler needs to persist real `Msg::Frame` records
 /// (previously captured in-process and immediately dropped, todo.md §14's eighteenth-brick gap).
 fn boot_run_and_drain(
     kernel_path: &Path,
     cmdline: &str,
     tape: Vec<u8>,
+    initramfs: Option<&[u8]>,
+    periodic_timer: Option<(u64, u8, u32)>,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
@@ -203,13 +293,21 @@ fn boot_run_and_drain(
         1,
         tape,
         None,
-        None,
+        initramfs,
         rdseed_sites,
     )
     .map_err(|e| format!("boot error: {e}"))?;
-    let outcome = mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?;
+    let halt = match periodic_timer {
+        Some((period_rcb, vector, max_ticks)) => {
+            let (_ticks, halt) = mv
+                .run_to_first_halt_with_periodic_timer(period_rcb, vector, max_ticks)
+                .map_err(|e| format!("determinism hole: {e}"))?;
+            halt
+        }
+        None => mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?,
+    };
     let records = mv.drain_tape_records();
-    Ok(((outcome.console_output, outcome.ram_hash, None, None), records))
+    Ok(((halt.console_output, halt.ram_hash, None, None), records))
 }
 
 /// Re-boot a real KVM guest and return only the `Msg::Frame` records it produced, in order — the
@@ -220,8 +318,10 @@ pub(crate) fn boot_and_drain_frames(
     kernel_path: &Path,
     cmdline: &str,
     tape: Vec<u8>,
+    initramfs: Option<&[u8]>,
+    periodic_timer: Option<(u64, u8, u32)>,
 ) -> Result<Vec<baud_proto::FrameRecord>, String> {
-    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape)?;
+    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer)?;
     Ok(records
         .into_iter()
         .filter_map(|m| match m {
@@ -1089,8 +1189,8 @@ mod tests {
         let kernel = framebuffer_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![]).expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![]).expect("second boot failed");
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None).expect("first boot failed");
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None).expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
         assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
@@ -1127,6 +1227,52 @@ mod tests {
 
         assert_eq!(first_console, second_console, "console output must be identical across two boots");
         assert_eq!(first_hash, second_hash, "RAM hash must be identical across two boots");
+    }
+
+    fn linux_guest_kernel_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/linux-guest/bzImage")
+    }
+
+    fn linux_guest_initramfs() -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/linux-guest/initramfs.cpio.gz");
+        std::fs::read(path).expect("read linux-guest initramfs fixture")
+    }
+
+    /// Closes todo.md §14 item 1's "`baud run kvm` (`RunKvmBody`) has no `initramfs` field at
+    /// all, so a `baud image build`-produced image cannot yet be booted through the CLI/server
+    /// path end-to-end" gap: boots the exact real, unmodified Linux 6.18 kernel + initramfs
+    /// `baud_multiverse::linux::guest_kernel_boots_to_userspace` already proves reach `/init` on
+    /// real `/dev/kvm`, but this time through `boot_run_and_drain` — the precise function `POST
+    /// /run/kvm`'s HTTP handler calls, minus only the axum/JSON plumbing — with a real
+    /// `initramfs_path` and `periodic_timer` threaded through exactly as an HTTP caller would
+    /// supply them. Without both, this hangs forever (no periodic ticks) or never finds `/init`
+    /// (no initramfs) — this test is the server-route-level proof that the wiring gap is closed,
+    /// not just the underlying `baud-multiverse` primitive.
+    #[test]
+    fn run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_initramfs();
+        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE;
+        const PERIOD_RCB: u64 = 500_000;
+        const TIMER_VECTOR: u8 = 0xec;
+        const MAX_TICKS: u32 = 2000;
+
+        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
+            &kernel,
+            cmdline,
+            vec![],
+            Some(&initramfs),
+            Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+        )
+        .expect("real linux-guest boot through boot_run_and_drain failed");
+
+        let console = String::from_utf8_lossy(&console_output);
+        assert!(
+            console.contains("baud-guest: minimal kernel reached /init"),
+            "guest must reach /init and print its marker; got:\n{console}"
+        );
     }
 
     /// Server-level analogue of `baud-multiverse`'s own

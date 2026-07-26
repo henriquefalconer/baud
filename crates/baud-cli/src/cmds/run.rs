@@ -76,6 +76,24 @@ pub enum RunAction {
         /// The run's whole tape, hex-encoded.
         #[arg(long, default_value = "")]
         tape_hex: String,
+        /// Path to a reproducible initramfs on the server host's filesystem (e.g. the
+        /// `initramfs.cpio.gz` `baud image build` writes) — booted alongside `--kernel`, spec
+        /// §4.2/§4.3. Omit for a guest with no separate initramfs.
+        #[arg(long)]
+        initramfs: Option<String>,
+        /// Work-clock period (retired conditional branches) between injected timer ticks — a real,
+        /// unmodified Linux kernel guest's own scheduler calibration hangs forever without this
+        /// (no hand-assembled fixture in this workspace needs it). Setting this enables periodic
+        /// timer injection for the boot.
+        #[arg(long)]
+        periodic_timer_period_rcb: Option<u64>,
+        /// Interrupt vector to inject at each tick. Defaults to `0xec`, Linux's own
+        /// `LOCAL_TIMER_VECTOR`. Only used when `--periodic-timer-period-rcb` is set.
+        #[arg(long, default_value_t = 0xec)]
+        periodic_timer_vector: u8,
+        /// Bound on ticks before giving up. Only used when `--periodic-timer-period-rcb` is set.
+        #[arg(long, default_value_t = 2000)]
+        periodic_timer_max_ticks: u32,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
     /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
@@ -200,12 +218,28 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
         RunAction::Resume { run: id } => {
             eprintln!("run resume {id}: not yet implemented (M4+)");
         }
-        RunAction::Kvm { kernel, cmdline, tape_hex } => {
-            let body = json!({
+        RunAction::Kvm {
+            kernel,
+            cmdline,
+            tape_hex,
+            initramfs,
+            periodic_timer_period_rcb,
+            periodic_timer_vector,
+            periodic_timer_max_ticks,
+        } => {
+            let mut body = json!({
                 "kernel_path": kernel,
                 "cmdline": cmdline,
                 "tape_hex": tape_hex,
+                "initramfs_path": initramfs,
             });
+            if let Some(period_rcb) = periodic_timer_period_rcb {
+                body["periodic_timer"] = json!({
+                    "period_rcb": period_rcb,
+                    "vector": periodic_timer_vector,
+                    "max_ticks": periodic_timer_max_ticks,
+                });
+            }
             let v = c.post("/run/kvm", &body).await?;
             fmt::print(&v, json);
             if v.get("error").is_some() {

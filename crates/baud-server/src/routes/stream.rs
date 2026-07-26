@@ -147,16 +147,30 @@ pub async fn render(
     let fmt = body.format.as_deref().unwrap_or("y4m").to_string();
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
-    let kvm_meta = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT kernel_path, cmdline, tape_hex FROM kvm_run_meta WHERE run_id = ?",
+    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>)>(
+        "SELECT kernel_path, cmdline, tape_hex, initramfs_path, periodic_timer_period_rcb, \
+         periodic_timer_vector, periodic_timer_max_ticks FROM kvm_run_meta WHERE run_id = ?",
     )
     .bind(&run_id)
     .fetch_optional(&state.db)
     .await;
 
     let frames: Result<Vec<(u32, u32, Vec<u8>)>, Value> = match kvm_meta {
-        Ok(Some((kernel_path, cmdline, tape_hex))) => {
-            render_frames_from_real_replay(kernel_path, cmdline, tape_hex, from_step, to_step).await
+        Ok(Some((kernel_path, cmdline, tape_hex, initramfs_path, period_rcb, vector, max_ticks))) => {
+            let periodic_timer = match (period_rcb, vector, max_ticks) {
+                (Some(p), Some(v), Some(m)) => Some((p as u64, v as u8, m as u32)),
+                _ => None,
+            };
+            render_frames_from_real_replay(
+                kernel_path,
+                cmdline,
+                tape_hex,
+                initramfs_path,
+                periodic_timer,
+                from_step,
+                to_step,
+            )
+            .await
         }
         Ok(None) => render_frames_from_stored_hashes(&state, &run_id, from_step, to_step).await,
         Err(e) => Err(json!({ "error": format!("db error: {e}") })),
@@ -234,6 +248,8 @@ async fn render_frames_from_real_replay(
     kernel_path: String,
     cmdline: String,
     tape_hex: String,
+    initramfs_path: Option<String>,
+    periodic_timer: Option<(u64, u8, u32)>,
     from_step: u64,
     to_step: Option<u64>,
 ) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
@@ -241,9 +257,22 @@ async fn render_frames_from_real_replay(
         Some(t) => t,
         None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
     };
+    let initramfs = match &initramfs_path {
+        Some(path) => match crate::routes::run_kvm::read_initramfs(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => return Err(json!({ "error": e })),
+        },
+        None => None,
+    };
     let kernel_path_buf = PathBuf::from(&kernel_path);
     let records = tokio::task::spawn_blocking(move || {
-        crate::routes::run_kvm::boot_and_drain_frames(&kernel_path_buf, &cmdline, tape)
+        crate::routes::run_kvm::boot_and_drain_frames(
+            &kernel_path_buf,
+            &cmdline,
+            tape,
+            initramfs.as_deref(),
+            periodic_timer,
+        )
     })
     .await
     .expect("stream/render replay task panicked");
@@ -273,6 +302,8 @@ async fn render_frames_from_real_replay(
     _kernel_path: String,
     _cmdline: String,
     _tape_hex: String,
+    _initramfs_path: Option<String>,
+    _periodic_timer: Option<(u64, u8, u32)>,
     _from_step: u64,
     _to_step: Option<u64>,
 ) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
