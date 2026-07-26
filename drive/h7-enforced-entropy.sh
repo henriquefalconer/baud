@@ -16,16 +16,25 @@
 # with host-scheduling jitter between independent boots. Only with RDTSC hardware-trapped and
 # served from the work-clock (rdtsc-enforce.patch) does that read become reproducible too.
 #
-# Why this also needs RDTSCP handling (the concrete blocker this script exists to close): booting
-# the real linux-guest kernel + entropy_init.c under the *first* version of the enforced module hit
-# KVM_EXIT_INTERNAL_ERROR immediately — dmesg showed "vmx: unexpected exit reason 0x33"
-# (EXIT_REASON_RDTSCP). Forcing CPU_BASED_RDTSC_EXITING also forces RDTSCP to VM-exit (Intel SDM
-# Vol. 3C 25.1.2), but kvm_vmx_exit_handlers[] had no entry for it at all — every prior
-# hand-assembled fixture issued only bare RDTSC, never RDTSCP; a real, unmodified Linux 6.18 kernel
-# is the first guest to issue it (early boot TSC calibration / vDSO setup). rdtsc-enforce.patch now
-# adds `handle_baud_rdtscp_exit` (payload kind 3) alongside `handle_baud_rdtsc_exit` (kind 0), and
-# `baud-vcpu` serves EDX:EAX from the same work-clock plus ECX from `IA32_TSC_AUX`
-# (`WorkClock::serve_enforced_tsc_aux`).
+# Why this also needs RDTSCP handling: booting the real linux-guest kernel + entropy_init.c under
+# the *first* version of the enforced module hit KVM_EXIT_INTERNAL_ERROR immediately — dmesg showed
+# "vmx: unexpected exit reason 0x33" (EXIT_REASON_RDTSCP). Forcing CPU_BASED_RDTSC_EXITING also
+# forces RDTSCP to VM-exit (Intel SDM Vol. 3C 25.1.2), but kvm_vmx_exit_handlers[] had no entry for
+# it at all — every prior hand-assembled fixture issued only bare RDTSC, never RDTSCP; a real,
+# unmodified Linux 6.18 kernel is the first guest to issue it (early boot TSC calibration / vDSO
+# setup). rdtsc-enforce.patch now adds `handle_baud_rdtscp_exit` (payload kind 3) alongside
+# `handle_baud_rdtsc_exit` (kind 0), and `baud-vcpu` serves EDX:EAX from the same work-clock plus
+# ECX from `IA32_TSC_AUX` (`WorkClock::serve_enforced_tsc_aux`). That crash is gone for good.
+#
+# KNOWN FLAKINESS (todo.md §14 next-actions item 2, not yet root-caused with direct evidence): with
+# the crash fixed, this test still fails a real, non-trivial fraction of runs (observed ~50-75%
+# failure rate) — getrandom()/urandom output genuinely diverges between the two boots at the byte
+# level. Leading hypothesis: landing an interrupt at the identical RIP (H4's own guarantee) does not
+# guarantee an identical *served* TSC/work-clock value at that instant (add_interrupt_randomness
+# mixes both), and the served value is sensitive to the real ±RCB_HARDWARE_JITTER_TOLERANCE (8)
+# branch-counter read-precision jitter this project has documented elsewhere. This script reports
+# the test's real pass/fail honestly — a FAIL here is expected some fraction of the time until that
+# deeper issue is fixed or the test is redesigned to tolerate it, not a sign this script is broken.
 #
 #   Reuses `tests/fixtures/linux-guest/` (H7's boot-to-userspace fixture) — `entropy_init.c` /
 #   `entropy_initramfs.cpio.gz` are a second `/init` for the *same* already-built kernel (no

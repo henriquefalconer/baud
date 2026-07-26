@@ -2158,6 +2158,18 @@ mod tests {
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
         const ENTROPY_MARKER: &str = "baud-guest: entropy probe done\n";
+        // Real-hardware finding (todo.md §14): `entropy_init.c` writes each hex-encoded probe line
+        // via raw `outb` (no interrupt-driven tty path exists on this machine, `BUILD.md`'s own
+        // documented reason), so a periodic timer tick landing *mid-write* lets the kernel's own
+        // asynchronous "no LAPIC device model" diagnostic (`linux-guest/BUILD.md`: harmless, expected
+        // on every tick since there is no LAPIC) interleave character-by-character into whatever probe
+        // line was in flight at that instant -- e.g. `URANDOM:ac3595Spurious LAPIC timer interrupt on
+        // cpu 0\na15749e0...` splits one 64-hex-char line into a corrupted 6-char fragment plus an
+        // orphaned continuation. This is a console-capture race, not entropy nondeterminism: the
+        // kernel's diagnostic text is itself fixed and deterministic, so stripping every occurrence of
+        // it before line-splitting reassembles the probe line exactly as the guest's own outb sequence
+        // produced it, with no effect on the entropy bytes themselves.
+        const SPURIOUS_LAPIC_LINE: &str = "Spurious LAPIC timer interrupt on cpu 0\n";
 
         let mut probe_runs = Vec::new();
         for i in 0..2 {
@@ -2175,7 +2187,8 @@ mod tests {
             let (_ticks, halt) = m
                 .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
                 .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
-            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            let console =
+                String::from_utf8_lossy(&halt.console_output).replace(SPURIOUS_LAPIC_LINE, "");
             assert!(
                 console.contains(ENTROPY_MARKER),
                 "run {i}: guest must reach the entropy probe's own completion marker; got:\n{console}"
