@@ -12,9 +12,11 @@
 //
 // **What this module deliberately does not do yet**: raise `InterruptStatus` or inject a real IRQ
 // after publishing a used-ring entry — `virtio_mmio.rs`'s doc explains why (no in-kernel irqchip on
-// this host, so which vector a `virtio_mmio.device=` IRQ resolves to is unverified); nor does
-// anything call `SplitVirtqueue::process_available` automatically from `QueueNotify` yet. Both are
-// the next real steps, not stubbed here.
+// this host, so which vector a `virtio_mmio.device=` IRQ resolves to is unverified). Driving
+// `process_available` from a real `QueueNotify` is no longer unimplemented — `console.rs`'s
+// `DeviceBus::service_virtio_rng` does exactly that, filling buffers with tape-seeded entropy bytes
+// — but it is still a caller-invoked step, not something a real KVM boot loop calls automatically
+// yet (that needs the same interrupt-routing investigation, plus cmdline/CLI wiring, todo.md §14).
 
 use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend};
 
@@ -88,6 +90,14 @@ impl SplitVirtqueue {
     /// `reset()` already zeroes the negotiated queue state that produces a fresh `config`).
     pub fn new(config: QueueRingConfig) -> Self {
         SplitVirtqueue { config, next_avail_idx: 0, next_used_idx: 0 }
+    }
+
+    /// The ring config this instance was constructed with — lets a caller that caches a
+    /// `SplitVirtqueue` across calls (`console.rs`'s `DeviceBus::service_virtio_rng`) detect a
+    /// driver re-negotiation (new addresses/size after a device reset) and rebuild rather than keep
+    /// walking a stale layout.
+    pub(crate) fn config(&self) -> QueueRingConfig {
+        self.config
     }
 
     fn read_u16<M: GuestMemoryBackend>(&self, mem: &M, addr: u64) -> Result<u16, VirtqueueError> {

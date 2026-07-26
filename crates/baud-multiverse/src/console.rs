@@ -29,6 +29,13 @@ use std::convert::Infallible;
 use vm_superio::serial::NoEvents;
 use vm_superio::{Serial, Trigger};
 
+#[cfg(target_os = "linux")]
+use crate::timesource::SplitMix64;
+#[cfg(target_os = "linux")]
+use crate::virtio_queue::{SplitVirtqueue, VirtqueueError};
+#[cfg(target_os = "linux")]
+use vm_memory::GuestMemoryBackend;
+
 /// COM1's 8-register I/O window — the only PIO range this milestone's console serves; every other
 /// address still falls through to [`OpenBusFallback`] via [`DeviceBus`].
 pub const COM1_BASE: u16 = 0x3f8;
@@ -226,10 +233,23 @@ pub struct DeviceBus {
     /// [`Self::with_tape`], [`Self::restore`]) leaves it unset, so no existing boot path's MMIO
     /// behavior changes: an unset slot falls straight through to `fallback` exactly as before this
     /// device existed. Not yet wired into any real boot's cmdline/CLI (todo.md-tracked next step —
-    /// `crate::virtio_queue::SplitVirtqueue` can now walk this transport's negotiated rings once a
-    /// caller drives it from `queue_ring_config`, but nothing calls that automatically on
-    /// `QueueNotify` yet, and real interrupt delivery is still unimplemented, see that module's doc).
+    /// The actual ring-draining mechanism is now real — see [`Self::service_virtio_rng`] — but
+    /// nothing calls it automatically from `QueueNotify` (the memory-oblivious [`Bus`] trait has no
+    /// guest-memory access to do so, see `virtio_mmio.rs`'s doc), and real interrupt delivery is
+    /// still unimplemented.
     virtio_rng: Option<VirtioMmioTransport>,
+    /// The live ring-walking cursor for `virtio_rng`'s sole queue, lazily built (and rebuilt on
+    /// driver re-negotiation) by [`Self::service_virtio_rng`] — `None` until the queue is both
+    /// enabled and marked ready. Linux-only: it borrows real `vm-memory`, unlike every other field
+    /// on this struct.
+    #[cfg(target_os = "linux")]
+    virtio_rng_queue: Option<SplitVirtqueue>,
+    /// The virtio-rng device's own tape-seeded byte stream (todo.md §3.8: an "ever-ready
+    /// deterministic byte source"), independent of the `rdrand`/`rdseed` entropy sub-stream
+    /// (`timesource::WorkClock`'s `entropy` field) and of the boot `SETUP_RNG_SEED` — see
+    /// [`Self::seed_virtio_rng_entropy`].
+    #[cfg(target_os = "linux")]
+    virtio_rng_entropy: SplitMix64,
     fallback: OpenBusFallback,
 }
 
@@ -244,9 +264,17 @@ impl DeviceBus {
 
     /// Installs a virtio-rng transport at [`crate::layout::VIRTIO_MMIO_RNG_BASE`] — opt-in (no
     /// existing caller does this yet), so [`Bus::mmio_read`]/[`Bus::mmio_write`] start dispatching
-    /// that address window to it instead of [`OpenBusFallback`].
+    /// that address window to it instead of [`OpenBusFallback`]. The entropy stream starts seeded
+    /// at `0` (matching `WorkClock::new`'s own "deterministic but not tape-derived until seeded"
+    /// convention) — call [`Self::seed_virtio_rng_entropy`] before any guest code runs to make it
+    /// tape-derived instead.
     pub fn enable_virtio_rng(&mut self) {
         self.virtio_rng = Some(VirtioMmioTransport::new_rng(crate::layout::VIRTIO_MMIO_RNG_BASE));
+        #[cfg(target_os = "linux")]
+        {
+            self.virtio_rng_queue = None;
+            self.virtio_rng_entropy = SplitMix64::new(0);
+        }
     }
 
     /// The virtio-rng transport, if [`Self::enable_virtio_rng`] has been called — the read access a
@@ -254,6 +282,53 @@ impl DeviceBus {
     /// against real guest memory (`self.virtio_rng` is otherwise private to this module).
     pub fn virtio_rng(&self) -> Option<&VirtioMmioTransport> {
         self.virtio_rng.as_ref()
+    }
+
+    /// Reseed the virtio-rng device's byte stream — call once, right after
+    /// [`Self::enable_virtio_rng`], before any guest code runs (mirrors `WorkClock::with_entropy_
+    /// seed`'s "call once before boot" contract). A real caller derives `seed` from the run's own
+    /// tape via its own domain-separated hash, keeping this stream independent of both the
+    /// `rdrand`/`rdseed` sub-stream and the boot `SETUP_RNG_SEED` (todo.md §3.8).
+    #[cfg(target_os = "linux")]
+    pub fn seed_virtio_rng_entropy(&mut self, seed: u64) {
+        self.virtio_rng_entropy = SplitMix64::new(seed);
+    }
+
+    /// Drain every virtqueue chain the driver has posted to `virtio_rng`'s sole queue since the
+    /// last call, filling each writable descriptor with bytes drawn from the tape-seeded entropy
+    /// stream — the actual virtio-rng device behavior (spec 1.1 §5.4: the device's only job is
+    /// writing random data into whatever buffer the driver posts to `requestq`). A no-op (`Ok(0)`)
+    /// if virtio-rng was never enabled, or its queue is not yet negotiated/ready.
+    ///
+    /// Requires real guest memory to walk the ring, unlike every other method on this type — that
+    /// is exactly why this lives behind `#[cfg(target_os = "linux")]` and takes an explicit `mem`
+    /// parameter rather than being invoked automatically from [`Bus::mmio_write`]: the [`Bus`]
+    /// trait is shared with `baud-vcpu`'s exit dispatch and is deliberately memory-oblivious (see
+    /// `virtio_mmio.rs`'s doc), so it cannot drive this itself. A caller — a real boot loop, once
+    /// wired (todo.md §14 next-actions item 1's still-open "boot/cmdline/CLI wiring") — is expected
+    /// to call this with the guest's real memory after an `MmioWrite` lands on `QueueNotify`; until
+    /// then, nothing does, matching the "next real step, not stubbed here" framing this module's
+    /// prior iterations left in place.
+    #[cfg(target_os = "linux")]
+    pub fn service_virtio_rng<M: GuestMemoryBackend>(&mut self, mem: &M) -> Result<u32, VirtqueueError> {
+        let Some(transport) = self.virtio_rng.as_ref() else { return Ok(0) };
+        let Some(config) = transport.queue_ring_config(0) else {
+            self.virtio_rng_queue = None; // not ready (e.g. just reset): drop any stale cursor
+            return Ok(0);
+        };
+        if self.virtio_rng_queue.as_ref().map(SplitVirtqueue::config) != Some(config) {
+            // First negotiation, or the driver renegotiated (new addresses/size after a reset):
+            // a stale cursor must never keep walking the old layout.
+            self.virtio_rng_queue = Some(SplitVirtqueue::new(config));
+        }
+        let queue = self.virtio_rng_queue.as_mut().expect("just set above");
+        let entropy = &mut self.virtio_rng_entropy;
+        queue.process_available(mem, |buf| {
+            for chunk in buf.chunks_mut(8) {
+                let word = entropy.next_u64().to_le_bytes();
+                chunk.copy_from_slice(&word[..chunk.len()]);
+            }
+        })
     }
 
     /// A [`DeviceBus`] reconstructed from a `Universe` snapshot's device row
@@ -271,6 +346,10 @@ impl DeviceBus {
             tape: tape_bus,
             cmos: Cmos,
             virtio_rng: None,
+            #[cfg(target_os = "linux")]
+            virtio_rng_queue: None,
+            #[cfg(target_os = "linux")]
+            virtio_rng_entropy: SplitMix64::new(0),
             fallback: OpenBusFallback,
         }
     }
@@ -478,5 +557,192 @@ mod tests {
         let mut data = [0u8; 1];
         bus.pio_read(TAPE_DEVICE_BASE + reg::DATA, &mut data);
         assert_eq!(data, [30]);
+    }
+}
+
+/// `DeviceBus::service_virtio_rng` — the mechanism todo.md §14 next-actions item 1 named as still
+/// open after ralph iteration 24 ("nothing calls `SplitVirtqueue::process_available` automatically
+/// from `QueueNotify` yet"): a real driver enumeration/negotiation sequence through `DeviceBus`'s
+/// own `Bus` impl, followed by an explicit `service_virtio_rng(&mem)` call, actually drains the
+/// posted descriptor chain and fills it with tape-seeded entropy bytes. Hardware-independent (pure
+/// `vm-memory` `GuestMemoryMmap::from_ranges` anonymous-mmap memory, no KVM/perf), same convention
+/// as `virtio_queue.rs`'s own tests — gated to Linux only since it needs real `vm-memory`.
+#[cfg(all(test, target_os = "linux"))]
+mod virtio_rng_service_tests {
+    use super::*;
+    use crate::virtio_mmio::{
+        VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
+    };
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+
+    type GuestMemory = GuestMemoryMmap<()>;
+
+    const DESC_BASE: u64 = 0x1000;
+    const AVAIL_BASE: u64 = 0x2000;
+    const USED_BASE: u64 = 0x3000;
+    const BUF_BASE: u64 = 0x4000;
+
+    fn test_guest_mem() -> GuestMemory {
+        GuestMemory::from_ranges(&[(GuestAddress(0), crate::layout::GUEST_RAM_SIZE)])
+            .expect("anonymous-mmap guest memory for a unit test")
+    }
+
+    fn write_reg(bus: &mut DeviceBus, offset: u64, value: u32) {
+        bus.mmio_write(crate::layout::VIRTIO_MMIO_RNG_BASE + offset, &value.to_le_bytes());
+    }
+
+    fn read_reg(bus: &mut DeviceBus, offset: u64) -> u32 {
+        let mut data = [0u8; 4];
+        bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE + offset, &mut data);
+        u32::from_le_bytes(data)
+    }
+
+    /// Drives the real driver-enumeration/negotiation sequence (mirroring `virtio_mmio.rs`'s own
+    /// `a_full_driver_enumeration_and_queue_setup_sequence_succeeds` test) through `DeviceBus`
+    /// itself, then posts one writable descriptor of `len` bytes and notifies — everything a real
+    /// virtio-rng driver's `probe` + one `hwrng_fillfn` request would do.
+    fn negotiate_and_post_one_descriptor(bus: &mut DeviceBus, mem: &GuestMemory, len: u32) {
+        write_reg(bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE);
+        write_reg(bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        write_reg(bus, 0x014, 1); // DeviceFeaturesSel = word 1
+        let offered = read_reg(bus, 0x010);
+        write_reg(bus, 0x024, 1); // DriverFeaturesSel = word 1
+        write_reg(bus, 0x020, offered);
+        write_reg(bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
+
+        write_reg(bus, 0x030, 0); // QueueSel = 0
+        write_reg(bus, 0x038, 256); // QueueNum
+        write_reg(bus, 0x080, DESC_BASE as u32);
+        write_reg(bus, 0x090, AVAIL_BASE as u32);
+        write_reg(bus, 0x0a0, USED_BASE as u32);
+        write_reg(bus, 0x044, 1); // QueueReady
+        write_reg(
+            bus,
+            0x070,
+            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK,
+        );
+
+        let mut raw = [0u8; 16];
+        raw[0..8].copy_from_slice(&BUF_BASE.to_le_bytes());
+        raw[8..12].copy_from_slice(&len.to_le_bytes());
+        raw[12..14].copy_from_slice(&2u16.to_le_bytes()); // VIRTQ_DESC_F_WRITE
+        raw[14..16].copy_from_slice(&0u16.to_le_bytes());
+        mem.write_slice(&raw, GuestAddress(DESC_BASE)).expect("write descriptor");
+        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(AVAIL_BASE + 2)).expect("avail.idx = 1");
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(AVAIL_BASE + 4)).expect("avail.ring[0] = 0");
+
+        write_reg(bus, 0x050, 0); // QueueNotify
+    }
+
+    fn read_used_buffer(mem: &GuestMemory, len: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; len];
+        mem.read_slice(&mut buf, GuestAddress(BUF_BASE)).expect("read filled buffer");
+        buf
+    }
+
+    #[test]
+    fn service_virtio_rng_is_a_harmless_no_op_before_enable_ready_or_notify() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0, "virtio-rng was never enabled");
+
+        bus.enable_virtio_rng();
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0, "queue never negotiated/ready");
+    }
+
+    #[test]
+    fn queue_notify_now_actually_drains_the_ring_with_entropy_bytes() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_rng();
+        bus.seed_virtio_rng_entropy(42);
+        negotiate_and_post_one_descriptor(&mut bus, &mem, 32);
+
+        let processed = bus.service_virtio_rng(&mem).unwrap();
+        assert_eq!(processed, 1);
+        assert_eq!(read_reg(&mut bus, 0x044), 1, "queue is still ready after servicing");
+        let written = read_used_buffer(&mem, 32);
+        assert_ne!(written, vec![0u8; 32], "the buffer must actually be filled, not left zeroed");
+
+        // A second call with no further driver activity drains nothing new.
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_same_seed_reproduces_the_identical_byte_stream() {
+        let bytes_from = |seed: u64| {
+            let mem = test_guest_mem();
+            let mut bus = DeviceBus::default();
+            bus.enable_virtio_rng();
+            bus.seed_virtio_rng_entropy(seed);
+            negotiate_and_post_one_descriptor(&mut bus, &mem, 24);
+            bus.service_virtio_rng(&mem).unwrap();
+            read_used_buffer(&mem, 24)
+        };
+
+        assert_eq!(bytes_from(7), bytes_from(7), "same seed must reproduce the identical byte stream");
+        assert_ne!(bytes_from(7), bytes_from(8), "a different seed must change the byte stream");
+    }
+
+    #[test]
+    fn resetting_and_renegotiating_rebuilds_the_stale_ring_cursor() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_rng();
+        bus.seed_virtio_rng_entropy(1);
+        negotiate_and_post_one_descriptor(&mut bus, &mem, 8);
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 1);
+
+        // Device reset (status = 0) clears queue readiness; a real driver would renegotiate with
+        // potentially different ring addresses before posting again.
+        write_reg(&mut bus, 0x070, 0);
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0, "queue is unready right after reset");
+
+        const NEW_DESC_BASE: u64 = 0x5000;
+        const NEW_AVAIL_BASE: u64 = 0x6000;
+        const NEW_USED_BASE: u64 = 0x7000;
+        const NEW_BUF_BASE: u64 = 0x8000;
+
+        write_reg(&mut bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE);
+        write_reg(&mut bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        write_reg(&mut bus, 0x014, 1);
+        let offered = read_reg(&mut bus, 0x010);
+        write_reg(&mut bus, 0x024, 1);
+        write_reg(&mut bus, 0x020, offered);
+        write_reg(
+            &mut bus,
+            0x070,
+            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK,
+        );
+        write_reg(&mut bus, 0x030, 0);
+        write_reg(&mut bus, 0x038, 256);
+        write_reg(&mut bus, 0x080, NEW_DESC_BASE as u32);
+        write_reg(&mut bus, 0x090, NEW_AVAIL_BASE as u32);
+        write_reg(&mut bus, 0x0a0, NEW_USED_BASE as u32);
+        write_reg(&mut bus, 0x044, 1);
+        write_reg(
+            &mut bus,
+            0x070,
+            VIRTIO_STATUS_ACKNOWLEDGE
+                | VIRTIO_STATUS_DRIVER
+                | VIRTIO_STATUS_FEATURES_OK
+                | VIRTIO_STATUS_DRIVER_OK,
+        );
+
+        let mut raw = [0u8; 16];
+        raw[0..8].copy_from_slice(&NEW_BUF_BASE.to_le_bytes());
+        raw[8..12].copy_from_slice(&8u32.to_le_bytes());
+        raw[12..14].copy_from_slice(&2u16.to_le_bytes());
+        raw[14..16].copy_from_slice(&0u16.to_le_bytes());
+        mem.write_slice(&raw, GuestAddress(NEW_DESC_BASE)).unwrap();
+        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(NEW_AVAIL_BASE + 2)).unwrap();
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(NEW_AVAIL_BASE + 4)).unwrap();
+        write_reg(&mut bus, 0x050, 0);
+
+        let processed = bus.service_virtio_rng(&mem).unwrap();
+        assert_eq!(processed, 1, "the rebuilt cursor must walk the new ring, not a stale one");
+        let mut written = [0u8; 8];
+        mem.read_slice(&mut written, GuestAddress(NEW_BUF_BASE)).unwrap();
+        assert_ne!(written, [0u8; 8]);
     }
 }

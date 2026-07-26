@@ -5545,3 +5545,47 @@ todo.md updated with this iteration's findings (appended after the ralph-iterati
   - Still open (unchanged from iteration 23's scoping): nothing auto-drains a queue on QueueNotify, InterruptStatus always reads 0 (no real interrupt raised), and no boot/cmdline/CLI wiring exists yet — blocked on the same unresolved interrupt-vector question (no in-kernel irqchip on this host).
   - Verification: cargo build/clippy/test --workspace all clean (0 failures, 0 new clippy warnings — confirmed via targeted grep); drive/h0.sh-h7.sh (8/8) and drive/m9.sh-m13.sh (5/5) all PASS on real /dev/kvm, no regressions.
 ---
+
+Post-push verification: git push succeeded (7ee620b..cfc1413 main -> main); local HEAD matches origin/main tip exactly (cfc1413); working tree clean. Full build/clippy/test/drive-script suite was run against this exact commit content before pushing. todo.md still has pending items (virtio-rng interrupt-delivery + boot/CLI wiring, H8/FCEUX Qt5, H9 Ubuntu) -- emitting NEXT.
+
+## 2026-07-26T15:52:49 UTC (35min) - Session usage — build-24 [sonnet]
+- cost $7.6884 (from claude -p)
+- context 226,633 tok peak of 1M (23%) across 84 inference calls, monotonic
+- models sonnet-5 $7.6852 (in 256 / out 76,741 / cache-read 15,666,255) · haiku-4-5 $0.0031
+- subagents (4) sonnet-5 x4
+- transcript: ralph/.run/20260726T004845Z/024-build-24.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 25
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose to wire virtio-mmio's QueueNotify write to actually drain the split virtqueue via SplitVirtqueue::process_available, filling driver-writable buffers with tape-derived entropy bytes -- this is the last mechanism-only slice before the interrupt-routing/boot-wiring blocker that iterations 23-24 explicitly left open. It's the smallest genuinely non-stub next increment: it makes virtio-rng data actually flow (guest posts a buffer, host fills it with real tape-seeded bytes and publishes to the used ring) without yet requiring the unresolved in-kernel-irqchip question.
+
+Implemented and building clean: DeviceBus::service_virtio_rng (console.rs) wires QueueNotify to actually drain the split virtqueue via SplitVirtqueue::process_available, filling driver-writable buffers with a new tape-seedable SplitMix64 entropy stream (made pub(crate) in timesource.rs, shared PRNG with the rdrand/rdseed path but an independent stream). Added SplitVirtqueue::config() so the cached ring cursor can detect driver re-negotiation after a reset and rebuild instead of walking a stale layout. 4 new hardware-independent tests added in console.rs (gated cfg(target_os=linux)). Running cargo test -p baud-multiverse --lib now.
+
+Full baud-multiverse --lib suite: 113 passed, 0 failed, 8 ignored (enforced-regime/opt-in as expected), 212s -- includes the 4 new virtio_rng_service_tests. Running cargo build/clippy/test --workspace now.
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets now.
+
+cargo clippy --workspace --all-targets: 0 new warnings -- confirmed all warnings are the same pre-existing list documented in prior iterations (baud-tracing aya::Bpf, baud-multiverse/src/lib.rs EntropyDevice/InputDevice/NetDevice/ExitDevice derivable-impl + div_ceil/unnecessary_cast, baud-tape-agent/transport.rs, baud-server routes/{fuzz,replay,tracing}.rs) -- none touch console.rs/virtio_mmio.rs/virtio_queue.rs/timesource.rs. Running cargo test --workspace now.
+
+cargo test --workspace: 0 failures across every crate. Running drive/h0.sh through drive/h7.sh and drive/m9.sh-m13.sh individually against real /dev/kvm next.
+
+drive/h0.sh through drive/h7.sh (8/8) and drive/m9.sh through drive/m13.sh (5/5) all PASS on real /dev/kvm, no regressions. Dispatching a subagent to update todo.md with this iteration's findings now.
+
+Subagent updating todo.md is running; waiting for it to finish before committing.
+
+todo.md updated with this iteration's findings (37 insertions, 0 deletions, both notes appended correctly). Verified diff. Committing now.
+
+## 2026-07-26T16:25:30 UTC - Changes committed.
+- Wired virtio-mmio's QueueNotify to actually drain the split virtqueue with real, tape-seedable entropy bytes -- the next slice of the virtio-rng gap iterations 23-24 left open.
+- Files changed: crates/baud-multiverse/src/console.rs, crates/baud-multiverse/src/timesource.rs, crates/baud-multiverse/src/virtio_queue.rs, crates/baud-multiverse/src/virtio_mmio.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - `console.rs`'s `DeviceBus` gained `virtio_rng_queue: Option<SplitVirtqueue>` and `virtio_rng_entropy: SplitMix64` (both `#[cfg(target_os = "linux")]`-gated), plus `seed_virtio_rng_entropy(seed)` and `service_virtio_rng(&mem)` -- the latter is the real drain mechanism: walks every posted descriptor chain via `SplitVirtqueue::process_available`, fills writable descriptors with bytes drawn from the entropy stream, and rebuilds its cached cursor on driver re-negotiation (detected via a new `SplitVirtqueue::config()` accessor) rather than walking a stale ring layout.
+  - `timesource.rs`'s `SplitMix64` PRNG widened from module-private to `pub(crate)` (+`Default`) so the virtio-rng device reuses it as an independent stream, distinct from the rdrand/rdseed sub-stream and the boot `SETUP_RNG_SEED`.
+  - Explicitly NOT auto-wired from `QueueNotify`: `baud_vcpu::Bus` is memory-oblivious by design (shared with baud-vcpu's exit dispatch), so nothing inside a `Bus` impl can reach guest RAM -- `service_virtio_rng` is a method a real boot loop must call explicitly once wired (still open, same as interrupt delivery / the in-kernel-irqchip question).
+  - 4 new hardware-independent tests in `console.rs`'s `virtio_rng_service_tests` (pure `vm-memory` anonymous-mmap memory, no KVM/perf): no-op-before-ready, real driver-negotiation-through-notify-through-drain end-to-end, same-seed/different-seed determinism, and reset+renegotiate cursor-rebuild regression.
+  - Verification: `cargo build --workspace` clean; `cargo clippy --workspace --all-targets` 0 new warnings (confirmed against the same pre-existing warning list prior iterations documented); `cargo test --workspace` 0 failures (baud-multiverse: 113 passed, 8 ignored); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`, no regressions.
+---

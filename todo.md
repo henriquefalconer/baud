@@ -1407,6 +1407,39 @@ snapshot, not a duplicate of it.
      `baud-server/src/routes/{fuzz,replay,tracing}.rs`); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-
      `m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions from the widened
      `VirtioMmioTransport`/`DeviceBus` public surface.
+     **This iteration (ralph iteration 25): the "nothing wires notify to ring-draining" gap iteration 24
+     explicitly left open is now closed — but interrupt delivery and boot/cmdline/CLI wiring are not.**
+     `console.rs`'s `DeviceBus` gained two new `#[cfg(target_os = "linux")]`-gated fields —
+     `virtio_rng_queue: Option<SplitVirtqueue>` (the live ring cursor) and `virtio_rng_entropy:
+     SplitMix64` (the device's own tape-seedable byte stream, kept as an independent stream from the
+     rdrand/rdseed sub-stream and the boot `SETUP_RNG_SEED`, per §3.8's domain-separation convention;
+     `timesource.rs`'s `SplitMix64` was widened from module-private to `pub(crate)`, plus a
+     `#[derive(Default)]`, to be reused here rather than duplicated) — and two new methods:
+     `seed_virtio_rng_entropy(&mut self, seed: u64)` and `service_virtio_rng<M: GuestMemoryBackend>(&mut
+     self, mem: &M) -> Result<u32, VirtqueueError>`, the latter being the actual drain mechanism: it walks
+     every posted chain via `SplitVirtqueue::process_available`, fills writable descriptors 8 bytes at a
+     time from `next_u64().to_le_bytes()`, and lazily rebuilds its cached `SplitVirtqueue` by comparing
+     against a new `SplitVirtqueue::config()` accessor whenever the transport's `queue_ring_config`
+     changes (first negotiation, or a reset+renegotiate) rather than walking a stale layout; a no-op
+     (`Ok(0)`) if virtio-rng was never enabled or the queue isn't ready, never panics. Explicitly NOT
+     wired to fire automatically from `Bus::mmio_write`'s `QueueNotify` arm, and can't be without a larger
+     redesign: `baud_vcpu::Bus` is shared with `baud-vcpu`'s exit-dispatch code and is deliberately
+     memory-oblivious (`mmio_write(&mut self, addr: u64, data: &[u8])`, no guest-memory parameter), so
+     nothing inside a `Bus` impl can reach real guest RAM to walk a virtqueue — `service_virtio_rng` is a
+     method a caller with real guest memory must invoke explicitly, and no real boot loop does that yet
+     (the same still-open boot/cmdline/CLI wiring from iterations 23/24). 4 new hardware-independent tests
+     in a new `console.rs` module `virtio_rng_service_tests` (pure `vm-memory::GuestMemoryMmap::from_
+     ranges` anonymous-mmap memory, no KVM/perf): a before-enable/ready/notify no-op check; a full driver
+     enumeration/negotiate/post/notify sequence through `DeviceBus`'s own `Bus` impl proving the ring is
+     actually drained and filled (and a second no-op call drains nothing further); a same-seed-reproduces-
+     identical-bytes / different-seed-differs determinism check; and a reset+renegotiate-with-new-ring-
+     addresses regression test for the `config()`-comparison rebuild logic specifically. `cargo build`
+     clean; `clippy --workspace --all-targets` 0 new warnings (the full warning list is unchanged from
+     prior iterations' documented list, none in files touched here); `cargo test --workspace` 0 failures
+     (baud-multiverse alone: 113 passed, 0 failed, 8 ignored); `drive/h0.sh`-`h7.sh` (8/8) and
+     `drive/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions. The in-kernel-irqchip
+     question (this host never calls `KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD`, so which vector a
+     `virtio_mmio.device=` cmdline IRQ resolves to remains unverified) was again explicitly out of scope.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-
@@ -1678,6 +1711,10 @@ snapshot, not a duplicate of it.
      as still-open just above is now done — see item 1's ralph-iteration-24 note above
      (`crates/baud-multiverse/src/virtio_queue.rs`'s `SplitVirtqueue`). Interrupt delivery and boot/
      cmdline/CLI wiring remain open exactly as described.
+     **Correction (ralph iteration 25)**: the notify-to-drain wiring is also now done — see item 1's
+     ralph-iteration-25 note above (`console.rs`'s `service_virtio_rng`). Interrupt delivery and
+     boot/cmdline/CLI wiring are the only pieces still open before `virtio_rng_reseed_is_deterministic`
+     can pass.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

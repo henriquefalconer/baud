@@ -283,16 +283,19 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
 }
 
 /// A tiny, dependency-free deterministic PRNG (SplitMix64, Steele/Lea/Flood 2014 — the algorithm
-/// behind Java's `SplittableRandom`) used only to back [`WorkClock::serve_enforced_rdrand`]. No
-/// crate dependency needed for this (`kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md`:
-/// "the userspace side needs zero changes to any pinned crate").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SplitMix64 {
+/// behind Java's `SplittableRandom`) used to back [`WorkClock::serve_enforced_rdrand`] and — via
+/// `pub(crate)` visibility — `console.rs`'s virtio-rng device byte stream (`DeviceBus::service_
+/// virtio_rng`, todo.md §14 next-actions item 1), so both tape-seeded entropy mechanisms share one
+/// PRNG implementation rather than duplicating it. No crate dependency needed for this
+/// (`kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md`: "the userspace side needs zero changes to
+/// any pinned crate").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) struct SplitMix64 {
     state: u64,
 }
 
 impl SplitMix64 {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         SplitMix64 { state: seed }
     }
 
@@ -300,7 +303,7 @@ impl SplitMix64 {
         self.state
     }
 
-    fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

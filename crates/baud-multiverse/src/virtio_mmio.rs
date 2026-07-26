@@ -18,12 +18,16 @@
 // records that a notification arrived (`notify_count`/`last_notified_queue`), and
 // `InterruptStatus` always reads `0`. [`Self::queue_ring_config`] hands the negotiated addresses to
 // `crate::virtio_queue::SplitVirtqueue`, which walks a queue's descriptor table / avail ring / used
-// ring over real `vm-memory` (todo.md §14 next-actions item 1) — that piece is now implemented and
-// hardware-independently tested, but nothing yet drives it from `QueueNotify` automatically, and
-// injecting a real interrupt through the exact-boundary engine (`baud_vcpu::boundary`) or a new one
-// is still deferred: this host has no in-kernel irqchip (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are
-// never called, `linux/mod.rs`), so which vector a `virtio_mmio.device=` IRQ number resolves to is
-// unverified and needs its own investigation before that can be wired in, not stubbed here.
+// ring over real `vm-memory` (todo.md §14 next-actions item 1); `console.rs`'s `DeviceBus::service_
+// virtio_rng` now actually drives that from a `QueueNotify`-equivalent call, filling buffers with
+// tape-seeded entropy bytes — but only when a caller invokes it explicitly with real guest memory,
+// since this transport's own `Bus` impl (used by `baud-vcpu`'s memory-oblivious exit dispatch) has
+// no guest-memory access to do so itself. Injecting a real interrupt through the exact-boundary
+// engine (`baud_vcpu::boundary`) or a new one is still deferred: this host has no in-kernel irqchip
+// (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called, `linux/mod.rs`), so which vector a
+// `virtio_mmio.device=` IRQ number resolves to is unverified and needs its own investigation before
+// that can be wired in, not stubbed here — same for wiring any of this into a real boot's
+// cmdline/CLI/server route.
 //
 // Every register is a naturally-aligned 32-bit word (the only access width the virtio-mmio spec
 // permits); this mirrors `console.rs`'s `Console::pio_read`'s own precedent for a narrower-than-
