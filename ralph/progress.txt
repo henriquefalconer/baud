@@ -4703,3 +4703,54 @@ drive/h7-enforced-checkpoint.sh confirmed: exits 0 (RDTSC regression gate passes
   - `drive/h7-enforced-checkpoint.sh` deliberately does not gate workspace verification on this test's own pass/fail (only on its RDTSC regression check), since it is expected to fail every run until the residual jitter is eliminated or the specific static-call site is pinned (both future work, documented in todo.md §14 next-actions item 2)
   - Full verification green: `cargo build`/`clippy --all-targets`/`test --workspace` all clean (0 failures, 87 passed + 6 ignored in `baud-multiverse`, one `fleet_of_vms_run_in_parallel_without_interference` transient real-hardware failure confirmed to pass in isolation and on a full clean rerun, same pre-existing flakiness class as prior iterations); `drive/h4.sh`, `h5.sh`, `h7.sh` (stock module) all pass; `drive/h7-enforced-checkpoint.sh` exits 0 (RDTSC regression passes; RAM-hash test fails as documented, non-gating); stock kvm_intel/kvm module confirmed restored and `/dev/kvm` confirmed idle after every real-hardware run
 ---
+
+Post-push verification: local main (2213ffe) matches origin/main exactly (fetch + rev-parse confirmed), working tree clean, stock kvm_intel/kvm module loaded and /dev/kvm confirmed idle. Summary: this iteration implemented H7's guest-driven-checkpoint mechanism for double_boot_ram_hash_identical (todo.md's own concrete next-action item) by reusing the tape device's existing MARK_BRANCH opcode, added the run_until_branch_or_halt_with_periodic_timer combinator (fixing a real Halted-before-drain bug along the way), a third checkpoint_init.c fixture, the new test, and drive/h7-enforced-checkpoint.sh. Real-hardware validation found the checkpoint mechanism itself is correct but the RAM-hash comparison fails every run (0/8 twice) -- root-caused via a byte-diff diagnostic to a static_call/jump-label trampoline site whose patched jump target is sensitive to the same residual RCB/TSC-read-jitter mechanism already documented for os_entropy_is_deterministic, now extended and more precisely characterized. cargo build/clippy/test --workspace all green (one transient fleet_of_vms flake confirmed pre-existing and non-reproducing); drive/h4.sh, h5.sh, h7.sh (stock) and h7-enforced-checkpoint.sh (RDTSC regression gate) all pass. todo.md still has pending items (driving the static-call-site jitter to zero, the baud-packages automated image pipeline, H8 Mario rebuild, the generic-core guardrail, virtio-rng, H9 Ubuntu, entropy_guest_is_deterministic/initial_crng_state_is_reproducible as documented aliases, and more per section 14) -- emitting NEXT.
+
+## 2026-07-26T07:24:59 UTC (45min) - Session usage — build-9 [sonnet]
+- cost $8.7704 (from claude -p)
+- context 251,918 tok peak of 1M (25%) across 97 inference calls, monotonic
+- models sonnet-5 $8.7672 (in 2,350 / out 101,937 / cache-read 18,126,597) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/009-build-9.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 10
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and specs/*...
+
+Chose to investigate: wiring bootparams::DETERMINISTIC_CMDLINE as the real boot cmdline (todo.md next-actions item 1's small open item) vs. implementing the no_workload_specifics_in_core lint (item 4) -- both are concrete, non-hardware-jitter tasks, unlike the residual RCB jitter work which has diminishing returns after many iterations. Dispatching subagents to check current state of both before deciding.
+
+Wired bootparams::DETERMINISTIC_CMDLINE into the three real-linux-guest test cmdlines (guest_kernel_boots_to_userspace, os_entropy_is_deterministic, double_boot_ram_hash_identical), replacing hand-diverged inline strings -- closes todo.md's documented reconciliation gap. Verified via subagent that added flags (no-kvmclock/pci=off/acpi=off/quiet loglevel=1/random.trust_*/nomodule) are no-ops or improvements for this fixture (CONFIG_PCI=n, CONFIG_ACPI=n, CONFIG_MODULES=n; marker is raw-outb not printk so quiet doesn't affect assertions). Building now...
+
+Build clean. Running guest_kernel_boots_to_userspace (real KVM boot, now using DETERMINISTIC_CMDLINE) to verify the cmdline change doesn't break the boot...
+
+guest_kernel_boots_to_userspace passes on real /dev/kvm with the new DETERMINISTIC_CMDLINE. Now running h7-enforced-entropy.sh and h7-enforced-checkpoint.sh (enforced-module swap) to confirm the ignored tests os_entropy_is_deterministic / double_boot_ram_hash_identical still behave the same (module swap + RDTSC regression gate) with their cmdline now sourced from the constant too.
+
+drive/h7-enforced-entropy.sh passed (os_entropy_is_deterministic byte-identical, RDTSC regression clean) with DETERMINISTIC_CMDLINE. Now running h7-enforced-checkpoint.sh (checkpoint mechanism should still pass; RAM-hash comparison itself is documented non-gating/expected-fail).
+
+double_boot_ram_hash_identical PASSED 1/1 this run (previously 0/8 twice) -- possibly because DETERMINISTIC_CMDLINE's 'quiet loglevel=1' (and other added flags) changes which/how many static_call sites get exercised during boot, sidestepping the jitter-sensitive trampoline. This could be a real fix for a long-standing open item (todo.md next-actions item 2). Running H7_CHECKPOINT_REPEATS=8 to get a real signal before concluding anything.
+
+H7_CHECKPOINT_REPEATS=8 batch: double_boot_ram_hash_identical improved from 0/8 (twice, pre-change) to 4/8 with DETERMINISTIC_CMDLINE wired in -- a real, substantial improvement (not a full fix), plausibly because quiet/loglevel=1 reduces boot-time printk/branch noise around the jitter-sensitive static_call site. Updating todo.md with this finding, then running full verification protocol (clippy, full test suite, remaining drive scripts).
+
+todo.md updated with the DETERMINISTIC_CMDLINE wiring + the 4/8 checkpoint-improvement finding. Running cargo clippy --workspace --all-targets next...
+
+clippy clean (only pre-existing warnings, no new ones from this change). Running cargo test --workspace...
+
+cargo test --workspace: zero failures across the full suite. Running drive/h4.sh...
+
+drive/h4.sh passed. Running drive/h5.sh...
+
+drive/h5.sh passed. All verification green: build/clippy/test --workspace clean, h4/h5/h7/h7-enforced-entropy/h7-enforced-checkpoint drive scripts all pass. Confirming stock kvm module is loaded and /dev/kvm is idle before committing...
+
+Stock kvm_intel/kvm confirmed loaded from /lib/modules/.../kernel/arch/x86/kvm/, /dev/kvm idle. Appending final progress block and committing.
+
+## 2026-07-26T07:45:29 UTC - Changes committed.
+- Wired bootparams::DETERMINISTIC_CMDLINE as the actual cmdline for all three real-linux-guest tests, closing a documented todo.md reconciliation gap
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - guest_kernel_boots_to_userspace, os_entropy_is_deterministic, and double_boot_ram_hash_identical now use bootparams::DETERMINISTIC_CMDLINE verbatim instead of three hand-diverged inline cmdline strings (todo.md next-actions item 1's closing item)
+  - Verified every newly-added token (no-kvmclock/pci=off/acpi=off/quiet loglevel=1/random.trust_cpu=off random.trust_bootloader=on/nomodule) is a no-op or improvement for this fixture (CONFIG_PCI=n/CONFIG_ACPI=n/CONFIG_MODULES=n; nomodule is not a real kernel param and becomes a harmless ignored argv entry; marker assertions read raw-outb writes, not printk text, so quiet is safe)
+  - Unexpected real-hardware finding recorded in todo.md: this cmdline change alone raised double_boot_ram_hash_identical's pass rate from 0/8 (twice, prior iteration) to 4/8 in a fresh H7_CHECKPOINT_REPEATS=8 batch -- a substantial, verified improvement (plausibly less boot-time printk/branch noise before the checkpoint), not a full fix; still open, now with a new lever to investigate
+  - Full verification green: cargo build/clippy --all-targets/test --workspace all clean (0 failures); drive/h4.sh, h5.sh, h7.sh (stock module) all pass; drive/h7-enforced-entropy.sh passes (os_entropy_is_deterministic byte-identical, no regression); drive/h7-enforced-checkpoint.sh passes its RDTSC regression gate (double_boot_ram_hash_identical itself remains non-gating, 4/8 this run); stock kvm_intel/kvm module confirmed restored and /dev/kvm confirmed idle after every real-hardware run
+---

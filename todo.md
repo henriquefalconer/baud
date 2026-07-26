@@ -1160,6 +1160,30 @@ snapshot, not a duplicate of it.
      test's own pass/fail (only on its RDTSC regression check), since it is expected to fail every
      run until one of those two fixes lands; the checkpoint *mechanism* itself (the tape cursor
      landing at the identical step across two boots) is asserted unconditionally and passes.
+     **This iteration: `bootparams::DETERMINISTIC_CMDLINE` (spec §4.2's exact cmdline, previously
+     "not yet wired as anyone's default" per this section) is now used verbatim by all three real-
+     `linux-guest`-fixture tests (`guest_kernel_boots_to_userspace`, `os_entropy_is_deterministic`,
+     `double_boot_ram_hash_identical`), replacing three hand-diverged inline cmdline strings —
+     closing that reconciliation gap. Verified each added/changed token
+     (`no-kvmclock`/`pci=off`/`acpi=off`/`quiet loglevel=1`/`random.trust_cpu=off
+     random.trust_bootloader=on`/`nomodule`) is a no-op or an improvement for this fixture
+     (`minimal.config` has `CONFIG_PCI=n`/`CONFIG_ACPI=n`/`CONFIG_MODULES=n`; `nomodule` itself is
+     not a real kernel parameter — it becomes a harmless, ignored extra `argv` entry to `/init`,
+     which never reads `argv` — worth fixing or dropping from the spec string itself in a future
+     pass, but harmless as-is; the marker assertions read only the guest's own raw-`outb` writes,
+     never kernel `printk` text, so `quiet` doesn't affect them). **Unexpected, real finding**: with
+     this cmdline change alone (no other code touched), a fresh `H7_CHECKPOINT_REPEATS=8` real-
+     hardware batch for `double_boot_ram_hash_identical` came back **4/8 passed** — a substantial
+     jump from the pre-change 0/8 (twice, 16 boots, prior iteration) — plausibly because `quiet
+     loglevel=1` (now included for the first time) reduces boot-time console/`printk` work and
+     thus the number of branches taken before the checkpoint, narrowing the window in which the
+     jitter-sensitive `static_call` trampoline site (documented above) resolves differently. This is
+     a real, verified improvement, **not** a fix: 4/8 failures still reproduce the identical
+     signature (same tape cursor, byte-diff confined to the same trampoline pattern). Driving this
+     the rest of the way to 100% is still open future work — same two candidate fixes as before
+     (zero out the residual single-fd `perf_event`-read jitter, or pin the specific static-call
+     site), now with a promising new lever (further reducing boot-time branch-count variance before
+     the checkpoint) to investigate first.
      Also still open: `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
      `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted) — the
      spec's own named tests for this guarantee, distinct from the H7-specific

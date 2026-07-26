@@ -2143,9 +2143,11 @@ mod tests {
     fn guest_kernel_boots_to_userspace() {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_initramfs();
-        let cmdline = "console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable \
-                       no_timer_check reboot=t panic=-1 printk.time=0 i8042.noaux i8042.nomux \
-                       i8042.nopnp 8250.nr_uarts=1 rdinit=/init";
+        // Spec §4.2's exact cmdline (todo.md §14 next-actions item 1's closing item: this used to
+        // be a hand-diverged inline string, `quiet loglevel=1` included -- safe here because the
+        // marker/tick-count assertions below read only the guest's own raw-`outb` writes, never
+        // kernel printk text).
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE;
         const PERIOD_RCB: u64 = 500_000;
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
@@ -2289,10 +2291,10 @@ mod tests {
         // `random.trust_bootloader=on` makes the kernel *credit* the pinned `SETUP_RNG_SEED` node
         // `boot_guest` always writes (§3.8), marking the CRNG ready synchronously from the
         // tape-derived seed alone rather than falling back to the jitter/interrupt-timing path.
-        let cmdline = "console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable \
-                       no_timer_check reboot=t panic=-1 printk.time=0 random.trust_cpu=off \
-                       random.trust_bootloader=on i8042.noaux i8042.nomux i8042.nopnp \
-                       8250.nr_uarts=1 rdinit=/init";
+        // Spec §4.2's exact cmdline (todo.md §14 next-actions item 1's closing item); already
+        // included `random.trust_cpu=off random.trust_bootloader=on`, so this call site's diff
+        // from `DETERMINISTIC_CMDLINE` was the smallest of the three.
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE;
         const PERIOD_RCB: u64 = 500_000;
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
@@ -2506,10 +2508,8 @@ mod tests {
     fn double_boot_ram_hash_identical() {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_checkpoint_initramfs();
-        let cmdline = "console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable \
-                       no_timer_check reboot=t panic=-1 printk.time=0 random.trust_cpu=off \
-                       random.trust_bootloader=on i8042.noaux i8042.nomux i8042.nopnp \
-                       8250.nr_uarts=1 rdinit=/init";
+        // Spec §4.2's exact cmdline (todo.md §14 next-actions item 1's closing item).
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE;
         const PERIOD_RCB: u64 = 500_000;
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
