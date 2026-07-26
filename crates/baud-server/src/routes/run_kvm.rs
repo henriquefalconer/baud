@@ -267,6 +267,12 @@ type BranchOutcome = (Vec<u8>, String, Option<u64>, Option<String>);
 /// `(run_id, node_id_hex)` — what a caller hands to `POST /run/kvm/resume` to fork more branches
 /// from a persisted universe later.
 type PersistedRef = (String, String);
+/// Every drained tape-device record (`Msg::Frame` included) a call to [`run_branches`] produced,
+/// one `Vec` per branch, parallel to (not folded into) its `Vec<BranchOutcome>` — kept as a
+/// separate parallel `Vec` rather than `Vec<(BranchOutcome, Vec<Msg>)>` because `baud_proto::Msg`
+/// is not `PartialEq`, and several existing tests compare a whole `Vec<BranchOutcome>` via
+/// `assert_eq!` (`run_branches`'s own doc explains this in full).
+type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
@@ -398,6 +404,21 @@ pub struct RunKvmBranchBody {
     /// default) preserves this route's exact prior behavior.
     #[serde(default)]
     pub periodic_timer: Option<PeriodicTimerSpec>,
+    /// One optional run id per entry in `branch_tapes_hex` (same length, or omitted entirely) —
+    /// when `Some`, that branch's replay inputs and every `Msg::Frame` record it produced are
+    /// persisted into `kvm_run_meta`/`frame_records` under this run id via the same
+    /// `persist_kvm_run` `/run/kvm { run_id }` already uses, closing todo.md §14's "a real
+    /// Linux-guest run persisted via branch/resume still won't get a `kvm_run_meta` row" gap for
+    /// this route's fixed-tape mode. This works because `boot_and_snapshot` always snapshots the
+    /// branch point with an **empty** tape, before any guest instruction runs (see its own doc) —
+    /// so a branch's own suffix *is* its entire replay tape from a cold boot, byte-identical to
+    /// forking from the snapshot. `stream::render`'s real-replay path can then reboot this branch's
+    /// exact guest (`kernel_path`/`cmdline`/`initramfs_path`/`periodic_timer`, all from this same
+    /// request, plus `tape_hex = branch_tapes_hex[i]`) to regenerate real pixels instead of falling
+    /// back to the synthetic-gradient path. Ignored when `generate` is set (see
+    /// `DriverGenerateSpec::frame_run_id_prefix` instead).
+    #[serde(default)]
+    pub frame_run_ids: Vec<Option<String>>,
 }
 
 /// Drives `baud_driver::Driver` to generate `count` branch tapes instead of a caller supplying
@@ -421,10 +442,40 @@ pub struct DriverGenerateSpec {
     /// a branch `interesting` when reached, alongside any real `Outcome::Crash` from the guest.
     #[serde(default)]
     pub strategy: baud_driver::StrategySpec,
+    /// When set, every generated branch's replay inputs and `Msg::Frame` records are persisted
+    /// under the run id `"{prefix}-{i}"` (`i` = the branch's index in this call, `0`-based) —
+    /// the generate-mode analogue of `RunKvmBranchBody::frame_run_ids` (see its doc for why a
+    /// branch's own tape is its whole replay tape from a cold boot). A caller can't name each
+    /// generated branch's run id ahead of time the way `frame_run_ids` names a `branch_tapes_hex`
+    /// entry, since the driver — not the caller — chooses each branch's tape; the index-derived
+    /// name is the simplest scheme that still gives every branch a distinct, reproducible id.
+    /// **Only honored by `/run/kvm/branch`'s generate mode** — `/run/kvm/resume` reuses this same
+    /// spec type for its own generate mode, but resume never has a `kernel_path`/`cmdline` to
+    /// reboot from (it reconstructs a `Universe` from the store, not from a kernel image), so there
+    /// is nothing a real-replay reboot could target; `resume` rejects a request that sets this
+    /// field rather than silently ignoring it.
+    #[serde(default)]
+    pub frame_run_id_prefix: Option<String>,
 }
 
 fn default_generate_tape_len_bytes() -> u32 {
     4
+}
+
+/// Persist one branch's frames under `run_id` via [`persist_kvm_run`] and return the JSON fragment
+/// `branch()` folds into its response's `frame_persistence` array — shared by the fixed-tape
+/// (`RunKvmBranchBody::frame_run_ids`) and generate (`DriverGenerateSpec::frame_run_id_prefix`)
+/// modes, mirroring `run()`'s own single-boot `persist_kvm_run` call.
+async fn persist_branch_frames(
+    state: &AppState,
+    run_id: &str,
+    params: &KvmBootParams<'_>,
+    records: &[baud_proto::Msg],
+) -> Value {
+    match persist_kvm_run(state, run_id, params, records).await {
+        Ok(frames_recorded) => json!({ "run_id": run_id, "frames_recorded": frames_recorded }),
+        Err(e) => json!({ "run_id": run_id, "persist_error": e }),
+    }
 }
 
 /// POST /run/kvm/branch — boot `kernel_path`, snapshot immediately after boot as the shared branch
@@ -439,7 +490,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
         return Json(json!({ "error": "specify either branch_tapes_hex or generate, not both" }));
     }
     let kernel_path = PathBuf::from(&body.kernel_path);
-    let cmdline = body.cmdline;
+    let cmdline = body.cmdline.clone();
     let persist = body.persist_run_id.map(|run_id| (state.snapshot_store.clone(), run_id));
     let initramfs = match &body.initramfs_path {
         Some(path) => match read_initramfs(path) {
@@ -462,6 +513,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                 )
             }));
         }
+        let frame_run_id_prefix = spec.frame_run_id_prefix.clone();
         let result = tokio::task::spawn_blocking(move || {
             let persist_ref = persist.as_ref().map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
             boot_snapshot_and_generate(
@@ -478,7 +530,24 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
 
         return match result {
             Ok((outcomes, summary, persisted)) => {
-                let branches: Vec<Value> = outcomes.into_iter().map(generated_outcome_to_json).collect();
+                let mut branches = Vec::with_capacity(outcomes.len());
+                let mut frame_persistence = Vec::new();
+                for (i, outcome) in outcomes.into_iter().enumerate() {
+                    if let Some(prefix) = &frame_run_id_prefix {
+                        let run_id = format!("{prefix}-{i}");
+                        let params = KvmBootParams {
+                            kernel_path: &body.kernel_path,
+                            cmdline: &body.cmdline,
+                            tape_hex: &outcome.tape_hex,
+                            initramfs_path: body.initramfs_path.as_deref(),
+                            periodic_timer,
+                        };
+                        frame_persistence.push(
+                            persist_branch_frames(&state, &run_id, &params, &outcome.records).await,
+                        );
+                    }
+                    branches.push(generated_outcome_to_json(outcome));
+                }
                 let mut response = json!({
                     "ok": true,
                     "branches": branches,
@@ -491,6 +560,9 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                 });
                 if let Some((run_id, node_id)) = persisted {
                     response["persisted"] = json!({ "run_id": run_id, "node_id": node_id });
+                }
+                if !frame_persistence.is_empty() {
+                    response["frame_persistence"] = json!(frame_persistence);
                 }
                 Json(response)
             }
@@ -518,6 +590,15 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
             )
         }));
     }
+    if !body.frame_run_ids.is_empty() && body.frame_run_ids.len() != body.branch_tapes_hex.len() {
+        return Json(json!({
+            "error": format!(
+                "frame_run_ids length ({}) must match branch_tapes_hex length ({})",
+                body.frame_run_ids.len(),
+                body.branch_tapes_hex.len()
+            )
+        }));
+    }
     let mut tape_suffixes = Vec::with_capacity(body.branch_tapes_hex.len());
     for hex in &body.branch_tapes_hex {
         match hex_decode(hex) {
@@ -541,11 +622,29 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
     .expect("run/kvm/branch task panicked");
 
     match result {
-        Ok((outcomes, persisted)) => {
-            let branches: Vec<Value> = outcomes.into_iter().map(branch_outcome_to_json).collect();
+        Ok((outcomes, records, persisted)) => {
+            let mut branches = Vec::with_capacity(outcomes.len());
+            let mut frame_persistence = Vec::new();
+            for (i, (outcome, branch_records)) in outcomes.into_iter().zip(records).enumerate() {
+                if let Some(Some(run_id)) = body.frame_run_ids.get(i) {
+                    let params = KvmBootParams {
+                        kernel_path: &body.kernel_path,
+                        cmdline: &body.cmdline,
+                        tape_hex: &body.branch_tapes_hex[i],
+                        initramfs_path: body.initramfs_path.as_deref(),
+                        periodic_timer,
+                    };
+                    frame_persistence
+                        .push(persist_branch_frames(&state, run_id, &params, &branch_records).await);
+                }
+                branches.push(branch_outcome_to_json(outcome));
+            }
             let mut response = json!({ "ok": true, "branches": branches });
             if let Some((run_id, node_id)) = persisted {
                 response["persisted"] = json!({ "run_id": run_id, "node_id": node_id });
+            }
+            if !frame_persistence.is_empty() {
+                response["frame_persistence"] = json!(frame_persistence);
             }
             Json(response)
         }
@@ -611,32 +710,37 @@ fn boot_and_snapshot(
 /// the persisted node a fresh suffix through `POST /run/kvm/resume` actually changes what the guest
 /// does next), closing the "can detect but cannot persist-and-resume-further" gap the fixed-tape
 /// path used to have relative to the generate path (todo.md §14's ninth-brick entry).
+/// Returns each branch's outcome alongside every tape-device record it produced (`Msg::Frame`
+/// included) — a parallel `Vec<Vec<Msg>>`, not folded into `BranchOutcome` itself, so every existing
+/// caller/test that compares/derives `BranchOutcome`/`Vec<BranchOutcome>` (`baud_proto::Msg` is not
+/// `PartialEq`) keeps working unchanged. `boot_snapshot_and_branch`'s HTTP caller
+/// (`routes::run_kvm::branch`) uses the records to persist a branch's frames under
+/// `RunKvmBranchBody::frame_run_ids`, mirroring `run()`'s own `persist_kvm_run` call.
 fn run_branches(
     universe: &baud_snapshot::Universe,
     tape_suffixes: Vec<Vec<u8>>,
     persist: Option<(&SnapshotStore, &str, Option<baud_snapshot_store::NodeId>)>,
     periodic_timer: Option<(u64, u8, u32)>,
-) -> Result<Vec<BranchOutcome>, String> {
+) -> Result<(Vec<BranchOutcome>, BranchRecords), String> {
     let mut outcomes = Vec::with_capacity(tape_suffixes.len());
+    let mut all_records = Vec::with_capacity(tape_suffixes.len());
     let mut offset: u64 = 0;
     for (i, suffix) in tape_suffixes.into_iter().enumerate() {
         let suffix_len = suffix.len() as u64;
         let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix, WORK_CLOCK_K, None)
             .map_err(|e| format!("branch {i} error: {e}"))?;
-        let run_outcome = match periodic_timer {
+        let (run_outcome, mut records) = match periodic_timer {
             Some((period_rcb, vector, max_ticks)) => {
-                let (_ticks, outcome, _records) = branch
+                let (_ticks, outcome, records) = branch
                     .run_until_branch_or_halt_with_periodic_timer(period_rcb, vector, max_ticks)
                     .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
-                outcome
+                (outcome, records)
             }
-            None => {
-                let (outcome, _records) = branch
-                    .run_until_branch_or_halt(BRANCH_MAX_EXITS)
-                    .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
-                outcome
-            }
+            None => branch
+                .run_until_branch_or_halt(BRANCH_MAX_EXITS)
+                .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
         };
+        records.extend(branch.drain_tape_records());
         let (console_output, ram_hash, mark_branch_step) = match &run_outcome {
             baud_multiverse::linux::RunUntilBranchOutcome::Halted(halt) => {
                 (halt.console_output.clone(), halt.ram_hash.clone(), None)
@@ -664,8 +768,9 @@ fn run_branches(
             None
         };
         outcomes.push((console_output, ram_hash, mark_branch_step, node_id));
+        all_records.push(records);
     }
-    Ok(outcomes)
+    Ok((outcomes, all_records))
 }
 
 /// `persisted`'s node id, parsed, for use as the `parent` of any deeper node persisted in the same
@@ -691,7 +796,7 @@ fn boot_snapshot_and_branch(
     persist: Option<(&SnapshotStore, &str)>,
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
-) -> Result<(Vec<BranchOutcome>, Option<PersistedRef>), String> {
+) -> Result<(Vec<BranchOutcome>, BranchRecords, Option<PersistedRef>), String> {
     let universe = boot_and_snapshot(kernel_path, cmdline, initramfs)?;
     let persisted = match persist {
         Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
@@ -699,8 +804,8 @@ fn boot_snapshot_and_branch(
     };
     let parent = persisted_root_parent(&persisted)?;
     let branch_persist = persist.map(|(store, run_id)| (store, run_id, parent));
-    let outcomes = run_branches(&universe, tape_suffixes, branch_persist, periodic_timer)?;
-    Ok((outcomes, persisted))
+    let (outcomes, records) = run_branches(&universe, tape_suffixes, branch_persist, periodic_timer)?;
+    Ok((outcomes, records, persisted))
 }
 
 /// One driver-generated branch's result: the tape `Driver::draw_bits` produced for it, its
@@ -740,6 +845,11 @@ struct GeneratedBranchOutcome {
     /// `Some(step)` when this branch stopped at a `MARK_BRANCH` checkpoint (the tape cursor it
     /// stopped at) rather than running to `Hlt`; `None` for a branch that halted normally.
     mark_branch_step: Option<u64>,
+    /// Every tape-device record this branch produced (`Msg::Frame` included) — not exposed by
+    /// `generated_outcome_to_json` (the HTTP response stays exactly as before), only consumed by
+    /// `branch()`'s `frame_run_id_prefix` handling to persist a branch's frames the same way
+    /// `run()`'s `persist_kvm_run` does for a plain `/run/kvm` boot.
+    records: Vec<baud_proto::Msg>,
 }
 
 struct DriverRunSummary {
@@ -897,6 +1007,7 @@ fn run_driver_generated_branches_with_persist(
             interesting,
             node_id,
             mark_branch_step,
+            records,
         });
     }
     let summary = DriverRunSummary {
@@ -1079,6 +1190,18 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                 )
             }));
         }
+        // `frame_run_id_prefix` needs a `kernel_path`/`cmdline` to reboot from for a real-replay
+        // frame persist — `resume` never has one (it reconstructs a `Universe` from the store, not
+        // from a kernel image, see `RunKvmResumeBody`'s own doc), so honoring it here would either
+        // silently no-op or persist wrong replay inputs. Reject loudly instead
+        // (`DriverGenerateSpec::frame_run_id_prefix`'s own doc names this exact restriction).
+        if spec.frame_run_id_prefix.is_some() {
+            return Json(json!({
+                "error": "generate.frame_run_id_prefix is not supported by /run/kvm/resume \
+                          (resume has no kernel_path/cmdline to reboot from for real-replay frame \
+                          persistence) — use /run/kvm/branch instead"
+            }));
+        }
         let result = tokio::task::spawn_blocking(move || {
             resume_and_generate(store.as_ref(), &run_id, &node_id_hex, spec, periodic_timer)
         })
@@ -1129,7 +1252,9 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
     .expect("run/kvm/resume task panicked");
 
     match result {
-        Ok(outcomes) => {
+        // `_records`: resume has no kernel_path/cmdline to reboot a real replay from, so there is
+        // nothing to persist these into yet — see `resume_and_branch`'s widened return type doc.
+        Ok((outcomes, _records)) => {
             let branches: Vec<Value> = outcomes.into_iter().map(branch_outcome_to_json).collect();
             Json(json!({ "ok": true, "branches": branches }))
         }
@@ -1190,7 +1315,7 @@ fn resume_and_branch(
     node_id_hex: &str,
     tape_suffixes: Vec<Vec<u8>>,
     periodic_timer: Option<(u64, u8, u32)>,
-) -> Result<Vec<BranchOutcome>, String> {
+) -> Result<(Vec<BranchOutcome>, BranchRecords), String> {
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
     let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
     run_branches(&universe, tape_suffixes, Some((store, run_id, Some(parent))), periodic_timer)
@@ -1387,7 +1512,7 @@ mod tests {
         const TIMER_VECTOR: u8 = 0xec;
         const MAX_TICKS: u32 = 2000;
 
-        let (outcomes, _persisted) = boot_snapshot_and_branch(
+        let (outcomes, _records, _persisted) = boot_snapshot_and_branch(
             &kernel,
             cmdline,
             vec![vec![]],
@@ -1417,8 +1542,9 @@ mod tests {
         let cmdline = "console=ttyS0";
         let suffixes: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i, 0xAA, 0xBB, 0xCC]).collect();
 
-        let (first_run, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None)
-            .expect("boot_snapshot_and_branch failed");
+        let (first_run, _records, _) =
+            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None)
+                .expect("boot_snapshot_and_branch failed");
         assert_eq!(first_run.len(), suffixes.len());
         for (i, (console_output, _ram_hash, mark_branch_step, _node_id)) in first_run.iter().enumerate() {
             assert_eq!(
@@ -1430,7 +1556,7 @@ mod tests {
 
         // Re-forking from a fresh branch point with the same suffixes must be byte-identical —
         // both across branches (no cross-branch bleed) and across this whole re-run (determinism).
-        let (second_run, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None)
+        let (second_run, _records, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None)
             .expect("second boot_snapshot_and_branch failed");
         assert_eq!(first_run, second_run, "re-forking the same suffixes must reproduce byte-identically");
     }
@@ -1459,13 +1585,13 @@ mod tests {
         let (_dir, store) = temp_snapshot_store();
         let run_id = "persist-test-run";
 
-        let (direct_outcomes, persisted) =
+        let (direct_outcomes, _direct_records, persisted) =
             boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), Some((&store, run_id)), None, None)
                 .expect("boot_snapshot_and_branch with persist failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
-        let resumed_outcomes = resume_and_branch(&store, run_id, &node_id_hex, suffixes, None)
+        let (resumed_outcomes, _resumed_records) = resume_and_branch(&store, run_id, &node_id_hex, suffixes, None)
             .expect("resume_and_branch failed");
 
         assert_eq!(
@@ -1533,6 +1659,7 @@ mod tests {
             count: 5,
             tape_len_bytes: 4,
             strategy: baud_driver::StrategySpec { maximize: vec!["console_len".into()], ..Default::default() },
+            frame_run_id_prefix: None,
         };
 
         let universe1 = boot_and_snapshot(&kernel, cmdline, None).expect("boot 1");
@@ -1579,6 +1706,7 @@ mod tests {
             count: 3,
             tape_len_bytes: 4,
             strategy: baud_driver::StrategySpec::default(),
+            frame_run_id_prefix: None,
         };
         let (_outcomes, _summary, persisted) =
             boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None)
@@ -1586,7 +1714,7 @@ mod tests {
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
-        let resumed = resume_and_branch(&store, run_id, &node_id_hex, vec![vec![9, 8, 7, 6]], None)
+        let (resumed, _records) = resume_and_branch(&store, run_id, &node_id_hex, vec![vec![9, 8, 7, 6]], None)
             .expect("resume_and_branch failed");
         assert_eq!(
             resumed[0].0,
@@ -1611,6 +1739,7 @@ mod tests {
             count: 4,
             tape_len_bytes: 4,
             strategy: baud_driver::StrategySpec { maximize: vec!["console_len".into()], ..Default::default() },
+            frame_run_id_prefix: None,
         };
 
         let universe = boot_and_snapshot(&kernel, cmdline, None).expect("boot");
@@ -1667,6 +1796,7 @@ mod tests {
                 }),
                 ..Default::default()
             },
+            frame_run_id_prefix: None,
         };
 
         let (outcomes, summary, persisted) =
@@ -1700,7 +1830,7 @@ mod tests {
             // Resuming this exact node — with *any* tape, since the guest is already halted —
             // must reproduce this branch's own frozen output, proving the persisted state really
             // is this specific branch's final state, not some other one's.
-            let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![vec![0xAB, 0xCD]], None)
+            let (resumed, _records) = resume_and_branch(&store, run_id, node_id_hex, vec![vec![0xAB, 0xCD]], None)
                 .expect("resuming a generated branch's node failed");
             assert_eq!(
                 resumed[0].0, outcome.console_output,
@@ -1743,6 +1873,7 @@ mod tests {
             count: 3,
             tape_len_bytes: 1,
             strategy: baud_driver::StrategySpec::default(),
+            frame_run_id_prefix: None,
         };
 
         let (outcomes, _summary, persisted) =
@@ -1770,8 +1901,9 @@ mod tests {
             // loop iteration — `run_until_branch_or_halt` stops the instant it hits the guest's own
             // next MARK_BRANCH, so extra trailing bytes beyond that aren't needed or consumed.
             let fresh_suffix: Vec<u8> = vec![outcome.console_output[0], 0xAA];
-            let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()], None)
-                .expect("resuming a MARK_BRANCH-persisted node failed");
+            let (resumed, _records) =
+                resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()], None)
+                    .expect("resuming a MARK_BRANCH-persisted node failed");
             let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, _resumed_node_id) = &resumed[0];
             assert_eq!(
                 *resumed_mark_branch_step,
@@ -1806,7 +1938,7 @@ mod tests {
         // mark-branch-guest reads one byte, echoes it, then issues MARK_BRANCH —
         // run_until_branch_or_halt stops right there, same one-byte suffix the generate-mode
         // sibling test above uses (tape_len_bytes: 1).
-        let (outcomes, persisted) =
+        let (outcomes, _records, persisted) =
             boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None)
                 .expect("boot_snapshot_and_branch failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
@@ -1836,7 +1968,7 @@ mod tests {
         // cursor is already past it) so it can be anything; index 1 is the one real new byte for
         // the guest's second loop iteration.
         let fresh_suffix: Vec<u8> = vec![console_output[0], 0xAA];
-        let resumed = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()], None)
+        let (resumed, _records) = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()], None)
             .expect("resuming a MARK_BRANCH-persisted node failed");
         let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, resumed_node_id) = &resumed[0];
         assert_eq!(
@@ -1885,7 +2017,7 @@ mod tests {
 
         // First branch point: boot + persist (no generate here — just get a root node to resume
         // from), mirroring boot_snapshot_and_branch's own root-then-children shape.
-        let (outcomes, persisted) =
+        let (outcomes, _records, persisted) =
             boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None)
                 .expect("boot_snapshot_and_branch failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
@@ -1900,6 +2032,7 @@ mod tests {
             count: 3,
             tape_len_bytes: 2,
             strategy: baud_driver::StrategySpec::default(),
+            frame_run_id_prefix: None,
         };
         let (outcomes, _summary) = resume_and_generate(&store, run_id, &node_id_hex, spec, None)
             .expect("resume_and_generate failed");
@@ -1938,7 +2071,7 @@ mod tests {
         let (_dir, store) = temp_snapshot_store();
         let run_id = "driver-state-resume-test";
 
-        let (outcomes, persisted) =
+        let (outcomes, _records, persisted) =
             boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None)
                 .expect("boot_snapshot_and_branch failed");
         let (_root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
@@ -1951,6 +2084,7 @@ mod tests {
             count: 3,
             tape_len_bytes: 2,
             strategy: baud_driver::StrategySpec::default(),
+            frame_run_id_prefix: None,
         };
 
         resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None)

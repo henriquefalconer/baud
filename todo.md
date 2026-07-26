@@ -1137,11 +1137,21 @@ snapshot, not a duplicate of it.
      `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h0.sh` through
      `drive/h7.sh` (8/8) and `drive/m9.sh`/`m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no
      regressions from the widened `RunKvmBranchBody`/`RunKvmResumeBody`/`boot_and_snapshot`/
-     `run_branches`/`run_driver_generated_branches_with_persist` signatures. **Still open, newly surfaced
-     by this**: a real Linux-guest run persisted via `persist_run_id` through branch/resume still won't
-     get a `kvm_run_meta` row (only plain `/run/kvm { run_id }` calls `persist_kvm_run`), so
-     `stream::render`'s real-replay path can't yet replay a branch/resume-originated run's frames — a
-     natural follow-up, not something this iteration attempted. Tests `boot_params_seed_is_pinned` and
+     `run_branches`/`run_driver_generated_branches_with_persist` signatures. **Follow-up closed for
+     `/run/kvm/branch` in iteration 16, still open for `/run/kvm/resume`**: `boot_and_snapshot` always
+     snapshots the guest with an empty tape before any instruction runs, so a branch's own tape suffix is
+     its entire replay tape from cold boot — byte-identical to forking from the snapshot — which let
+     `branch()` reuse the existing `persist_kvm_run`/`KvmBootParams` machinery as-is, keyed by
+     `tape_hex = branch_tapes_hex[i]` (fixed-tape) or `outcome.tape_hex` (generate mode), via a new
+     `persist_branch_frames` helper and opt-in `RunKvmBranchBody.frame_run_ids` /
+     `DriverGenerateSpec.frame_run_id_prefix` fields (both `#[serde(default)]`); `stream::render`'s
+     real-replay path now replays a branch-originated run's frames (new `drive/m12.sh`, 4/4, real
+     `/dev/kvm`). `/run/kvm/resume` still won't get a `kvm_run_meta` row: resume reconstructs a `Universe`
+     from `SnapshotStore`, not from a kernel image, so there's no `kernel_path`/`cmdline` to reboot from
+     for a real replay — closing it needs `SnapshotStore` to additionally track each node's full
+     root-to-node replay-tape lineage, a materially bigger change, out of scope this iteration; resume's
+     generate mode rejects a `frame_run_id_prefix` request outright with a clear error rather than
+     silently ignoring it. Tests `boot_params_seed_is_pinned` and
      `init_powers_off_deterministically` remain unwritten. H8 (Mario, item 3 below) is still blocked on
      the rest of item 1, not just this piece.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the

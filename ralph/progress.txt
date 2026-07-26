@@ -5023,3 +5023,57 @@ m9/m10/m11 all PASS on real hardware (no regressions from RunKvmBranchBody/RunKv
   - CLI: baud run kvm-branch gained --initramfs/--periodic-timer-{period-rcb,vector,max-ticks}; baud run kvm-resume gained the three --periodic-timer-* flags (no --initramfs, matching resume's no-reboot semantics).
   - Full verification green: cargo build/clippy/test --workspace all clean (0 failures across every crate, one transient real-hardware RCB-jitter flake in an unrelated, untouched function confirmed non-reproducing on rerun); drive/h0.sh-h7.sh (8/8) and drive/m9.sh/m10.sh/m11.sh all PASS on real hardware, no regressions.
 ---
+
+Post-push verification: local main (3ff0cbe) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle (fuser exit 1, no process attached). Summary: this iteration closed todo.md §14 item 1's other named gap -- /run/kvm/branch and /run/kvm/resume (plus boot_and_snapshot/boot_snapshot_and_branch/boot_snapshot_and_generate/run_branches/run_driver_generated_branches_with_persist/resume_and_branch/resume_and_generate) now accept initramfs_path/periodic_timer, matching plain /run/kvm from last iteration. Found and fixed a real bug in Multiverse::run_until_branch_or_halt_with_periodic_timer along the way (it silently dropped non-MARK_BRANCH tape records mid-run). New real-hardware test proves a real Linux guest branches correctly via this path (stops at its MARK_BRANCH checkpoint). CLI gained matching --initramfs/--periodic-timer-* flags on kvm-branch/kvm-resume. Full verification green: cargo build/clippy/test --workspace clean (one transient real-hardware RCB-jitter flake in an untouched function confirmed non-reproducing), h0.sh-h7.sh (8/8) and m9/m10/m11 all pass on real hardware, no regressions. todo.md still has pending items (Buildroot/Nix image builders, /dev/vport tape endpoint, DETERMINISTIC_CMDLINE not wired as production default, H7 os-entropy/RAM-hash residual jitter, virtio-rng device, H8 Mario rebuild, and the newly-surfaced branch/resume runs not yet getting a kvm_run_meta row for stream replay) -- emitting NEXT.
+
+## 2026-07-26T10:33:37 UTC (37min) - Session usage — build-15 [sonnet]
+- cost $8.9848 (from claude -p)
+- context 252,771 tok peak of 1M (25%) across 100 inference calls, monotonic
+- models sonnet-5 $8.9816 (in 254 / out 69,888 / cache-read 20,296,493) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/015-build-15.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 16
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose item 1's newly-surfaced follow-up: real Linux-guest runs persisted via branch/resume (persist_run_id) still don't get a kvm_run_meta row, so stream::render's real-replay path can't replay branch/resume-originated runs' frames. This is the smallest well-scoped next step directly following last iteration's work, versus the larger multi-day items (Buildroot/Nix, virtio-rng, vport tape endpoint, H7 residual jitter).
+
+Wired kvm_run_meta frame persistence into /run/kvm/branch's fixed-tape (frame_run_ids) and generate (frame_run_id_prefix) modes; resume explicitly rejected for now (no kernel_path to reboot from). Building to check compile errors before adding CLI flags/tests...
+
+Test binary compiles clean. Running non-ignored baud-server unit tests to confirm no regressions from the run_branches/boot_snapshot_and_branch/resume_and_branch signature widening...
+
+Adding CLI flags --frame-run-id / --frame-run-id-prefix to baud run kvm-branch; building baud-cli...
+
+Wrote drive/m12.sh, a new HTTP-level end-to-end drive script proving a /run/kvm/branch-originated run's frames replay for real via /runs/:id/stream/render (mirrors m11.sh's assertions, using the framebuffer-guest fixture). Running it now on real /dev/kvm...
+
+drive/m12.sh passes on real /dev/kvm — the branch-originated frame-replay design is confirmed correct end-to-end. Now running the full verification protocol: cargo build/clippy/test --workspace, then h0-h7 + m9/m10/m11/m12.
+
+Fixed two new clippy warnings (too_many_arguments on persist_branch_frames, type_complexity on the widened branch return types) by reusing KvmBootParams and a new BranchRecords type alias. Rebuilding + re-running clippy...
+
+clippy clean for run_kvm.rs (only pre-existing, unrelated warnings remain elsewhere). Running cargo test --workspace...
+
+cargo test --workspace: 0 failures across the whole workspace. Now running drive/h0.sh through h7.sh, then m9/m10/m11/m12, one at a time on real /dev/kvm...
+
+h0-h7 (8/8) all PASS on real hardware. Now running m9/m10/m11/m12 to confirm no regression...
+
+All verification green: cargo build/clippy/test --workspace clean, h0-h7 (8/8), m9/m10/m11 (no regressions), and new drive/m12.sh (4/4) all pass on real hardware. Dispatching a subagent to update todo.md §14 with this iteration's findings before the final commit.
+
+todo.md §14 updated by subagent to close the /run/kvm/branch half of the kvm_run_meta gap, leaving /run/kvm/resume explicitly documented as still open. Preparing final commit...
+
+## 2026-07-26T11:10:45 UTC - Changes committed.
+- Closed todo.md §14 item 1's newly-surfaced gap for /run/kvm/branch: a branch-originated run now gets a kvm_run_meta row too, so stream::render's real-replay path can replay its frames (not just plain /run/kvm's).
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-cli/src/cmds/run.rs, drive/m12.sh (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Key insight: boot_and_snapshot always snapshots the branch point with an empty tape before any guest instruction runs, so a branch's own suffix is its whole replay tape from a cold boot -- the existing persist_kvm_run/KvmBootParams machinery /run/kvm already used could be reused as-is, keyed by tape_hex = the branch's own suffix.
+  - RunKvmBranchBody gained frame_run_ids: Vec<Option<String>> (one optional run id per branch_tapes_hex entry, fixed-tape mode); DriverGenerateSpec gained frame_run_id_prefix: Option<String> (generated branches persist under "{prefix}-{i}"). Both #[serde(default)], every existing caller unaffected.
+  - run_branches/run_driver_generated_branches_with_persist now capture and return each branch's drained tape-device records instead of discarding them, via a new BranchRecords = Vec<Vec<Msg>> type alias kept parallel to (not zipped into) Vec<BranchOutcome> -- baud_proto::Msg is not PartialEq and several existing tests compare a whole Vec<BranchOutcome> via assert_eq!, so zipping would have broken them. GeneratedBranchOutcome gained a records field for the generate-mode side.
+  - boot_snapshot_and_branch/resume_and_branch widened to return the new BranchRecords for signature uniformity; resume()'s HTTP handler still discards them (resume has no kernel_path/cmdline to reboot from for a real replay -- reconstructs a Universe from SnapshotStore, not a kernel image) and its generate mode now explicitly rejects a frame_run_id_prefix request with a clear error instead of silently ignoring it.
+  - branch() HTTP handler persists each requested branch's frames via a new persist_branch_frames helper (reuses persist_kvm_run/KvmBootParams), surfaced as a new frame_persistence: [{run_id, frames_recorded}, ...] response array.
+  - CLI: baud run kvm-branch gained --frame-run-id (repeatable, parallel to --branch-tape-hex, empty string = skip) and --frame-run-id-prefix (generate mode).
+  - New drive/m12.sh (modeled on m11.sh): POST /run/kvm/branch with frame_run_ids on the framebuffer-guest fixture, then GET /runs/:id/frames + POST /runs/:id/stream/render, proving a branch-originated run's frames replay for real (decodes to the guest's actual pixels, not synthetic) and reproduce byte-identically -- PASSED on real /dev/kvm.
+  - Fixed two new clippy warnings this iteration introduced along the way (too_many_arguments on the persist helper, resolved by reusing KvmBootParams instead of unpacked fields; type_complexity on the widened branch return types, resolved via the new BranchRecords alias).
+  - Full verification green: cargo build/clippy/test --workspace all clean (0 failures); drive/h0.sh-h7.sh (8/8), drive/m9.sh/m10.sh/m11.sh (no regressions), and the new drive/m12.sh (4/4) all pass on real /dev/kvm.
+---
