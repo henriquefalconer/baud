@@ -5990,3 +5990,22 @@ todo.md updated via subagent, verified clean (no forbidden iteration-numbering t
 Post-push verification: git push was a clean fast-forward (cee798f..276bbfb), working tree clean, origin/main matches local main exactly (276bbfb). All verification (build/clippy/test --workspace, drive/h0.sh-h7.sh, drive/m9.sh-m13.sh, pkg-boot-cli.sh, pkg-multifile-initramfs.sh, pkg-dynamic-link.sh, pkg-build-cli.sh, all four pkg-virtio-rng-*-cli.sh) was run against this exact commit before pushing.
 
 Iteration complete: booted a real Linux kernel's own virtio_mmio.c/virtio-rng.c drivers through baud-multiverse for the first time, fixed a real halted-vCPU virtio-rng wakeup gap discovered along the way, all verification green, pushed clean. todo.md still has pending items (Buildroot/pinned-Nix guest-image pipeline for H8/H9's full rootfs needs, H8 Mario FCEUX/Xvfb packaging, H9 Ubuntu not started, virtio_rng_reseed_is_deterministic's continuous-reseeding case still open) -- emitting NEXT.
+
+## 2026-07-26T21:26:32 UTC (50min) - Session usage — build-33 [sonnet]
+- cost $10.0062 (from claude -p)
+- context 302,110 tok peak of 1M (30%) across 104 inference calls, monotonic
+- models sonnet-5 $10.0031 (in 230 / out 117,610 / cache-read 21,238,371) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/033-build-33.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 34
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where iteration 33 left off.
+
+Chose to implement virtio_rng_reseed_is_deterministic (§3.8) — the continuous-reseeding case. Iteration 33 proved the *initial* read of a real Linux kernel's own virtio-rng driver is deterministic across boots; the spec-named test implies multiple reads/requests over time (continuous reseeding), which is still open. This builds directly on the just-landed virtio_rng_init.c fixture and service_virtio_rng_interrupt_while_halted plumbing.
+
+Note: found tools/pauseresume_ab.sh (an Arm-A/B/C RCB-counter experiment from a prior session) still running in the background against a clean tree, mutating crates/baud-multiverse/src/linux/mod.rs transiently. It finished and self-reverted via its own EXIT trap (git checkout -- <file>) partway through my edit, wiping my first attempt at the new test. Saved a diff first, confirmed the file was back to clean HEAD, and re-applied just my test addition -- no interference with that script's own experiment, which is unrelated to this iteration's work. Proceeding to build the guest fixture and run the new test.
+
+New test virtio_rng_reseed_is_deterministic passes on real /dev/kvm (all 4 reads distinct entropy, byte-identical across two boots). Also re-ran the two pre-existing virtio-rng tests with the updated 4-read fixture -- both still pass. Updated BUILD.md. Now running full clippy/test/drive verification.

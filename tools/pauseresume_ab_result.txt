@@ -1,4 +1,4 @@
-$ N=20 bash pauseresume_ab.sh
+s$ RUN_ARM_C=1 ARMC_N=5 bash pauseresume_ab.sh
 
 ================================================================
   Arm A (raw event + pause/resume) — H7_ENTROPY_REPEATS=20 bash drive/h7-enforced-entropy.sh
@@ -59,7 +59,7 @@ $ N=20 bash pauseresume_ab.sh
 
 running 1 test
 .
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.47s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.43s
   [PASS] rdtsc_enforced_regime_is_bit_exact_across_boots — no regression
 
 === H7-enforced: ALL CHECKS PASSED ===
@@ -139,7 +139,7 @@ failures:
 
 ---- linux::tests::rdtsc_enforced_regime_is_bit_exact_across_boots stdout ----
 
-thread 'linux::tests::rdtsc_enforced_regime_is_bit_exact_across_boots' (1339730) panicked at crates/baud-multiverse/src/linux/mod.rs:2051:9:
+thread 'linux::tests::rdtsc_enforced_regime_is_bit_exact_across_boots' (1395180) panicked at crates/baud-multiverse/src/linux/mod.rs:2102:9:
 assertion `left == right` failed: enforced-regime RDTSC is served entirely from the work-clock (a pure function of the branch counter), so it must reproduce bit-for-bit across two boots, not just in its high bits — first=0x161 second=0x163
   left: 353
  right: 355
@@ -149,19 +149,141 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     linux::tests::rdtsc_enforced_regime_is_bit_exact_across_boots
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.51s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.46s
 
 error: test failed, to rerun pass `-p baud-multiverse --lib`
   [FAIL] rdtsc_enforced_regime_is_bit_exact_across_boots FAILED (regression from the RDTSCP handler layered on the same patch)
 [h7-enforced-entropy] restoring stock kvm_intel/kvm...
-[ab] restored crates/baud-multiverse/src/linux/mod.rs
 
-================== A/B RESULT (N=20) ==================
-  Arm A  raw event + pause/resume :  PASS=20  FAIL=0
-  Arm B  raw event, NO pause/resume:  PASS=20  FAIL=0
-------------------------------------------------------
-  VERDICT: REDUNDANT — Arm B matches Arm A within noise (delta=0).
-           The raw 0x11c4 event subsumes what pause/resume bought; the bracketing
-           can be simplified/removed. (Bump N=50 to tighten if delta=1.)
-  logs: Arm A=/tmp/tmp.G1p1PZ0yie  Arm B=/tmp/tmp.VQ630Rb5W1
-======================================================
+[ab] Arm C: neutralize pause/resume AND set exclude_host=1 (can the textbook flag replace
+     the bracketing?). If exclude_host is non-functional the work-clock stalls and the boot
+     hangs — bounded to 900s, then force-killed with a stock-module restore.
+ crates/baud-multiverse/src/linux/mod.rs | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+[ab] compile-checking Arm C (cargo test --no-run)...
+
+================================================================
+  Arm C — H7_ENTROPY_REPEATS=5 bash drive/h7-enforced-entropy.sh   (bounded 900s)
+================================================================
+
+=== H7-enforced: real Linux OS-entropy is deterministic under the enforced KVM module ===
+
+[h7-enforced-entropy] Preparing patched kvm.ko/kvm-intel.ko in /home/baud/wsl-kernel-src/src...
+[h7-enforced-entropy] rdtsc-enforce.patch (with RDTSCP handling) already applied to this tree, skipping patch step
+  [PASS] patched kvm.ko + kvm-intel.ko built (RDTSC + RDTSCP enforcement)
+[h7-enforced-entropy] rmmod stock kvm_intel/kvm...
+[h7-enforced-entropy] insmod patched kvm.ko + kvm-intel.ko...
+  [PASS] patched kvm_intel.ko loaded in place of the stock module
+[h7-enforced-entropy] Running os_entropy_is_deterministic against the patched module...
+[h7-enforced-entropy] os_entropy_is_deterministic: run 1/5...
+error: lifetime may not live long enough
+    --> crates/baud-multiverse/src/linux/mod.rs:2862:13
+     |
+2861 |           let extract_reads = |console: &str| -> Vec<&str> {
+     |                                         -            - let's call the lifetime of this reference `'2`
+     |                                         |
+     |                                         let's call the lifetime of this reference `'1`
+2862 | /             console
+2863 | |                 .lines()
+2864 | |                 .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+2865 | |                 .collect()
+     | |__________________________^ returning this value requires that `'1` must outlive `'2`
+
+error: could not compile `baud-multiverse` (lib test) due to 1 previous error
+  [FAIL] run 1/5: os_entropy_is_deterministic FAILED (see diagnostic above)
+[h7-enforced-entropy] os_entropy_is_deterministic: run 2/5...
+error: lifetime may not live long enough
+    --> crates/baud-multiverse/src/linux/mod.rs:2862:13
+     |
+2861 |           let extract_reads = |console: &str| -> Vec<&str> {
+     |                                         -            - let's call the lifetime of this reference `'2`
+     |                                         |
+     |                                         let's call the lifetime of this reference `'1`
+2862 | /             console
+2863 | |                 .lines()
+2864 | |                 .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+2865 | |                 .collect()
+     | |__________________________^ returning this value requires that `'1` must outlive `'2`
+
+error: could not compile `baud-multiverse` (lib test) due to 1 previous error
+  [FAIL] run 2/5: os_entropy_is_deterministic FAILED (see diagnostic above)
+[h7-enforced-entropy] os_entropy_is_deterministic: run 3/5...
+error: lifetime may not live long enough
+    --> crates/baud-multiverse/src/linux/mod.rs:2862:13
+     |
+2861 |           let extract_reads = |console: &str| -> Vec<&str> {
+     |                                         -            - let's call the lifetime of this reference `'2`
+     |                                         |
+     |                                         let's call the lifetime of this reference `'1`
+2862 | /             console
+2863 | |                 .lines()
+2864 | |                 .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+2865 | |                 .collect()
+     | |__________________________^ returning this value requires that `'1` must outlive `'2`
+
+error: could not compile `baud-multiverse` (lib test) due to 1 previous error
+  [FAIL] run 3/5: os_entropy_is_deterministic FAILED (see diagnostic above)
+[h7-enforced-entropy] os_entropy_is_deterministic: run 4/5...
+error: lifetime may not live long enough
+    --> crates/baud-multiverse/src/linux/mod.rs:2862:13
+     |
+2861 |           let extract_reads = |console: &str| -> Vec<&str> {
+     |                                         -            - let's call the lifetime of this reference `'2`
+     |                                         |
+     |                                         let's call the lifetime of this reference `'1`
+2862 | /             console
+2863 | |                 .lines()
+2864 | |                 .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+2865 | |                 .collect()
+     | |__________________________^ returning this value requires that `'1` must outlive `'2`
+
+error: could not compile `baud-multiverse` (lib test) due to 1 previous error
+  [FAIL] run 4/5: os_entropy_is_deterministic FAILED (see diagnostic above)
+[h7-enforced-entropy] os_entropy_is_deterministic: run 5/5...
+error: lifetime may not live long enough
+    --> crates/baud-multiverse/src/linux/mod.rs:2862:13
+     |
+2861 |           let extract_reads = |console: &str| -> Vec<&str> {
+     |                                         -            - let's call the lifetime of this reference `'2`
+     |                                         |
+     |                                         let's call the lifetime of this reference `'1`
+2862 | /             console
+2863 | |                 .lines()
+2864 | |                 .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+2865 | |                 .collect()
+     | |__________________________^ returning this value requires that `'1` must outlive `'2`
+
+error: could not compile `baud-multiverse` (lib test) due to 1 previous error
+  [FAIL] run 5/5: os_entropy_is_deterministic FAILED (see diagnostic above)
+[h7-enforced-entropy] os_entropy_is_deterministic summary: 0/5 passed
+  [WARN] 5/5 run(s) failed — the RCB-event fix (see header) took this to 10/10 last measured, so a failure now likely means a real regression; inspect the diagnostic output above for correlation with a specific tick
+[h7-enforced-entropy] Regression: re-running rdtsc_enforced_regime_is_bit_exact_across_boots (RDTSCP handling layered on the same patch)...
+error: lifetime may not live long enough
+    --> crates/baud-multiverse/src/linux/mod.rs:2862:13
+     |
+2861 |           let extract_reads = |console: &str| -> Vec<&str> {
+     |                                         -            - let's call the lifetime of this reference `'2`
+     |                                         |
+     |                                         let's call the lifetime of this reference `'1`
+2862 | /             console
+2863 | |                 .lines()
+2864 | |                 .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+2865 | |                 .collect()
+     | |__________________________^ returning this value requires that `'1` must outlive `'2`
+
+error: could not compile `baud-multiverse` (lib test) due to 1 previous error
+  [FAIL] rdtsc_enforced_regime_is_bit_exact_across_boots FAILED (regression from the RDTSCP handler layered on the same patch)
+[h7-enforced-entropy] restoring stock kvm_intel/kvm...
+
+================== A/B(/C) RESULT ==================
+  Arm A  raw + pause/resume        :  os_entropy=20/20  rdtsc_bit_exact=pass  all_checks=yes
+  Arm B  raw, NO pause/resume       :  os_entropy=20/20  rdtsc_bit_exact=fail  all_checks=no
+  Arm C  raw, exclude_host, no p/r  :  os_entropy=0/5  rdtsc_bit_exact=fail  all_checks=no  [ran]
+---------------------------------------------------
+  A-vs-B: pause/resume is LOAD-BEARING — removing it broke a gated check that passed WITH it
+          (rdtsc_bit_exact pass->fail, all_checks yes->no). os_entropy is
+          too lenient to show it (20/20 vs 20/20). Keep pause/resume (or replace via Arm C).
+  A-vs-C: exclude_host set, but Arm C did NOT cleanly pass (rdtsc_bit_exact=fail,
+          os_entropy=0/5, all_checks=no) — it does not replace pause/resume; keep it.
+  logs: A=/tmp/tmp.dAmRhSYxwi  B=/tmp/tmp.3kGFjovMXE C=/tmp/tmp.zgPsszleOB
+===================================================
