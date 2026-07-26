@@ -4137,3 +4137,5 @@ drive/full-demo.sh: ALL 32 CHECKS PASSED after the doc-comment fix. Running one 
   contention flakes, confirmed transient by isolated re-run, not regressions). `drive/h0.sh` through
   `drive/h6.sh` and `drive/full-demo.sh` (32/32) all pass end-to-end on real `/dev/kvm`.
 ---
+
+Post-push verification: local main (0214494) matches origin/main exactly, working tree clean. todo.md still has pending items (rest of the guest boot pipeline in baud-packages, H7 OS-entropy, H8 Mario, H9 Ubuntu, generic-core guardrail) — emitting NEXT.
