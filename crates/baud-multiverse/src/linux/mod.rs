@@ -948,9 +948,19 @@ impl Multiverse {
         let mut stepper =
             baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
                 .with_baseline_rcb(baseline);
-        let point = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
+        let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
             .map_err(|e| DeterminismHole(e.to_string()))?;
-        Ok(TimerTick { rip: point.rip, rcb: point.rcb })
+        match outcome {
+            baud_vcpu::boundary::InjectOutcome::Injected(point) => {
+                Ok(TimerTick { rip: point.rip, rcb: point.rcb })
+            }
+            baud_vcpu::boundary::InjectOutcome::Halted(point) => Err(DeterminismHole(format!(
+                "inject_timer_tick: guest halted at rcb={} before reaching target_rcb={target_rcb} \
+                 -- use run_to_first_halt_with_periodic_timer for a guest whose tick count is not \
+                 known ahead of time",
+                point.rcb
+            ))),
+        }
     }
 
     /// Inject `num_ticks` timer ticks spaced `period_rcb` apart (via repeated
@@ -959,6 +969,11 @@ impl Multiverse {
     /// entry point for a guest fixture that survives more than one delivered interrupt before
     /// halting — `timer_tick_lands_at_identical_instruction` calls this twice on the same
     /// image+tape and compares every returned [`TimerTick`] pairwise across the two runs.
+    ///
+    /// Requires the caller to already know exactly how many ticks the guest survives —
+    /// [`run_to_first_halt_with_periodic_timer`](Self::run_to_first_halt_with_periodic_timer) is
+    /// the open-ended counterpart for a guest (a real kernel's scheduler, most concretely) whose
+    /// tick count is not known ahead of time.
     pub fn run_with_timer_ticks(
         &mut self,
         period_rcb: u64,
@@ -971,6 +986,58 @@ impl Multiverse {
         }
         let halt = self.run_to_first_halt()?;
         Ok((ticks, halt))
+    }
+
+    /// Wire H4's interrupt-injection engine into an open-ended run loop (todo.md §14 "Guest boot
+    /// pipeline": "wire H4 timer-interrupt injection into the boot path — an earlier attempt hung
+    /// in `calibrate_delay()` waiting on a jiffies tick because injection wasn't wired in"). Unlike
+    /// [`run_with_timer_ticks`](Self::run_with_timer_ticks), the caller does not need to know in
+    /// advance how many ticks the guest survives: this repeatedly schedules a tick `period_rcb`
+    /// retired conditional branches after the last one and delivers it (exactly
+    /// [`inject_timer_tick`](Self::inject_timer_tick)'s arm-early-then-single-step engine, per
+    /// tick), but instead of treating "the guest halted before the next tick's target" as an error,
+    /// it is the expected, graceful end of the run — precisely the shape a real kernel's periodic
+    /// scheduler timer needs: it keeps ticking indefinitely until the kernel itself decides to
+    /// power off (§4.3's `reboot(RB_POWER_OFF)`/triple-fault path), not for a fixed, test-chosen
+    /// tick count. `max_ticks` bounds a guest that never halts at all (the same "no silent non-
+    /// termination" convention as [`run_until_console_len`](Self::run_until_console_len)) — reached
+    /// only by a guest that genuinely never stops, not by the ordinary halting case.
+    pub fn run_to_first_halt_with_periodic_timer(
+        &mut self,
+        period_rcb: u64,
+        vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        let mut ticks = Vec::new();
+        for _ in 0..max_ticks {
+            let baseline = self.time.current_rcb();
+            let target_rcb = baseline.saturating_add(period_rcb);
+            let mut stepper =
+                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
+                    .with_baseline_rcb(baseline);
+            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            match outcome {
+                baud_vcpu::boundary::InjectOutcome::Injected(point) => {
+                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                }
+                // The guest halted on its own before this tick's target: the run is over. Do not
+                // call `run_to_first_halt` here — the `Hlt`/`Shutdown` exit that set this was
+                // already dispatched inside `inject_at`'s own `KVM_RUN` calls, so the bus/console
+                // already reflect it; calling `KVM_RUN` again on an already-halted vCPU with no
+                // in-kernel irqchip risks blocking indefinitely instead of re-observing `Hlt`.
+                baud_vcpu::boundary::InjectOutcome::Halted(_) => {
+                    let halt = HaltOutcome {
+                        console_output: self.bus.console.output().to_vec(),
+                        ram_hash: self.ram_hash(),
+                    };
+                    return Ok((ticks, halt));
+                }
+            }
+        }
+        Err(DeterminismHole(format!(
+            "run_to_first_halt_with_periodic_timer: guest did not halt within {max_ticks} periodic ticks"
+        )))
     }
 
     /// Every tape-device record (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`,
@@ -1816,6 +1883,83 @@ mod tests {
             second_halt.ram_hash, first_halt.ram_hash,
             "guest RAM at first Hlt must be byte-identical across two boots even with \
              interrupts injected mid-run"
+        );
+    }
+
+    /// todo.md §14's "Guest boot pipeline" next-action: wire H4 into the run loop for a guest whose
+    /// tick count is not known ahead of time (a real kernel's periodic scheduler timer, the
+    /// prerequisite for ever reaching a real-kernel's own `calibrate_delay()`/scheduler tick without
+    /// hanging). `run_to_first_halt_with_periodic_timer` must (a) keep injecting ticks across the
+    /// guest's whole natural lifetime without the caller pre-computing a tick count, (b) detect the
+    /// guest's own halt gracefully (never as an error) whenever it falls before the next scheduled
+    /// tick, and (c) do both reproducibly — the real-hardware counterpart to `boundary.rs`'s
+    /// scripted-stepper `reports_halted_instead_of_injecting_when_guest_halts_before_target`, which
+    /// only ever exercised a fake stepper and so never hit a real halted vCPU or real hardware
+    /// counter-read precision.
+    #[test]
+    fn periodic_timer_injection_halts_gracefully_and_reproducibly() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        // Small enough relative to `timer-guest`'s ~340,000-branch busy loop (BUILD.md) that the
+        // guest survives a handful of ticks before its own `hlt`, exercising the open-ended path
+        // -- not just the "exactly N pre-known ticks" path `run_with_timer_ticks` already covers
+        // -- while keeping the tick count low: each tick independently carries the same real
+        // hardware branch-counter read jitter `timer_tick_lands_at_identical_instruction` already
+        // documents (`RCB_HARDWARE_JITTER_TOLERANCE`), so many more ticks than needed would just
+        // multiply the chance any single one exceeds that per-tick tolerance under load.
+        const PERIOD_RCB: u64 = 2_000_000;
+        const MAX_TICKS: u32 = 20;
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let (first_ticks, first_halt) = first
+            .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+            .expect("first periodic run failed");
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let (second_ticks, second_halt) = second
+            .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+            .expect("second periodic run failed");
+
+        assert!(
+            !first_ticks.is_empty(),
+            "the guest's busy loop must survive at least one periodic tick before its own natural halt"
+        );
+        assert_eq!(
+            first_ticks.len(),
+            second_ticks.len(),
+            "the same image+tape must survive the same number of periodic ticks before halting \
+             on its own -- this is what proves the graceful-halt path is deterministic, not just \
+             non-erroring"
+        );
+        for (i, (a, b)) in first_ticks.iter().zip(second_ticks.iter()).enumerate() {
+            assert_eq!(
+                a.rip, b.rip,
+                "tick {i}: periodic injection must land on the bit-identical instruction across \
+                 two boots of the same image+tape"
+            );
+            let rcb_diff = a.rcb.abs_diff(b.rcb);
+            assert!(
+                rcb_diff <= RCB_HARDWARE_JITTER_TOLERANCE,
+                "tick {i}: rcb disagreement {rcb_diff} (a={}, b={}) exceeds the documented \
+                 hardware counter-read jitter tolerance of {RCB_HARDWARE_JITTER_TOLERANCE}",
+                a.rcb,
+                b.rcb
+            );
+        }
+
+        let expected_output = vec![TIMER_MARKER; first_ticks.len()];
+        assert_eq!(
+            first_halt.console_output, expected_output,
+            "the guest must take exactly one marker byte per periodic tick before its own \
+             natural halt, with no ticks lost or duplicated"
+        );
+        assert_eq!(
+            second_halt.console_output, first_halt.console_output,
+            "console output through the guest's own natural halt must be identical across two boots"
+        );
+        assert_eq!(
+            second_halt.ram_hash, first_halt.ram_hash,
+            "guest RAM at the guest's own natural halt must be byte-identical across two boots"
         );
     }
 

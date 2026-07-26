@@ -77,32 +77,73 @@ pub trait PmuStepper {
     fn run_until_irq_window(&mut self) -> Result<(), Self::Error>;
     /// `KVM_INTERRUPT` / `KVM_SET_VCPU_EVENTS` (step 5).
     fn inject(&mut self, vector: u8) -> Result<(), Self::Error>;
+    /// Has the guest already halted (`Hlt`/`Shutdown`) at some point during arming/stepping toward
+    /// the target? A guest whose own natural halt falls *before* the next scheduled tick is not a
+    /// determinism hole — it is the ordinary end of a periodic-timer-driven run (todo.md §14's
+    /// "wire H4 into the boot path": nothing upstream of one `inject_at` call knows in advance how
+    /// many ticks a real kernel survives before its own shutdown) — so `inject_at` checks this
+    /// after every step that could have observed a halt exit, instead of erroring.
+    fn is_halted(&self) -> bool;
+}
+
+/// What [`inject_at`] actually managed to do: land the injection (carrying the [`ExecPoint`] it
+/// landed on, compared across runs by `timer_tick_lands_at_identical_instruction`), or discover
+/// the guest halted on its own before the target boundary was ever reached (carrying the last
+/// observed point, for diagnostics — no interrupt was injected in this case).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InjectOutcome {
+    Injected(ExecPoint),
+    Halted(ExecPoint),
+}
+
+impl InjectOutcome {
+    /// The [`ExecPoint`] either variant carries — the landing point whether or not injection
+    /// actually happened.
+    pub fn point(&self) -> &ExecPoint {
+        match self {
+            InjectOutcome::Injected(p) | InjectOutcome::Halted(p) => p,
+        }
+    }
+
+    pub fn was_injected(&self) -> bool {
+        matches!(self, InjectOutcome::Injected(_))
+    }
 }
 
 /// Drive `stepper` to land the injection of `vector` at exactly `target_rcb` retired conditional
-/// branches, per specs/baud-vcpu.md §5. Returns the [`ExecPoint`] the injection actually landed
-/// on, so callers can compare it against another run's tuple
-/// (`timer_tick_lands_at_identical_instruction`).
+/// branches, per specs/baud-vcpu.md §5 — or discover the guest halted on its own first (see
+/// [`PmuStepper::is_halted`]'s doc). Returns the outcome, so callers can compare the landed
+/// [`ExecPoint`] against another run's tuple (`timer_tick_lands_at_identical_instruction`) when
+/// injection happened, or handle a graceful halt without treating it as an error.
 pub fn inject_at<S: PmuStepper>(
     stepper: &mut S,
     target_rcb: u64,
     vector: u8,
-) -> Result<ExecPoint, S::Error> {
+) -> Result<InjectOutcome, S::Error> {
     let armed_target = target_rcb.saturating_sub(MARGIN);
     stepper.arm_overflow(armed_target)?;
     stepper.run_until_exit()?;
+    if stepper.is_halted() {
+        return Ok(InjectOutcome::Halted(stepper.current_point()));
+    }
 
     let mut point = stepper.current_point();
     while point.rcb < target_rcb {
         point = stepper.step()?;
+        if stepper.is_halted() {
+            return Ok(InjectOutcome::Halted(point));
+        }
     }
 
     if !stepper.ready_for_interrupt_injection() {
         stepper.request_interrupt_window()?;
         stepper.run_until_irq_window()?;
+        if stepper.is_halted() {
+            return Ok(InjectOutcome::Halted(stepper.current_point()));
+        }
     }
     stepper.inject(vector)?;
-    Ok(point)
+    Ok(InjectOutcome::Injected(point))
 }
 
 #[cfg(test)]
@@ -123,6 +164,10 @@ mod tests {
         injectable_after_windows: u32,
         injected: Option<(u8, ExecPoint)>,
         steps_taken: u32,
+        /// When `Some(r)`, `step()` marks the guest halted the moment its `rcb` reaches `r` —
+        /// models a guest whose own natural halt falls before the requested target boundary.
+        halt_at_rcb: Option<u64>,
+        halted: bool,
     }
 
     impl ScriptedStepper {
@@ -137,6 +182,8 @@ mod tests {
                 injectable_after_windows,
                 injected: None,
                 steps_taken: 0,
+                halt_at_rcb: None,
+                halted: false,
             }
         }
 
@@ -176,6 +223,11 @@ mod tests {
         fn step(&mut self) -> Result<ExecPoint, Self::Error> {
             self.rcb += 1;
             self.steps_taken += 1;
+            if let Some(halt_at) = self.halt_at_rcb {
+                if self.rcb >= halt_at {
+                    self.halted = true;
+                }
+            }
             Ok(self.point_at(self.rcb))
         }
 
@@ -204,13 +256,18 @@ mod tests {
             self.injected = Some((vector, self.current_point()));
             Ok(())
         }
+
+        fn is_halted(&self) -> bool {
+            self.halted
+        }
     }
 
     #[test]
     fn injects_exactly_at_target_rcb() {
         let mut stepper = ScriptedStepper::new(1_000, 0);
-        let point = inject_at(&mut stepper, 1_000, 42).expect("injection must succeed");
-        assert_eq!(point.rcb, 1_000);
+        let outcome = inject_at(&mut stepper, 1_000, 42).expect("injection must succeed");
+        assert!(outcome.was_injected());
+        assert_eq!(outcome.point().rcb, 1_000);
         assert_eq!(stepper.injected.as_ref().unwrap().0, 42);
         assert_eq!(stepper.injected.as_ref().unwrap().1.rcb, 1_000);
         // Armed strictly before the target by MARGIN, then stepped the remainder one at a time.
@@ -221,8 +278,9 @@ mod tests {
     #[test]
     fn falls_back_to_interrupt_window_when_not_immediately_injectable() {
         let mut stepper = ScriptedStepper::new(500, 2);
-        let point = inject_at(&mut stepper, 500, 7).expect("injection must succeed");
-        assert_eq!(point.rcb, 500);
+        let outcome = inject_at(&mut stepper, 500, 7).expect("injection must succeed");
+        assert!(outcome.was_injected());
+        assert_eq!(outcome.point().rcb, 500);
         assert_eq!(stepper.windows_opened, 2);
         assert!(stepper.ready_for_interrupt_injection());
     }
@@ -233,9 +291,9 @@ mod tests {
     fn identical_target_yields_identical_injection_tuple_across_runs() {
         let mut run_a = ScriptedStepper::new(10_000, 0);
         let mut run_b = ScriptedStepper::new(10_000, 0);
-        let point_a = inject_at(&mut run_a, 10_000, 99).unwrap();
-        let point_b = inject_at(&mut run_b, 10_000, 99).unwrap();
-        assert_eq!(point_a, point_b);
+        let outcome_a = inject_at(&mut run_a, 10_000, 99).unwrap();
+        let outcome_b = inject_at(&mut run_b, 10_000, 99).unwrap();
+        assert_eq!(outcome_a, outcome_b);
     }
 
     #[test]
@@ -243,8 +301,21 @@ mod tests {
         // start_rcb == target_rcb: run_until_exit already overshoots-to-the-target under this
         // stepper's model, and the while-loop takes zero extra steps — still exact.
         let mut stepper = ScriptedStepper::new(50, 0);
-        let point = inject_at(&mut stepper, 50, 1).unwrap();
-        assert_eq!(point.rcb, 50);
+        let outcome = inject_at(&mut stepper, 50, 1).unwrap();
+        assert_eq!(outcome.point().rcb, 50);
+    }
+
+    /// The graceful-halt path this iteration adds (todo.md §14, "wire H4 into the boot path"): a
+    /// guest whose own natural halt falls before the requested target boundary must be reported as
+    /// [`InjectOutcome::Halted`], never as an error and never injected into.
+    #[test]
+    fn reports_halted_instead_of_injecting_when_guest_halts_before_target() {
+        let mut stepper = ScriptedStepper::new(500, 0);
+        stepper.halt_at_rcb = Some(510); // halts partway through the single-step walk to 1_000
+        let outcome = inject_at(&mut stepper, 1_000, 42).expect("a graceful halt must not surface as an error");
+        assert_eq!(outcome, InjectOutcome::Halted(stepper.point_at(510)));
+        assert!(!outcome.was_injected());
+        assert!(stepper.injected.is_none(), "must never inject once the guest has halted on its own");
     }
 
     #[test]

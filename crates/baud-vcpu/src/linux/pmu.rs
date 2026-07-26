@@ -69,11 +69,19 @@ pub struct LinuxPmuStepper<'vcpu, 'io> {
     /// [`run_until_exit`]: Self::run_until_exit
     /// [`current_rcb`]: Self::current_rcb
     poll_target: u64,
+    /// Set the moment any real `KVM_RUN` call taken while arming/stepping toward the target
+    /// observes the guest halt (`Hlt`/`Shutdown`) on its own — a real guest surviving an unknown
+    /// number of periodic ticks before its own shutdown is the ordinary case (todo.md §14, "wire
+    /// H4 into the boot path"), not a determinism hole, so this is reported via
+    /// [`PmuStepper::is_halted`] instead of an error. Once set, every method here stops calling
+    /// `KVM_RUN` again (a halted vCPU with no in-kernel irqchip and no way to become injectable
+    /// again would otherwise risk blocking indefinitely on the next entry).
+    halted: bool,
 }
 
 impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
     pub fn new(vcpu: &'vcpu mut VcpuFd, bus: &'io mut dyn Bus, time: &'io mut dyn TimeSource) -> Self {
-        LinuxPmuStepper { vcpu, bus, time, counter: None, baseline_rcb: 0, poll_target: 0 }
+        LinuxPmuStepper { vcpu, bus, time, counter: None, baseline_rcb: 0, poll_target: 0, halted: false }
     }
 
     /// Anchor this stepper's own RCB space to an externally-known cumulative branch count (e.g.
@@ -182,7 +190,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                         Err(e) => return Err(e),
                     },
                     Ok(DispatchOutcome::Halted) => {
-                        return Err(io::Error::other("guest halted while armed for interrupt injection"))
+                        // Stop calling KVM_RUN the instant a halt is observed — see `halted`'s doc.
+                        self.halted = true;
+                        return Ok(());
                     }
                     Err(hole) => return Err(io::Error::other(hole.to_string())),
                 },
@@ -243,7 +253,10 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                         Err(e) => break Err(e),
                     },
                     Ok(DispatchOutcome::Halted) => {
-                        break Err(io::Error::other("guest halted mid single-step boundary walk"))
+                        // See `halted`'s doc: stop single-stepping the instant a halt is observed,
+                        // never keep driving KVM_RUN on an already-halted vCPU.
+                        self.halted = true;
+                        break Ok(());
                     }
                     Err(hole) => break Err(io::Error::other(hole.to_string())),
                 },
@@ -316,7 +329,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                         Err(e) => return Err(e),
                     },
                     Ok(DispatchOutcome::Halted) => {
-                        return Err(io::Error::other("guest halted waiting for an interrupt window"))
+                        // See `halted`'s doc: stop waiting for a window on an already-halted vCPU.
+                        self.halted = true;
+                        return Ok(());
                     }
                     Err(hole) => return Err(io::Error::other(hole.to_string())),
                 },
@@ -332,5 +347,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
         events.interrupt.nr = vector;
         events.interrupt.soft = 0;
         self.vcpu.set_vcpu_events(&events).map_err(io::Error::from)
+    }
+
+    fn is_halted(&self) -> bool {
+        self.halted
     }
 }

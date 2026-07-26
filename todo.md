@@ -886,15 +886,38 @@ snapshot, not a duplicate of it.
   guest RAM at the address `hdr.setup_data` points to. Still open: the virtio-rng tape-fed device, and proving
   the deterministic-TSC + exact-interrupt seeding covers the initial CRNG state on a real Linux kernel guest
   (blocked on the boot-pipeline prerequisite in step 1 below).
+  **H4's interrupt-injection engine is now wired for an open-ended (unknown tick count) run, not just a
+  pre-known one**: `baud_vcpu::boundary::PmuStepper::is_halted` + `InjectOutcome::{Injected, Halted}` (a
+  guest halting before the next scheduled tick is reported gracefully, never as an error) and
+  `Multiverse::run_to_first_halt_with_periodic_timer` (§14 next-actions item 1 below has the full detail).
+  This was the concrete prerequisite an earlier real-kernel boot attempt was missing (it hung in
+  `calibrate_delay()` because nothing injected more than a fixed, test-chosen number of ticks) — the real
+  image pipeline in `baud-packages` is still the remaining, larger piece of item 1.
 - **Next actions (this rewrite)** — a sequence, each step enabling the next:
-  1. **Guest boot pipeline (§4)** — the enabling milestone. Wire H4 interrupt injection into the boot path
-     (an earlier real-kernel attempt hung in `calibrate_delay()` waiting on a jiffies tick because injection
-     wasn't wired in), then build the real image pipeline in `baud-packages`: a minimal builtin kernel
-     (Buildroot → pinned Nix, §4.5), the deterministic cmdline (§4.2), `bootparams.rs` gaining
-     `e820` + initramfs fields (`setup_data`/`SETUP_RNG_SEED` is now done — see the bullet above), a
-     reproducible initramfs + static `/init`, and the `/dev/vport` (or PIO) tape endpoint. Tests
-     `guest_kernel_boots_to_userspace`, `boot_params_seed_is_pinned`, `init_powers_off_deterministically`,
-     `image_build_is_reproducible`.
+  1. **Guest boot pipeline (§4)** — the enabling milestone.
+     **H4 interrupt injection is now wired into an open-ended run loop** (the sub-step that was blocking
+     this: an earlier real-kernel attempt hung in `calibrate_delay()` waiting on a jiffies tick because
+     periodic injection wasn't wired in at all — nothing called `inject_timer_tick` more than a caller-
+     chosen, pre-known number of times). `baud_vcpu::boundary::PmuStepper` gained `is_halted()` and
+     `inject_at` now returns an `InjectOutcome::{Injected, Halted}` instead of erroring when the guest
+     halts on its own before the next scheduled tick's target — the ordinary case for a real kernel whose
+     tick count is never known ahead of time, not a determinism hole. `Multiverse::
+     run_to_first_halt_with_periodic_timer(period_rcb, vector, max_ticks)` (`crates/baud-multiverse/src/
+     linux/mod.rs`) is the new open-ended counterpart to `run_with_timer_ticks`: it keeps scheduling ticks
+     until the guest halts gracefully or `max_ticks` is exhausted (the same bounded-non-termination
+     convention as `run_until_console_len`). Hardware-verified on real `/dev/kvm`
+     (`periodic_timer_injection_halts_gracefully_and_reproducibly`, `timer-guest` fixture): the guest
+     survives several ticks then halts on its own, reproducibly (identical tick count, rip-per-tick, console
+     output, and RAM hash across two boots) — same per-tick `RCB_HARDWARE_JITTER_TOLERANCE` framing as
+     `timer_tick_lands_at_identical_instruction` (rare per-tick jitter over tolerance is a known real-
+     hardware branch-counter read-precision limit, not a logic bug; keep tick counts in a test low for
+     exactly this reason — more ticks multiplies the chance any single one trips the tolerance).
+     **Still open**: nothing yet actually *calls* this from a real kernel boot — the real image pipeline in
+     `baud-packages` still needs building: a minimal builtin kernel (Buildroot → pinned Nix, §4.5), the
+     deterministic cmdline (§4.2), `bootparams.rs` gaining `e820` + initramfs fields (`setup_data`/
+     `SETUP_RNG_SEED` is done — see the bullet above), a reproducible initramfs + static `/init`, and the
+     `/dev/vport` (or PIO) tape endpoint. Tests `guest_kernel_boots_to_userspace`,
+     `boot_params_seed_is_pinned`, `init_powers_off_deterministically`, `image_build_is_reproducible`.
   2. **H7 — OS-entropy end-to-end (rides on #1)** — boot the real Linux guest and prove the CRNG is a pure
      function of the tape: `os_entropy_is_deterministic`, `double_boot_ram_hash_identical`,
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,

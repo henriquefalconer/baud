@@ -387,8 +387,8 @@ mod tests {
     }
 
     /// A guest image containing no `rdseed` at all round-trips through the pass as a no-op
-    /// (todo.md §4: "a no-op here" for images like the Mario emulator that touch no entropy
-    /// instruction at all).
+    /// (todo.md §4: "a no-op here" for a guest workload that touches no entropy instruction at
+    /// all).
     #[test]
     fn image_without_rdseed_is_a_no_op() {
         let code = RDRAND_EAX.to_vec();
