@@ -56,6 +56,13 @@ pub const RNG_SEED_SETUP_DATA_LEN: u64 = 16 + 32;
 pub const CMDLINE_ADDR: u64 = 0x0002_0000;
 pub const CMDLINE_MAX_SIZE: usize = 0x1_0000;
 
+/// Where the initramfs (`ramdisk_image`/`ramdisk_size`, todo.md §4.2) is loaded — 32 MiB in,
+/// comfortably clear of [`KERNEL_LOAD_ADDR`] for any minimal builtin kernel (todo.md §4.1's
+/// no-modules config; a `bzImage` built that way is a few MiB at most) with room to grow, and well
+/// inside [`GUEST_RAM_SIZE`] so a compressed initramfs has tens of MiB of headroom before it would
+/// need to shrink below what a real rootfs (§4.5) needs.
+pub const INITRAMFS_ADDR: u64 = 0x0200_0000;
+
 /// The three fixed page-table pages built fresh on every boot (`build_identity_page_tables`
 /// below) — one PML4 page, one PDPTE page, and enough PDE pages to cover `GUEST_RAM_SIZE` via
 /// 2 MiB pages (never any 4 KiB leaf, so the table is small and construction stays O(RAM/2MiB)).
@@ -112,6 +119,8 @@ const _STATIC_LAYOUT_INVARIANTS: () = {
     assert!(CMDLINE_ADDR + CMDLINE_MAX_SIZE as u64 <= KERNEL_LOAD_ADDR);
     assert!(KERNEL_LOAD_ADDR >= HIMEM_START);
     assert!(RNG_SEED_SETUP_DATA_ADDR + RNG_SEED_SETUP_DATA_LEN <= PML4_ADDR);
+    assert!(INITRAMFS_ADDR > KERNEL_LOAD_ADDR);
+    assert!((INITRAMFS_ADDR as usize) < GUEST_RAM_SIZE);
 };
 
 const PAGE_TABLE_ENTRY_COUNT: usize = 512;

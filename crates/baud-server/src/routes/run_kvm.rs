@@ -203,6 +203,7 @@ fn boot_run_and_drain(
         1,
         tape,
         None,
+        None,
         rdseed_sites,
     )
     .map_err(|e| format!("boot error: {e}"))?;
@@ -438,6 +439,7 @@ fn boot_and_snapshot(kernel_path: &Path, cmdline: &str) -> Result<baud_snapshot:
         0,
         WORK_CLOCK_K,
         vec![],
+        None,
         None,
         rdseed_sites,
     )

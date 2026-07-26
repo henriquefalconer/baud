@@ -165,6 +165,7 @@ pub fn boot_guest(
     cmdline: &str,
     tape: &[u8],
     dirty_ring_entries: Option<u32>,
+    initramfs: Option<&[u8]>,
 ) -> Result<(BootedGuest, Option<baud_snapshot::linux::DirtyRing>), BootError> {
     let (guest, dirty_ring) = create_vm_vcpu_shell(dirty_ring_entries)?;
     guest.vcpu.set_tsc_khz(VIRTUAL_TSC_KHZ)?;
@@ -182,6 +183,7 @@ pub fn boot_guest(
         cmdline,
         layout::GUEST_RAM_SIZE,
         &rng_seed,
+        initramfs,
     )?;
 
     let mut regs = guest.vcpu.get_regs()?;
@@ -599,14 +601,16 @@ impl Multiverse {
         tape: Vec<u8>,
         dirty_ring_entries: Option<u32>,
     ) -> Result<Self, BootError> {
-        Self::boot_with_rdseed_sites(kernel_path, cmdline, base, k, tape, dirty_ring_entries, [])
+        Self::boot_with_rdseed_sites(kernel_path, cmdline, base, k, tape, dirty_ring_entries, None, [])
     }
 
     /// [`boot`](Self::boot) plus this guest image's known `rdseed`→`UD2` rewrite sites
     /// (`baud_packages::rewrite_rdseed`'s `RdseedRewriteReport`, todo.md §4), keyed by the guest
     /// address of the `UD2` itself and registered on the work-clock via
     /// [`WorkClock::with_rdseed_sites`](crate::timesource::WorkClock::with_rdseed_sites) before any
-    /// guest code runs.
+    /// guest code runs, plus an optional `initramfs` (todo.md §4.2/§4.3) loaded at
+    /// [`layout::INITRAMFS_ADDR`] and pointed to by `hdr.ramdisk_image`/`ramdisk_size` —
+    /// `None` for any guest with no initramfs (every fixture in this crate today).
     ///
     /// Only sites passed here are ever *served* a value: under the enforced-regime patched module
     /// (`kernel-module/baud-enforced/ud2-enforce.patch`), every `UD2` the guest executes traps to
@@ -627,6 +631,7 @@ impl Multiverse {
     /// hand-assembled flat-binary fixture that never goes through the ELF-based rewrite pass at all
     /// (see `tests/fixtures/rdseed-guest/BUILD.md`), so it still hardcodes its one site rather than
     /// reading a sidecar.
+    #[allow(clippy::too_many_arguments)]
     pub fn boot_with_rdseed_sites(
         kernel_path: &Path,
         cmdline: &str,
@@ -634,9 +639,10 @@ impl Multiverse {
         k: u64,
         tape: Vec<u8>,
         dirty_ring_entries: Option<u32>,
+        initramfs: Option<&[u8]>,
         rdseed_sites: impl IntoIterator<Item = (u64, baud_vcpu::EnforcedRdseedSite)>,
     ) -> Result<Self, BootError> {
-        let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, &tape, dirty_ring_entries)?;
+        let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, &tape, dirty_ring_entries, initramfs)?;
         // Must come before `LinuxBranchCounter::new()` — see `entropy_seed_from_tape`'s doc.
         let entropy_seed = entropy_seed_from_tape(&tape);
         let counter = LinuxBranchCounter::new()?;
@@ -1264,6 +1270,62 @@ mod tests {
         assert_ne!(seed_a1, seed_b, "a different tape must change the RNG seed");
     }
 
+    /// todo.md §4.2's initramfs wiring (`bootparams::write_initramfs`), closed against a real boot
+    /// rather than only `bootparams`'s own guest-memory-only unit tests: an initramfs handed to
+    /// [`Multiverse::boot_with_rdseed_sites`] must (1) land byte-for-byte in real guest RAM at
+    /// [`layout::INITRAMFS_ADDR`], (2) be pointed to by `hdr.ramdisk_image`/`ramdisk_size` read back
+    /// off the real zero page, and (3) not disturb the ordinary boot flow — the hello-guest fixture
+    /// still reaches its marker and halts cleanly with an initramfs present that it never reads
+    /// (it predates any ramdisk-aware `/init`), proving the write doesn't collide with the kernel
+    /// image or clobber anything the boot flow depends on.
+    #[test]
+    fn initramfs_is_wired_into_a_real_boot_and_lands_in_guest_ram() {
+        use vm_memory::Bytes;
+
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let initramfs: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+
+        let mut mv = Multiverse::boot_with_rdseed_sites(
+            &kernel,
+            cmdline,
+            0,
+            1,
+            vec![],
+            None,
+            Some(&initramfs),
+            [],
+        )
+        .expect("boot with initramfs failed");
+
+        let mut zero_page = vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
+        mv.guest
+            .guest_mem
+            .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
+            .expect("read back the zero page from real guest RAM");
+        let params: linux_loader::loader::bootparam::boot_params =
+            unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const _) };
+        // `boot_params` is `#[repr(C, packed)]` — copy the nested fields to locals before
+        // `assert_eq!` takes a reference to them (E0793), same as this file's RNG-seed test above.
+        let (ramdisk_image, ramdisk_size) = (params.hdr.ramdisk_image, params.hdr.ramdisk_size);
+        assert_eq!(ramdisk_image, layout::INITRAMFS_ADDR as u32);
+        assert_eq!(ramdisk_size, initramfs.len() as u32);
+
+        let mut initramfs_back = vec![0u8; initramfs.len()];
+        mv.guest
+            .guest_mem
+            .read_slice(&mut initramfs_back, GuestAddress(layout::INITRAMFS_ADDR))
+            .expect("read back the initramfs bytes from real guest RAM");
+        assert_eq!(initramfs_back, initramfs, "initramfs must land verbatim in real guest RAM");
+
+        let outcome = mv.run_to_first_halt().expect("boot with an (unread) initramfs must still run cleanly");
+        assert_eq!(
+            String::from_utf8_lossy(&outcome.console_output),
+            HELLO_GUEST_MARKER,
+            "the initramfs write must not disturb the ordinary boot flow"
+        );
+    }
+
     /// specs/baud-multiverse.md §4 / todo.md §3.2's `cpuid_leaves_are_fixed`, closed for real
     /// against real KVM hardware for the first time (todo.md §14's H2 gap: only a synthetic
     /// `kvm_cpuid_entry2` payload had ever been fed through `apply_determinism_mask` in isolation
@@ -1651,7 +1713,7 @@ mod tests {
         let sites = [(RDSEED_GUEST_UD2_ADDR, RDSEED_GUEST_SITE)];
 
         let mut first =
-            Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, sites)
+            Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, None, sites)
                 .expect("first boot failed");
         let first_outcome =
             first.run_to_first_halt().expect("first run failed (enforced RDSEED exit not served?)");
@@ -1666,7 +1728,7 @@ mod tests {
         assert_eq!(&first_outcome.console_output[..RDSEED_GUEST_MARKER.len()], RDSEED_GUEST_MARKER);
 
         let mut second =
-            Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, sites)
+            Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, None, sites)
                 .expect("second boot failed");
         let second_outcome =
             second.run_to_first_halt().expect("second run failed (enforced RDSEED exit not served?)");

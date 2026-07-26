@@ -893,6 +893,24 @@ snapshot, not a duplicate of it.
   This was the concrete prerequisite an earlier real-kernel boot attempt was missing (it hung in
   `calibrate_delay()` because nothing injected more than a fixed, test-chosen number of ticks) — the real
   image pipeline in `baud-packages` is still the remaining, larger piece of item 1.
+  **`bootparams.rs` now also carries initramfs, alongside the already-done `e820`/`SETUP_RNG_SEED`**:
+  `crates/baud-multiverse/src/layout.rs` adds `INITRAMFS_ADDR` (0x0200_0000, 32 MiB in, above
+  `KERNEL_LOAD_ADDR` and inside `GUEST_RAM_SIZE` per a new static assertion); `bootparams.rs`'s
+  `write_initramfs` writes the bytes verbatim there, and `load_kernel_and_write_boot_params` gained an
+  `initramfs: Option<&[u8]>` param that, when `Some`, points `hdr.ramdisk_image`/`ramdisk_size` at them and
+  sets `hdr.initrd_addr_max` explicitly to `ram_size - 1` (left at 0 it reads to some kernels as "no
+  placement allowed", not "unlimited" — a real gotcha). `hdr.loadflags` now always gets `LOADED_HIGH`/
+  `CAN_USE_HEAP` set, initramfs or not, per §4.2. `linux/mod.rs`'s `boot_guest` and
+  `Multiverse::boot_with_rdseed_sites` thread the same `initramfs: Option<&[u8]>` through (`Multiverse::boot`
+  still passes `None`, so no existing caller changed); hardware-verified end-to-end
+  (`initramfs_is_wired_into_a_real_boot_and_lands_in_guest_ram`, real `/dev/kvm`, `hello-guest` fixture):
+  bytes land verbatim in real guest RAM, `hdr.ramdisk_image`/`ramdisk_size` read back correctly off the real
+  zero page, and the boot still reaches its marker and halts cleanly with an initramfs present that it never
+  reads. Also added `bootparams::DETERMINISTIC_CMDLINE`, the exact cmdline string §4.2 specifies, as a pure
+  Rust constant — **not yet wired as anyone's default**, callers still pass their own cmdline string; nothing
+  calls it outside its own test (`deterministic_cmdline_matches_the_spec_exactly`). This closes the
+  `bootparams.rs`/initramfs sub-item that item 1 below used to list as open; the boot-pipeline items still
+  open are relisted there.
 - **Next actions (this rewrite)** — a sequence, each step enabling the next:
   1. **Guest boot pipeline (§4)** — the enabling milestone.
      **H4 interrupt injection is now wired into an open-ended run loop** (the sub-step that was blocking
@@ -912,12 +930,18 @@ snapshot, not a duplicate of it.
      `timer_tick_lands_at_identical_instruction` (rare per-tick jitter over tolerance is a known real-
      hardware branch-counter read-precision limit, not a logic bug; keep tick counts in a test low for
      exactly this reason — more ticks multiplies the chance any single one trips the tolerance).
-     **Still open**: nothing yet actually *calls* this from a real kernel boot — the real image pipeline in
-     `baud-packages` still needs building: a minimal builtin kernel (Buildroot → pinned Nix, §4.5), the
-     deterministic cmdline (§4.2), `bootparams.rs` gaining `e820` + initramfs fields (`setup_data`/
-     `SETUP_RNG_SEED` is done — see the bullet above), a reproducible initramfs + static `/init`, and the
-     `/dev/vport` (or PIO) tape endpoint. Tests `guest_kernel_boots_to_userspace`,
-     `boot_params_seed_is_pinned`, `init_powers_off_deterministically`, `image_build_is_reproducible`.
+     **Still open**: nothing yet actually *calls* this from a real kernel boot. `bootparams.rs` itself is now
+     done — `e820`, `SETUP_RNG_SEED`, and initramfs wiring plus `DETERMINISTIC_CMDLINE` are all in place (see
+     the bullet above) — but `DETERMINISTIC_CMDLINE` isn't wired as any caller's default yet, and there is no
+     real image to boot. What remains is essentially everything else in the real image pipeline in
+     `baud-packages`: a minimal builtin kernel (Buildroot → pinned Nix, §4.5 — **blocked on a kernel-build
+     toolchain not currently installed in this dev sandbox: confirmed this session that `nix`/`nix-env` isn't
+     present; the CLAUDE.md-documented bare-metal WSL2 host likely can have one installed, or a plain
+     from-source `make bzImage` could reuse the kernel source tree already checked out at
+     `~/wsl-kernel-src/src` for the enforced-module work — next concrete step**), a reproducible initramfs
+     builder + static `/init` (§4.3/§4.4), and the `/dev/vport` (or PIO) tape endpoint. Tests
+     `guest_kernel_boots_to_userspace`, `boot_params_seed_is_pinned`, `init_powers_off_deterministically`,
+     `image_build_is_reproducible`.
   2. **H7 — OS-entropy end-to-end (rides on #1)** — boot the real Linux guest and prove the CRNG is a pure
      function of the tape: `os_entropy_is_deterministic`, `double_boot_ram_hash_identical`,
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,

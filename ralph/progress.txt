@@ -4139,3 +4139,83 @@ drive/full-demo.sh: ALL 32 CHECKS PASSED after the doc-comment fix. Running one 
 ---
 
 Post-push verification: local main (0214494) matches origin/main exactly, working tree clean. todo.md still has pending items (rest of the guest boot pipeline in baud-packages, H7 OS-entropy, H8 Mario, H9 Ubuntu, generic-core guardrail) — emitting NEXT.
+
+## 2026-07-26T01:35:16 UTC (47min) - Session usage — build-1 [sonnet]
+- cost $8.0782 (from claude -p)
+- context 246,975 tok peak of 1M (25%) across 105 inference calls, monotonic
+- models sonnet-5 $8.0751 (in 210 / out 64,138 / cache-read 19,242,317) · haiku-4-5 $0.0031
+- transcript: ralph/.run/20260726T004845Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history first.
+
+Chose item 1 from §14 Next-actions (Guest boot pipeline §4) — the interrupt-injection prerequisite is done; remaining scope is the real baud-packages image pipeline: minimal builtin kernel (Buildroot/Nix), deterministic cmdline, bootparams.rs e820+initramfs fields, reproducible initramfs+/init, and the tape endpoint. Surveying current baud-packages crate and bootparams.rs state before touching anything.
+
+Implemented initramfs wiring (layout::INITRAMFS_ADDR, bootparams::write_initramfs, hdr.ramdisk_image/ramdisk_size/loadflags/initrd_addr_max) plus DETERMINISTIC_CMDLINE builder (todo.md §4.2 exact string), threaded initramfs_path through boot_guest/Multiverse::boot_with_rdseed_sites and updated the 4 call sites (2 tests, 2 in baud-server run_kvm.rs). Added unit + real-hardware /dev/kvm tests. Building baud-multiverse now to check for compile errors.
+
+baud-multiverse/baud-server/baud-cli build clean. Building full workspace next.
+
+Full workspace build clean. Running cargo clippy --workspace --all-targets next.
+
+Fixed 5 E0793 (packed-struct unaligned field access) errors in the new tests by copying fields to locals before assert_eq! (same pattern the existing e820/rng_seed tests already use). cargo clippy --workspace --all-targets now clean (zero errors, only pre-existing unrelated warnings). Running cargo test -p baud-multiverse (real /dev/kvm hardware tests, including the two new initramfs tests) next.
+
+cargo test -p baud-multiverse: 85/85 passed, 4 ignored (enforced-regime tests needing patched kvm module) — includes the 3 new initramfs/cmdline tests. Running cargo test --workspace next.
+
+cargo test --workspace: 1 failure - periodic_timer_injection_halts_gracefully_and_reproducibly (rcb disagreement 10 > tolerance 8) - this is the same category of pre-documented real-hardware branch-counter jitter flake as timer_tick_lands_at_identical_instruction, unrelated to this iteration's initramfs/cmdline change. Re-running it isolated to confirm before moving on.
+
+Confirmed transient: periodic_timer_injection_halts_gracefully_and_reproducibly passes cleanly in isolation. Running full cargo test --workspace once more to confirm a clean run and see results for crates after baud-multiverse (prior tail truncated them).
+
+cargo test --workspace: fully green on clean rerun (exit 0). Running drive/h0.sh through h6.sh individually next (each its own Bash call), since this change touches the real KVM boot path (bootparams.rs/linux/mod.rs) used by every H-milestone drive script.
+
+h0 PASS. Running drive/h1.sh...
+
+h1 PASS. Running drive/h2.sh...
+
+h2 PASS. Running drive/h3.sh...
+
+h3 PASS. Running drive/h4.sh...
+
+h4 PASS. Running drive/h5.sh...
+
+h5 PASS (~227s, 1000-branch test included). Running drive/h6.sh...
+
+h6 PASS — H0-H6 all green on real /dev/kvm. Running drive/full-demo.sh as the overall M-series regression gate before committing.
+
+drive/full-demo.sh: ALL 32 CHECKS PASSED. Full verification protocol green: cargo build/clippy/test --workspace clean, drive/h0.sh-h6.sh + full-demo.sh all pass on real /dev/kvm. Updating todo.md via subagent to record the initramfs-wiring + deterministic-cmdline-builder milestone, then committing.
+
+todo.md updated via subagent (verified diff: accurate, no overclaiming — bootparams.rs initramfs sub-item marked done, next-actions item 1 narrowed to the kernel-build toolchain/initramfs-builder/tape-endpoint work, nix-not-installed noted as the concrete next blocker). Appending final progress block and committing.
+
+## 2026-07-26T02:06:33 UTC - Changes committed.
+- Wired the initramfs (ramdisk_image/ramdisk_size) fields into the real KVM boot path's bootparams
+  writer, and added a DETERMINISTIC_CMDLINE constant matching todo.md §4.2's exact spec cmdline
+- Files changed: crates/baud-multiverse/src/layout.rs, crates/baud-multiverse/src/linux/bootparams.rs,
+  crates/baud-multiverse/src/linux/mod.rs, crates/baud-server/src/routes/run_kvm.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - layout.rs: added INITRAMFS_ADDR (32 MiB in, above KERNEL_LOAD_ADDR, inside GUEST_RAM_SIZE) plus a
+    static layout-invariant assertion
+  - bootparams.rs: write_initramfs() writes bytes verbatim at INITRAMFS_ADDR; load_kernel_and_write_boot_params()
+    gained an initramfs: Option<&[u8]> param that, when Some, points hdr.ramdisk_image/ramdisk_size at it and
+    sets hdr.initrd_addr_max explicitly (left-at-zero reads as "no placement allowed" to some kernels, not
+    "unlimited"); hdr.loadflags now always carries LOADED_HIGH|CAN_USE_HEAP per §4.2; added
+    DETERMINISTIC_CMDLINE, the exact §4.2 cmdline string, as a pure constant (not yet wired as any caller's
+    default -- callers still pass their own cmdline)
+  - linux/mod.rs: boot_guest() and Multiverse::boot_with_rdseed_sites() thread the same initramfs param
+    through (Multiverse::boot() still delegates with None, so no existing caller broke); added real-/dev/kvm
+    hardware test initramfs_is_wired_into_a_real_boot_and_lands_in_guest_ram (hello-guest fixture): bytes land
+    verbatim in real guest RAM, ramdisk fields read back correctly off the real zero page, ordinary boot flow
+    undisturbed
+  - run_kvm.rs: updated the 2 real call sites of boot_with_rdseed_sites to pass None (no behavior change --
+    no real image pipeline exists yet to supply an actual initramfs)
+  - Added 5 new unit/integration tests total (2 bootparams unit tests, 1 cmdline-exact-match test, 1 real
+    hardware boot test, plus the no-initramfs negative-control test)
+  - Verified: cargo build/clippy/test --workspace all green (one transient hardware-timing-jitter failure on
+    first run -- periodic_timer_injection_halts_gracefully_and_reproducibly, confirmed pre-existing/
+    non-regression via isolated re-run and a full clean re-run); drive/h0.sh through drive/h6.sh and
+    drive/full-demo.sh (32/32) all PASS on real /dev/kvm
+  - todo.md updated: the bootparams.rs/initramfs sub-item of §14 next-actions item 1 is now closed; remaining
+    scope narrowed to the kernel-build toolchain (nix/nix-env confirmed not installed in this sandbox --
+    concrete next blocker), the initramfs builder + static /init, and the tape-device guest endpoint
+---
