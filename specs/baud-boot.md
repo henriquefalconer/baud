@@ -184,6 +184,14 @@ credited, the CRNG initializes synchronously and identically, and the kernel's `
 runs — so an unmodified guest's `getrandom` / `/dev/urandom` are a pure function of the tape (validated at
 `todo.md` H7).
 
+**Kernel-version caveat.** `SETUP_RNG_SEED` (v6.0), `random.trust_bootloader` (v5.4), and `random.trust_cpu`
+(v4.19) are all *modern-kernel* mechanisms. On an **older distro kernel** (e.g. Ubuntu 18.04's 4.15, `todo.md`
+§4.7) none of them exist, so this seed node is a no-op and `baud-boot` may omit it. Determinism there does not
+depend on a credited seed — it comes entirely from the machine pinning the CRNG's *inputs* (trapped
+RDTSC/RDRAND, rewritten RDSEED, exact-boundary interrupt injection, zeroed RAM, pinned MAC), which the
+pre-5.17 CRNG folds into its key and credits via `add_interrupt_randomness`. baud writes the seed node only
+when the target kernel honors it; either way `getrandom` stays a pure function of the tape.
+
 ---
 
 ## 7. Shutdown detection

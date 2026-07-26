@@ -385,6 +385,46 @@ and arbitrary binaries are all supported; the guest kernel is unmodified (§3.8)
 - **Test** (`image_rewrites_rdseed`): `baud image build` rewrites every `rdseed` opcode; a follow-up scan
   (`no_rdseed_opcode_survives_in_image`) finds none.
 
+### 4.7 Running a full, unmodified distro (Ubuntu 18.04.1 LTS)
+
+The minimal kernel (§4.1) proves the pipeline; a **full, unmodified distro** proves baud runs *real* software
+deterministically. baud boots the **stock Ubuntu 18.04.1 LTS** kernel + rootfs to the serial login prompt on
+the same deterministic machine.
+
+- **Image**: the frozen 18.04.1 build from `cloud-images-archive.ubuntu.com` — the qcow2 rootfs converted to
+  raw (`qemu-img convert -O raw`) served as one virtio-blk disk, plus the stock `…-vmlinuz-generic` (4.15)
+  and `…-initrd-generic` direct-booted via §4.2. The stock initrd carries the `virtio_pci`/`virtio_blk`
+  modules that probe `/dev/vda` and mount `/dev/vda1`; confirm the build's `/etc/os-release` reads
+  `PRETTY_NAME="Ubuntu 18.04.1 LTS"`.
+- **Machine additions the distro needs** (beyond the minimal-guest device set): a **minimal ACPI**
+  (RSDP → RSDT/XSDT → FADT + DSDT + MADT with one LAPIC), **PCI** (MCFG ECAM or legacy `0xCF8/0xCFC`), and a
+  **deterministic virtio-blk** device — the block completion is delivered at a fixed work-clock boundary
+  through the interrupt-injection engine (blkreplay-style), not on host-I/O return, and the disk is a
+  **read-only content-addressed base image + an in-memory copy-on-write overlay** (guest writes are a
+  function of the guest's own deterministic execution; the base stays pristine). Pin the NIC MAC (or emulate
+  no NIC); emulate no RTC so the guest starts at epoch 1970 (deterministic).
+- **Deterministic command line** (4.15 GA kernel): `systemd.unit=multi-user.target cloud-init=disabled
+  console=ttyS0 nokaslr net.ifnames=0 biosdevname=0 clocksource=tsc tsc=reliable no_timer_check
+  scsi_mod.scan=sync udev.children_max=1 ro fsck.mode=skip` + `root=/dev/vda1 rootwait`, plus the mask list.
+- **Mask the policy units** (userspace nondeterminism, not the machine): `systemd-timesyncd` +
+  `systemd-time-wait-sync`, `systemd-random-seed`, `systemd-networkd(-wait-online)` + `systemd-resolved`, the
+  four `cloud-init*` stages, and the `apt-daily`/`motd-news`/`man-db`/`fstrim`/`tmpfiles-clean`/`snapd*`
+  timers (each makes a wall-clock- or RNG-dependent `RandomizedDelaySec` draw). Ship the rootfs cleanly
+  unmounted (empty ext4 journal → no replay writes) with `tune2fs -c 0 -i 0`.
+- **Entropy on an old kernel — the load-bearing detail**: 18.04's 4.15 kernel **predates** `SETUP_RNG_SEED`
+  (v6.0), `random.trust_bootloader` (v5.4), and `random.trust_cpu` (v4.19), so the boot-seed pinning of §4.2 /
+  §3.8 is a **no-op** there. Determinism instead comes **entirely from the machine pinning the CRNG's
+  inputs**: 4.15 folds RDSEED/RDRAND/RDTSC into the CRNG key and credits the pool only via
+  `add_interrupt_randomness` (RDTSC + jiffies + IRQ + IP) — all of which baud already makes deterministic
+  (trapped RDTSC/RDRAND, rewritten RDSEED, exact-boundary interrupts, zeroed RAM, pinned MAC). So
+  `getrandom`/`/dev/urandom` remain a pure function of the tape. This is the **strongest** form of the §3.8
+  thesis: it holds on a kernel with *no entropy-injection support at all*, purely by controlling inputs. (On
+  an 18.04 HWE 5.x kernel the seed flags do apply and drive the CRNG ready directly.)
+- **The banner** `Ubuntu 18.04.1 LTS ubuntu ttyS0` / `ubuntu login:` is `agetty` rendering `/etc/issue`
+  (`\S` → `/etc/os-release` `PRETTY_NAME`, `\n` → hostname `ubuntu`, `\l` → `ttyS0`). The exact three-token
+  form needs `/etc/issue = \S \n \l` (the stock default `\S \l` omits the middle `ubuntu`) — the one line to
+  confirm on the image.
+
 ## 5. Snapshot-branch multiverse (replaces replay-from-zero)
 
 Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud-snapshot-store.md`
@@ -542,6 +582,39 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   goal with the framebuffer streamed live. Drive `drive/mario.sh` (§11.8):
   `interactive_probe_stream_is_identical` + `framebuffer_hashes_identical` across two boots, goal reachability,
   shrink+replay, and the mandatory ~25%-screen live window. H8 is the flagship acceptance of the whole stack.
+- **H9 — a full unmodified distro, cross-VM determinism.** Boot the **stock Ubuntu 18.04.1 LTS** image (§4.7)
+  to the serial login prompt, take a **timed exit** at a fixed work-clock point, and dump a fingerprint; two
+  independent VMs (`vm0`, `vm1` — separate processes on separate cores) on the same `(image, tape)` produce a
+  **byte-identical** fingerprint. The **timed exit** stops the guest at an exact `deterministic events` count
+  (retired conditional branches — a raw `BR_INST_RETIRED.COND` event, identical on both VMs) via
+  arm-early-then-single-step (§3.4), then reads guest RIP (`KVM_GET_REGS`), translates it to a guest-physical
+  address (`KVM_TRANSLATE`, cross-checked by a manual CR3 4-level page walk), and hashes guest RAM (blake3
+  over the RAM slots in canonical order, excluding MMIO / host-written pages). Drive `drive/h9.sh` boots both
+  VMs and asserts equality of all four fields, printing:
+  ```
+  Ubuntu 18.04.1 LTS ubuntu ttyS0
+
+  ubuntu login:
+  vm0 - timed exit:
+  deterministic events = <N>
+  guest RIP = <rip> (-> guest physical = <gpa>)
+  guest memory hash = <hash>
+  vm0: done
+  ```
+  ```
+  Ubuntu 18.04.1 LTS ubuntu ttyS0
+
+  ubuntu login:
+  vm1 - timed exit:
+  deterministic events = <same N>
+  guest RIP = <same rip> (-> guest physical = <same gpa>)
+  guest memory hash = <same hash>
+  vm1: done
+  ```
+  Identical `deterministic events`, `guest RIP`, `guest physical`, and `guest memory hash` across `vm0` and
+  `vm1` proves the whole-distro execution is a pure function of `(image, tape)` — independent of host
+  instance, physical core, or wall-clock. Tests `ubuntu_boots_to_login`, `timed_exit_fingerprint_is_stable`,
+  `cross_vm_fingerprint_matches`.
 - **M-series** rebuild server/CLI/driver/store/stream on this core: tape-tree exploration
   (`driver_is_reproducible`, `shrink_reproduces_from_nearest_snapshot`), strategy/tactics over guest probes,
   snapshot-store reconstruction/shrinking, the framebuffer stream (§11), a distributed target as a **guest
@@ -729,6 +802,8 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 | 27 | OS-entropy determinism must be shown, not asserted | Boot a real Linux guest and prove the CRNG is a pure function of the tape end-to-end (§4, §3.8) | `os_entropy_is_deterministic` (H7); `double_boot_ram_hash_identical` |
 | 28 | An arbitrary interactive program must be driven to a goal, reproducibly, inside Linux | The emulator example (§11) runs inside the H7 guest; identical probe + framebuffer streams across boots; goal reached; shrink+replay holds | `interactive_probe_stream_is_identical`; `framebuffer_hashes_identical`; `mario_stream_is_live_and_rederivable` |
 | 29 | Example specifics could leak into core crates | The engine stays generic; all workload code lives under `examples/` (§11.0) | `no_workload_specifics_in_core` |
+| 30 | Determinism must hold for a full unmodified distro, provably | Boot stock Ubuntu 18.04.1 to login (§4.7); a timed-exit fingerprint (events / RIP / guest-physical / RAM hash) is byte-identical across two independent VMs | `ubuntu_boots_to_login`; `timed_exit_fingerprint_is_stable`; `cross_vm_fingerprint_matches` |
+| 31 | A stock distro kernel (Ubuntu 4.15) predates seed-injection flags | Determinism comes from the machine pinning CRNG inputs (RDTSC/RDRAND/RDSEED + exact-boundary interrupts + zeroed RAM + pinned MAC), not a boot seed — holds with no guest entropy support (§4.7) | `os_entropy_is_deterministic` (on the Ubuntu guest) |
 
 ## 13. Migration map (from the current userspace plan)
 
