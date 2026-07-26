@@ -59,6 +59,27 @@ cd rootfs && touch -h -d '@1' init . && \
 ```
 (§4.3's exact reproducible-cpio recipe — fixed mtimes, sorted entries, uid/gid 0, `gzip -9n`.)
 
+## `entropy_init.c` / `entropy_initramfs.cpio.gz` — H7 `os_entropy_is_deterministic`
+
+A second `/init`, for the *same already-built* `bzImage` above (no kernel rebuild: OS-entropy
+determinism is entirely a userspace-visible property this fixture's `minimal.config` already
+supports, via `CONFIG_DEVTMPFS_MOUNT=y` giving `/dev/urandom` for free). It calls `getrandom()`
+four times and reads `/dev/urandom` four times, hex-encoding each 32-byte read and writing it out
+through the same raw-`outb` COM1 endpoint (see "Why `/init` uses raw port I/O" below — same
+reasoning applies). Regenerate its initramfs the same way as the main one, just from
+`entropy_init.c`:
+
+```bash
+musl-gcc -static -Os -o entropy_init entropy_init.c && strip entropy_init
+mkdir -p entropy_rootfs && cp entropy_init entropy_rootfs/init && chmod 755 entropy_rootfs/init
+cd entropy_rootfs && touch -h -d '@1' init . && \
+    find . -print0 | sort -z | cpio -o -H newc -R +0:+0 --reproducible --null | gzip -9n \
+    > ../entropy_initramfs.cpio.gz
+```
+
+Only `entropy_init.c` and `entropy_initramfs.cpio.gz` are checked in (same convention as the main
+fixture: the compiled `entropy_init` binary and `entropy_rootfs/` build directory are not).
+
 ## Why `/init` uses raw port I/O, not `write(1, ...)`
 
 `init.c` writes its marker via `iopl(3)` + inline `outb` straight to COM1's data register (`0x3f8`)

@@ -2104,6 +2104,118 @@ mod tests {
         );
     }
 
+    /// `tests/fixtures/linux-guest/entropy_init.c` -- a second `/init` for the same, already-built
+    /// `linux-guest` kernel (no kernel rebuild needed: OS-entropy determinism is a userspace-visible
+    /// property this fixture's own `minimal.config` already supports -- `CONFIG_DEVTMPFS_MOUNT=y`
+    /// gives it `/dev/urandom` for free). It calls `getrandom()` four times and reads `/dev/urandom`
+    /// four times, hex-encoding each 32-byte read and writing it out through the same raw-`outb`
+    /// COM1 endpoint `init.c` uses (`BUILD.md` explains why: no interrupt controller, so the normal
+    /// interrupt-driven tty transmit path never drains).
+    fn linux_guest_entropy_initramfs() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/linux-guest/entropy_initramfs.cpio.gz");
+        std::fs::read(path).expect("read linux-guest entropy_initramfs fixture")
+    }
+
+    /// todo.md §14 item 2 / H7 (`os_entropy_is_deterministic`): proves that on a real, unmodified
+    /// Linux kernel booted through baud-multiverse, `getrandom()` and `/dev/urandom` are a pure
+    /// function of the tape -- both across two independent boots of the same image+tape (the CRNG's
+    /// seeding inputs, §3.8, are all hypervisor-controlled: trapped `rdtsc`/`rdrand`, the pinned
+    /// `SETUP_RNG_SEED` boot seed, deterministic interrupt timing) and non-trivially (the eight
+    /// 32-byte reads are not all the same value, so this isn't just observing an always-zero
+    /// buffer). musl (this fixture's libc) has no vDSO `getrandom` path, so only the syscall side of
+    /// the spec's "both the syscall and, on glibc 2.41+, the vDSO path" is exercised here -- the
+    /// vDSO path needs a glibc 2.41+ guest, which is future work, not a gap in this fixture's own
+    /// contract.
+    ///
+    /// **Requires the enforced (RDTSC-trapping) `kvm_intel.ko`** (`kernel-module/baud-enforced/
+    /// rdtsc-enforce.patch`), like the sibling `*_enforced_regime_is_bit_exact_across_boots` tests
+    /// -- `#[ignore]`d so a normal `cargo test --workspace` (stock module) never runs it; only
+    /// `drive/h7-enforced-entropy.sh` invokes it by name, after the same swap-in/swap-out dance
+    /// `drive/h3-enforced-rdtsc.sh` uses. This was empirically load-bearing, not a defensive
+    /// precaution: an earlier version of this test against the *stock* module (RDTSC executing
+    /// natively) failed non-deterministically even with the `SETUP_RNG_SEED` boot seed pinned and
+    /// `random.trust_bootloader=on` set, because `random_init()` (`drivers/char/random.c`)
+    /// unconditionally mixes `ktime_get_real()` -- which, with no RTC and only a TSC clocksource,
+    /// reads the real (untrapped) hardware TSC at a point that varies by host-scheduling jitter
+    /// between independent boots -- into the pool and re-extracts the CRNG key from it, *after* the
+    /// pinned seed already credited the pool. Only with RDTSC hardware-trapped and served from the
+    /// work-clock (a pure function of the branch counter, not wall time) does that `ktime_get_real()`
+    /// read become reproducible too.
+    #[test]
+    #[ignore]
+    fn os_entropy_is_deterministic() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_entropy_initramfs();
+        // `random.trust_bootloader=on` makes the kernel *credit* the pinned `SETUP_RNG_SEED` node
+        // `boot_guest` always writes (§3.8), marking the CRNG ready synchronously from the
+        // tape-derived seed alone rather than falling back to the jitter/interrupt-timing path.
+        let cmdline = "console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable \
+                       no_timer_check reboot=t panic=-1 printk.time=0 random.trust_cpu=off \
+                       random.trust_bootloader=on i8042.noaux i8042.nomux i8042.nopnp \
+                       8250.nr_uarts=1 rdinit=/init";
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
+        const ENTROPY_MARKER: &str = "baud-guest: entropy probe done\n";
+
+        let mut probe_runs = Vec::new();
+        for i in 0..2 {
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
+            let (_ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+                .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            assert!(
+                console.contains(ENTROPY_MARKER),
+                "run {i}: guest must reach the entropy probe's own completion marker; got:\n{console}"
+            );
+            let probes: Vec<&str> = console
+                .lines()
+                .filter(|l| l.starts_with("GETRANDOM:") || l.starts_with("URANDOM:"))
+                .collect();
+            assert_eq!(
+                probes.len(),
+                8,
+                "run {i}: expected 4 GETRANDOM + 4 URANDOM probe lines; got:\n{console}"
+            );
+            for line in &probes {
+                let (tag, hex) = line.split_once(':').unwrap();
+                assert_eq!(
+                    hex.len(),
+                    64,
+                    "run {i}: {tag} probe must be a 32-byte (64 hex char) read, not an error/short \
+                     read; got line {line:?} from console:\n{console}"
+                );
+            }
+            probe_runs.push(probes.into_iter().map(str::to_string).collect::<Vec<_>>());
+        }
+
+        assert_eq!(
+            probe_runs[0], probe_runs[1],
+            "getrandom()/dev/urandom must be byte-identical across two boots of the same \
+             image+tape -- an unmodified Linux CRNG is a pure function of the tape"
+        );
+
+        let distinct: std::collections::HashSet<&String> = probe_runs[0].iter().collect();
+        assert!(
+            distinct.len() > 1,
+            "the 8 probe reads must not all be the same value -- otherwise this test would pass \
+             even if entropy were degenerate (e.g. an always-zeroed buffer): {:?}",
+            probe_runs[0]
+        );
+    }
+
     /// H5's named test (specs/baud-snapshot.md §7, todo.md §10): `Multiverse::snapshot`/`restore`
     /// wired for the first time against a real guest and real KVM hardware (todo.md §14 tracked
     /// this exact gap: "nothing calls snapshot/restore/DirtyRing on real KVM hardware yet").

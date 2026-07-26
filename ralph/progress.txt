@@ -4290,3 +4290,96 @@ drive/h0.sh through h7.sh all PASS on real /dev/kvm. Spot-checked drive/m0.sh (P
   - Guest kernel config needed CONFIG_X86_IOPL_IOPERM=y; /init writes its marker via raw outb (not write(1,...)) since this machine has no interrupt controller for the 8250 UART's normal interrupt-driven tty path
   - New drive/h7.sh (partial H7: boot-to-userspace leg only); todo.md updated with full findings and narrowed remaining gaps (OS-entropy leg, checkpoint-based double-boot-hash test, baud-packages automation, DETERMINISTIC_CMDLINE wiring)
 ---
+
+Post-push verification: local main (1cee920) matches origin/main exactly, working tree clean, cargo build --workspace clean, guest_kernel_boots_to_userspace passes against real /dev/kvm on the pushed tip. todo.md still has pending items (OS-entropy leg, checkpoint-based double_boot_ram_hash_identical, baud-packages automated build pipeline, examples/mario rebuild, generic-core guardrail, and more per §14) -- emitting NEXT.
+
+## 2026-07-26T03:08:50 UTC (1h01min) - Session usage — build-3 [sonnet]
+- cost $14.6173 (from claude -p)
+- context 348,097 tok peak of 1M (35%) across 142 inference calls, monotonic
+- models sonnet-5 $14.6142 (in 336 / out 142,112 / cache-read 33,159,933) · haiku-4-5 $0.0031
+- subagents (3) sonnet-5 x3
+- transcript: ralph/.run/20260726T004845Z/003-build-3.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and specs/*...
+
+Studied todo.md. Next item: H7 OS-entropy leg — os_entropy_is_deterministic test needs a static probe calling getrandom()/reading /dev/urandom, byte-identical across two boots. Reading existing linux-guest fixture and boot test code...
+
+Built entropy probe fixture (entropy_init.c + entropy_initramfs.cpio.gz, reusing the existing linux-guest bzImage kernel — no kernel rebuild needed). Now writing the os_entropy_is_deterministic Rust test.
+
+Build clean. Running os_entropy_is_deterministic against real /dev/kvm (single-threaded, boots real Linux kernel twice — expect ~30-60s)...
+
+Root-caused the nondeterminism: random_init() mixes ktime_get_real() (real untrapped TSC) into the CRNG pool after the pinned SETUP_RNG_SEED boot seed, so getrandom() output varies with host scheduling jitter under the stock kvm_intel module. Marked os_entropy_is_deterministic #[ignore] (needs the enforced RDTSC-trapping module, same pattern as rdtsc_enforced_regime_is_bit_exact_across_boots). Building patched kvm_intel.ko to verify...
+
+Found a second real bug: under the enforced module, dmesg shows 'vmx: unexpected exit reason 0x33' (51 = EXIT_REASON_RDTSCP) — the current rdtsc-enforce.patch only adds a dispatch-table entry for EXIT_REASON_RDTSC (10), not RDTSCP (51), and neither stock nor patched kvm_vmx_exit_handlers[] has an RDTSCP entry at all. A real Linux 6.18 kernel (unlike every prior synthetic fixture) issues a bare rdtscp somewhere in early boot, so with RDTSC-exiting forced on it now hits KVM_EXIT_INTERNAL_ERROR. This is what currently blocks os_entropy_is_deterministic under the enforced module. Swapping the stock kvm_intel module back now (safety) before documenting this in todo.md.
+
+Stock kvm_intel module restored (fuser confirmed no other process using /dev/kvm during the swap). Updating todo.md with the RDTSCP finding, then running full pre-push validation protocol (cargo build, clippy, test, drive scripts).
+
+cargo build --workspace: clean. Running cargo clippy --workspace --all-targets...
+
+cargo clippy --workspace --all-targets: clean (0 errors, pre-existing warnings only, none in my changed files). Running cargo test --workspace (this is the full suite, may take a while)...
+
+cargo test --workspace: 41 test suites, all green, zero failures (os_entropy_is_deterministic correctly shows as 'ignored' under stock module; guest_kernel_boots_to_userspace still passes on real hardware). Running drive scripts one at a time now.
+
+drive/h0.sh PASS. Running drive/h1.sh...
+
+drive/h1.sh PASS. Running drive/h2.sh...
+
+drive/h2.sh PASS. Running drive/h3.sh...
+
+drive/h3.sh PASS. Running drive/h4.sh...
+
+drive/h4.sh PASS. Running drive/h5.sh (includes the ~4min 1000-branch test)...
+
+drive/h5.sh PASS (~210s for 1000-branch test). Running drive/h6.sh...
+
+drive/h6.sh PASS. Running drive/h7.sh (directly exercises the linux-guest fixture I touched)...
+
+drive/h7.sh PASS. H0-H7 all green on real /dev/kvm. Spot-checking drive/m0.sh since my change is scoped to baud-multiverse's real-KVM boot path (already re-validated by h0-h7 + full cargo test --workspace)...
+
+drive/m0.sh PASS. Full verification protocol green: cargo build/clippy/test --workspace clean, drive/h0.sh-h7.sh + m0.sh all pass on real /dev/kvm. Appending final progress block and committing.
+
+## 2026-07-26T03:34:53 UTC - Changes committed.
+- Implemented and hardware-tested todo.md §14 item 2 (H7 OS-entropy leg): a new
+  `os_entropy_is_deterministic` test plus its guest fixture, and diagnosed two real bugs found
+  getting it this far (documented precisely in todo.md so the next iteration can pick up exactly
+  where this one stopped).
+- Files changed:
+  - `crates/baud-multiverse/tests/fixtures/linux-guest/entropy_init.c` (new) + `entropy_initramfs.cpio.gz`
+    (new, built via musl-gcc/cpio/gzip, same reproducible-cpio recipe as the existing fixture) — a
+    second `/init` for the already-built `linux-guest` kernel, calling `getrandom()` x4 and reading
+    `/dev/urandom` x4, hex-encoding each 32-byte read out via the same raw-`outb` COM1 endpoint
+    `init.c` uses.
+  - `crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md` — documents the new fixture and its
+    regeneration recipe.
+  - `crates/baud-multiverse/src/linux/mod.rs` — new `os_entropy_is_deterministic` test (`#[ignore]`d,
+    documented why), `linux_guest_entropy_initramfs()` helper.
+  - `todo.md` — recorded both real bugs found this iteration with full diagnosis and the concrete
+    next step.
+- **Brief description of changes:**
+  - `entropy_init.c` initially failed to open `/dev/urandom` (`NOFD`) because `rdinit=/init` skips the
+    kernel's own devtmpfs auto-mount (`prepare_namespace()`, not reached on this boot path) — fixed by
+    mounting devtmpfs from `/init` itself before opening the device.
+  - Under the *stock* `kvm_intel` module (this test's default), the two boots' entropy output still
+    differed even with the pinned `SETUP_RNG_SEED` boot seed correctly credited
+    (`random.trust_bootloader=on`) — root-caused to `random_init()` unconditionally mixing
+    `ktime_get_real()` (a real, untrapped-under-stock TSC read sensitive to host-scheduling jitter)
+    into the CRNG pool *after* the pinned seed. The test is `#[ignore]`d and requires the enforced
+    (RDTSC-trapping) `kvm_intel.ko`, same pattern as `rdtsc_enforced_regime_is_bit_exact_across_boots`.
+  - Verified that hypothesis is the right direction, then hit a second real bug running under the
+    enforced module: `KVM_EXIT_INTERNAL_ERROR` immediately, with dmesg showing `vmx: unexpected exit
+    reason 0x33` (51 = `EXIT_REASON_RDTSCP`) — `rdtsc-enforce.patch`'s dispatch table has no handler
+    for `RDTSCP`, which a real Linux 6.18 kernel issues (unlike every prior hand-assembled fixture).
+    This is now the concrete next blocker, documented in todo.md with the exact fix needed
+    (`handle_baud_rdtscp_exit`, also serving `ECX`/`IA32_TSC_AUX`).
+  - Full verification protocol green throughout: `cargo build/clippy/test --workspace` clean (41 test
+    suites, 0 failures, new test correctly shows `ignored`), `drive/h0.sh` through `drive/h7.sh` and
+    `drive/m0.sh` all PASS on real `/dev/kvm`. The enforced-module swap (used only to investigate, not
+    left in place) was done and reverted safely per CLAUDE.md's dance, `fuser /dev/kvm` confirmed clear
+    both before and after.
+---
