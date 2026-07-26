@@ -24,6 +24,7 @@ use crate::console::DeviceBus;
 use crate::cpuid::{self, CpuidEntry};
 use crate::layout;
 use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX};
+use crate::virtio_mmio::VirtioMmioTransport;
 use baud_snapshot::{PageRef, PageStore, Universe};
 use baud_vcpu::DeterminismHole;
 use kvm_bindings::{
@@ -1169,6 +1170,64 @@ impl Multiverse {
         )))
     }
 
+    /// Enable the virtio-rng device on this guest's device bus ([`DeviceBus::enable_virtio_rng`])
+    /// — call before any guest code that probes for it runs. Every existing `boot`/`restore` call
+    /// leaves it disabled by default, so nothing changes for a caller that never calls this.
+    pub fn enable_virtio_rng(&mut self) {
+        self.bus.enable_virtio_rng();
+    }
+
+    /// Seed the virtio-rng device's own tape-derived entropy stream
+    /// ([`DeviceBus::seed_virtio_rng_entropy`]) — independent of the `rdrand`/`rdseed` substream
+    /// and the boot `SETUP_RNG_SEED` (spec §3.8's domain-separation convention). Call once, right
+    /// after [`enable_virtio_rng`](Self::enable_virtio_rng), before any guest code runs.
+    pub fn seed_virtio_rng_entropy(&mut self, seed: u64) {
+        self.bus.seed_virtio_rng_entropy(seed);
+    }
+
+    /// The virtio-rng transport's own state, if [`enable_virtio_rng`](Self::enable_virtio_rng) has
+    /// been called — read access for a caller (or test) that wants to observe `notify_count`/
+    /// `interrupt_status` without reaching into this `Multiverse`'s private device bus.
+    pub fn virtio_rng(&self) -> Option<&VirtioMmioTransport> {
+        self.bus.virtio_rng()
+    }
+
+    /// Drain any virtio-rng `QueueNotify`s since the last call ([`DeviceBus::service_virtio_rng`],
+    /// given this guest's real memory) and, if at least one chain was actually drained, deliver a
+    /// real interrupt at `vector` to this guest's vCPU right now — H4's exact-boundary engine
+    /// ([`inject_timer_tick`](Self::inject_timer_tick)), used degenerately with `period_rcb = 0`:
+    /// "the next reachable boundary", which for a guest that has not halted resolves to "as soon
+    /// as the vCPU is ready for interrupt injection" (`ready_for_interrupt_injection`/
+    /// `request_interrupt_window`, the same machinery every periodic-timer tick already uses — no
+    /// new low-level primitive needed). Returns the same count `service_virtio_rng` does (`0` if
+    /// nothing was drained, so no interrupt was staged either).
+    ///
+    /// Real-hardware-verified against `tests/fixtures/virtio-rng-guest/` — that fixture's own IDT
+    /// gate proves `vector` genuinely reaches the guest's own registered ISR, not just that
+    /// `KVM_SET_VCPU_EVENTS` was called (see `virtio_rng_interrupt_reaches_the_guests_own_isr`
+    /// below and that fixture's `BUILD.md`). This closes the "interrupt delivery" half of todo.md
+    /// §14 next-actions item 1's still-open virtio-rng gap — **not** the deeper, still-open
+    /// question of which vector an *unmodified Linux* guest's real `virtio_mmio` driver would bind
+    /// to via `request_irq()` (there is no IOAPIC/PIC here to resolve one dynamically, unlike the
+    /// LAPIC timer's architecturally-fixed vector), nor boot/cmdline/CLI wiring — both remain open.
+    ///
+    /// **Must not be called while this guest's vCPU is already sitting at a halted exit** — every
+    /// caller here drives it right after observing a `QueueNotify`-equivalent write, while the
+    /// guest is still running, never after a `Hlt`/`Shutdown` dispatch. `inject_timer_tick`'s own
+    /// doc (see `run_to_first_halt_with_periodic_timer`'s `Halted` arm above) explains why:
+    /// re-entering `KVM_RUN` on an already-halted vCPU with no in-kernel irqchip and no interrupt
+    /// yet staged risks blocking indefinitely instead of re-observing the halt.
+    pub fn service_virtio_rng_interrupt(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+        let processed = self
+            .bus
+            .service_virtio_rng(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        if processed > 0 {
+            self.inject_timer_tick(0, vector)?;
+        }
+        Ok(processed)
+    }
+
     /// Every tape-device record (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`,
     /// specs/baud-tape-device.md §4) the guest has emitted and not yet drained. Callers typically
     /// call this after [`run_to_first_halt`](Self::run_to_first_halt) to collect what the guest
@@ -2189,6 +2248,92 @@ mod tests {
         );
         assert_eq!(
             second_halt.ram_hash, first_halt.ram_hash,
+            "guest RAM at the guest's own natural halt must be byte-identical across two boots"
+        );
+    }
+
+    /// `tests/fixtures/virtio-rng-guest/`'s payload: a real (hand-assembled) virtio-rng driver
+    /// sequence -- negotiate, set up one queue, post one writable descriptor, notify -- against the
+    /// real `VirtioMmioTransport`, with its own IDT gate at `VIRTIO_RNG_VECTOR` proving a real
+    /// delivered interrupt reaches it. See that directory's `BUILD.md` for the full rationale: this
+    /// is the "interrupt delivery" half of todo.md §14 next-actions item 1's virtio-rng gap, closed
+    /// with no in-kernel irqchip at all, via the same "stage `KVM_SET_VCPU_EVENTS`, let the next
+    /// `KVM_RUN` deliver it" trick `timer-guest` already proved for the LAPIC timer's fixed vector.
+    fn virtio_rng_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/virtio-rng-guest/bzImage")
+    }
+
+    /// The vector `tests/fixtures/virtio-rng-guest/payload.s`'s IDT gate is registered at.
+    const VIRTIO_RNG_VECTOR: u8 = 0x31;
+
+    /// Boots `virtio-rng-guest`, steps it one exit at a time until its `QueueNotify` write is
+    /// observed (`Multiverse::virtio_rng`'s `notify_count`), services the ring and delivers a real
+    /// interrupt at `VIRTIO_RNG_VECTOR` (`Multiverse::service_virtio_rng_interrupt`), then runs the
+    /// guest to its own clean halt. Returns the halt outcome plus the exact first entropy byte the
+    /// seed produces (computed independently here, via the same `SplitMix64` `service_virtio_rng`
+    /// itself draws from) so a caller can assert the guest's own ISR actually observed it, not just
+    /// that some interrupt fired.
+    fn run_virtio_rng_guest_once(seed: u64) -> (HaltOutcome, u8) {
+        let kernel = virtio_rng_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let mut mv = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+        mv.enable_virtio_rng();
+        mv.seed_virtio_rng_entropy(seed);
+
+        const MAX_EXITS: u32 = 200; // the negotiate/setup sequence needs ~19 real MMIO exits
+        let mut exits = 0u32;
+        loop {
+            assert!(exits < MAX_EXITS, "guest never issued QueueNotify within {MAX_EXITS} exits");
+            let outcome = mv.step_exit().expect("step_exit failed");
+            assert!(
+                !matches!(outcome, baud_vcpu::DispatchOutcome::Halted),
+                "guest halted before ever notifying the virtio-rng queue"
+            );
+            exits += 1;
+            if mv.virtio_rng().map(|t| t.notify_count()) == Some(1) {
+                break;
+            }
+        }
+
+        let processed =
+            mv.service_virtio_rng_interrupt(VIRTIO_RNG_VECTOR).expect("service + interrupt delivery failed");
+        assert_eq!(processed, 1, "exactly the one posted descriptor must be drained");
+
+        let halt = mv.run_to_first_halt().expect("run to halt after injection failed");
+        let expected_byte = crate::timesource::SplitMix64::new(seed).next_u64().to_le_bytes()[0];
+        (halt, expected_byte)
+    }
+
+    /// Real-hardware proof that virtio-rng's "interrupt delivery" gap (todo.md §14 next-actions
+    /// item 1) is closed: the guest's own IDT-registered ISR actually runs, and reads back the
+    /// exact tape-seeded entropy byte `DeviceBus::service_virtio_rng` wrote into its posted buffer,
+    /// through a real KVM-delivered interrupt with no in-kernel irqchip at all.
+    #[test]
+    fn virtio_rng_interrupt_reaches_the_guests_own_isr() {
+        let (halt, expected_byte) = run_virtio_rng_guest_once(42);
+        assert_eq!(
+            halt.console_output,
+            vec![b'R', expected_byte],
+            "the guest's ISR must fire exactly once, writing its marker then the real entropy byte \
+             service_virtio_rng filled the buffer with"
+        );
+    }
+
+    /// The same guarantee every other H4 interrupt test in this file asserts: a double-run of the
+    /// identical image+tape (here, the same entropy seed) reaches identical guest-visible state --
+    /// the interrupt is not merely delivered, it is delivered deterministically.
+    #[test]
+    fn virtio_rng_interrupt_delivery_is_reproducible_across_two_boots() {
+        let (first, expected_byte) = run_virtio_rng_guest_once(7);
+        let (second, expected_byte_again) = run_virtio_rng_guest_once(7);
+        assert_eq!(expected_byte, expected_byte_again, "same seed must reproduce the identical entropy byte");
+        assert_eq!(
+            first.console_output, second.console_output,
+            "console output (marker + entropy byte) must be identical across two boots of the same \
+             image+tape"
+        );
+        assert_eq!(
+            first.ram_hash, second.ram_hash,
             "guest RAM at the guest's own natural halt must be byte-identical across two boots"
         );
     }

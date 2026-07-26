@@ -298,17 +298,19 @@ impl DeviceBus {
     /// last call, filling each writable descriptor with bytes drawn from the tape-seeded entropy
     /// stream — the actual virtio-rng device behavior (spec 1.1 §5.4: the device's only job is
     /// writing random data into whatever buffer the driver posts to `requestq`). A no-op (`Ok(0)`)
-    /// if virtio-rng was never enabled, or its queue is not yet negotiated/ready.
+    /// if virtio-rng was never enabled, or its queue is not yet negotiated/ready. Whenever at least
+    /// one chain is drained, also raises the transport's `InterruptStatus` "used buffer" bit
+    /// ([`VirtioMmioTransport::raise_used_buffer_notification`]) — the driver's ISR (once a real
+    /// interrupt is delivered, `Multiverse::service_virtio_rng_interrupt` in `linux/mod.rs`) reads
+    /// that register to know a completion is ready.
     ///
     /// Requires real guest memory to walk the ring, unlike every other method on this type — that
     /// is exactly why this lives behind `#[cfg(target_os = "linux")]` and takes an explicit `mem`
     /// parameter rather than being invoked automatically from [`Bus::mmio_write`]: the [`Bus`]
     /// trait is shared with `baud-vcpu`'s exit dispatch and is deliberately memory-oblivious (see
-    /// `virtio_mmio.rs`'s doc), so it cannot drive this itself. A caller — a real boot loop, once
-    /// wired (todo.md §14 next-actions item 1's still-open "boot/cmdline/CLI wiring") — is expected
-    /// to call this with the guest's real memory after an `MmioWrite` lands on `QueueNotify`; until
-    /// then, nothing does, matching the "next real step, not stubbed here" framing this module's
-    /// prior iterations left in place.
+    /// `virtio_mmio.rs`'s doc), so it cannot drive this itself. `Multiverse::service_virtio_rng_
+    /// interrupt` is the real caller, invoked with the guest's real memory after an `MmioWrite`
+    /// lands on `QueueNotify`.
     #[cfg(target_os = "linux")]
     pub fn service_virtio_rng<M: GuestMemoryBackend>(&mut self, mem: &M) -> Result<u32, VirtqueueError> {
         let Some(transport) = self.virtio_rng.as_ref() else { return Ok(0) };
@@ -323,12 +325,19 @@ impl DeviceBus {
         }
         let queue = self.virtio_rng_queue.as_mut().expect("just set above");
         let entropy = &mut self.virtio_rng_entropy;
-        queue.process_available(mem, |buf| {
+        let processed = queue.process_available(mem, |buf| {
             for chunk in buf.chunks_mut(8) {
                 let word = entropy.next_u64().to_le_bytes();
                 chunk.copy_from_slice(&word[..chunk.len()]);
             }
-        })
+        })?;
+        if processed > 0 {
+            self.virtio_rng
+                .as_mut()
+                .expect("checked Some at the top of this function")
+                .raise_used_buffer_notification();
+        }
+        Ok(processed)
     }
 
     /// A [`DeviceBus`] reconstructed from a `Universe` snapshot's device row
@@ -666,6 +675,34 @@ mod virtio_rng_service_tests {
 
         // A second call with no further driver activity drains nothing new.
         assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0);
+    }
+
+    #[test]
+    fn draining_the_ring_raises_interrupt_status_and_ack_clears_it() {
+        const REG_INTERRUPT_STATUS: u64 = 0x060;
+        const REG_INTERRUPT_ACK: u64 = 0x064;
+
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_rng();
+        bus.seed_virtio_rng_entropy(1);
+        assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0, "nothing raised before any activity");
+
+        negotiate_and_post_one_descriptor(&mut bus, &mem, 8);
+        // QueueNotify alone (before the caller drains the ring) must not raise it -- only actually
+        // draining does, matching real hardware (the device, not the doorbell, raises the ISR
+        // condition).
+        assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0);
+
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 1);
+        assert_ne!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0, "draining a chain raises the vring bit");
+
+        write_reg(&mut bus, REG_INTERRUPT_ACK, u32::MAX);
+        assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0, "driver ack clears it");
+
+        // Nothing left to drain, so servicing again must not re-raise it.
+        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0);
+        assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0);
     }
 
     #[test]

@@ -79,7 +79,13 @@ pub const INITRAMFS_ADDR: u64 = 0x0200_0000;
 
 /// The three fixed page-table pages built fresh on every boot (`build_identity_page_tables`
 /// below) — one PML4 page, one PDPTE page, and enough PDE pages to cover `GUEST_RAM_SIZE` via
-/// 2 MiB pages (never any 4 KiB leaf, so the table is small and construction stays O(RAM/2MiB)).
+/// 2 MiB pages (never any 4 KiB leaf, so the table is small and construction stays O(RAM/2MiB)),
+/// plus one more PDE page `build_identity_page_tables` always appends after the RAM-covering ones
+/// to identity-map the virtio-mmio device window ([`VIRTIO_MMIO_RNG_BASE`]) — paging is mandatory
+/// in long mode, so a guest can only *reach* a GPA outside registered RAM at all if its own page
+/// tables have a present translation for it; without this, a guest touching that window takes a
+/// genuine `#PF` long before the access could ever become the intended VM exit. [`GDT_ADDR`]
+/// starts one page later than it otherwise would, to leave room for it.
 pub const PML4_ADDR: u64 = 0x0000_9000;
 pub const PDPTE_ADDR: u64 = 0x0000_A000;
 pub const PDE_ADDR: u64 = 0x0000_B000;
@@ -96,8 +102,9 @@ pub const BOOT_STACK_POINTER: u64 = 0x0000_FFF0;
 /// a real GDT descriptor-table lookup of the gate's target selector, regardless of how the
 /// *current* CS got there. `inject_at` (`baud_vcpu::boundary`) landing an interrupt into a guest's
 /// IDT-registered handler therefore needs an actual GDT in guest memory or the CPU faults trying
-/// to read it. One page is reserved; only 3 entries (24 bytes) are ever written.
-pub const GDT_ADDR: u64 = 0x0000_C000;
+/// to read it. One page is reserved; only 3 entries (24 bytes) are ever written. Starts at
+/// `0xD000`, not `0xC000`, to leave room for [`PDE_ADDR`]'s second (virtio-mmio-window) page.
+pub const GDT_ADDR: u64 = 0x0000_D000;
 
 /// Selector for the flat 64-bit code segment ([`build_flat_gdt`]'s index 1) — matches
 /// `pagetables::long_mode_sregs`'s `cs.selector` exactly, so `kvm_sregs` (KVM's direct-loaded
@@ -160,20 +167,25 @@ const PTE_WRITABLE: u64 = 1 << 1;
 const PTE_PAGE_SIZE_2MB: u64 = 1 << 7;
 
 /// One fixed, minimal identity map: guest-virtual address == guest-physical address for every
-/// byte of `GUEST_RAM_SIZE`, built from exactly `1 PML4 + 1 PDPTE + ceil(RAM / 1GiB) PDE pages`
-/// (one PDPTE page's 512 entries already cover 512 GiB, so `GUEST_RAM_SIZE` never needs more than
-/// one PDPTE page at the sizes baud boots today). This is the long-mode direct-boot technique
-/// every minimal rust-vmm VMM uses in place of emulating the kernel's own real-mode/legacy
-/// page-table setup code (specs/baud-multiverse.md §3.6's subtractive rule: no host interrupts, no
-/// real BIOS, "down to a console plus the tape device" — including no real-mode boot trampoline).
+/// byte of `GUEST_RAM_SIZE`, plus one dedicated leaf for the virtio-mmio device window
+/// ([`VIRTIO_MMIO_RNG_BASE`], see [`build_identity_page_tables`]'s doc for why that leaf must
+/// exist at all). Built from `1 PML4 + 1 PDPTE + ceil(RAM / 1GiB) PDE pages` for RAM, plus exactly
+/// one more PDE page for the virtio-mmio window (one PDPTE page's 512 entries already cover
+/// 512 GiB, so neither RAM nor the device window ever needs more than this one PDPTE page at the
+/// sizes baud boots today). This is the long-mode direct-boot technique every minimal rust-vmm VMM
+/// uses in place of emulating the kernel's own real-mode/legacy page-table setup code
+/// (specs/baud-multiverse.md §3.6's subtractive rule: no host interrupts, no real BIOS, "down to a
+/// console plus the tape device" — including no real-mode boot trampoline).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityPageTables {
     /// One page (4 KiB, 512 x 8-byte entries) — entry 0 points at the PDPTE page.
     pub pml4: [u64; PAGE_TABLE_ENTRY_COUNT],
-    /// One page — entry 0 points at the first PDE page (only one needed while `GUEST_RAM_SIZE`
-    /// stays under 1 GiB per PDPTE entry).
+    /// One page — one entry per 1 GiB region that has a mapped PDE page: RAM's (always index 0,
+    /// while `GUEST_RAM_SIZE` stays under 1 GiB) and the virtio-mmio window's (a fixed, distinct
+    /// index derived from [`VIRTIO_MMIO_RNG_BASE`]).
     pub pdpte: [u64; PAGE_TABLE_ENTRY_COUNT],
-    /// One page per 1 GiB of `ram_size`, each holding up to 512 2 MiB leaf mappings.
+    /// One page per 1 GiB of `ram_size` (each holding up to 512 2 MiB leaf mappings), plus exactly
+    /// one more page — always last — holding the virtio-mmio window's single leaf mapping.
     pub pde_pages: Vec<[u64; PAGE_TABLE_ENTRY_COUNT]>,
 }
 
@@ -190,7 +202,7 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
     let two_mb_pages_needed = ram_size.div_ceil(PDE_PAGE_SIZE_BYTES as usize);
     let pde_page_count = two_mb_pages_needed.div_ceil(PAGE_TABLE_ENTRY_COUNT).max(1);
 
-    let mut pde_pages = Vec::with_capacity(pde_page_count);
+    let mut pde_pages = Vec::with_capacity(pde_page_count + 1); // +1 for the virtio-mmio-window page below
     // `pde_page_index` is used for its own arithmetic value (the PDPTE-entry address offset and
     // the leaf-GPA calculation below), not just to index `pdpte` — `enumerate()` wouldn't remove
     // any of that arithmetic, only rename the index.
@@ -215,6 +227,31 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
         pde_pages.push(pde);
     }
 
+    // Also identity-map the fixed virtio-mmio device window (`VIRTIO_MMIO_RNG_BASE`): it sits
+    // outside `GUEST_RAM_SIZE` so it is never backed by a registered KVM memory region (an access
+    // still traps to a real VM exit, per this module's own MMIO-window doc), but paging is
+    // mandatory in long mode, so a guest can only *reach* that GPA at all if its own page tables
+    // have a present translation for it -- an identity map that only covers RAM leaves this
+    // address entirely unmapped, so a guest touching it takes a genuine #PF long before the
+    // access could ever become a VM exit (found for real: `virtio-rng-guest`'s first boot attempt
+    // halted via an unhandled fault before ever reaching its own `QueueNotify` write). One
+    // dedicated PDPTE entry + PDE page, present in every boot's bootstrap identity map -- harmless
+    // for any guest that never touches this GVA (every fixture before `virtio-rng-guest`), since
+    // real Linux replaces this whole bootstrap map with its own dynamic (`ioremap`-built) page
+    // tables during early boot regardless.
+    let mmio_pdpte_index = (VIRTIO_MMIO_RNG_BASE / (1u64 << 30)) as usize;
+    let mmio_pde_index = ((VIRTIO_MMIO_RNG_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+    assert!(
+        mmio_pdpte_index >= pde_page_count,
+        "the virtio-mmio window's PDPTE entry must not collide with a RAM-covering one"
+    );
+    let mut mmio_pde = [0u64; PAGE_TABLE_ENTRY_COUNT];
+    mmio_pde[mmio_pde_index] = VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
+    let mmio_pde_page_index = pde_pages.len();
+    pdpte[mmio_pdpte_index] =
+        (PDE_ADDR + (mmio_pde_page_index as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE;
+    pde_pages.push(mmio_pde);
+
     IdentityPageTables { pml4, pdpte, pde_pages }
 }
 
@@ -232,9 +269,12 @@ mod tests {
     #[test]
     fn pdpte_entries_point_at_consecutive_pde_pages() {
         let tables = build_identity_page_tables(GUEST_RAM_SIZE);
-        for (i, page) in tables.pde_pages.iter().enumerate() {
+        // The last page is always the dedicated virtio-mmio-window page (a distinct, non-
+        // contiguous PDPTE index) -- only the RAM-covering pages before it are contiguous.
+        let ram_pde_pages = tables.pde_pages.len() - 1;
+        for i in 0..ram_pde_pages {
             assert_eq!(tables.pdpte[i], (PDE_ADDR + (i as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE);
-            assert!(!page.is_empty());
+            assert!(!tables.pde_pages[i].is_empty());
         }
     }
 
@@ -242,7 +282,7 @@ mod tests {
     fn every_2mb_of_ram_is_identity_mapped_present_writable_2mb_page() {
         let ram = 256 * 1024 * 1024; // 256 MiB -> 128 leaf entries, all in one PDE page
         let tables = build_identity_page_tables(ram);
-        assert_eq!(tables.pde_pages.len(), 1);
+        assert_eq!(tables.pde_pages.len(), 2, "one RAM page plus the dedicated virtio-mmio-window page");
         let pde = &tables.pde_pages[0];
         let mapped_count = ram / (PDE_PAGE_SIZE_BYTES as usize);
         for (i, &entry) in pde.iter().enumerate() {
@@ -258,14 +298,44 @@ mod tests {
 
     #[test]
     fn ram_larger_than_one_gib_spans_multiple_pde_pages() {
-        let ram = 1536 * 1024 * 1024; // 1.5 GiB -> needs 2 PDE pages (768 leaf entries)
+        let ram = 1536 * 1024 * 1024; // 1.5 GiB -> needs 2 RAM PDE pages (768 leaf entries)
         let tables = build_identity_page_tables(ram);
-        assert_eq!(tables.pde_pages.len(), 2);
-        // Last mapped leaf entry (index 767, in the second PDE page at offset 255).
+        assert_eq!(tables.pde_pages.len(), 3, "2 RAM pages plus the dedicated virtio-mmio-window page");
+        // Last mapped leaf entry (index 767, in the second RAM PDE page at offset 255).
         let last_mapped = &tables.pde_pages[1][255];
         assert_eq!(*last_mapped & !0xFFF, 767 * PDE_PAGE_SIZE_BYTES);
         // First not-present entry right after it.
         assert_eq!(tables.pde_pages[1][256], 0);
+    }
+
+    /// The dedicated leaf `build_identity_page_tables` always appends for
+    /// [`VIRTIO_MMIO_RNG_BASE`] — the fix for a real bug `virtio-rng-guest`'s first boot attempt
+    /// found (that fixture halted on an unhandled fault before ever reaching its own `QueueNotify`
+    /// write): without this, a guest touching that GVA has no present page-table translation for
+    /// it at all, so paging (mandatory in long mode) faults before the access could ever become
+    /// the intended VM exit.
+    #[test]
+    fn identity_map_also_covers_the_virtio_mmio_window() {
+        let tables = build_identity_page_tables(GUEST_RAM_SIZE);
+        let mmio_pdpte_index = (VIRTIO_MMIO_RNG_BASE / (1u64 << 30)) as usize;
+        let mmio_pde_index = ((VIRTIO_MMIO_RNG_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+
+        assert_ne!(mmio_pdpte_index, 0, "must not collide with RAM's own PDPTE entry 0");
+        let mmio_pde_page = tables.pde_pages.last().expect("at least one PDE page always exists");
+        let expected_pdpte_entry =
+            (PDE_ADDR + ((tables.pde_pages.len() - 1) as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE;
+        assert_eq!(tables.pdpte[mmio_pdpte_index], expected_pdpte_entry);
+
+        assert_eq!(
+            mmio_pde_page[mmio_pde_index],
+            VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
+        );
+        // Every other entry in this page stays not-present -- only the one window leaf is mapped.
+        for (i, &entry) in mmio_pde_page.iter().enumerate() {
+            if i != mmio_pde_index {
+                assert_eq!(entry, 0, "no fabricated mapping outside the virtio-mmio window itself");
+            }
+        }
     }
 
     #[test]
@@ -305,7 +375,10 @@ mod tests {
         let regions: &[(&str, u64, u64)] = &[
             ("pml4", PML4_ADDR, 0x1000),
             ("pdpte", PDPTE_ADDR, 0x1000),
-            ("pde", PDE_ADDR, 0x1000), // first PDE page; additional pages follow contiguously
+            // `GUEST_RAM_SIZE` (256 MiB) needs exactly one RAM-covering PDE page, plus the
+            // dedicated virtio-mmio-window page `build_identity_page_tables` always appends --
+            // 2 pages total in the common (this project's) case; `GDT_ADDR` starts right after.
+            ("pde", PDE_ADDR, 0x2000),
             ("zero_page", ZERO_PAGE_ADDR, 0x1000),
             ("gdt", GDT_ADDR, 0x1000),
         ];

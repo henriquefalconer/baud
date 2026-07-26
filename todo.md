@@ -1440,6 +1440,59 @@ snapshot, not a duplicate of it.
      `drive/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions. The in-kernel-irqchip
      question (this host never calls `KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD`, so which vector a
      `virtio_mmio.device=` cmdline IRQ resolves to remains unverified) was again explicitly out of scope.
+     **This iteration: the "interrupt delivery" half of this gap is now closed too — boot/cmdline/CLI
+     wiring is the only piece still open.** `virtio_mmio.rs` gained `VIRTIO_MMIO_INT_VRING` (bit 0 of
+     `InterruptStatus`, spec 1.1 §4.2.2.2's "Used Buffer Notification"), `VirtioMmioTransport::raise_
+     used_buffer_notification()` (ORs that bit in; only the driver's own `REG_INTERRUPT_ACK` write ever
+     clears it, matching real hardware) and an `interrupt_status()` read accessor; the module's own doc
+     comment, which previously said this transport "does not raise a real interrupt" and that
+     `InterruptStatus` "always reads 0", is updated to match. `console.rs`'s `DeviceBus::service_
+     virtio_rng` now calls `raise_used_buffer_notification()` whenever `process_available` reports at
+     least one drained chain (one new test, `draining_the_ring_raises_interrupt_status_and_ack_clears_
+     it`, proving a bare `QueueNotify` does not raise it, draining does, and the driver's ack clears it).
+     `linux/mod.rs`'s `Multiverse` gained four new methods: `enable_virtio_rng()` and `seed_virtio_rng_
+     entropy(seed)` (thin wrappers over the `DeviceBus` methods iteration 25 added), `virtio_rng()` (a
+     read accessor onto the transport, for callers/tests that want `notify_count`/`interrupt_status`
+     without reaching into private state), and — the actual new piece —
+     `service_virtio_rng_interrupt(vector) -> Result<u32, DeterminismHole>`, which calls `DeviceBus::
+     service_virtio_rng` with the guest's real memory and, if anything was drained, delivers a real
+     interrupt at `vector` to the vCPU right now by calling `inject_timer_tick(0, vector)`'s degenerate
+     `period_rcb = 0` case ("the next reachable boundary") — no new low-level KVM primitive was needed;
+     this reuses H4's existing exact-boundary engine (`baud_vcpu::boundary`) exactly as the periodic
+     timer already does for `LOCAL_TIMER_VECTOR`. Proving this end-to-end surfaced a real, independent
+     bug: `layout::build_identity_page_tables` only ever identity-mapped `GUEST_RAM_SIZE`, so a guest's
+     own access to the virtio-mmio device window (`VIRTIO_MMIO_RNG_BASE = 0xd0000000`, deliberately
+     outside registered RAM so it traps to a VM exit) had no page-table translation at all — paging is
+     mandatory in long mode, so the access took a genuine `#PF` long before it could ever become the
+     intended MMIO VM-exit. Fixed by always appending one dedicated PDE page + PDPTE entry identity-
+     mapping that window, regardless of `ram_size`; `layout::GDT_ADDR` moved from `0xC000` to `0xD000`
+     to make room (confirmed via `grep` that nothing else in the codebase hardcoded the old value).
+     Layout's unit tests were updated for the extra always-present PDE page and a new test,
+     `identity_map_also_covers_the_virtio_mmio_window`, added. A new hand-assembled real-hardware
+     fixture, `crates/baud-multiverse/tests/fixtures/virtio-rng-guest/` (`payload.s`, `build.py`,
+     `BUILD.md`), is a minimal real x86-64 virtio-rng driver sequence — negotiate, set up one queue,
+     post one writable descriptor, `QueueNotify` — with its own IDT gate (vector `0x31`) whose ISR
+     writes a marker byte plus the actual entropy byte the device filled the buffer with. Two new real-
+     hardware tests in `linux/mod.rs`: `virtio_rng_interrupt_reaches_the_guests_own_isr` (single boot,
+     asserts the guest's own ISR observes the exact tape-seeded entropy byte through a real delivered
+     interrupt) and `virtio_rng_interrupt_delivery_is_reproducible_across_two_boots` (double-boot
+     determinism, same style as `timer_tick_lands_at_identical_instruction`), both passing on real
+     `/dev/kvm`. Explicitly NOT done: which vector an *unmodified Linux* guest's real `virtio_mmio`/
+     `virtio_rng` driver stack would resolve its `virtio_mmio.device=<size>@<base>:<irq>` cmdline IRQ
+     to via `request_irq()` remains unverified — unlike the LAPIC timer's architecturally-fixed vector,
+     an ordinary device IRQ is normally resolved through an IOAPIC/PIC, which this VMM does not have
+     (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are still never called anywhere, confirmed again); wiring
+     virtio-rng into any real boot's cmdline/CLI/server route is also still open; the spec-named test
+     `virtio_rng_reseed_is_deterministic` still cannot pass until both land — a real Linux guest, not
+     just this hand-assembled fixture, must actually negotiate and use the device. `cargo build
+     --workspace` clean; `clippy --workspace --all-targets` 0 new warnings (confirmed the full warning
+     list is unchanged from prior iterations, none in the files this iteration touched); `cargo test
+     --workspace` — one test (`linux::tests::rdtsc_guest_reproduces_high_bits_across_boots`) failed once
+     under full parallel load but passed clean both in isolation and on a full-suite rerun (0 failures),
+     the same one-off real-hardware jitter flake iteration 13 already documented for this exact test,
+     not a regression, not chased further; `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5)
+     all still PASS on real `/dev/kvm`, no regressions from the widened `DeviceBus`/`Multiverse`/
+     `layout` surfaces.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-
@@ -1715,6 +1768,11 @@ snapshot, not a duplicate of it.
      ralph-iteration-25 note above (`console.rs`'s `service_virtio_rng`). Interrupt delivery and
      boot/cmdline/CLI wiring are the only pieces still open before `virtio_rng_reseed_is_deterministic`
      can pass.
+     **Correction (this iteration)**: interrupt delivery is also now done — see item 1's note above
+     (`VirtioMmioTransport::raise_used_buffer_notification` plus `Multiverse::service_virtio_rng_
+     interrupt`). Boot/cmdline/CLI wiring (and, separately, which vector an unmodified Linux guest's
+     `virtio_mmio` driver would actually bind to) is the only piece still open before `virtio_rng_
+     reseed_is_deterministic` can pass.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

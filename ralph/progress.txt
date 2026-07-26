@@ -5591,3 +5591,51 @@ todo.md updated with this iteration's findings (37 insertions, 0 deletions, both
 ---
 
 Post-push verification: git push succeeded (cfc1413..817d345 main -> main); local HEAD matches origin/main tip exactly (817d345); working tree clean. Full build/clippy/test/drive-script suite was run against this exact commit content before pushing. todo.md still has pending items (virtio-rng interrupt-delivery + boot/CLI wiring, H8/FCEUX Qt5, H9 Ubuntu) -- emitting NEXT.
+
+## 2026-07-26T16:26:50 UTC (34min) - Session usage — build-25 [sonnet]
+- cost $6.9777 (from claude -p)
+- context 246,196 tok peak of 1M (25%) across 79 inference calls, monotonic
+- models sonnet-5 $6.9745 (in 174 / out 61,068 / cache-read 15,321,322) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/025-build-25.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 26
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md and recent progress history.
+
+Chose the virtio-rng interrupt-delivery + boot/cmdline/CLI wiring gap -- it's the next open piece explicitly named at the end of item 1 in todo.md (iterations 23-25 built the transport register layer, ring parsing, and notify-to-drain wiring; interrupt delivery + wiring into a real boot is the last blocker before virtio_rng_reseed_is_deterministic can pass). Dispatched an Explore subagent to map the existing KVM_INTERRUPT injection machinery (no in-kernel irqchip exists) before designing the interrupt path.
+
+Mechanical piece landed and unit-tested: virtio_mmio.rs now raises InterruptStatus bit 0 on used-buffer completion (raise_used_buffer_notification), console.rs's service_virtio_rng calls it after draining. 28 unit tests pass (2 new). Now wiring Multiverse-level real interrupt delivery (linux/mod.rs) using the existing inject_timer_tick(0, vector) degenerate-case primitive, plus a new hand-assembled virtio-rng-guest fixture to hardware-verify it end-to-end.
+
+Found the root cause of the guest halting before notifying: the boot-time identity page tables only mapped GUEST_RAM_SIZE, so the flat-binary guest's own access to the virtio-mmio window (0xd0000000, outside registered RAM) faulted before ever reaching the intended VM-exit trap -- paging is mandatory in long mode. Fixed layout::build_identity_page_tables to always append a dedicated PDE page identity-mapping VIRTIO_MMIO_RNG_BASE (moved GDT_ADDR 0xC000->0xD000 to make room). All 8 layout unit tests pass after the fix. Re-running the virtio-rng interrupt hardware tests now.
+
+Both new virtio-rng interrupt-delivery tests pass on real /dev/kvm: virtio_rng_interrupt_reaches_the_guests_own_isr and virtio_rng_interrupt_delivery_is_reproducible_across_two_boots. This closes the interrupt-delivery gap iteration 25 left open. Now running the full baud-multiverse test suite (cross-cutting change: every boot's identity page tables changed) to check for regressions.
+
+Full baud-multiverse --lib suite: 118 passed, 0 failed, 8 ignored (enforced-regime/opt-in as expected), 210s -- confirms the identity-page-table fix causes no regressions across every existing fixture. Running cargo build --workspace now.
+
+cargo build --workspace clean (only pre-existing baud-tracing aya::Bpf warnings). Running cargo clippy --workspace --all-targets now.
+
+cargo clippy --workspace --all-targets: 0 new warnings -- confirmed all warnings are the same pre-existing list (baud-tracing aya::Bpf, baud-multiverse lib.rs Entropy/Input/Net/ExitDevice derivable-impl + div_ceil/unnecessary_cast, baud-tape-agent transport.rs, baud-server routes/{fuzz,replay,tracing}.rs) -- none touch virtio_mmio.rs/console.rs/linux/mod.rs/layout.rs. Running cargo test --workspace now.
+
+cargo test --workspace: 1 failure (linux::tests::rdtsc_guest_reproduces_high_bits_across_boots) under full parallel load -- confirmed via isolated rerun (passes clean) this matches the same pre-existing real-hardware jitter flake iteration 13 documented (unrelated hand-assembled rdtsc-guest fixture, never touches the virtio-mmio window my page-table change added). Rerunning full cargo test --workspace once more to confirm it's not a real regression.
+
+cargo test --workspace rerun: 0 failures across every crate -- confirms the earlier rdtsc_guest failure was a one-off parallel-load hardware flake, not a regression. Running drive/h0.sh through drive/h7.sh and drive/m9.sh-m13.sh individually against real /dev/kvm next.
+
+drive/h0.sh through drive/h7.sh (8/8) all PASS on real /dev/kvm, no regressions from the identity-page-table change. Running drive/m9.sh through drive/m13.sh next.
+
+drive/m9.sh through drive/m13.sh (5/5) all PASS on real /dev/kvm, no regressions. Full verification suite green. Dispatching a subagent to update todo.md with this iteration's findings now.
+
+## 2026-07-26T17:20:00 UTC - Changes committed.
+- Closed the "interrupt delivery" half of virtio-rng's remaining gap (todo.md §14 item 1) -- a real interrupt can now be delivered to a guest's virtio-rng ISR with no in-kernel irqchip, hardware-verified end to end.
+- Files changed: crates/baud-multiverse/src/{virtio_mmio.rs,console.rs,layout.rs,linux/mod.rs}, crates/baud-multiverse/tests/fixtures/virtio-rng-guest/{payload.s,build.py,BUILD.md,bzImage} (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - `virtio_mmio.rs`: `VIRTIO_MMIO_INT_VRING` constant, `VirtioMmioTransport::raise_used_buffer_notification()` (sets InterruptStatus bit 0), `interrupt_status()` accessor -- InterruptStatus is no longer hardcoded to 0.
+  - `console.rs`: `DeviceBus::service_virtio_rng` now raises the interrupt-status bit whenever it drains at least one chain.
+  - `linux/mod.rs`: `Multiverse` gained `enable_virtio_rng()`, `seed_virtio_rng_entropy(seed)`, `virtio_rng()` accessor, and `service_virtio_rng_interrupt(vector)` -- the last one drains the ring with real guest memory and, if anything was drained, delivers a real interrupt right now via `inject_timer_tick(0, vector)`'s degenerate case, reusing H4's existing exact-boundary engine with no new low-level KVM primitive.
+  - `layout.rs`: fixed a real bug this work surfaced -- the boot-time identity page tables only ever mapped `GUEST_RAM_SIZE`, so a guest's own access to the virtio-mmio device window (outside registered RAM by design) took a genuine `#PF` before the access could become the intended MMIO VM-exit. `build_identity_page_tables` now always appends a dedicated PDE page + PDPTE entry for `VIRTIO_MMIO_RNG_BASE`; `GDT_ADDR` moved 0xC000->0xD000 to make room. New test `identity_map_also_covers_the_virtio_mmio_window`; existing layout tests updated for the extra page.
+  - New fixture `tests/fixtures/virtio-rng-guest/`: a real, hand-assembled x86-64 virtio-rng driver sequence (negotiate/queue-setup/post/notify) with its own IDT gate whose ISR reads back the actual tape-seeded entropy byte the device wrote. Two new real-hardware tests in `linux/mod.rs`: `virtio_rng_interrupt_reaches_the_guests_own_isr` and `virtio_rng_interrupt_delivery_is_reproducible_across_two_boots`, both passing on real `/dev/kvm`.
+  - Still open (documented in todo.md, not attempted): which vector an unmodified Linux guest's real `virtio_mmio` driver would bind to via `request_irq()` (no IOAPIC/PIC here to resolve one dynamically), and wiring virtio-rng into any real boot's cmdline/CLI/server route.
+  - Verification: `cargo build --workspace` clean; `cargo clippy --workspace --all-targets` 0 new warnings; `cargo test --workspace` 0 failures (one transient `rdtsc_guest_reproduces_high_bits_across_boots` flake under parallel load, confirmed a pre-existing one-off hardware-jitter flake via isolated rerun and a clean full-suite rerun, not a regression); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`.
+---

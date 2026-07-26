@@ -14,20 +14,29 @@
 //
 // **What this module deliberately does not do** (register-level bookkeeping only, by design — see
 // `crate::virtio_queue` for the layer above): it never dereferences `desc`/`driver`/`device` as
-// guest-memory addresses itself, and it does not raise a real interrupt — `QueueNotify` only
-// records that a notification arrived (`notify_count`/`last_notified_queue`), and
-// `InterruptStatus` always reads `0`. [`Self::queue_ring_config`] hands the negotiated addresses to
+// guest-memory addresses itself. [`Self::queue_ring_config`] hands the negotiated addresses to
 // `crate::virtio_queue::SplitVirtqueue`, which walks a queue's descriptor table / avail ring / used
 // ring over real `vm-memory` (todo.md §14 next-actions item 1); `console.rs`'s `DeviceBus::service_
 // virtio_rng` now actually drives that from a `QueueNotify`-equivalent call, filling buffers with
 // tape-seeded entropy bytes — but only when a caller invokes it explicitly with real guest memory,
 // since this transport's own `Bus` impl (used by `baud-vcpu`'s memory-oblivious exit dispatch) has
-// no guest-memory access to do so itself. Injecting a real interrupt through the exact-boundary
-// engine (`baud_vcpu::boundary`) or a new one is still deferred: this host has no in-kernel irqchip
-// (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called, `linux/mod.rs`), so which vector a
-// `virtio_mmio.device=` IRQ number resolves to is unverified and needs its own investigation before
-// that can be wired in, not stubbed here — same for wiring any of this into a real boot's
-// cmdline/CLI/server route.
+// no guest-memory access to do so itself.
+//
+// `InterruptStatus` is no longer hardcoded to `0`: [`Self::raise_used_buffer_notification`] sets
+// bit 0 (spec 1.1 §4.2.2.2, "Used Buffer Notification") once a caller has drained the ring —
+// `console.rs`'s `service_virtio_rng` calls it whenever `process_available` reports a nonzero
+// count — and `REG_INTERRUPT_ACK`'s existing write handler clears whatever bits the driver
+// acknowledges. Actually *delivering* that as a real CPU interrupt through the exact-boundary
+// engine (`baud_vcpu::boundary::inject_at`) is `Multiverse::service_virtio_rng_interrupt`
+// (`linux/mod.rs`) — real-hardware-verified against a hand-assembled fixture with its own IDT
+// gate (`tests/fixtures/virtio-rng-guest/`) that this host needs no in-kernel irqchip at all
+// (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called anywhere) for a *fixed, baud-chosen*
+// vector to reach a guest's own ISR — the same trick H4's periodic timer already relies on for
+// Linux's `LOCAL_TIMER_VECTOR`. **Still open**: which vector an *unmodified Linux* guest's real
+// `virtio_mmio` driver would actually bind to via `request_irq()` for a `virtio_mmio.device=`
+// cmdline IRQ number remains unverified (there is no IOAPIC/PIC here to resolve one dynamically,
+// unlike the LAPIC timer's architecturally-fixed vector) — and wiring any of this into a real
+// boot's cmdline/CLI/server route is separate, still-open work.
 //
 // Every register is a naturally-aligned 32-bit word (the only access width the virtio-mmio spec
 // permits); this mirrors `console.rs`'s `Console::pio_read`'s own precedent for a narrower-than-
@@ -66,6 +75,11 @@ pub const VIRTIO_STATUS_DRIVER_OK: u32 = 4;
 pub const VIRTIO_STATUS_FEATURES_OK: u32 = 8;
 pub const VIRTIO_STATUS_DEVICE_NEEDS_RESET: u32 = 64;
 pub const VIRTIO_STATUS_FAILED: u32 = 128;
+
+/// `InterruptStatus` bit 0 (spec 1.1 §4.2.2.2): "Used Buffer Notification" — a queue's used ring
+/// has entries the driver's ISR must observe. Bit 1 (`VIRTIO_MMIO_INT_CONFIG`, config-space
+/// change) is never set by this transport — virtio-rng defines no config space to change.
+pub const VIRTIO_MMIO_INT_VRING: u32 = 1;
 
 // Register offsets within the device's MMIO window (spec 1.1 §4.2.2 Table 4.1), version-2 subset
 // (no legacy `QueuePFN`/`QueueAlign`/`GuestPageSize`).
@@ -205,6 +219,22 @@ impl VirtioMmioTransport {
     /// has never notified.
     pub fn last_notified_queue(&self) -> Option<u32> {
         self.last_notified_queue
+    }
+
+    /// The interrupt-status register's current raw value — `0` until [`Self::raise_used_buffer_
+    /// notification`] sets a bit, or after the driver acknowledges it (`REG_INTERRUPT_ACK`).
+    pub fn interrupt_status(&self) -> u32 {
+        self.interrupt_status
+    }
+
+    /// Set the "Used Buffer Notification" bit (spec 1.1 §4.2.2.2) — called once a caller has
+    /// drained new entries from a queue's used ring (`console.rs`'s `service_virtio_rng`), so the
+    /// driver's ISR sees a nonzero `InterruptStatus` and knows which condition to service. Cleared
+    /// only by the driver's own `REG_INTERRUPT_ACK` write, matching real hardware — this method
+    /// never clears anything, only ORs the bit in, so back-to-back notifications before the driver
+    /// acknowledges the first are never silently dropped.
+    pub fn raise_used_buffer_notification(&mut self) {
+        self.interrupt_status |= VIRTIO_MMIO_INT_VRING;
     }
 
     /// The status register's current raw value — every bit the driver has written since the last
@@ -501,8 +531,28 @@ mod tests {
         write_reg(&mut t, REG_QUEUE_NOTIFY, 0);
         assert_eq!(t.notify_count(), 2);
         assert_eq!(t.last_notified_queue(), Some(0));
-        // No ring is processed yet, so no interrupt is ever raised by a notification.
+        // This transport never raises an interrupt on its own from a bare notify -- only a caller
+        // that has actually drained the ring (`console.rs`'s `service_virtio_rng`) does that, via
+        // `raise_used_buffer_notification`.
         assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), 0);
+    }
+
+    #[test]
+    fn raise_used_buffer_notification_sets_vring_bit_and_ack_clears_only_that_bit() {
+        let mut t = VirtioMmioTransport::new_rng(BASE);
+        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), 0);
+
+        t.raise_used_buffer_notification();
+        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), VIRTIO_MMIO_INT_VRING);
+        assert_eq!(t.interrupt_status(), VIRTIO_MMIO_INT_VRING);
+
+        // Raising it again while already set is idempotent (OR, not increment).
+        t.raise_used_buffer_notification();
+        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), VIRTIO_MMIO_INT_VRING);
+
+        // The driver acknowledges by writing the bit(s) it handled back to InterruptAck.
+        write_reg(&mut t, REG_INTERRUPT_ACK, VIRTIO_MMIO_INT_VRING);
+        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), 0, "ack clears the bit");
     }
 
     #[test]
