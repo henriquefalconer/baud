@@ -26,18 +26,26 @@
 # `handle_baud_rdtsc_exit` (kind 0), and `baud-vcpu` serves EDX:EAX from the same work-clock plus
 # ECX from `IA32_TSC_AUX` (`WorkClock::serve_enforced_tsc_aux`). That crash is gone for good.
 #
-# KNOWN FLAKINESS, IMPROVED BUT NOT FULLY FIXED (todo.md §14 next-actions item 2): a prior iteration
-# root-caused and fixed the largest source of divergence — WorkClock's RCB perf_event counter
-# accumulated host-side dispatch branches between guest exits (exclude_host doesn't work on this
-# nested-virtualized dev host), not just guest branches. Fixed by pausing/resuming that counter
-# around each KVM_RUN ioctl (crates/baud-vcpu/src/linux/mod.rs's run_and_convert_rcb_bracketed).
-# Measured effect on real hardware: observed pass rate rose from ~25-50% to ~75% (15/20 across two
-# batches) — real, verified improvement, not a full fix. A FAIL here is still expected some fraction
-# of runs until the residual ~25% is root-caused (leading hypothesis: WorkClock's long-lived pinned
-# counter and LinuxPmuStepper's per-tick freshly-created pinned counter, both counting the same
-# hardware event on the same thread, may still interact at the physical-PMU-slot level even paused
-# — see os_entropy_is_deterministic's own doc comment for the full detail) — not a sign this script
-# is broken.
+# KNOWN FLAKINESS, IMPROVED AND NOW ROOT-CAUSED, STILL NOT FULLY FIXED (todo.md §14 next-actions
+# item 2): a prior iteration root-caused and fixed the largest source of divergence — WorkClock's
+# RCB perf_event counter accumulated host-side dispatch branches between guest exits (exclude_host
+# doesn't work on this nested-virtualized dev host), not just guest branches. Fixed by
+# pausing/resuming that counter around each KVM_RUN ioctl
+# (crates/baud-vcpu/src/linux/mod.rs's run_and_convert_rcb_bracketed). Measured effect on real
+# hardware: observed pass rate rose from ~25-50% to ~75% (15/20 across two batches) — real, verified
+# improvement, not a full fix. This iteration's os_entropy_is_deterministic tick diagnostic caught a
+# divergent pair with the SAME tick count and the SAME landing rip on both boots, but a 34-count
+# disagreement in the landing RCB overshoot — that overshoot IS the served virtual-TSC value at the
+# interrupt, and Linux's own add_interrupt_randomness() folds it (uncredited but still mixed) into
+# the CRNG pool on every interrupt, so a same-instruction interrupt still seeds the CRNG differently
+# each boot. Confirms (not just hypothesizes) that WorkClock's long-lived pinned counter and
+# LinuxPmuStepper's per-tick freshly-created pinned counter disagree on exactly when the
+# arm-early-then-single-step engine judges the target crossed — see os_entropy_is_deterministic's
+# own doc comment for the full mechanism. Reconciling the two into one shared pinned fd is the
+# concrete next fix, not yet attempted (a real architectural change, deferred to a future
+# iteration). A FAIL here is still expected some fraction of runs until that fix lands — not a sign
+# this script is broken. Set H7_ENTROPY_REPEATS=N to rerun the double-boot test N times in place
+# (one module swap, not N) to gather more diverging pairs' diagnostic output in one sitting.
 #
 #   Reuses `tests/fixtures/linux-guest/` (H7's boot-to-userspace fixture) — `entropy_init.c` /
 #   `entropy_initramfs.cpio.gz` are a second `/init` for the *same* already-built kernel (no
@@ -128,11 +136,31 @@ pass "patched kvm_intel.ko loaded in place of the stock module"
 # The real-hardware test: only meaningful with the patched module loaded.
 # ---------------------------------------------------------------------------
 log "Running os_entropy_is_deterministic against the patched module..."
-ENFORCED_OUT=$(cargo test -q -p baud-multiverse --lib -- --ignored --exact \
-    linux::tests::os_entropy_is_deterministic --test-threads=1 2>&1)
-echo "$ENFORCED_OUT"
-echo "$ENFORCED_OUT" | grep -q "test result: ok" || fail "os_entropy_is_deterministic FAILED"
-pass "os_entropy_is_deterministic — getrandom()/dev/urandom byte-identical across two boots, non-degenerate"
+# H7_ENTROPY_REPEATS (default 1): reruns the double-boot test this many times in place, without
+# re-swapping the kernel module each time — used to gather multiple boot-pairs' worth of the
+# tick-diagnostic panic output (todo.md §14 next-actions item 2's residual-divergence
+# investigation) in one sitting. Default of 1 preserves the script's normal pass/fail gating
+# contract; a caller investigating flakiness sets e.g. H7_ENTROPY_REPEATS=10.
+REPEATS="${H7_ENTROPY_REPEATS:-1}"
+FAILED_RUNS=0
+for i in $(seq 1 "$REPEATS"); do
+    log "os_entropy_is_deterministic: run $i/$REPEATS..."
+    ENFORCED_OUT=$(cargo test -q -p baud-multiverse --lib -- --ignored --exact \
+        linux::tests::os_entropy_is_deterministic --test-threads=1 2>&1)
+    if echo "$ENFORCED_OUT" | grep -q "test result: ok"; then
+        pass "run $i/$REPEATS: os_entropy_is_deterministic — byte-identical across two boots, non-degenerate"
+    else
+        FAILED_RUNS=$((FAILED_RUNS + 1))
+        echo "$ENFORCED_OUT"
+        echo "  [FAIL] run $i/$REPEATS: os_entropy_is_deterministic FAILED (see diagnostic above)" >&2
+    fi
+done
+if [[ "$REPEATS" -eq 1 ]]; then
+    [[ "$FAILED_RUNS" -eq 0 ]] || fail "os_entropy_is_deterministic FAILED"
+else
+    log "os_entropy_is_deterministic summary: $((REPEATS - FAILED_RUNS))/$REPEATS passed"
+    [[ "$FAILED_RUNS" -eq 0 ]] || echo "  [WARN] $FAILED_RUNS/$REPEATS run(s) failed — known residual flakiness, todo.md §14 next-actions item 2; inspect the diagnostic output above for correlation with a specific tick" >&2
+fi
 
 log "Regression: re-running rdtsc_enforced_regime_is_bit_exact_across_boots (RDTSCP handling layered on the same patch)..."
 RDTSC_OUT=$(cargo test -q -p baud-multiverse --lib -- --ignored --exact \

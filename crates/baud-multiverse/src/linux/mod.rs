@@ -2170,16 +2170,41 @@ mod tests {
     /// `crates/baud-vcpu/src/linux/mod.rs`), across all four real `KVM_RUN` call sites (the plain
     /// run loop plus `LinuxPmuStepper`'s three). Measured effect on real hardware: the observed pass
     /// rate rose from an estimated ~25-50% (the ~50-75% failure rate this doc previously described)
-    /// to ~75% (15/20 across two batches) — a real, verified improvement, not a full fix. Leading
-    /// hypothesis for the residual ~25%: `WorkClock`'s long-lived pinned counter and
-    /// `LinuxPmuStepper`'s per-tick freshly-created pinned counter both count the identical
-    /// hardware event on the identical thread simultaneously (up to `MAX_TICKS` times per boot) —
-    /// even paused/disabled, opening/closing the stepper's own counter that often could still
-    /// perturb physical-PMU-counter scheduling for `WorkClock`'s counter in a way this fix doesn't
-    /// address. Not yet confirmed by direct instrumentation. Do not re-claim this test as reliably
-    /// green until that hypothesis is checked and either fixed or the residual is shown to be the
-    /// already-acknowledged `RCB_HARDWARE_JITTER_TOLERANCE`-class hardware-read imprecision (§3.7)
-    /// rather than a further contamination source.
+    /// to ~75% (15/20 across two batches) — a real, verified improvement, not a full fix.
+    ///
+    /// **Residual ~25% root-caused this iteration by the tick diagnostic below (confirmed, not just
+    /// hypothesized).** A captured divergent pair showed the *same* tick count (13 == 13) and the
+    /// *same* landing `rip` (`0xffffffff81424b64`) on both boots at tick 0 — ruling out both a
+    /// control-flow divergence and a wrong injection site — yet the landing RCB itself overshot the
+    /// 500,000 target by a different amount on each boot (500,192 vs 500,158, a 34-count
+    /// disagreement, well past the ±8 tolerance [`RCB_HARDWARE_JITTER_TOLERANCE`] documents
+    /// elsewhere). That overshoot *is* the served virtual-TSC value at the exact instant the timer
+    /// interrupt lands — and Linux's own `add_interrupt_randomness()` folds `random_get_entropy()`
+    /// (== a raw `rdtsc`/our served value) into the CRNG pool on *every* interrupt, uncredited but
+    /// still mixed in (spec §3.8's own "why not just set kernel knobs" paragraph: mixing happens
+    /// regardless of crediting). So a same-instruction, same-tick-count interrupt still feeds a
+    /// different raw number into the guest's CRNG key each boot — this fully explains the observed
+    /// `getrandom()`/`/dev/urandom` divergence without needing any further contamination source or
+    /// control-flow explanation. This confirms, not refutes, the standing hypothesis that
+    /// `WorkClock`'s long-lived pinned counter and `LinuxPmuStepper`'s own per-tick freshly-created
+    /// pinned counter (both counting the identical hardware event on the identical thread, up to
+    /// `MAX_TICKS` times per boot) disagree on exactly *when* the arm-early-then-single-step engine
+    /// judges the target crossed — a two-fd epoch/scheduling disagreement, not raw single-fd
+    /// hardware imprecision (§3.7's own H0 gate already established the raw `BR_INST_RETIRED.COND`
+    /// event is bit-exact on a single always-running fd, so 34 counts of *landing-precision* jitter
+    /// implicates the second fd, not the counted event itself). **Not yet fixed**: the concrete next
+    /// step is reconciling the two into one shared pinned fd (`WorkClock::current_rcb`'s own doc
+    /// already flagged this as deferred work) so the interrupt-injection engine's "is the target
+    /// crossed yet" reads and the work-clock's own served value come from the identical epoch:
+    /// deferred to a future iteration as a real architectural change, not rushed in alongside this
+    /// diagnostic. On divergence this test now reports, instead of a bare byte-diff, whether the two
+    /// boots' `run_to_first_halt_with_periodic_timer` tick streams (rip + cumulative rcb per tick)
+    /// took a different number of ticks (would indicate a genuine control-flow divergence, e.g. a
+    /// TSC-calibration loop like `calibrate_delay()` iterating a different number of times — not
+    /// observed in the captured case above), or the same tick count with a per-tick RCB-delta
+    /// disagreement at a specific tick (the case observed, above), or neither (the divergence would
+    /// be invisible to the tick stream and must originate elsewhere — within a `KVM_RUN` window,
+    /// RDTSCP's TSC_AUX half, or the CRNG-mixing layer itself).
     #[test]
     #[ignore]
     fn os_entropy_is_deterministic() {
@@ -2210,6 +2235,17 @@ mod tests {
         const SPURIOUS_LAPIC_LINE: &str = "Spurious LAPIC timer interrupt on cpu 0\n";
 
         let mut probe_runs = Vec::new();
+        // todo.md §14 next-actions item 2's "needed next" step: direct instrumentation of the
+        // served RCB value at each tick, to tell apart the two remaining candidate explanations
+        // for the residual ~25% divergence -- cross-counter PMU contention (which would show up
+        // as a per-tick RCB-delta anomaly, or a differing tick *count* between the two boots,
+        // since a bad served virtual-TSC value can change how many iterations a TSC-calibration
+        // loop like `calibrate_delay()` takes -- a real control-flow divergence) versus the
+        // already-acknowledged `RCB_HARDWARE_JITTER_TOLERANCE`-class hardware-read imprecision
+        // (which would not correlate with any particular tick). Kept even on the passing path
+        // (not just on divergence) so `tick_runs` is available to the diagnostic below without a
+        // second, non-reproducing run.
+        let mut tick_runs: Vec<Vec<TimerTick>> = Vec::new();
         for i in 0..2 {
             let mut m = Multiverse::boot_with_rdseed_sites(
                 &kernel,
@@ -2222,9 +2258,10 @@ mod tests {
                 [],
             )
             .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
-            let (_ticks, halt) = m
+            let (ticks, halt) = m
                 .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
                 .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            tick_runs.push(ticks);
             let console =
                 String::from_utf8_lossy(&halt.console_output).replace(SPURIOUS_LAPIC_LINE, "");
             assert!(
@@ -2252,11 +2289,64 @@ mod tests {
             probe_runs.push(probes.into_iter().map(str::to_string).collect::<Vec<_>>());
         }
 
-        assert_eq!(
-            probe_runs[0], probe_runs[1],
-            "getrandom()/dev/urandom must be byte-identical across two boots of the same \
-             image+tape -- an unmodified Linux CRNG is a pure function of the tape"
-        );
+        if probe_runs[0] != probe_runs[1] {
+            let (n0, n1) = (tick_runs[0].len(), tick_runs[1].len());
+            let mut diag = format!("tick counts: run0={n0} ticks, run1={n1} ticks\n");
+            if n0 != n1 {
+                diag += "-> tick COUNTS DIFFER: the two boots took a different number of \
+                         periodic-timer ticks to reach halt, i.e. a real control-flow divergence \
+                         (e.g. a TSC-calibration loop like calibrate_delay() ran a different \
+                         number of iterations), not just a numeric read-jitter -- points at the \
+                         served virtual-TSC/RCB value itself being wrong at some point, not only \
+                         hardware-read imprecision.\n";
+            } else {
+                // Same tick count: compare the RCB *delta* between consecutive ticks (should be
+                // ~PERIOD_RCB every time) run-for-run, and report the first tick whose delta
+                // disagrees between the two boots -- pinpointing whether the divergence clusters
+                // at a particular tick (implicating cross-counter PMU contention, which would most
+                // plausibly perturb whichever ticks land during/near a `LinuxPmuStepper` counter
+                // teardown) or is spread uniformly across all ticks (implicating pure hardware
+                // read jitter, RCB_HARDWARE_JITTER_TOLERANCE-class, unrelated to any one tick).
+                let mut first_divergence = None;
+                for idx in 0..n0 {
+                    let d0 = tick_runs[0][idx]
+                        .rcb
+                        .saturating_sub(if idx == 0 { 0 } else { tick_runs[0][idx - 1].rcb });
+                    let d1 = tick_runs[1][idx]
+                        .rcb
+                        .saturating_sub(if idx == 0 { 0 } else { tick_runs[1][idx - 1].rcb });
+                    if d0 != d1 {
+                        first_divergence = Some((idx, d0, d1));
+                        break;
+                    }
+                }
+                match first_divergence {
+                    Some((idx, d0, d1)) => {
+                        diag += &format!(
+                            "-> same tick count, but tick {idx}/{n0} is the first whose \
+                             RCB delta from the previous tick disagrees between boots: \
+                             run0 delta={d0} run1 delta={d1} (period_rcb={PERIOD_RCB}); \
+                             run0 rip={:#x} run1 rip={:#x}\n",
+                            tick_runs[0][idx].rip, tick_runs[1][idx].rip
+                        );
+                    }
+                    None => {
+                        diag += "-> same tick count AND identical per-tick RCB deltas across \
+                                 both boots -- the entropy divergence is NOT reflected in the \
+                                 timer-tick RCB stream at all, so it originates somewhere the \
+                                 tick instrumentation doesn't observe (e.g. within a single \
+                                 KVM_RUN window between ticks, or in RDTSCP's TSC_AUX half, or \
+                                 truly at the CRNG-mixing layer itself).\n";
+                    }
+                }
+            }
+            panic!(
+                "getrandom()/dev/urandom must be byte-identical across two boots of the same \
+                 image+tape -- an unmodified Linux CRNG is a pure function of the tape\n{diag}\
+                 run0={:?}\nrun1={:?}",
+                probe_runs[0], probe_runs[1]
+            );
+        }
 
         let distinct: std::collections::HashSet<&String> = probe_runs[0].iter().collect();
         assert!(

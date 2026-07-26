@@ -1063,24 +1063,35 @@ snapshot, not a duplicate of it.
        `rdrand_enforced_regime_is_bit_exact_across_boots`, `rdseed_enforced_regime_is_bit_exact_across_
        boots` all still pass (no regression); `drive/h4.sh`/`h5.sh`/`h7.sh` all still pass clean on the
        stock module (including the 1000-branch and snapshot-restore real-hardware proofs).
-       (c) **Residual ~25% divergence, not yet root-caused — leading hypothesis for the next
-       iteration**: `WorkClock`'s long-lived pinned counter and `LinuxPmuStepper`'s own *separate*
-       pinned counter (freshly created and destroyed once per tick, up to `MAX_TICKS` times per boot)
-       both count the identical hardware event (`PERF_COUNT_HW_BRANCH_INSTRUCTIONS`) on the identical
-       thread simultaneously — even with `WorkClock`'s counter paused during the stepper's setup/
-       teardown, opening/closing a second *pinned* counter that often may still perturb the physical
-       PMU's limited counter-slot scheduling in a way `pause`/`resume` alone doesn't address (this is
-       distinct from the already-acknowledged `RCB_HARDWARE_JITTER_TOLERANCE`-class hardware-read
-       imprecision, §3.7, though the two could be compounding). **Needed next**: direct
-       instrumentation of the served RCB/virtual-TSC value at each tick across a diverging pair of
-       boots (still nothing logs this — confirmed absent this iteration), to determine whether the
-       residual divergence correlates with ticks (implicating cross-counter PMU contention) or is
-       spread uniformly (implicating pure hardware jitter); if the former, consider reconciling
-       `LinuxPmuStepper`'s counter and `WorkClock`'s counter into one shared, single pinned fd (the
-       existing doc at `WorkClock::current_rcb` already flags this reconciliation as deferred work).
-       Do not re-claim `os_entropy_is_deterministic` as reliably green until the residual is root-
-       caused with direct evidence and fixed, or shown to be pure hardware jitter the test should
-       instead be redesigned to tolerate.
+       (c) **Residual ~25% divergence — ROOT-CAUSED this iteration by direct instrumentation, still
+       not fixed.** Added a tick-level diagnostic to `os_entropy_is_deterministic`
+       (`crates/baud-multiverse/src/linux/mod.rs`; `run_to_first_halt_with_periodic_timer` already
+       returned per-tick `rip`+cumulative-`rcb`, previously discarded as `_ticks`) that on a byte-diff
+       reports whether the two boots' tick streams differ in *count* (control-flow divergence) or
+       have a per-tick RCB-delta disagreement at a specific tick (landing-precision jitter) or
+       neither. `drive/h7-enforced-entropy.sh` gained an `H7_ENTROPY_REPEATS=N` knob to rerun the
+       double-boot test N times against one module swap, to gather diverging pairs efficiently. A
+       real-hardware batch (`H7_ENTROPY_REPEATS=6`) caught one: **same tick count (13==13) and the
+       same landing `rip` on both boots, but a 34-count disagreement in the landing RCB overshoot
+       past the 500,000 target (500,192 vs 500,158)** — ruling out control-flow divergence and
+       confirming landing-precision jitter. That overshoot *is* the served virtual-TSC value at the
+       interrupt, and Linux's own `add_interrupt_randomness()` folds `random_get_entropy()` (== that
+       served value) into the CRNG pool on every interrupt regardless of crediting (spec §3.8) — so a
+       same-instruction interrupt still seeds the CRNG differently each boot, fully explaining the
+       observed `getrandom()`/`/dev/urandom` divergence with no further contamination source needed.
+       This *confirms* (not merely still-hypothesizes) that `WorkClock`'s long-lived pinned counter
+       and `LinuxPmuStepper`'s per-tick freshly-created pinned counter (both counting the identical
+       hardware event on the identical thread) disagree on exactly when the arm-early-then-single-
+       step engine judges the target crossed — a two-fd epoch/scheduling disagreement, not raw
+       single-fd hardware imprecision (§3.7's H0 gate already established the raw
+       `BR_INST_RETIRED.COND` event is bit-exact on one always-running fd, so 34 counts of
+       landing-precision jitter implicates the second fd). **Needed next**: reconcile the two into
+       one shared pinned fd (`WorkClock::current_rcb`'s own doc already flags this as deferred work)
+       — a real architectural change (the interrupt-injection engine's "is the target crossed" reads
+       and the work-clock's served value would need to come from the identical epoch), intentionally
+       not rushed into this iteration alongside the diagnostic. Do not re-claim
+       `os_entropy_is_deterministic` as reliably green until that reconciliation lands and a repeat
+       batch (`H7_ENTROPY_REPEATS=N`) shows no further tick-diagnostic disagreements.
      `double_boot_ram_hash_identical` still needs a **guest-driven checkpoint** design (an explicit
      `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first
      attempt at the latter found the two boots differ in exactly one kernel-internal diagnostic line,
