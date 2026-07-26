@@ -5268,3 +5268,18 @@ Confirmed 25/25 total on double_boot_ram_hash_identical across two real-hardware
 Updated the stale in-code doc comments on os_entropy_is_deterministic and double_boot_ram_hash_identical (crates/baud-multiverse/src/linux/mod.rs) to record the fix and its real-hardware verification, and rewrote both enforced-regime drive scripts headers/closing text/gating accordingly. Re-running full build/clippy/test to confirm the doc-only changes did not break anything before committing.
 
 todo.md updated (section 14 next-actions item 2 and §12 matrix row 27) to record this fix and its real-hardware verification, without deleting the historical investigation narrative. Reviewed the subagent diff for accuracy -- correct and well-cited. Staging everything and committing.
+
+Committed (f2b8136). Pushing to origin/main.
+
+## 2026-07-26T13:34:00Z UTC - Changes committed.
+- Root-caused and fixed the H7 residual RCB perf_event jitter that several prior iterations had chased without full resolution.
+- Files changed: crates/baud-host/src/linux.rs, crates/baud-multiverse/src/linux/mod.rs, drive/h7-enforced-checkpoint.sh, drive/h7-enforced-entropy.sh, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - LinuxBranchCounter (baud-multiverse work-clock) and measure_fixed_loop_branches (baud-host H0 gate) were both still reading the generic PERF_COUNT_HW_BRANCH_INSTRUCTIONS perf event instead of the raw BR_INST_RETIRED.COND (0x11c4) event this project's own docs/determinism.md had always specified as the only bit-exact one on this host -- independently reconfirmed live via the repo's own tools/pmucheck.c. Switched both call sites to the raw event via perf-event's Builder::attrs_mut() escape hatch, no new dependency.
+  - Recalibrated periodic_timer_injection_halts_gracefully_and_reproducibly's PERIOD_RCB (2,000,000 -> 200,000, empirically binary-searched on real hardware, stable at 5 ticks across 4 repeated runs) since the old value was tuned against the wrong, host-branch-inclusive event.
+  - Real-hardware result: os_entropy_is_deterministic went from ~70-90% to 10/10 (11/11 total with a follow-up single run); double_boot_ram_hash_identical went from 0/8-4/8 to 25/25 across two batches (26/26 total) -- both previously-flaky H7 tests are now believed fully deterministic, closing todo.md section 14 next-actions item 2 and matrix row 27.
+  - Converted drive/h7-enforced-checkpoint.sh from an informational-only script to a real hard pass/fail gate, matching drive/h7-enforced-entropy.sh, since the flakiness it existed to track is now fixed; updated both scripts' header comments and updated in-code doc comments on both tests with RESOLVED addenda (historical investigation narrative kept, not deleted).
+  - Full verification green: cargo build/clippy/test --workspace clean, h0-h7 (8/8), m9-m12 (4/4), pkg-boot-cli.sh, pkg-multifile-initramfs.sh all PASS on real /dev/kvm.
+---
+
+Post-push verification: local main (f2b8136) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle, stock kvm_intel/kvm module correctly restored after both enforced-regime drive-script runs (no leftover swapped state). This iteration closed todo.md section 14 next-actions item 2's residual RCB/perf_event jitter gap for both os_entropy_is_deterministic and double_boot_ram_hash_identical, previously chased across several prior iterations without full resolution. todo.md still has pending items (Buildroot/pinned-Nix image pipeline, virtio-rng device, /dev/vport tape endpoint (non-blocking), H8 Mario blocked on the rest of item 1, H9 Ubuntu distro milestone not started) -- emitting NEXT.
