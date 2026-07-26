@@ -128,6 +128,22 @@ pub enum RunAction {
         /// Probe name to maximize (`StrategySpec.maximize`), in priority order. Repeatable.
         #[arg(long = "maximize")]
         maximize: Vec<String>,
+        /// Same flag as `kvm --initramfs`, applied to the boot that establishes this call's shared
+        /// branch point. Omit for a guest with no separate initramfs.
+        #[arg(long)]
+        initramfs: Option<String>,
+        /// Same flag as `kvm --periodic-timer-period-rcb`, applied to every branch this call
+        /// forks. A real, unmodified Linux kernel guest's scheduler calibration hangs forever
+        /// without this. Setting this enables periodic timer injection for every branch.
+        #[arg(long)]
+        periodic_timer_period_rcb: Option<u64>,
+        /// Interrupt vector to inject at each tick. Defaults to `0xec`, Linux's own
+        /// `LOCAL_TIMER_VECTOR`. Only used when `--periodic-timer-period-rcb` is set.
+        #[arg(long, default_value_t = 0xec)]
+        periodic_timer_vector: u8,
+        /// Bound on ticks before giving up. Only used when `--periodic-timer-period-rcb` is set.
+        #[arg(long, default_value_t = 2000)]
+        periodic_timer_max_ticks: u32,
     },
     /// Fork more branches from a universe a prior `kvm-branch --persist-run-id` call persisted —
     /// no kernel image, no re-boot: reconstructs the universe from the server's SnapshotStore and
@@ -158,6 +174,20 @@ pub enum RunAction {
         /// Probe name to maximize (`StrategySpec.maximize`), in priority order. Repeatable.
         #[arg(long = "maximize")]
         maximize: Vec<String>,
+        /// Same flag as `kvm --periodic-timer-period-rcb`, applied to every branch this call forks
+        /// from the reconstructed universe. No `--initramfs` here: resuming never boots a kernel —
+        /// the reconstructed universe alone is enough — but a resumed real-Linux-guest checkpoint
+        /// still needs periodic ticks to make forward progress past it, exactly like a fresh
+        /// branch does.
+        #[arg(long)]
+        periodic_timer_period_rcb: Option<u64>,
+        /// Interrupt vector to inject at each tick. Defaults to `0xec`, Linux's own
+        /// `LOCAL_TIMER_VECTOR`. Only used when `--periodic-timer-period-rcb` is set.
+        #[arg(long, default_value_t = 0xec)]
+        periodic_timer_vector: u8,
+        /// Bound on ticks before giving up. Only used when `--periodic-timer-period-rcb` is set.
+        #[arg(long, default_value_t = 2000)]
+        periodic_timer_max_ticks: u32,
     },
 }
 
@@ -255,12 +285,24 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             generate_count,
             generate_tape_len_bytes,
             maximize,
+            initramfs,
+            periodic_timer_period_rcb,
+            periodic_timer_vector,
+            periodic_timer_max_ticks,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
                 "cmdline": cmdline,
                 "persist_run_id": persist_run_id,
+                "initramfs_path": initramfs,
             });
+            if let Some(period_rcb) = periodic_timer_period_rcb {
+                body["periodic_timer"] = json!({
+                    "period_rcb": period_rcb,
+                    "vector": periodic_timer_vector,
+                    "max_ticks": periodic_timer_max_ticks,
+                });
+            }
             if let (Some(seed), Some(count)) = (generate_seed, generate_count) {
                 body["generate"] = json!({
                     "seed": seed,
@@ -285,11 +327,21 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             generate_count,
             generate_tape_len_bytes,
             maximize,
+            periodic_timer_period_rcb,
+            periodic_timer_vector,
+            periodic_timer_max_ticks,
         } => {
             let mut body = json!({
                 "run_id": run_id,
                 "node_id": node_id,
             });
+            if let Some(period_rcb) = periodic_timer_period_rcb {
+                body["periodic_timer"] = json!({
+                    "period_rcb": period_rcb,
+                    "vector": periodic_timer_vector,
+                    "max_ticks": periodic_timer_max_ticks,
+                });
+            }
             if let (Some(seed), Some(count)) = (generate_seed, generate_count) {
                 body["generate"] = json!({
                     "seed": seed,

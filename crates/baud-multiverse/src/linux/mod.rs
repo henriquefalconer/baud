@@ -1079,13 +1079,23 @@ impl Multiverse {
     /// (`sync()` + `reboot()`, in `checkpoint_init.c`'s case) rather than a wall-clock point or a
     /// full boot's raw console/RAM comparison (both of which embed real-hardware RCB/TSC read
     /// jitter, see `tests/fixtures/linux-guest/BUILD.md`'s "known, deliberate non-goal" section).
+    /// Returns the tick trace, the stop condition, and every tape-device record drained along the
+    /// way (not just a `MarkBranch` match) — earlier versions of this function called
+    /// `drain_records()` once per tick purely to *look for* `MarkBranch` and threw the rest away,
+    /// silently dropping any `PROBE`/`GOAL`/`VIOLATION`/`LOG` record a guest emitted on a tick that
+    /// didn't also stop the run. Fixed to match [`run_until_branch_or_halt`](Self::
+    /// run_until_branch_or_halt)'s own "accumulate every drained record" contract, since a caller
+    /// scoring branches from these records (e.g. `baud-server`'s
+    /// `run_driver_generated_branches_with_persist`) needs the guest's real probe stream, not just
+    /// its stop condition.
     pub fn run_until_branch_or_halt_with_periodic_timer(
         &mut self,
         period_rcb: u64,
         vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
         let mut ticks = Vec::new();
+        let mut records = Vec::new();
         for _ in 0..max_ticks {
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
@@ -1093,14 +1103,16 @@ impl Multiverse {
                 baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
             let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
                 .map_err(|e| DeterminismHole(e.to_string()))?;
-            let drained = self.bus.tape.device_mut().drain_records();
+            let mut drained = self.bus.tape.device_mut().drain_records();
             if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
                 let step = match drained[pos] {
                     baud_proto::Msg::MarkBranch { step } => step,
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
-                return Ok((ticks, RunUntilBranchOutcome::MarkBranch { step }));
+                records.extend(drained.drain(..=pos));
+                return Ok((ticks, RunUntilBranchOutcome::MarkBranch { step }, records));
             }
+            records.extend(drained);
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
                     ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
@@ -1110,7 +1122,7 @@ impl Multiverse {
                         console_output: self.bus.console.output().to_vec(),
                         ram_hash: self.ram_hash(),
                     };
-                    return Ok((ticks, RunUntilBranchOutcome::Halted(halt)));
+                    return Ok((ticks, RunUntilBranchOutcome::Halted(halt), records));
                 }
             }
         }
@@ -2528,7 +2540,7 @@ mod tests {
                 [],
             )
             .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
-            let (_ticks, outcome) = m
+            let (_ticks, outcome, _records) = m
                 .run_until_branch_or_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
                 .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
             let step = match outcome {

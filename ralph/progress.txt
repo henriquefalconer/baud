@@ -4970,3 +4970,56 @@ m9/m10/m11 all PASS on real hardware (no regressions from the RunKvmBody/persist
   - New real-hardware test run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer (crates/baud-server/src/routes/run_kvm.rs) and new drive/pkg-boot-cli.sh, both PASS on real /dev/kvm — the latter boots the checked-in linux-guest fixture through the actual baud CLI + baud-server over real HTTP, reaching /init.
   - Full verification green: cargo build/clippy/test --workspace all clean (0 failures across every crate); drive/h0.sh-h7.sh (8/8) and drive/m9.sh/m10.sh/m11.sh all still PASS on real hardware — no regressions.
 ---
+
+Post-push verification: local main (f6a196a) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle (fuser exit 1, no process attached). Summary: this iteration closed todo.md §14 item 1's 'baud run kvm has no initramfs field' gap plus the deeper periodic-timer-injection gap it depended on — RunKvmBody/CLI/stream-replay all wired end-to-end, new real-hardware test + drive/pkg-boot-cli.sh both PASS on real /dev/kvm (boots the real linux-guest fixture through the actual CLI + HTTP server to /init). Full verification green: cargo build/clippy/test --workspace clean, drive/h0.sh-h7.sh (8/8) and m9/m10/m11 all still pass, no regressions. todo.md still has pending items (branch/resume routes still lack initramfs/periodic_timer, Buildroot/Nix, /dev/vport tape endpoint, H7 os-entropy residual jitter, H8 Mario rebuild) — emitting NEXT.
+
+## 2026-07-26T09:56:35 UTC (34min) - Session usage — build-14 [sonnet]
+- cost $8.9464 (from claude -p)
+- context 253,145 tok peak of 1M (25%) across 108 inference calls, monotonic
+- models sonnet-5 $8.9432 (in 232 / out 77,478 / cache-read 20,718,347) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/014-build-14.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 15
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose to close the branch/resume-routes initramfs/periodic-timer gap: todo.md §14 item 1 explicitly names this as 'the next concrete step in this area' — /run/kvm/branch and /run/kvm/resume (and boot_and_snapshot/boot_snapshot_and_branch/boot_snapshot_and_generate) still don't accept initramfs_path/periodic_timer, unlike /run/kvm which was closed last iteration. Searching the codebase with subagents before touching anything.
+
+Dispatched an Explore subagent to map the /run/kvm/branch and /run/kvm/resume routes, boot_and_snapshot/boot_snapshot_and_branch/boot_snapshot_and_generate, CLI branch/resume flags, and stream::render's replay path for all run types. Waiting for its report before touching any code.
+
+Mapped the branch/resume call chain via a subagent. Found and fixed a real bug while at it: Multiverse::run_until_branch_or_halt_with_periodic_timer (crates/baud-multiverse/src/linux/mod.rs) drained tape-device records every tick only to check for MARK_BRANCH, silently discarding any PROBE/GOAL/VIOLATION/LOG record emitted on a non-stopping tick -- unlike its non-periodic sibling run_until_branch_or_halt, which accumulates everything drained. This directly matters for the branch/resume periodic-timer wiring I'm about to add (baud-server's generate-mode scoring reads exactly these records), so fixed it to return the accumulated Vec<Msg> too and updated its one existing test call site. Now wiring initramfs_path/periodic_timer into RunKvmBranchBody/RunKvmResumeBody and their boot_and_snapshot/boot_snapshot_and_branch/boot_snapshot_and_generate/run_branches/run_driver_generated_branches_with_persist/resume_and_branch/resume_and_generate call chain.
+
+cargo build --workspace: clean. Now adding CLI flags to RunAction::KvmBranch/KvmResume and a new hardware test proving a real Linux guest branches through periodic_timer via boot_snapshot_and_branch, then running the run_kvm.rs test suite.
+
+New test run_kvm_branch_boots_a_real_linux_guest_with_initramfs_and_periodic_timer PASSED on real /dev/kvm -- boot_snapshot_and_branch correctly threads initramfs/periodic_timer into a real Linux 6.18 guest, reaching its MARK_BRANCH checkpoint before halting. All 17 run_kvm.rs tests pass. Now doing CLI flags for KvmBranch/KvmResume, then the full verification protocol.
+
+CLI: added --initramfs/--periodic-timer-* flags to KvmBranch and --periodic-timer-* to KvmResume, threaded into their JSON bodies. cargo build --workspace clean. Running cargo clippy --workspace --all-targets next.
+
+cargo clippy --workspace --all-targets: no new warnings (all warnings are pre-existing, in files this iteration never touched -- confirmed by grep for run_kvm.rs/cmds/run.rs/linux/mod.rs, zero hits). Running cargo test --workspace now.
+
+cargo test --workspace: one failure, linux::tests::periodic_timer_injection_halts_gracefully_and_reproducibly (rcb jitter 12 > documented tolerance 8). This test calls run_to_first_halt_with_periodic_timer, a function this iteration never touched (only run_until_branch_or_halt_with_periodic_timer was changed) -- matches the already-documented real-hardware single-fd RCB read-jitter pattern noted in prior iterations. Re-running in isolation to confirm it's a transient hardware flake, not a regression.
+
+Confirmed transient: periodic_timer_injection_halts_gracefully_and_reproducibly passes clean in isolation (real /dev/kvm) -- a one-off real-hardware RCB-read jitter under full-suite parallel load, same pattern documented in prior iterations (e.g. rdtsc_guest_reproduces_high_bits_across_boots flaking once under cargo test --workspace then passing clean both isolated and full-suite). Re-running the full cargo test --workspace to confirm green.
+
+cargo test --workspace: fully green on re-run (0 failures across every crate). Starting the h0-h7 drive gate one script at a time.
+
+h0-h5 all PASS on real hardware. Continuing to h6.sh and h7.sh.
+
+h0-h7 (8/8) all PASS on real hardware. Now running m9/m10/m11 (branch/resume/generate drive scripts) to confirm no regression from the RunKvmBranchBody/RunKvmResumeBody/boot_and_snapshot/run_branches/run_driver_generated_branches_with_persist signature changes.
+
+m9/m10/m11 all PASS on real hardware (no regressions from RunKvmBranchBody/RunKvmResumeBody/boot_and_snapshot/run_branches/run_driver_generated_branches_with_persist signature changes). Full verification green: cargo build/clippy/test --workspace clean, h0-h7 (8/8) and m9/m10/m11 all pass. Dispatching a subagent to update todo.md §14 with this iteration's findings before the final commit.
+
+## 2026-07-26T10:32:43 UTC - Changes committed.
+- Closed todo.md §14 item 1's other named gap: /run/kvm/branch and /run/kvm/resume now accept initramfs_path/periodic_timer, matching /run/kvm (closed last iteration).
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-multiverse/src/linux/mod.rs, crates/baud-cli/src/cmds/run.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - RunKvmBranchBody gained initramfs_path + periodic_timer (both serde-defaulted); RunKvmResumeBody gained periodic_timer only (resume never boots a kernel, so no initramfs_path there).
+  - boot_and_snapshot now takes initramfs: Option<&[u8]> instead of hardcoding None; run_branches and run_driver_generated_branches_with_persist both take periodic_timer: Option<(u64,u8,u32)> and switch to Multiverse::run_until_branch_or_halt_with_periodic_timer when set. boot_snapshot_and_branch/boot_snapshot_and_generate/resume_and_branch/resume_and_generate all thread both through from the HTTP bodies.
+  - Real bug found and fixed in baud-multiverse while wiring this up: Multiverse::run_until_branch_or_halt_with_periodic_timer drained tape-device records every tick only to check for MARK_BRANCH, silently discarding every other record (PROBE/GOAL/VIOLATION/LOG) on a non-stopping tick, unlike its non-periodic sibling run_until_branch_or_halt. Fixed to accumulate and return every drained record (widened return type to include Vec<Msg>); its one prior call site updated.
+  - New real-hardware test run_kvm_branch_boots_a_real_linux_guest_with_initramfs_and_periodic_timer (crates/baud-server/src/routes/run_kvm.rs): boots the real linux-guest fixture + checkpoint_initramfs.cpio.gz through boot_snapshot_and_branch with real initramfs/periodic_timer, asserts the branch stops at its MARK_BRANCH checkpoint — PASSED on real /dev/kvm.
+  - CLI: baud run kvm-branch gained --initramfs/--periodic-timer-{period-rcb,vector,max-ticks}; baud run kvm-resume gained the three --periodic-timer-* flags (no --initramfs, matching resume's no-reboot semantics).
+  - Full verification green: cargo build/clippy/test --workspace all clean (0 failures across every crate, one transient real-hardware RCB-jitter flake in an unrelated, untouched function confirmed non-reproducing on rerun); drive/h0.sh-h7.sh (8/8) and drive/m9.sh/m10.sh/m11.sh all PASS on real hardware, no regressions.
+---

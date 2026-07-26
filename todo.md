@@ -1108,14 +1108,40 @@ snapshot, not a duplicate of it.
      (§4.4) is still not implemented. `bootparams::DETERMINISTIC_CMDLINE` still isn't wired as any
      *production* caller's default (it's now used by this iteration's new test and drive script, but
      `guest_kernel_boots_to_userspace` and the enforced-regime tests in `baud-multiverse` were already
-     using it from a prior iteration). **`/run/kvm` (plain boot-to-first-halt) now accepts
-     `initramfs_path`/`periodic_timer`, but `/run/kvm/branch` and `/run/kvm/resume` — and their
-     underlying `boot_and_snapshot`/`boot_snapshot_and_branch`/`boot_snapshot_and_generate`
-     functions — still do not accept either**, so a real Linux guest that needs to be explored via
-     branch/resume (not just booted once to halt) isn't reachable through those routes yet; this was a
-     deliberate scope decision this iteration (the gap as previously written here named `RunKvmBody`/
-     `/run/kvm` specifically, not the branch/resume routes), not an oversight — closing it is the next
-     concrete step in this area. Tests `boot_params_seed_is_pinned` and
+     using it from a prior iteration). **`/run/kvm/branch` and `/run/kvm/resume` now also accept
+     `initramfs_path`/`periodic_timer`, closing the gap named here last iteration.** `RunKvmBranchBody`
+     gained `initramfs_path: Option<String>` and `periodic_timer: Option<PeriodicTimerSpec>` (both
+     `#[serde(default)]`, so existing callers are unaffected); `RunKvmResumeBody` gained `periodic_timer`
+     only, since resume never boots a kernel (`reconstruct_universe` rebuilds `Multiverse` from a
+     persisted `Universe`, not `kernel_path`). `boot_and_snapshot` gained an `initramfs: Option<&[u8]>`
+     param (previously hardcoded `None`), threaded from `boot_snapshot_and_branch`/
+     `boot_snapshot_and_generate`; `run_branches`/`run_driver_generated_branches_with_persist` gained a
+     `periodic_timer: Option<(u64, u8, u32)>` param routing each forked branch through
+     `Multiverse::run_until_branch_or_halt_with_periodic_timer` instead of the plain variant when set.
+     **Real bug found and fixed while wiring this up**: `run_until_branch_or_halt_with_periodic_timer`
+     (`crates/baud-multiverse/src/linux/mod.rs`) drained the tape device every tick to check for
+     `MARK_BRANCH` but discarded every other drained record (`PROBE`/`GOAL`/`VIOLATION`/`LOG`) on every
+     non-final tick — unlike its sibling `run_until_branch_or_halt`, which accumulates all of them — so a
+     driver-generated branch scored via `observations_from_records` would have silently seen an
+     incomplete probe stream once periodic-timer branching was wired in. Fixed by widening the function's
+     return type to `Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole>`
+     and accumulating every drained record exactly like `run_until_branch_or_halt` does; its one prior
+     call site (the `#[ignore]`d `double_boot_ram_hash_identical` test) was updated for the new tuple
+     shape. New real-hardware test `run_kvm_branch_boots_a_real_linux_guest_with_initramfs_and_periodic_timer`
+     boots the real, checked-in `checkpoint_initramfs.cpio.gz` fixture (whose `/init` issues one
+     `MARK_BRANCH` before powering off) through `boot_snapshot_and_branch` with a real
+     `initramfs`/`periodic_timer` and asserts the forked branch stops at its `MARK_BRANCH` checkpoint
+     rather than halting or hanging — **passed on real `/dev/kvm`**. CLI: `RunAction::KvmBranch` gained
+     the same four `--initramfs`/`--periodic-timer-*` flags as `RunAction::Kvm`; `RunAction::KvmResume`
+     gained the three `--periodic-timer-*` flags only (no `--initramfs`, matching the resume body).
+     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h0.sh` through
+     `drive/h7.sh` (8/8) and `drive/m9.sh`/`m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no
+     regressions from the widened `RunKvmBranchBody`/`RunKvmResumeBody`/`boot_and_snapshot`/
+     `run_branches`/`run_driver_generated_branches_with_persist` signatures. **Still open, newly surfaced
+     by this**: a real Linux-guest run persisted via `persist_run_id` through branch/resume still won't
+     get a `kvm_run_meta` row (only plain `/run/kvm { run_id }` calls `persist_kvm_run`), so
+     `stream::render`'s real-replay path can't yet replay a branch/resume-originated run's frames — a
+     natural follow-up, not something this iteration attempted. Tests `boot_params_seed_is_pinned` and
      `init_powers_off_deterministically` remain unwritten. H8 (Mario, item 3 below) is still blocked on
      the rest of item 1, not just this piece.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
