@@ -494,6 +494,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "capstone",
+ "flate2",
  "object",
  "proptest",
  "serde",

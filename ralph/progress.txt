@@ -4812,3 +4812,62 @@ drive/h7.sh PASS. Full verification protocol green: cargo build/clippy/test --wo
   - Recorded a known pre-existing gap this lint does NOT catch: `crates/baud-raftlet` already lives directly under `crates/` in violation of §8's "targets live as guest images under examples/, never in-tree" -- it predates the KVM pivot and references no Mario/NES terms, so it doesn't trip this lint. Moving it into an examples/-based guest image is separate, real future M-series work (§10), not part of this item -- documented in todo.md, not attempted this iteration
   - Full verification green: cargo build/clippy --all-targets/test --workspace all clean (0 failures); drive/h0.sh through drive/h7.sh (stock module) all PASS on real /dev/kvm. Enforced-module and M-series drive scripts were not re-run since this change touches zero KVM/VMM runtime code (a pure static-analysis addition, no existing caller/runtime path modified)
 ---
+
+Committed c745846. Pushing to origin/main.
+
+Post-push verification: local main (c745846) matches origin/main exactly (fetch + rev-parse confirmed). Stock kvm_intel/kvm module confirmed loaded, /dev/kvm confirmed idle (fuser: no users). Summary: this iteration closed todo.md §14 next-actions item 4, the generic-core guardrail -- new crates/baud-packages/src/workload_lint.rs scans crates/ for Mario/NES-example-specific terms and fails loud on any leak, closing §12 test #29. 4 new tests pass including the spec-named no_workload_specifics_in_core itself against the real crates/ tree (currently zero leaks). Full verification green: cargo build/clippy/test --workspace all clean (0 failures); drive/h0.sh through h7.sh all PASS on real /dev/kvm. Recorded a known pre-existing gap this lint doesn't catch (crates/baud-raftlet still lives in-tree, a separate M-series migration) in todo.md. todo.md still has pending items (items 1-3 of §14's next-actions sequence: the automated guest image pipeline blocked on a missing kernel-build toolchain, H7's residual OS-entropy/checkpoint hardware jitter, and H8 Mario rebuild blocked on item 1; plus H9 Ubuntu, virtio-rng, and more per §12) -- emitting NEXT.
+
+## 2026-07-26T08:10:31 UTC (24min) - Session usage — build-11 [sonnet]
+- cost $3.9967 (from claude -p)
+- context 176,700 tok peak of 1M (18%) across 58 inference calls, monotonic
+- models sonnet-5 $3.9936 (in 130 / out 36,042 / cache-read 7,930,396) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/011-build-11.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 12
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and ralph/progress.txt to understand current state.
+
+
+Read todo.md sections 10-14. Pending items: (1) automated guest image-build pipeline in baud-packages (blocked on missing kernel-build toolchain, next step is plain 'make bzImage' reusing ~/wsl-kernel-src/src), (2) H7 OS-entropy residual jitter (7/10 and 4/8 pass rates, root-caused to perf_event read jitter / static_call trampoline), (3) H8 Mario rebuild (blocked on 1). Investigating current sandbox state (nix availability, kernel source tree) before picking.
+
+
+Scoped item 1 (automated guest image-build pipeline): implementing two new baud-packages modules -- a pure-Rust reproducible newc-cpio+gzip initramfs builder (closes the 'reproducible initramfs builder' gap, §4.3) and kernel-build automation that shells out to 'make' with deterministic KBUILD_BUILD_TIMESTAMP/USER/HOST env vars against the existing ~/wsl-kernel-src/src tree (closes §4.5's image_build_is_reproducible test, gated #[ignore] + a new drive script since it needs a real ~2-5min kernel build). Writing code now.
+
+
+Wrote crates/baud-packages/src/initramfs.rs (pure-Rust reproducible newc-cpio+gzip builder) and kernel_build.rs (make-based bzImage automation with deterministic env vars), wired into lib.rs. Building baud-packages now.
+
+
+baud-packages unit tests: 35 passed, 2 ignored, 0 failed. clippy clean. Added drive/pkg-image-build.sh to hardware-verify the new kernel-build reproducibility test for real (builds a real Linux kernel twice from ~/wsl-kernel-src/src, ~2-5 min). Running it now to confirm the pipeline actually works before committing.
+
+
+First real run of pkg-image-build.sh hit ENOSPC: /tmp on this WSL2 host is a small (3.9G) RAM-backed tmpfs, not enough room for two kernel-source-tree copies + build output. Fixed by pointing TMPDIR at a directory on the real 948G disk (~/.baud-tmp) in the drive script. Re-running now.
+
+
+drive/pkg-image-build.sh PASSED for real: two independent from-source builds of the linux-guest kernel (mrproper->allnoconfig->merge_config.sh->olddefconfig->bzImage, with KBUILD_BUILD_TIMESTAMP/USER/HOST + SOURCE_DATE_EPOCH pinned) produced a byte-for-byte identical bzImage across two full kernel compiles (~9 min total on real hardware). This hardware-verifies §4.5's image_build_is_reproducible test for the first time. Now updating todo.md with a subagent, then running full workspace verification before committing.
+
+
+Dispatched a subagent to update todo.md §14 item 1 with this iteration's findings while running full workspace verification in parallel. Starting cargo build --workspace.
+
+
+todo.md updated by subagent (verified: initramfs.rs/kernel_build.rs/pkg-image-build.sh all documented in §14 item 1). cargo build/clippy/test --workspace all clean, 0 failures. Now running drive/h0.sh through h7.sh (stock module) one at a time.
+
+
+drive/h0.sh through h5.sh all PASS on real /dev/kvm. Running h6.sh and h7.sh next.
+
+
+drive/h0.sh through h7.sh (stock module) ALL PASS on real /dev/kvm. Full verification protocol green: cargo build/clippy/test --workspace clean, 0 failures; drive/h0-h7 pass; drive/pkg-image-build.sh (new, hardware-verified) passes. Recording final progress block and committing now.
+
+## 2026-07-26T08:52:00 UTC - Changes committed.
+- Implemented todo.md §14 next-actions item 1's "next concrete step": automated the by-hand guest-kernel build pipeline, closing spec §4.5's `image_build_is_reproducible` test for real
+- Files changed: crates/baud-packages/src/initramfs.rs (new), crates/baud-packages/src/kernel_build.rs (new), crates/baud-packages/src/lib.rs, crates/baud-packages/Cargo.toml, drive/pkg-image-build.sh (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New `crates/baud-packages/src/initramfs.rs`: a pure-Rust reproducible newc-format cpio + gzip initramfs builder (`InitramfsEntry`, `build_reproducible_initramfs`) implementing spec §4.3's exact recipe (fixed mtime=1, uid/gid=0, sorted entries with synthesized directory records for every path prefix, `gzip -9`) with zero dependency on the host having `cpio`/`gzip` installed -- output is a pure function of the input entries plus this crate's pinned `flate2` dependency. 6 new unit tests including byte-for-byte reproducibility and a round-trip decode (a test-only newc parser) confirming file contents/mode/path survive
+  - New `crates/baud-packages/src/kernel_build.rs`: automates `tests/fixtures/linux-guest/BUILD.md`'s by-hand kernel-build recipe (`mrproper -> allnoconfig -> merge_config.sh -> olddefconfig -> bzImage`) via `KernelBuildConfig`/`build_bzimage()`. Pins `KBUILD_BUILD_TIMESTAMP=@0`, `KBUILD_BUILD_USER=baud`, `KBUILD_BUILD_HOST=baud`, `SOURCE_DATE_EPOCH=0` -- a real nondeterminism source found and fixed this iteration (unset, Kbuild bakes the real wall-clock build time and whoami/hostname into the compiled kernel's version string, so two builds of identical source+config would NOT be byte-identical)
+  - **Hardware-verified for real**: new `#[ignore]`d test `kernel_build::tests::image_build_is_reproducible` (spec §4.5's named test) builds the real `linux-guest` fixture kernel twice, from two independent scratch copies of `~/wsl-kernel-src/src`, and asserts byte-identical `bzImage` output. New `drive/pkg-image-build.sh` runs it (opt-in, like `drive/h3-enforced-*.sh` -- not part of the standard h0-h7 gate, since it takes several minutes). **Result: PASSED** -- two independent ~4.5-minute from-source kernel builds on real hardware produced a byte-identical bzImage (~546s total). First time this test has been proven true, not just specified
+  - Real bug found and fixed getting the drive script working: `/tmp` on this WSL2 host is a small (3.9G) RAM-backed tmpfs, not enough for two kernel-source-tree copies + build output (`cp -a` hit ENOSPC). Fixed by pointing `TMPDIR` at `~/.baud-tmp` (on the real 948G disk, cleaned up via `trap ... EXIT`) in `drive/pkg-image-build.sh`
+  - todo.md §14 item 1 updated with this progress and a trimmed "still open" list (CLI/server `baud image build` wiring, multi-file rootfs assembly, end-to-end spec.toml->image composition, Buildroot/pinned-Nix themselves, `/dev/vport` tape endpoint -- all genuinely still open)
+  - Full verification green: cargo build/clippy/test --workspace all clean (0 failures); drive/h0.sh through drive/h7.sh (stock module) all PASS on real /dev/kvm; new drive/pkg-image-build.sh PASSES on real hardware
+---

@@ -17,6 +17,9 @@ tempfile = { workspace = true }
 # decoder -- never a byte-grep over `SHF_EXECINSTR` sections.
 object = "0.36"
 capstone = "0.14"
+# reproducible initramfs builder (todo.md §4.3): pure-Rust gzip so the archive's compressed bytes
+# are a deterministic function of this crate's pinned dependency, never the host's `gzip` binary.
+flate2 = "1"
 
 [dev-dependencies]
 proptest = "1"

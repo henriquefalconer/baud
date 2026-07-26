@@ -984,18 +984,64 @@ snapshot, not a duplicate of it.
      `IrqWindowOpen` dispatch bug, e820's missing sub-1MiB usable memory (Linux's `reserve_real_mode()`
      panics without it), and a missing `CONFIG_X86_IOPL_IOPERM=y` guest kernel config — are detailed in the
      bullet above and in that `BUILD.md`.
-     **Still open**: the real image-build pipeline in `baud-packages` itself still does not exist — a
-     minimal builtin kernel (Buildroot → pinned Nix, §4.5 — **blocked on a kernel-build toolchain not
-     currently installed in this dev sandbox: confirmed this session that `nix`/`nix-env` isn't present;
-     the CLAUDE.md-documented bare-metal WSL2 host likely can have one installed, or a plain from-source
-     `make bzImage` could reuse the kernel source tree already checked out at `~/wsl-kernel-src/src` for
-     the enforced-module work — next concrete step**), a reproducible initramfs builder + static `/init`
-     driven by that pipeline rather than hand-built per a fixture's `BUILD.md` (§4.3/§4.4), and the
-     `/dev/vport` (or PIO) tape endpoint; `bootparams::DETERMINISTIC_CMDLINE` also still isn't wired as any
-     real caller's default (`guest_kernel_boots_to_userspace` builds its own, similar but not identical,
+     **This iteration (ralph iteration 12) implemented and hardware-verified a real, concrete piece of
+     that automated pipeline**, in two new `baud-packages` library modules — neither yet wired into any
+     CLI/server route. `crates/baud-packages/src/initramfs.rs` is a pure-Rust reproducible newc-format
+     cpio + gzip initramfs builder (`InitramfsEntry`, `build_reproducible_initramfs`) implementing §4.3's
+     exact recipe — fixed mtime=1, uid/gid=0, sorted entries via synthesized directory records for every
+     path prefix, gzip -9 via the `flate2` crate — with no dependency on the host having `cpio`/`gzip`
+     installed; output is a pure function of the input entries plus the crate's pinned `flate2` version.
+     6 new unit tests, including a byte-for-byte reproducibility test and a round-trip test that decodes
+     the archive back (a test-only newc cpio parser) and confirms file contents/mode/path survive; all
+     pass, clippy clean. This closes the reproducible-initramfs-builder sub-gap of §4.3 as real, tested
+     code, though it is not yet wired as the actual builder for `tests/fixtures/linux-guest/
+     initramfs.cpio.gz` (that fixture is still hand-built per its own `BUILD.md`), and it is not yet
+     assembling a real multi-file rootfs (harness scripts, agent binary) beyond a single `/init`-style
+     entry. `crates/baud-packages/src/kernel_build.rs` automates the by-hand kernel-build recipe from
+     that same `BUILD.md`'s "Regenerating the kernel" section — `KernelBuildConfig`, `build_bzimage()`
+     shells out to `make CC=<cc> mrproper / allnoconfig / (merge_config.sh -m .config <fragment>) /
+     olddefconfig / -jN bzImage` against a given kernel source tree + Kconfig fragment — and critically
+     pins `KBUILD_BUILD_TIMESTAMP=@0`, `KBUILD_BUILD_USER=baud`, `KBUILD_BUILD_HOST=baud`,
+     `SOURCE_DATE_EPOCH=0` as build env vars: without these, Kbuild embeds the real wall-clock build time
+     and `whoami`/`hostname` into the compiled kernel's version string, so two builds of byte-identical
+     source+config would not be byte-identical — a real, non-obvious nondeterminism source this iteration
+     found and fixed before it could bite `image_build_is_reproducible`. Spec §4.5's named test,
+     `kernel_build::tests::image_build_is_reproducible` (`#[ignore]`d), builds the real `linux-guest`
+     fixture's kernel (`tests/fixtures/linux-guest/minimal.config`) twice from two independent scratch
+     copies of `~/wsl-kernel-src/src` (the same tree CLAUDE.md already documents for the enforced-module
+     work, copied first per that `BUILD.md`'s own warning never to build in the shared tree directly) and
+     asserts the two `arch/x86/boot/bzImage` outputs are byte-for-byte identical. New drive script
+     `drive/pkg-image-build.sh` runs it, opt-in like `drive/h3-enforced-*.sh` (not part of the standard
+     h0-h7 gate — two full kernel compiles take several minutes). **Real-hardware result: PASSED** — two
+     independent ~4.5-minute from-source kernel builds (real gcc-13, real `~/wsl-kernel-src/src`)
+     produced a byte-identical `bzImage`, ~546s total; this is the first time
+     `image_build_is_reproducible` has been proven true on this project, not just specified. One real bug
+     was found and fixed while getting the drive script working: `/tmp` on this WSL2 dev host is a small
+     (3.9G) RAM-backed tmpfs, nowhere near enough for two copies of a kernel source tree plus build output
+     (`cp -a` failed mid-copy with ENOSPC); fixed by having `drive/pkg-image-build.sh` set `TMPDIR` to a
+     directory on the real disk (`~/.baud-tmp`, cleaned up via a `trap ... EXIT`) before invoking the
+     test — `tempfile::tempdir()` (used by the Rust test) honors `$TMPDIR`, worth remembering for any
+     other drive script that stages large scratch data.
+     **Still open**: CLI/server wiring — no `baud image build` command exists yet (`baud image` only has
+     `lint` and `rewrite-rdseed`), so neither `initramfs.rs` nor `kernel_build.rs` is callable from any
+     real caller yet, and `baud-packages`'s existing `build()`/`BuildResult` is still the pre-KVM-pivot
+     single-ELF/Nix-flake path, untouched by this iteration; the reproducible-initramfs and kernel-build
+     pieces are not yet composed into one end-to-end "spec.toml in, guest image out" pipeline. The
+     initramfs builder is not yet assembling a real multi-file rootfs (harness scripts, agent binary)
+     beyond a single `/init`-style entry, and is not yet wired in to replace any of the three hand-built
+     `tests/fixtures/linux-guest/*initramfs.cpio.gz` files, which remain hand-built per their own
+     `BUILD.md`s. Buildroot (§4.5 Path 1) and pinned-Nix (§4.5 Path 2) themselves are still not
+     implemented — this iteration took the pragmatic third option this file's own text already flagged as
+     the "next concrete step" (plain from-source `make bzImage` reusing the already-checked-out kernel
+     tree) rather than either of those two, so a `nix`/`nix-env` toolchain is still not installed in this
+     dev sandbox and Buildroot remains unevaluated. The `/dev/vport` (or PIO) tape endpoint (§4.4) is
+     still not implemented; `bootparams::DETERMINISTIC_CMDLINE` also still isn't wired as any real
+     caller's default (`guest_kernel_boots_to_userspace` builds its own, similar but not identical,
      cmdline string inline — see the bullet above for the exact diff) — either wire it as the fixture's
-     cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned`,
-     `init_powers_off_deterministically`, `image_build_is_reproducible` remain unwritten.
+     cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned` and
+     `init_powers_off_deterministically` remain unwritten (`image_build_is_reproducible` is now written
+     and passing — see above). H8 (Mario, item 3 below) is still blocked on the rest of item 1, not just
+     this kernel-build sub-piece.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-

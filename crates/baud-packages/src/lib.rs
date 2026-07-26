@@ -31,6 +31,8 @@ use std::path::PathBuf;
 mod spec;
 mod flake;
 mod image;
+mod initramfs;
+mod kernel_build;
 mod rdseed;
 mod workload_lint;
 
@@ -40,6 +42,8 @@ pub use image::{
     image_lint, lint_kernel_config, ConfigState, GuestImageManifest, LintReport, LintViolation,
     FORBIDDEN_REAL_TIMERS, TAPE_DEVICE_CONFIG,
 };
+pub use initramfs::{build_reproducible_initramfs, InitramfsEntry};
+pub use kernel_build::{build_bzimage, KernelBuildConfig};
 pub use rdseed::{rewrite_rdseed, scan_rdseed_opcodes, RdseedRewriteReport, RdseedSite};
 pub use workload_lint::{
     scan_crates_for_workload_leaks, WorkloadLeak, FORBIDDEN_WORKLOAD_TERMS,
