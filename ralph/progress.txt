@@ -5733,3 +5733,55 @@ Writing a new drive/pkg-virtio-rng-replay-cli.sh end-to-end proof: /run/kvm with
   - New drive/pkg-virtio-rng-replay-cli.sh: real end-to-end proof over live HTTP -- POST /run/kvm { run_id, virtio_rng } persists the three columns (confirmed via a direct sqlite read), POST /runs/:id/stream/render replays with virtio_rng re-enabled and decodes the guest's real, unperturbed pixels, deterministically across two renders.
   - Verification: cargo build / clippy --workspace --all-targets / test --workspace all clean (0 failures, 0 new warnings, confirmed zero warnings in the touched files specifically); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), drive/pkg-boot-cli.sh, drive/pkg-virtio-rng-cli.sh, and the new drive/pkg-virtio-rng-replay-cli.sh all PASS on real /dev/kvm.
 ---
+
+Post-push verification: git push was a clean fast-forward (86fa24e..8dd3dba), working tree clean, origin/main matches local main exactly. All verification (build/clippy/test/drive gate, including the new pkg-virtio-rng-replay-cli.sh) was run against this exact commit before pushing.
+
+todo.md still has pending items (restore-replay virtio_rng, /run/kvm/branch+resume virtio_rng wiring blocked on a new run_until_branch_or_halt_with_virtio_rng combinator, the unmodified-Linux-guest IRQ-vector research question, virtio_rng_reseed_is_deterministic needing a real Linux guest, H8 Mario blocked on FCEUX Qt5/SDL2 packaging, H9 Ubuntu not started). Iteration 28 complete.
+
+## 2026-07-26T18:23:25 UTC (29min) - Session usage — build-28 [sonnet]
+- cost $5.2732 (from claude -p)
+- context 195,284 tok peak of 1M (20%) across 71 inference calls, monotonic
+- models sonnet-5 $5.2701 (in 172 / out 44,295 / cache-read 11,093,829) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/028-build-28.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 29
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick this iteration's step.
+
+Chose: extend virtio_rng support to /run/kvm/branch and /run/kvm/resume (currently blocked on a missing run_until_branch_or_halt_with_virtio_rng-family combinator in baud-multiverse) and to stream::render's real-restore replay path. This continues the thread iterations 23-28 built (virtio-mmio transport, virtqueue parsing, interrupt delivery, boot/cmdline/CLI wiring for the primary /run/kvm route, and the reboot replay path) -- the next open piece per todo.md item 1's H3 virtio-rng subsection.
+
+Server wiring done: RunKvmBranchBody/RunKvmResumeBody now accept virtio_rng (fixed-tape mode only), run_branches/resume_and_branch/boot_snapshot_and_branch thread it into two new Multiverse combinators (run_until_branch_or_halt_with_virtio_rng, run_until_branch_or_halt_with_periodic_timer_and_virtio_rng), and stream::render's real-restore path now reads back and honors the same 3 kvm_run_meta columns the real-replay path already did. cargo build -p baud-multiverse -p baud-server clean. Checking baud-cli for matching --virtio-rng-* flags on branch/resume subcommands next...
+
+cargo build --workspace clean. Running clippy next...
+
+cargo clippy --workspace --all-targets clean, no new warnings in touched files (run_kvm.rs/stream.rs/linux/mod.rs/cmds/run.rs). Adding unit tests for the new combinators + server wiring next...
+
+New unit tests pass on real /dev/kvm: run_until_branch_or_halt_with_virtio_rng_delivers_interrupt_to_a_branch (baud-multiverse) and boot_snapshot_and_branch_with_virtio_rng_delivers_interrupt_to_a_branch (baud-server). Adding a resume_and_branch + render_frames_from_real_restore virtio_rng test next...
+
+All three new virtio_rng tests pass on real hardware (multiverse branch combinator, server boot_snapshot_and_branch, server resume_and_branch+independent restore reproduction). Running full cargo build/clippy/test --workspace next as separate calls per protocol...
+
+cargo build/clippy --workspace clean. Running cargo test --workspace next (this includes real /dev/kvm tests, may take a while)...
+
+cargo test --workspace: ALL GREEN (0 failed across every crate, baud-multiverse 119 passed/8 ignored, baud-server 43 passed/2 ignored -- includes the 3 new virtio_rng tests). Running drive/*.sh gate scripts one at a time next...
+
+drive/h0.sh-h7.sh: 8/8 PASS on real /dev/kvm. Running drive/m9.sh-m13.sh and the pkg-boot/virtio-rng scripts next...
+
+drive/m9.sh-m13.sh: 5/5 PASS on real /dev/kvm (m13.4 specifically exercises the render_frames_from_real_restore path I just changed -- confirmed no regression). Running pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh next...
+
+New drive/pkg-virtio-rng-branch-resume-cli.sh (comprehensive real-hardware end-to-end proof) also PASSES. All drive scripts green. Updating todo.md with this iteration's findings next...
+
+## 2026-07-26T19:00:00 UTC - Changes committed.
+- Wired virtio_rng into /run/kvm/branch, /run/kvm/resume (fixed-tape mode), and stream::render's restore-and-replay path -- the last-open piece of todo.md's virtio-rng gap.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, crates/baud-cli/src/cmds/run.rs, drive/pkg-virtio-rng-branch-resume-cli.sh (new), drive/pkg-virtio-rng-replay-cli.sh, todo.md.
+- **Brief description of changes:**
+  - Added run_until_branch_or_halt_with_virtio_rng and run_until_branch_or_halt_with_periodic_timer_and_virtio_rng to Multiverse (baud-multiverse), merging run_until_branch_or_halt's MARK_BRANCH-stop condition with the existing virtio_rng notify-and-service poll.
+  - baud-server's run_branches (shared by /run/kvm/branch and /run/kvm/resume's fixed-tape mode) now accepts virtio_rng, re-enables/re-seeds the device fresh on every forked Multiverse::branch, and dispatches to the new combinators.
+  - RunKvmBranchBody/RunKvmResumeBody gained a virtio_rng field (fixed-tape mode only; generate mode unaffected, documented as still open).
+  - stream::render's render_frames_from_real_restore now reads back and honors the same kvm_run_meta virtio_rng_* columns the reboot replay path already did (bundled into a new RealRestoreParams struct for clippy).
+  - baud-cli's kvm-branch/kvm-resume subcommands gained matching --virtio-rng-* flags.
+  - New real-hardware-verified unit tests in both crates, plus a new drive/pkg-virtio-rng-branch-resume-cli.sh proving the whole feature end-to-end over real HTTP.
+  - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh, and the new pkg-virtio-rng-branch-resume-cli.sh all PASS on real /dev/kvm.
+---

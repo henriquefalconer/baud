@@ -188,18 +188,16 @@ pub async fn render(
             // exclusive with the `kernel_path`/`cmdline` reboot path below, never both.
             match (store_run_id, snapshot_node_id) {
                 (Some(store_run_id), Some(snapshot_node_id)) => {
-                    // Restore-and-replay has no `run_until_branch_or_halt_with_virtio_rng`
-                    // combinator yet (todo.md §14) — `virtio_rng` is not threaded here, same
-                    // still-open gap as `/run/kvm/resume` itself not accepting `virtio_rng`.
-                    render_frames_from_real_restore(
-                        state.snapshot_store.clone(),
+                    render_frames_from_real_restore(RealRestoreParams {
+                        store: state.snapshot_store.clone(),
                         store_run_id,
                         snapshot_node_id,
-                        tape_hex,
+                        tape_suffix_hex: tape_hex,
                         periodic_timer,
+                        virtio_rng,
                         from_step,
                         to_step,
-                    )
+                    })
                     .await
                 }
                 _ => {
@@ -391,17 +389,36 @@ async fn render_frames_from_real_replay(
 /// `Msg::Frame` records it produces — the restore-based analogue of the reboot-based path, closing
 /// todo.md §14's "`/run/kvm/resume`'s lineage gap" (no per-node full-tape-from-root reconstruction
 /// needed: only this one node's own tape suffix, which `RunKvmResumeBody::frame_run_ids`/
-/// `DriverGenerateSpec::frame_run_id_prefix` now persist).
+/// `DriverGenerateSpec::frame_run_id_prefix` now persist). `virtio_rng`, when set, re-enables and
+/// re-seeds the device fresh on the forked `Multiverse::branch` (device state is not itself part of
+/// the snapshot/restore/branch contract, see `Multiverse::run_until_branch_or_halt_with_virtio_rng`'s
+/// doc) and dispatches to the matching `..._with_virtio_rng` combinator — this closes the last
+/// still-open piece of todo.md §14 next-actions item 1's virtio-rng gap: `render()`'s reboot path
+/// (`render_frames_from_real_replay`) already threaded `virtio_rng` through; this restore path did not.
 #[cfg(target_os = "linux")]
-async fn render_frames_from_real_restore(
+struct RealRestoreParams {
     store: std::sync::Arc<baud_snapshot_store::SnapshotStore>,
     store_run_id: String,
     snapshot_node_id: String,
     tape_suffix_hex: String,
     periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
     from_step: u64,
     to_step: Option<u64>,
-) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+}
+
+#[cfg(target_os = "linux")]
+async fn render_frames_from_real_restore(params: RealRestoreParams) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    let RealRestoreParams {
+        store,
+        store_run_id,
+        snapshot_node_id,
+        tape_suffix_hex,
+        periodic_timer,
+        virtio_rng,
+        from_step,
+        to_step,
+    } = params;
     let tape_suffix = match hex_decode(&tape_suffix_hex) {
         Some(t) => t,
         None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
@@ -415,14 +432,35 @@ async fn render_frames_from_real_restore(
             None,
         )
         .map_err(|e| format!("restore branch error: {e}"))?;
-        let mut records = match periodic_timer {
-            Some((period_rcb, vector, max_ticks)) => {
+        if let Some((seed, _, _)) = virtio_rng {
+            branch.enable_virtio_rng();
+            branch.seed_virtio_rng_entropy(seed);
+        }
+        let mut records = match (periodic_timer, virtio_rng) {
+            (Some((period_rcb, timer_vector, max_ticks)), Some((_, rng_vector, _))) => {
+                let (_ticks, _outcome, records) = branch
+                    .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng(
+                        period_rcb,
+                        timer_vector,
+                        rng_vector,
+                        max_ticks,
+                    )
+                    .map_err(|e| format!("determinism hole: {e}"))?;
+                records
+            }
+            (Some((period_rcb, vector, max_ticks)), None) => {
                 let (_ticks, _outcome, records) = branch
                     .run_until_branch_or_halt_with_periodic_timer(period_rcb, vector, max_ticks)
                     .map_err(|e| format!("determinism hole: {e}"))?;
                 records
             }
-            None => {
+            (None, Some((_, rng_vector, max_exits))) => {
+                let (_outcome, records) = branch
+                    .run_until_branch_or_halt_with_virtio_rng(rng_vector, max_exits)
+                    .map_err(|e| format!("determinism hole: {e}"))?;
+                records
+            }
+            (None, None) => {
                 let (_outcome, records) = branch
                     .run_until_branch_or_halt(crate::routes::run_kvm::BRANCH_MAX_EXITS)
                     .map_err(|e| format!("determinism hole: {e}"))?;
@@ -457,15 +495,19 @@ async fn render_frames_from_real_restore(
 
 /// Non-Linux stub, mirroring `render_frames_from_real_replay`'s own — see its doc for why.
 #[cfg(not(target_os = "linux"))]
-async fn render_frames_from_real_restore(
-    _store: std::sync::Arc<baud_snapshot_store::SnapshotStore>,
-    _store_run_id: String,
-    _snapshot_node_id: String,
-    _tape_suffix_hex: String,
-    _periodic_timer: Option<(u64, u8, u32)>,
-    _from_step: u64,
-    _to_step: Option<u64>,
-) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+struct RealRestoreParams {
+    store: std::sync::Arc<baud_snapshot_store::SnapshotStore>,
+    store_run_id: String,
+    snapshot_node_id: String,
+    tape_suffix_hex: String,
+    periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
+    from_step: u64,
+    to_step: Option<u64>,
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn render_frames_from_real_restore(_params: RealRestoreParams) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
     Err(json!({ "error": "real KVM restore-replay is only available on target_os = \"linux\"" }))
 }
 

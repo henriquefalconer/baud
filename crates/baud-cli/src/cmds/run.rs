@@ -177,6 +177,18 @@ pub enum RunAction {
         /// Ignored when `--branch-tape-hex` is set instead of `--generate-seed`/`--generate-count`.
         #[arg(long)]
         frame_run_id_prefix: Option<String>,
+        /// Same flag as `kvm --virtio-rng-seed`, applied to every `--branch-tape-hex` branch this
+        /// call forks (each re-enables and re-seeds the device fresh, mirroring a cold boot — see
+        /// `RunKvmBranchBody::virtio_rng`'s doc). Only honored in fixed-tape mode, not
+        /// `--generate-seed`/`--generate-count`.
+        #[arg(long)]
+        virtio_rng_seed: Option<u64>,
+        /// Only used when `--virtio-rng-seed` is set.
+        #[arg(long, default_value_t = 0x31)]
+        virtio_rng_vector: u8,
+        /// Only used when `--virtio-rng-seed` is set and `--periodic-timer-period-rcb` is not.
+        #[arg(long, default_value_t = 200_000)]
+        virtio_rng_max_exits: u32,
     },
     /// Fork more branches from a universe a prior `kvm-branch --persist-run-id` call persisted —
     /// no kernel image, no re-boot: reconstructs the universe from the server's SnapshotStore and
@@ -236,6 +248,16 @@ pub enum RunAction {
         /// Ignored when `--branch-tape-hex` is set instead of `--generate-seed`/`--generate-count`.
         #[arg(long)]
         frame_run_id_prefix: Option<String>,
+        /// Same flag as `kvm-branch --virtio-rng-seed`, applied to every `--branch-tape-hex` branch
+        /// this call forks from the reconstructed universe. Only honored in fixed-tape mode.
+        #[arg(long)]
+        virtio_rng_seed: Option<u64>,
+        /// Only used when `--virtio-rng-seed` is set.
+        #[arg(long, default_value_t = 0x31)]
+        virtio_rng_vector: u8,
+        /// Only used when `--virtio-rng-seed` is set and `--periodic-timer-period-rcb` is not.
+        #[arg(long, default_value_t = 200_000)]
+        virtio_rng_max_exits: u32,
     },
 }
 
@@ -351,6 +373,9 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             periodic_timer_max_ticks,
             frame_run_ids,
             frame_run_id_prefix,
+            virtio_rng_seed,
+            virtio_rng_vector,
+            virtio_rng_max_exits,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -383,6 +408,13 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                         .map(|s| if s.is_empty() { serde_json::Value::Null } else { json!(s) })
                         .collect::<Vec<_>>());
                 }
+                if let Some(seed) = virtio_rng_seed {
+                    body["virtio_rng"] = json!({
+                        "seed": seed,
+                        "vector": virtio_rng_vector,
+                        "max_exits": virtio_rng_max_exits,
+                    });
+                }
             }
             let v = c.post("/run/kvm/branch", &body).await?;
             fmt::print(&v, json);
@@ -403,6 +435,9 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             periodic_timer_max_ticks,
             frame_run_ids,
             frame_run_id_prefix,
+            virtio_rng_seed,
+            virtio_rng_vector,
+            virtio_rng_max_exits,
         } => {
             let mut body = json!({
                 "run_id": run_id,
@@ -430,6 +465,13 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                         .iter()
                         .map(|s| if s.is_empty() { serde_json::Value::Null } else { json!(s) })
                         .collect::<Vec<_>>());
+                }
+                if let Some(seed) = virtio_rng_seed {
+                    body["virtio_rng"] = json!({
+                        "seed": seed,
+                        "vector": virtio_rng_vector,
+                        "max_exits": virtio_rng_max_exits,
+                    });
                 }
             }
             let v = c.post("/run/kvm/resume", &body).await?;

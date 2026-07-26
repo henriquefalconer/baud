@@ -1857,16 +1857,60 @@ snapshot, not a duplicate of it.
      warnings — confirmed via a targeted check of the touched files `stream.rs`/`run_kvm.rs` only);
      `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`, and
      `drive/pkg-virtio-rng-cli.sh` all still PASS on real `/dev/kvm`, no regressions from the widened
-     `boot_and_drain_frames` signature or the `RealReplayParams` refactor. **Still open, unchanged**:
-     `render_frames_from_real_restore` still doesn't support virtio_rng; `/run/kvm/branch`
-     (`RunKvmBranchBody`) and `/run/kvm/resume` (`RunKvmResumeBody`) still don't accept a `virtio_rng`
-     field at all — both blocked on the missing `run_until_branch_or_halt_with_virtio_rng`-family
-     combinator in `crates/baud-multiverse/src/linux/mod.rs` (real new run-loop plumbing, not just
-     server wiring); the "which vector would an unmodified Linux guest's real `virtio_mmio` driver
-     bind to" research question remains untouched; `virtio_rng_reseed_is_deterministic` (the
-     spec-named test) still needs a real Linux guest that actually negotiates and uses the device, not
-     just this hand-assembled fixture; H8 Mario is still blocked on the FCEUX Qt5/SDL2 packaging
-     problem; H9 Ubuntu is still not started.
+     `boot_and_drain_frames` signature or the `RealReplayParams` refactor.
+     **This iteration closes the missing `run_until_branch_or_halt_with_virtio_rng`-family
+     combinator and wires it everywhere the prior note flagged as blocked on it.**
+     `crates/baud-multiverse/src/linux/mod.rs` gained two new combinators, mirroring the existing
+     `run_to_first_halt_with_virtio_rng`/`run_to_first_halt_with_periodic_timer_and_virtio_rng` pair
+     but with `run_until_branch_or_halt`'s "stop at `MARK_BRANCH`, not just `Hlt`" condition merged
+     in: `run_until_branch_or_halt_with_virtio_rng(vector, max_exits)` and
+     `run_until_branch_or_halt_with_periodic_timer_and_virtio_rng(period_rcb, timer_vector,
+     virtio_rng_vector, max_ticks)`. `crates/baud-server/src/routes/run_kvm.rs`'s `run_branches`
+     (the shared fork-and-run loop `/run/kvm/branch` and `/run/kvm/resume`'s fixed-tape mode both
+     call) now takes a `virtio_rng: Option<(u64, u8, u32)>`, calls
+     `branch.enable_virtio_rng()`/`seed_virtio_rng_entropy(seed)` fresh right after
+     `Multiverse::branch` (device state is not itself part of the snapshot/restore/branch contract —
+     `DeviceBus::restore` always starts a branch with it disabled, confirmed by grep), and dispatches
+     on `(periodic_timer, virtio_rng)` to one of the four combinators, exactly mirroring
+     `boot_run_and_drain`'s existing dispatch. `RunKvmBranchBody`/`RunKvmResumeBody` both gained a
+     `virtio_rng: Option<VirtioRngSpec>` field (same struct `RunKvmBody` already used), threaded
+     through `boot_snapshot_and_branch`/`resume_and_branch` — **fixed-tape mode only**; `generate`
+     mode (`DriverGenerateSpec`-based branches) is unchanged and still runs with virtio_rng disabled,
+     deliberately out of scope this iteration. `stream::render`'s restore-and-replay path
+     (`render_frames_from_real_restore`) also now reads the same three `kvm_run_meta` `virtio_rng_*`
+     columns `render_frames_from_real_replay` already did and threads them the same way — its params
+     were bundled into a new `RealRestoreParams` struct (both cfg variants) to stay under
+     `too_many_arguments`, mirroring `RealReplayParams`. `baud-cli`'s `kvm-branch`/`kvm-resume`
+     subcommands gained matching `--virtio-rng-seed`/`--virtio-rng-vector`/`--virtio-rng-max-exits`
+     flags (honored only in fixed-tape mode). New unit tests, all real-hardware-verified: `baud-
+     multiverse`'s `run_until_branch_or_halt_with_virtio_rng_delivers_interrupt_to_a_branch` (a
+     *forked* branch, not just a fresh boot, delivers the real interrupt); `baud-server`'s
+     `boot_snapshot_and_branch_with_virtio_rng_delivers_interrupt_to_a_branch` and
+     `resume_and_branch_with_virtio_rng_delivers_interrupt_and_restore_reproduces_it` (the latter
+     also independently re-derives `render_frames_from_real_restore`'s own logic inline and confirms
+     it reproduces the live resume's console output). New drive script
+     `drive/pkg-virtio-rng-branch-resume-cli.sh` proves the whole thing end-to-end over real HTTP
+     against a live `baud-server` on real `/dev/kvm`: a fresh `/run/kvm/branch { virtio_rng }`
+     delivers the interrupt (`virtio-rng-guest` fixture, console=`5295`, seed 42); `/run/kvm/resume
+     { virtio_rng }` reproduces it with no re-boot; a `framebuffer-guest` restore-based row persisted
+     via `/run/kvm/resume { virtio_rng, frame_run_ids }` round-trips its three `kvm_run_meta` columns
+     and `POST /runs/:id/stream/render` decodes the guest's real, unperturbed pixels via the restore
+     path with virtio_rng re-enabled, byte-identical across two renders.
+     `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new
+     warnings in any touched file); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5),
+     `drive/pkg-boot-cli.sh`, `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`, and
+     the new `drive/pkg-virtio-rng-branch-resume-cli.sh` all PASS on real `/dev/kvm`, no regressions.
+     **Still open**: `generate` mode (`/run/kvm/branch`'s and `/run/kvm/resume`'s
+     `DriverGenerateSpec` path) still runs every branch with virtio_rng disabled, even when the
+     caller sets `virtio_rng` — the field is silently ignored there, not rejected (a caller relying
+     on generate-mode + virtio_rng would get no error, just no device); the "which vector would an
+     unmodified Linux guest's real `virtio_mmio` driver bind to" research question remains untouched;
+     `virtio_rng_reseed_is_deterministic` (the spec-named test) still needs a real Linux guest that
+     actually negotiates and uses the device, not just this hand-assembled fixture, and no fixture
+     exists yet that both drives virtio-rng and emits frames in the same guest (so
+     `render_frames_from_real_restore`'s virtio_rng plumbing is only proven as a no-op so far, same
+     caveat `render_frames_from_real_replay`'s own test already had); H8 Mario is still blocked on the
+     FCEUX Qt5/SDL2 packaging problem; H9 Ubuntu is still not started.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

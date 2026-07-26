@@ -1329,6 +1329,124 @@ impl Multiverse {
         )))
     }
 
+    /// [`run_until_branch_or_halt`](Self::run_until_branch_or_halt)'s per-exit "stop at
+    /// `MARK_BRANCH`, not just at `Hlt`" condition, combined with
+    /// [`run_to_first_halt_with_virtio_rng`](Self::run_to_first_halt_with_virtio_rng)'s
+    /// `notify_count` poll-and-service loop — the entry point `baud-server`'s `/run/kvm/branch` and
+    /// `/run/kvm/resume` routes need to drive a virtio-rng-enabled branch to its own checkpoint or
+    /// halt (todo.md §14 next-actions item 1's last-open virtio-rng gap: branch/resume/restore
+    /// never accepted `virtio_rng` at all because this combinator didn't exist). Requires
+    /// [`enable_virtio_rng`](Self::enable_virtio_rng) (and typically
+    /// [`seed_virtio_rng_entropy`](Self::seed_virtio_rng_entropy)) to already have been called on
+    /// this `Multiverse` — virtio-rng device state is not itself part of the snapshot/restore/branch
+    /// contract (`DeviceBus::restore` always starts a branched universe with the device disabled),
+    /// so a caller must re-enable and re-seed it fresh right after [`Multiverse::branch`], exactly
+    /// like a cold boot.
+    pub fn run_until_branch_or_halt_with_virtio_rng(
+        &mut self,
+        vector: u8,
+        max_exits: u32,
+    ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let mut exits = 0u32;
+        let mut records = Vec::new();
+        let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+        loop {
+            if exits >= max_exits {
+                return Err(DeterminismHole(format!(
+                    "run_until_branch_or_halt_with_virtio_rng: neither Hlt nor MARK_BRANCH within \
+                     {max_exits} exits"
+                )));
+            }
+            let outcome = self.step_exit()?;
+            exits += 1;
+            if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
+                let halt = HaltOutcome {
+                    console_output: self.bus.console.output().to_vec(),
+                    ram_hash: self.ram_hash(),
+                    exit_pc: self.current_rip()?,
+                };
+                return Ok((RunUntilBranchOutcome::Halted(halt), records));
+            }
+            let mut drained = self.bus.tape.device_mut().drain_records();
+            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+                let step = match drained[pos] {
+                    baud_proto::Msg::MarkBranch { step } => step,
+                    _ => unreachable!("position() only matched MarkBranch entries"),
+                };
+                records.extend(drained.drain(..=pos));
+                return Ok((RunUntilBranchOutcome::MarkBranch { step }, records));
+            }
+            records.extend(drained);
+            let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+            if notify_count != last_notify_count {
+                last_notify_count = notify_count;
+                self.service_virtio_rng_interrupt(vector)?;
+            }
+        }
+    }
+
+    /// [`run_until_branch_or_halt_with_periodic_timer`]
+    /// (Self::run_until_branch_or_halt_with_periodic_timer)'s per-tick "stop at `MARK_BRANCH`, not
+    /// just at `Hlt`" checkpoint engine, combined with
+    /// [`run_to_first_halt_with_periodic_timer_and_virtio_rng`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_virtio_rng)'s `notify_count` poll-and-
+    /// service — the four-way combination `/run/kvm/branch`/`/run/kvm/resume` need for a branch
+    /// that both requires periodic timer ticks and talks virtio-rng. The `MARK_BRANCH` drain-and-
+    /// check happens before the `Injected`/`Halted` match on every tick, exactly matching
+    /// `run_until_branch_or_halt_with_periodic_timer`'s own load-bearing ordering (a short guest
+    /// program's entire checkpoint-then-halt sequence can land inside one tick's window).
+    pub fn run_until_branch_or_halt_with_periodic_timer_and_virtio_rng(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        virtio_rng_vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let mut ticks = Vec::new();
+        let mut records = Vec::new();
+        let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+        for _ in 0..max_ticks {
+            let baseline = self.time.current_rcb();
+            let target_rcb = baseline.saturating_add(period_rcb);
+            let mut stepper =
+                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
+            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector)
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut drained = self.bus.tape.device_mut().drain_records();
+            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+                let step = match drained[pos] {
+                    baud_proto::Msg::MarkBranch { step } => step,
+                    _ => unreachable!("position() only matched MarkBranch entries"),
+                };
+                records.extend(drained.drain(..=pos));
+                return Ok((ticks, RunUntilBranchOutcome::MarkBranch { step }, records));
+            }
+            records.extend(drained);
+            match outcome {
+                baud_vcpu::boundary::InjectOutcome::Injected(point) => {
+                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                    let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+                    if notify_count != last_notify_count {
+                        last_notify_count = notify_count;
+                        self.service_virtio_rng_interrupt(virtio_rng_vector)?;
+                    }
+                }
+                baud_vcpu::boundary::InjectOutcome::Halted(_) => {
+                    let halt = HaltOutcome {
+                        console_output: self.bus.console.output().to_vec(),
+                        ram_hash: self.ram_hash(),
+                        exit_pc: self.current_rip()?,
+                    };
+                    return Ok((ticks, RunUntilBranchOutcome::Halted(halt), records));
+                }
+            }
+        }
+        Err(DeterminismHole(format!(
+            "run_until_branch_or_halt_with_periodic_timer_and_virtio_rng: neither Hlt nor \
+             MARK_BRANCH within {max_ticks} periodic ticks"
+        )))
+    }
+
     /// Every tape-device record (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`,
     /// specs/baud-tape-device.md §4) the guest has emitted and not yet drained. Callers typically
     /// call this after [`run_to_first_halt`](Self::run_to_first_halt) to collect what the guest
@@ -2424,6 +2542,53 @@ mod tests {
         assert_eq!(
             first.ram_hash, second.ram_hash,
             "guest RAM at the guest's own natural halt must be byte-identical across two boots"
+        );
+    }
+
+    /// Real-hardware proof that `run_until_branch_or_halt_with_virtio_rng` (todo.md §14 next-actions
+    /// item 1's "branch/resume don't accept virtio_rng at all" gap) delivers a real virtio-rng
+    /// interrupt through a *forked* `Multiverse::branch`, not just a fresh `boot` -- since virtio-rng
+    /// device state is not itself part of the snapshot/restore/branch contract
+    /// (`Multiverse::run_until_branch_or_halt_with_virtio_rng`'s own doc), this snapshots the
+    /// `virtio-rng-guest` fixture immediately after boot (before it negotiates anything), forks one
+    /// branch with an empty tape suffix, re-enables and re-seeds virtio-rng fresh on the branch
+    /// exactly as `baud-server`'s `run_branches` now does, and asserts the branch's own ISR observes
+    /// the same marker + entropy byte a direct boot does (`run_virtio_rng_guest_once`'s own
+    /// assertion). This fixture never calls `MARK_BRANCH`, so this only exercises the `Halted` stop
+    /// arm, not the `MarkBranch` one -- `run_until_branch_or_halt_with_periodic_timer_and_virtio_rng`
+    /// (the four-way combinator) has no dedicated fixture at all yet, since no existing guest talks
+    /// both virtio-rng and needs periodic ticks.
+    #[test]
+    fn run_until_branch_or_halt_with_virtio_rng_delivers_interrupt_to_a_branch() {
+        const WORK_CLOCK_K: u64 = 1;
+        let kernel = virtio_rng_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let mut boot =
+            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None).expect("boot failed");
+        let mut page_store = baud_snapshot::PageStore::new();
+        let universe = boot.snapshot(&mut page_store).expect("snapshot failed");
+
+        let mut branch =
+            Multiverse::branch(&universe, vec![], WORK_CLOCK_K, None).expect("branch failed");
+        branch.enable_virtio_rng();
+        branch.seed_virtio_rng_entropy(42);
+
+        const MAX_EXITS: u32 = 200_000;
+        let (outcome, _records) = branch
+            .run_until_branch_or_halt_with_virtio_rng(VIRTIO_RNG_VECTOR, MAX_EXITS)
+            .expect("run_until_branch_or_halt_with_virtio_rng failed");
+        let halt = match outcome {
+            RunUntilBranchOutcome::Halted(halt) => halt,
+            RunUntilBranchOutcome::MarkBranch { step } => {
+                panic!("virtio-rng-guest never calls MARK_BRANCH, got one at step {step}")
+            }
+        };
+        let expected_byte = crate::timesource::SplitMix64::new(42).next_u64().to_le_bytes()[0];
+        assert_eq!(
+            halt.console_output,
+            vec![b'R', expected_byte],
+            "a branch (not just a fresh boot) must deliver the real virtio-rng interrupt to the \
+             guest's own ISR, which must observe the exact seeded entropy byte"
         );
     }
 
