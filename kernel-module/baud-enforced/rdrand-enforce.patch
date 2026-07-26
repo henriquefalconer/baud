@@ -70,17 +70,20 @@ diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
 index 7be761e..f091c84 100644
 --- a/include/uapi/linux/kvm.h
 +++ b/include/uapi/linux/kvm.h
-@@ -185,9 +185,10 @@
+@@ -185,10 +185,12 @@
  #define KVM_EXIT_MEMORY_FAULT     39
  #define KVM_EXIT_TDX              40
  /*
 - * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason
-- * (0 == RDTSC). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit and
+- * (0 == RDTSC; 3 == RDTSCP, serving the identical EDX:EAX plus ECX = IA32_TSC_AUX).
+- * See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdtscp_exit and
 - * kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
 + * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason's
 + * low byte (0 == RDTSC, 1 == RDRAND with the destination GPR index in the next
-+ * byte). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdrand_exit
-+ * and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
++ * byte, 3 == RDTSCP -- same EDX:EAX as RDTSC plus ECX = IA32_TSC_AUX). See
++ * arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdtscp_exit/
++ * handle_baud_rdrand_exit and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md
++ * in the baud source tree.
   */
  #define KVM_EXIT_BAUD_DETERMINISM 41
  

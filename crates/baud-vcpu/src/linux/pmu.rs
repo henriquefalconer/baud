@@ -27,7 +27,7 @@
 
 use super::{
     reinject_ud, run_and_convert, write_enforced_rdrand_result, write_enforced_rdseed_result,
-    write_enforced_rdtsc_result, ConvertedExit,
+    write_enforced_rdtsc_result, write_enforced_rdtscp_result, ConvertedExit,
 };
 use crate::boundary::{ExecPoint, PmuStepper};
 use crate::{dispatch_exit, Bus, DispatchOutcome, Exit, TimeSource};
@@ -173,6 +173,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                             Err(e) => return Err(e),
                         }
                     }
+                    Ok(DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux }) => {
+                        match write_enforced_rdtscp_result(self.vcpu, value, tsc_aux) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
                     Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value }) => {
                         match write_enforced_rdrand_result(self.vcpu, gpr_index, value) {
                             Ok(()) => continue,
@@ -232,6 +238,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     Ok(DispatchOutcome::SingleStepBoundary) => break Ok(()),
                     Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
                         match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => break Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux }) => {
+                        match write_enforced_rdtscp_result(self.vcpu, value, tsc_aux) {
                             Ok(()) => continue,
                             Err(e) => break Err(e),
                         }
@@ -308,6 +320,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     Ok(DispatchOutcome::SingleStepBoundary) => continue,
                     Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
                         match write_enforced_rdtsc_result(self.vcpu, value) {
+                            Ok(()) => continue,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux }) => {
+                        match write_enforced_rdtscp_result(self.vcpu, value, tsc_aux) {
                             Ok(()) => continue,
                             Err(e) => return Err(e),
                         }

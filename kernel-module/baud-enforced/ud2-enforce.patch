@@ -104,17 +104,20 @@ diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
 index f091c84..d9d8d6c 100644
 --- a/include/uapi/linux/kvm.h
 +++ b/include/uapi/linux/kvm.h
-@@ -187,8 +187,11 @@
+@@ -187,10 +187,13 @@
  /*
   * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason's
   * low byte (0 == RDTSC, 1 == RDRAND with the destination GPR index in the next
-- * byte). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdrand_exit
-- * and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
+- * byte, 3 == RDTSCP -- same EDX:EAX as RDTSC plus ECX = IA32_TSC_AUX). See
+- * arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdtscp_exit/
+- * handle_baud_rdrand_exit and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md
 + * byte, 2 == a UD2 that may be a build-time-rewritten RDSEED site -- no register
 + * index, and RIP is left *at* the UD2 for userspace to advance or re-inject #UD
-+ * from). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdrand_exit/
-+ * handle_baud_ud2_exit and kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the
-+ * baud source tree.
++ * from, 3 == RDTSCP -- same EDX:EAX as RDTSC plus ECX = IA32_TSC_AUX). See
++ * arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdtscp_exit/
++ * handle_baud_rdrand_exit/handle_baud_ud2_exit and
++ * kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md
+  * in the baud source tree.
   */
  #define KVM_EXIT_BAUD_DETERMINISM 41
  

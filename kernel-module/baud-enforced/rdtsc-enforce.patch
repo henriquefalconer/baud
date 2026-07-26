@@ -18,10 +18,42 @@ index c084f48..7be0e65 100644
  			  CPU_BASED_MONITOR_TRAP_FLAG |
  			  CPU_BASED_PAUSE_EXITING);
  
-@@ -6105,6 +6109,35 @@ static int handle_wrmsr_imm(struct kvm_vcpu *vcpu)
+@@ -6105,6 +6109,67 @@ static int handle_wrmsr_imm(struct kvm_vcpu *vcpu)
  				     vmx_get_msr_imm_reg(vcpu));
  }
  
++/*
++ * baud: RDTSCP is forced to exit as a side effect of CPU_BASED_RDTSC_EXITING
++ * above -- per the Intel SDM (Vol. 3C 25.1.2), that execution control also
++ * governs RDTSCP, not just plain RDTSC, so no separate exec-control bit
++ * exists to turn on here. Unlike RDTSC, real RDTSCP also loads ECX with
++ * IA32_TSC_AUX[31:0] (SDM Vol. 2B) -- this handler does not compute that
++ * value itself (this out-of-tree module has no notion of baud's tape-derived
++ * TSC_AUX state); like the RDRAND handler below, it only skips the trapping
++ * instruction and marks the exit, leaving EDX:EAX:ECX for userspace to fill
++ * in via KVM_SET_REGS before the next KVM_RUN, exactly as
++ * handle_baud_rdtsc_exit does for plain RDTSC's EDX:EAX.
++ *
++ * This handler closes the real gap found booting a genuine Linux 6.18
++ * kernel under the enforced module for the first time: every hand-assembled
++ * fixture before it issued only bare RDTSC, never RDTSCP, so
++ * kvm_vmx_exit_handlers[] having no EXIT_REASON_RDTSCP entry at all (stock
++ * or patched) went unnoticed until then -- the guest hit
++ * KVM_EXIT_INTERNAL_ERROR with dmesg's "vmx: unexpected exit reason 0x33"
++ * instead.
++ */
++static int handle_baud_rdtscp_exit(struct kvm_vcpu *vcpu)
++{
++	int r = kvm_skip_emulated_instruction(vcpu);
++
++	if (r <= 0)
++		return r;
++
++	vcpu->run->exit_reason = KVM_EXIT_BAUD_DETERMINISM;
++	vcpu->run->hw.hardware_exit_reason = 3; /* 3 == RDTSCP */
++	return 0;
++}
++
 +/*
 + * baud: RDTSC is forced to exit (vmx_exec_control above) so a deterministic
 + * work-clock value can be served by userspace instead of the raw hardware
@@ -54,11 +86,12 @@ index c084f48..7be0e65 100644
  /*
   * The exit handlers return 1 if the exit was handled fully and guest execution
   * may resume.  Otherwise they set the kvm_run parameter to indicate what needs
-@@ -6167,6 +6200,7 @@ static int (*kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+@@ -6167,6 +6259,8 @@ static int (*kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
  	[EXIT_REASON_TDCALL]		      = handle_tdx_instruction,
  	[EXIT_REASON_MSR_READ_IMM]            = handle_rdmsr_imm,
  	[EXIT_REASON_MSR_WRITE_IMM]           = handle_wrmsr_imm,
 +	[EXIT_REASON_RDTSC]                   = handle_baud_rdtsc_exit,
++	[EXIT_REASON_RDTSCP]                  = handle_baud_rdtscp_exit,
  };
  
  static const int kvm_vmx_max_exit_handlers =
@@ -66,13 +99,14 @@ diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
 index 954e051..7be761e 100644
 --- a/include/uapi/linux/kvm.h
 +++ b/include/uapi/linux/kvm.h
-@@ -184,6 +184,12 @@ struct kvm_xen_exit {
+@@ -184,6 +184,13 @@ struct kvm_xen_exit {
  #define KVM_EXIT_LOONGARCH_IOCSR  38
  #define KVM_EXIT_MEMORY_FAULT     39
  #define KVM_EXIT_TDX              40
 +/*
 + * baud: out-of-tree, not upstream KVM. Served via kvm_run.hw.hardware_exit_reason
-+ * (0 == RDTSC). See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit and
++ * (0 == RDTSC; 3 == RDTSCP, serving the identical EDX:EAX plus ECX = IA32_TSC_AUX).
++ * See arch/x86/kvm/vmx/vmx.c's handle_baud_rdtsc_exit/handle_baud_rdtscp_exit and
 + * kernel-module/baud-enforced/ENFORCEMENT_DESIGN.md in the baud source tree.
 + */
 +#define KVM_EXIT_BAUD_DETERMINISM 41

@@ -4383,3 +4383,61 @@ drive/m0.sh PASS. Full verification protocol green: cargo build/clippy/test --wo
     left in place) was done and reverted safely per CLAUDE.md's dance, `fuser /dev/kvm` confirmed clear
     both before and after.
 ---
+
+Post-push verification: local main (adc66a2) matches origin/main exactly (git fetch + rev-parse confirmed), working tree clean, guest_kernel_boots_to_userspace re-verified against real /dev/kvm on the pushed tip. todo.md still has pending items (RDTSCP enforced-module gap just found, double_boot_ram_hash_identical checkpoint design, baud-packages automated pipeline, examples/mario rebuild, generic-core guardrail, Ubuntu H9, and more per §12/§14) -- emitting NEXT.
+
+## 2026-07-26T03:35:51 UTC (27min) - Session usage — build-4 [sonnet]
+- cost $5.2115 (from claude -p)
+- context 186,068 tok peak of 1M (19%) across 86 inference calls, monotonic
+- models sonnet-5 $5.2084 (in 172 / out 50,080 / cache-read 11,608,186) · haiku-4-5 $0.0031
+- transcript: ralph/.run/20260726T004845Z/004-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and progress.txt to understand current state.
+
+Chose the RDTSCP enforced-module gap (todo.md §14 item 2): the patched kvm_intel dispatch table has no handler for EXIT_REASON_RDTSCP (0x33), which blocks os_entropy_is_deterministic under the enforced module -- a real Linux 6.18 kernel is the first guest to issue RDTSCP. This is the concrete next blocker documented from the prior iteration.
+
+Implementing the fix: adding handle_baud_rdtscp_exit to rdtsc-enforce.patch (serves EDX:EAX from the work-clock plus ECX from IA32_TSC_AUX, payload kind 3), then wiring Exit::RdtscpEnforced / DispatchOutcome::ServeEnforcedRdtscp through baud-vcpu and a new TimeSource::serve_enforced_tsc_aux on WorkClock. Studied the existing RDTSC/RDRAND/UD2 enforced-exit plumbing end to end first.
+
+Verifying the patch chain: reverse-applying ud2/rdrand/rdtsc-enforce.patch on a scratch copy of the live wsl-kernel-src tree to recover a pristine vmx.c, then re-applying the updated three-patch chain to confirm correctness before touching the real tree.
+
+Kernel patch verified: rdtsc-enforce.patch now adds handle_baud_rdtscp_exit + an EXIT_REASON_RDTSCP dispatch entry (payload kind 3, ECX left for userspace same as RDRAND's destination-GPR pattern), and the doc comments in rdrand-enforce.patch/ud2-enforce.patch were updated to describe it. Confirmed the full three-patch chain (and rdtsc-enforce.patch standalone) applies cleanly with --fuzz=0 against a freshly reconstructed pristine vmx.c/kvm.h (reversed the old patches off a copy of the live tree, then reapplied the new chain) before touching the real ~/wsl-kernel-src/src tree. Now applying the same reverse+reapply to the real tree.
+
+Real ~/wsl-kernel-src/src tree now has the updated three-patch chain applied (including handle_baud_rdtscp_exit). Building the patched in-tree KVM module (M=arch/x86/kvm) with gcc-13 to confirm it compiles before touching the live kvm_intel module.
+
+Rust wiring complete: Exit::RdtscpEnforced / DispatchOutcome::ServeEnforcedRdtscp / TimeSource::serve_enforced_tsc_aux threaded through baud-vcpu (dispatch_exit, run_one_exit, write_enforced_rdtscp_result) and baud-multiverse's WorkClock. Added unit tests in all three spots. Running cargo build --workspace now.
+
+cargo build --workspace green (found and fixed a third dispatch call site I missed: baud_vcpu::linux::pmu's three KVM_RUN loops -- run_until_exit/step/run_until_irq_window -- each needed a ServeEnforcedRdtscp match arm alongside the existing RDTSC/RDRAND/RDSEED ones). Running clippy next.
+
+clippy clean (pre-existing warnings only, none in files I touched). Running cargo test --workspace now.
+
+Wrote drive/h7-enforced-entropy.sh (swaps in the enforced module, runs os_entropy_is_deterministic --ignored, then regression-checks rdtsc_enforced_regime_is_bit_exact_across_boots, always swapping the stock module back). cargo test --workspace still compiling in the background; will run it once the unit-test suite is green.
+
+Re-running cargo test --workspace in the foreground with a long timeout (Ralph's background notifications don't fire reliably in this harness) since the earlier auto-backgrounded run's output file was still empty.
+
+cargo test --workspace fully green (21 test-result:ok blocks, 0 failed). Now running drive/h3-enforced-rdseed.sh for a hardware regression check of the full rdtsc+rdrand+ud2 chain with RDTSCP layered underneath, before running the new drive/h7-enforced-entropy.sh.
+
+h3-enforced-rdseed.sh full regression PASSED (rdtsc/rdrand/rdseed all bit-exact with RDTSCP handling layered underneath, stock module restored cleanly). Now running the new drive/h7-enforced-entropy.sh -- this is the actual test of the RDTSCP fix: os_entropy_is_deterministic booting a real Linux 6.18 kernel under the enforced module, which previously hit KVM_EXIT_INTERNAL_ERROR on RDTSCP.
+
+H7-enforced-entropy PASSED: os_entropy_is_deterministic is green on real hardware -- getrandom()/dev/urandom byte-identical across two boots of a real, unmodified Linux 6.18 kernel under the enforced (RDTSC+RDTSCP-trapping) module. This closes the concrete blocker recorded in todo.md's §14 next-actions item 2. Stock kvm_intel/kvm module confirmed restored, /dev/kvm confirmed clear. Now running the full stock-module drive/*.sh suite one at a time per CLAUDE.md's verification protocol.
+
+h0/h1/h2 all PASS on stock module. Continuing through h3-h7 and m0-m11 per the mandatory verification protocol.
+
+h3-h7 all PASS on stock module (h5's 1000-branch test took 212s, everything else fast). Moving to the m0-m11 milestone scripts.
+
+## 2026-07-26T04:09:22 UTC - Changes committed.
+- Fixed the RDTSCP enforced-module gap that was blocking H7's os_entropy_is_deterministic test
+- Files changed: kernel-module/baud-enforced/{rdtsc,rdrand,ud2}-enforce.patch, crates/baud-vcpu/src/{lib.rs,tests.rs,linux/mod.rs,linux/pmu.rs}, crates/baud-multiverse/src/timesource.rs, drive/h7-enforced-entropy.sh (new), todo.md
+- **Brief description of changes:**
+  - rdtsc-enforce.patch: added `handle_baud_rdtscp_exit` (payload kind 3) + an `EXIT_REASON_RDTSCP` dispatch-table entry, alongside the existing `handle_baud_rdtsc_exit` (kind 0) — closes the real gap found booting a genuine Linux 6.18 kernel under the enforced module (KVM_EXIT_INTERNAL_ERROR, dmesg "unexpected exit reason 0x33"), since CPU_BASED_RDTSC_EXITING also forces RDTSCP to VM-exit but no dispatch-table entry existed for it, stock or patched
+  - rdrand-enforce.patch/ud2-enforce.patch: updated their doc-comment hunks (which incrementally rewrite the same kvm.h payload-kind comment) to describe kind 3 == RDTSCP consistently across the three-patch chain
+  - baud-vcpu: new `Exit::RdtscpEnforced` / `DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux }` / `TimeSource::serve_enforced_tsc_aux`, threaded through `dispatch_exit`, `linux::run_one_exit`, and all three `linux::pmu` KVM_RUN loops (run_until_exit/step/run_until_irq_window each needed their own match arm)
+  - baud-multiverse: `WorkClock::serve_enforced_tsc_aux` returns `tsc_aux` truncated to 32 bits, agreeing with `serve_rdmsr(MSR_IA32_TSC_AUX)`
+  - new drive/h7-enforced-entropy.sh: swaps in the enforced module, runs `os_entropy_is_deterministic --ignored` (PASSED on real /dev/kvm — getrandom()/dev/urandom byte-identical across two boots of a real Linux 6.18 kernel, non-degenerate), regression-checks rdtsc_enforced_regime_is_bit_exact_across_boots, always restores the stock module
+  - Verified the hand-edited three-patch chain (rdtsc+rdrand+ud2) still applies cleanly with --fuzz=0 by reconstructing a pristine vmx.c/kvm.h (reversing the old patches off a copy of the live tree) and reapplying; drive/h3-enforced-rdseed.sh's full regression (rdtsc/rdrand/rdseed all bit-exact) still passes with RDTSCP layered underneath
+  - Full verification green: cargo build/clippy/test --workspace clean; drive/h0.sh through drive/h7.sh and drive/m0.sh through drive/m11.sh all PASS on real /dev/kvm; drive/h3-enforced-rdtsc.sh/-rdrand.sh/-rdseed.sh and the new -entropy.sh all PASS with the stock module cleanly restored and /dev/kvm confirmed clear afterward
+  - todo.md §14 next-actions item 2 updated: os_entropy_is_deterministic is now GREEN and hardware-verified, not just written
+---

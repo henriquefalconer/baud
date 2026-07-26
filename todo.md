@@ -995,56 +995,51 @@ snapshot, not a duplicate of it.
      cmdline string inline — see the bullet above for the exact diff) — either wire it as the fixture's
      cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned`,
      `init_powers_off_deterministically`, `image_build_is_reproducible` remain unwritten.
-  2. **H7 — OS-entropy end-to-end (rides on #1)** — `os_entropy_is_deterministic` is now written and
-     hardware-tested (real `/dev/kvm`), but **`#[ignore]`d, not yet green** — it needs a second real bug
-     fixed first. **`tests/fixtures/linux-guest/entropy_init.c`** (+ `entropy_initramfs.cpio.gz`, same
-     process as `init.c`'s, documented in that directory's `BUILD.md`) is a second `/init` for the
-     *already-built* `linux-guest` kernel (no kernel rebuild: entropy determinism is userspace-visible,
-     and `minimal.config`'s `CONFIG_DEVTMPFS_MOUNT=y` already gives `/dev/urandom` for free once
-     mounted) that calls `getrandom()` ×4 and reads `/dev/urandom` ×4, hex-encoding each 32-byte read out
-     the same raw-`outb` COM1 endpoint `init.c` uses. Two real findings from getting this far, both
-     hardware-confirmed this iteration:
-     - **`rdinit=/init` skips the kernel's own devtmpfs auto-mount** (`prepare_namespace()`, which is
-       what actually calls `devtmpfs_mount()`, is only reached via the `root=`/`init=` path, not
-       `rdinit=` pointing at a runnable initramfs `/init`) — `CONFIG_DEVTMPFS_MOUNT=y` alone is a no-op
-       on this boot path. Fixed in `entropy_init.c` itself: `mkdir("/dev", 0755); mount("devtmpfs",
-       "/dev", "devtmpfs", 0, NULL);` before opening `/dev/urandom`.
-     - **Under the *stock* `kvm_intel` module** (this test's default — `random.trust_bootloader=on`
-       correctly credits the pinned `SETUP_RNG_SEED` boot seed, `boot_guest` always writes it), the two
-       boots' `getrandom()`/`/dev/urandom` output still differed. Root cause: `random_init()`
-       (`drivers/char/random.c`) *unconditionally* mixes `ktime_get_real()` into the pool and
-       re-extracts the CRNG key from it, **after** the pinned seed already credited the pool — and with
-       no RTC and only a TSC clocksource, `ktime_get_real()` reads the real (untrapped, under the stock
-       module) hardware TSC at a point that varies with host-scheduling jitter between independent
-       boots. Fix: the test is `#[ignore]`d and requires the **enforced** (RDTSC-trapping) `kvm_intel.ko`
-       (`kernel-module/baud-enforced/rdtsc-enforce.patch`), same pattern as
-       `rdtsc_enforced_regime_is_bit_exact_across_boots` — under the enforced module, RDTSC is served
-       from the work-clock (a pure function of the branch counter), so `ktime_get_real()` becomes
-       reproducible too.
-     - **Blocker found running under the enforced module (still open, not yet fixed):** booting the same
-       real Linux 6.18 kernel + `entropy_init.c` under the patched `kvm_intel.ko` hits
-       `KVM_EXIT_INTERNAL_ERROR` immediately (`determinism hole: unhandled exit "InternalError"`), and
-       `dmesg` confirms why: `vmx: unexpected exit reason 0x33` — **0x33 = 51 = `EXIT_REASON_RDTSCP`**.
-       `rdtsc-enforce.patch` forces `CPU_BASED_RDTSC_EXITING` on unconditionally, which (per the Intel
-       SDM) also forces `rdtscp` to VM-exit, not just `rdtsc` — but `kvm_vmx_exit_handlers[]` (verified
-       by grepping the patched tree at `~/wsl-kernel-src/src/arch/x86/kvm/vmx/vmx.c`) has **no entry for
-       `EXIT_REASON_RDTSCP` at all**, stock or patched — every fixture exercised under the enforced
-       module before this one (`rdtsc-guest`, `rdrand-guest`, `rdseed-guest`, `timer-guest`, all
-       hand-assembled) happened to issue only bare `rdtsc`, never `rdtscp`; a real, unmodified Linux
-       6.18 kernel is the first guest to issue `rdtscp` (likely early boot TSC calibration / vDSO setup)
-       and is the first to hit this gap. **Needed next**: a `handle_baud_rdtscp_exit` dispatch-table
-       entry analogous to `handle_baud_rdtsc_exit`, additionally serving `ECX` (`RDTSCP` also loads
-       `IA32_TSC_AUX` into `ECX`, unlike plain `RDTSC` — a deterministic fixed value, e.g. `0`, is
-       enough) — plus the matching `baud-vcpu`/`WorkClock` exit-dispatch wiring on the Rust side. Verify
-       via the same `drive/h3-enforced-rdtsc.sh`-style swap-in/swap-out dance before writing a
-       `drive/h7-enforced-entropy.sh` that runs `os_entropy_is_deterministic --ignored`.
-     `double_boot_ram_hash_identical` needs a **guest-driven checkpoint** design (an explicit
+  2. **H7 — OS-entropy end-to-end (rides on #1) — `os_entropy_is_deterministic` is now GREEN,
+     hardware-verified.** `tests/fixtures/linux-guest/entropy_init.c` (+ `entropy_initramfs.cpio.gz`,
+     same process as `init.c`'s, documented in that directory's `BUILD.md`) is a second `/init` for the
+     *already-built* `linux-guest` kernel (no kernel rebuild needed) that calls `getrandom()` ×4 and
+     reads `/dev/urandom` ×4, hex-encoding each 32-byte read out the same raw-`outb` COM1 endpoint
+     `init.c` uses. Getting here took three real fixes, the last one closed this iteration:
+     - **`rdinit=/init` skips the kernel's own devtmpfs auto-mount** — fixed in `entropy_init.c` itself
+       (`mkdir("/dev", 0755); mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);` before opening
+       `/dev/urandom`).
+     - **Under the *stock* `kvm_intel` module**, `random_init()` (`drivers/char/random.c`)
+       unconditionally mixes the real (untrapped) `ktime_get_real()`/TSC into the CRNG pool *after* the
+       pinned `SETUP_RNG_SEED` boot seed already credited it, so the two boots' output still differed —
+       the test requires the **enforced** (RDTSC-trapping) `kvm_intel.ko`
+       (`kernel-module/baud-enforced/rdtsc-enforce.patch`), same as
+       `rdtsc_enforced_regime_is_bit_exact_across_boots`. It stays `#[ignore]`d for this reason (same as
+       every enforced-regime test) — `drive/h7-enforced-entropy.sh` runs it with `--ignored`.
+     - **`EXIT_REASON_RDTSCP` gap — fixed.** Booting the same kernel + `entropy_init.c` under the
+       enforced module used to hit `KVM_EXIT_INTERNAL_ERROR` (dmesg: `vmx: unexpected exit reason
+       0x33` = `EXIT_REASON_RDTSCP`) because `CPU_BASED_RDTSC_EXITING` also forces `rdtscp` to VM-exit
+       (Intel SDM Vol. 3C 25.1.2) but `kvm_vmx_exit_handlers[]` had no entry for it at all — every prior
+       hand-assembled fixture issued only bare `rdtsc`. Fixed: `rdtsc-enforce.patch` now adds
+       `handle_baud_rdtscp_exit` (`KVM_EXIT_BAUD_DETERMINISM` payload kind 3) alongside
+       `handle_baud_rdtsc_exit` (kind 0); `baud-vcpu` gained `Exit::RdtscpEnforced` /
+       `DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux }`, threaded through all three
+       `linux::pmu` `KVM_RUN` loops (`run_until_exit`/`step`/`run_until_irq_window` — all three needed
+       the new match arm, not just one) and `linux::run_one_exit`'s own loop, writing EDX:EAX from the
+       same work-clock `RDTSC` already uses plus ECX from a new `TimeSource::serve_enforced_tsc_aux`
+       (`WorkClock::tsc_aux`, so RDTSCP's ECX agrees with `IA32_TSC_AUX` reads). Verified: the full
+       three-patch chain (rdtsc+rdrand+ud2) and `rdtsc-enforce.patch` standalone both re-apply cleanly
+       from a reconstructed pristine `vmx.c`/`kvm.h` (hand-patched, not machine-generated — reversed the
+       old patches off a copy of the live tree, reapplied the new chain, diffed); `drive/h3-enforced-
+       rdseed.sh`'s full regression (rdtsc/rdrand/rdseed all bit-exact) still passes with RDTSCP handling
+       layered underneath; new `drive/h7-enforced-entropy.sh` runs `os_entropy_is_deterministic` against
+       the patched module — **PASSED**: `getrandom()`/`/dev/urandom` byte-identical across two boots of
+       a real, unmodified Linux 6.18 kernel, non-degenerate (not all-same-value). This is the concrete,
+       end-to-end proof of todo.md §3.8's central thesis on real hardware, not just a synthetic fixture.
+     `double_boot_ram_hash_identical` still needs a **guest-driven checkpoint** design (an explicit
      `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first
      attempt at the latter found the two boots differ in exactly one kernel-internal diagnostic line
-     sensitive to already-documented real-hardware branch-counter read jitter (see the bullet above and
+     sensitive to already-documented real-hardware branch-counter read jitter (see
      `tests/fixtures/linux-guest/BUILD.md`'s "known, deliberate non-goal" section). Also still open:
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
-     `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted). No
+     `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted) — the
+     spec's own named tests for this guarantee, distinct from the H7-specific
+     `os_entropy_is_deterministic` that now proves the underlying mechanism on real hardware. No
      guest-kernel patch.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is

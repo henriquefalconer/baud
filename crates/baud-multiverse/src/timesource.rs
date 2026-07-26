@@ -17,7 +17,9 @@
 //                               is `baud_vcpu::boundary::inject_at`'s job (specs/baud-vcpu.md §5),
 //                               not this MSR — this just keeps the register's read-your-write value
 //                               consistent for a guest that polls it.
-//   IA32_TSC_AUX (0xC0000103) - absorbed/served verbatim (RDTSCP's auxiliary value).
+//   IA32_TSC_AUX (0xC0000103) - absorbed/served verbatim (RDTSCP's auxiliary value); also served,
+//                               truncated to 32 bits, as the enforced-regime trapped RDTSCP's own
+//                               ECX (`serve_enforced_tsc_aux`, todo.md §14 next-actions item 2).
 
 use baud_vcpu::{EnforcedRdseedSite, TimeSource};
 use std::collections::BTreeMap;
@@ -233,6 +235,12 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
         self.virtual_tsc()
     }
 
+    fn serve_enforced_tsc_aux(&mut self) -> u32 {
+        // Must agree with `serve_rdmsr(MSR_IA32_TSC_AUX)` truncated to 32 bits — real RDTSCP only
+        // ever loads ECX, never the full 64-bit RCX (todo.md §14 next-actions item 2).
+        self.tsc_aux as u32
+    }
+
     fn serve_enforced_rdrand(&mut self) -> u64 {
         self.entropy.next_u64()
     }
@@ -412,6 +420,17 @@ mod tests {
         let mut clock = WorkClock::new(1_000, 3, ConstantCounter(12));
         assert_eq!(clock.serve_enforced_rdtsc(), clock.serve_rdmsr(MSR_IA32_TSC));
         assert_eq!(clock.serve_enforced_rdtsc(), 1_000 + 3 * 12);
+    }
+
+    /// todo.md §14 next-actions item 2: the enforced-regime trapped-`RDTSCP` path serves the same
+    /// work-clock value as `RDTSC` (EDX:EAX) plus `IA32_TSC_AUX` truncated to 32 bits (ECX) — this
+    /// is the invariant `handle_baud_rdtscp_exit`'s served payload depends on.
+    #[test]
+    fn serve_enforced_tsc_aux_matches_the_tsc_aux_msr_truncated_to_32_bits() {
+        let mut clock = WorkClock::new(0, 1, ConstantCounter(0));
+        clock.absorb_wrmsr(MSR_IA32_TSC_AUX, 0xFFFF_FFFF_0000_002A);
+        assert_eq!(clock.serve_enforced_tsc_aux(), 0x0000_002A);
+        assert_eq!(clock.serve_enforced_tsc_aux() as u64, clock.serve_rdmsr(MSR_IA32_TSC_AUX) as u32 as u64);
     }
 
     #[test]

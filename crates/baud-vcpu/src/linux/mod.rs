@@ -28,12 +28,14 @@ const KVM_EXIT_BAUD_DETERMINISM: u32 = 41;
 /// Decode `kvm_run.hw.hardware_exit_reason`'s payload for a `KVM_EXIT_BAUD_DETERMINISM` exit —
 /// the low byte names which trapped instruction this is (`rdtsc-enforce.patch`'s
 /// `handle_baud_rdtsc_exit` sets `0`; `rdrand-enforce.patch`'s `handle_baud_rdrand_exit` sets `1`
-/// with the destination GPR index, x86-64 ModRM numbering, packed into the next byte). An unknown
-/// kind becomes `Unmodeled` rather than silently guessing, same rule as every other exit.
+/// with the destination GPR index, x86-64 ModRM numbering, packed into the next byte;
+/// `rdtsc-enforce.patch`'s `handle_baud_rdtscp_exit` sets `3`, no register index — `RDTSCP`'s
+/// EDX:EAX/ECX destinations are architecturally fixed, same as plain `RDTSC`'s). An unknown kind
+/// becomes `Unmodeled` rather than silently guessing, same rule as every other exit.
 ///
 /// Kind `2` (`ud2-enforce.patch`'s `handle_baud_ud2_exit`, a possible `rdseed` rewrite site) is
-/// deliberately **not** decoded here — unlike RDTSC/RDRAND, it carries no register/RIP info in the
-/// payload (the kernel patch never skips the trapping instruction, since only userspace's
+/// deliberately **not** decoded here — unlike RDTSC/RDTSCP/RDRAND, it carries no register/RIP info
+/// in the payload (the kernel patch never skips the trapping instruction, since only userspace's
 /// image-specific site table knows how far a confirmed site's `UD2`+`NOP` padding extends), so
 /// `run_and_convert` special-cases it before ever calling this function, fetching RIP via its own
 /// `KVM_GET_REGS`. It falls through to `Unmodeled` here only because nothing should call this
@@ -42,6 +44,7 @@ fn decode_baud_determinism_exit(payload: u64) -> Exit<'static> {
     match payload & 0xFF {
         0 => Exit::RdtscEnforced,
         1 => Exit::RdrandEnforced { gpr_index: ((payload >> 8) & 0xF) as u8 },
+        3 => Exit::RdtscpEnforced,
         _ => Exit::Unmodeled("BaudDeterminismUnknownKind"),
     }
 }
@@ -141,6 +144,7 @@ pub fn run_until_halted(
             DispatchOutcome::Halted => return Ok(()),
             DispatchOutcome::SingleStepBoundary => continue, // no boundary walk in progress here
             DispatchOutcome::ServeEnforcedRdtsc(_)
+            | DispatchOutcome::ServeEnforcedRdtscp { .. }
             | DispatchOutcome::ServeEnforcedRdrand { .. }
             | DispatchOutcome::ServeEnforcedRdseed { .. }
             | DispatchOutcome::ReinjectUd => {
@@ -236,6 +240,11 @@ pub fn run_one_exit(
                             .map_err(|e| DeterminismHole(format!("failed to write enforced-RDTSC result: {e}")))?;
                         Ok(DispatchOutcome::Continue)
                     }
+                    DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux } => {
+                        write_enforced_rdtscp_result(vcpu, value, tsc_aux)
+                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDTSCP result: {e}")))?;
+                        Ok(DispatchOutcome::Continue)
+                    }
                     DispatchOutcome::ServeEnforcedRdrand { gpr_index, value } => {
                         write_enforced_rdrand_result(vcpu, gpr_index, value)
                             .map_err(|e| DeterminismHole(format!("failed to write enforced-RDRAND result: {e}")))?;
@@ -272,6 +281,18 @@ fn write_enforced_rdtsc_result(vcpu: &VcpuFd, value: u64) -> io::Result<()> {
     let mut regs = vcpu.get_regs().map_err(io::Error::from)?;
     regs.rax = value & 0xFFFF_FFFF;
     regs.rdx = value >> 32;
+    vcpu.set_regs(&regs).map_err(io::Error::from)
+}
+
+/// Real `RDTSCP` (Intel SDM Vol. 2B): same EDX:EAX clearing/loading as `RDTSC` (see
+/// `write_enforced_rdtsc_result`) plus ECX loaded with `IA32_TSC_AUX[31:0]` — the processor also
+/// clears the high-order 32 bits of RCX, regardless of operating mode, so `tsc_aux` is
+/// zero-extended into the full 64-bit register here too.
+fn write_enforced_rdtscp_result(vcpu: &VcpuFd, value: u64, tsc_aux: u32) -> io::Result<()> {
+    let mut regs = vcpu.get_regs().map_err(io::Error::from)?;
+    regs.rax = value & 0xFFFF_FFFF;
+    regs.rdx = value >> 32;
+    regs.rcx = u64::from(tsc_aux);
     vcpu.set_regs(&regs).map_err(io::Error::from)
 }
 
@@ -445,6 +466,7 @@ mod tests {
             Exit::RdrandEnforced { gpr_index: 15 }
         ));
         assert!(matches!(decode_baud_determinism_exit(2), Exit::Unmodeled("BaudDeterminismUnknownKind")));
+        assert!(matches!(decode_baud_determinism_exit(3), Exit::RdtscpEnforced));
     }
 
     #[test]

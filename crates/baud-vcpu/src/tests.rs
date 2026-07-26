@@ -43,6 +43,7 @@ struct RecordingTime {
     rdmsr_calls: Vec<u32>,
     wrmsr_calls: Vec<(u32, u64)>,
     enforced_rdtsc_calls: u32,
+    enforced_tsc_aux_calls: u32,
     enforced_rdrand_calls: u32,
     enforced_rdseed_calls: u32,
     /// The one `rip` (if any) [`TimeSource::resolve_rdseed_site`] should recognize as a known
@@ -61,6 +62,10 @@ impl TimeSource for RecordingTime {
     fn serve_enforced_rdtsc(&mut self) -> u64 {
         self.enforced_rdtsc_calls += 1;
         self.serve_value
+    }
+    fn serve_enforced_tsc_aux(&mut self) -> u32 {
+        self.enforced_tsc_aux_calls += 1;
+        self.serve_value as u32
     }
     fn serve_enforced_rdrand(&mut self) -> u64 {
         self.enforced_rdrand_calls += 1;
@@ -176,6 +181,22 @@ fn rdtsc_enforced_is_served_from_time_source() {
     assert_eq!(time.enforced_rdtsc_calls, 1);
 }
 
+/// todo.md §14 next-actions item 2: a trapped `RDTSCP` resolves to the work-clock's own value
+/// (same as `RdtscEnforced`) plus the served `IA32_TSC_AUX`, reported back for `linux::run_one_exit`
+/// to write into EDX:EAX/ECX — never resolved silently or left for a generic catch-all.
+#[test]
+fn rdtscp_enforced_is_served_from_time_source() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime { serve_value: 0x1234_5678_9ABC, ..Default::default() };
+    let outcome = dispatch_exit(Exit::RdtscpEnforced, &mut bus, &mut time).unwrap();
+    assert_eq!(
+        outcome,
+        DispatchOutcome::ServeEnforcedRdtscp { value: 0x1234_5678_9ABC, tsc_aux: 0x5678_9ABC }
+    );
+    assert_eq!(time.enforced_rdtsc_calls, 1);
+    assert_eq!(time.enforced_tsc_aux_calls, 1);
+}
+
 /// todo.md §3.2's enforced regime: a trapped `RDRAND` resolves to a served value tagged with its
 /// guest-chosen destination GPR — reported back for `linux::run_and_convert`'s caller to write
 /// there (plus RFLAGS.CF), never resolved silently or left for a generic catch-all.
@@ -229,7 +250,7 @@ fn rdseed_enforced_at_an_unknown_site_is_reinjected_not_served() {
 proptest! {
     #[test]
     fn no_unmodeled_exit_is_silent(
-        which in 0u8..13,
+        which in 0u8..14,
         port in any::<u16>(),
         addr in any::<u64>(),
         msr in any::<u32>(),
@@ -263,14 +284,15 @@ proptest! {
             9 => dispatch_exit(Exit::RdrandEnforced { gpr_index }, &mut bus, &mut time),
             10 => dispatch_exit(Exit::RdseedEnforced { rip }, &mut bus, &mut time),
             11 => dispatch_exit(Exit::RdseedEnforced { rip: rip.wrapping_add(1) }, &mut bus, &mut time),
+            12 => dispatch_exit(Exit::RdtscpEnforced, &mut bus, &mut time),
             _ => {
                 let leaked: &'static str = Box::leak(exit_name.into_boxed_str());
                 dispatch_exit(Exit::Unmodeled(leaked), &mut bus, &mut time)
             }
         };
-        // The whole point: never a panic, and the catch-all (`which == 12`) is always `Err`,
+        // The whole point: never a panic, and the catch-all (`which == 13`) is always `Err`,
         // every modeled exit is always `Ok`.
-        if which == 12 {
+        if which == 13 {
             prop_assert!(result.is_err());
         } else {
             prop_assert!(result.is_ok());

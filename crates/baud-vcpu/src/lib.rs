@@ -59,6 +59,13 @@ pub enum Exit<'a> {
     /// numbering: 0=RAX..7=RDI, 8=R8..15=R15) for `linux::run_and_convert`'s caller to write the
     /// served value into; RFLAGS.CF is also set (success) as part of that write.
     RdrandEnforced { gpr_index: u8 },
+    /// `RDTSCP` trapped by the enforced-regime KVM module (same `KVM_EXIT_BAUD_DETERMINISM`
+    /// mechanism as `RdtscEnforced`, distinguished by a payload byte — `linux::convert_exit`'s
+    /// doc). Real `RDTSCP` (Intel SDM Vol. 2B) loads the identical work-clock value into EDX:EAX
+    /// as `RDTSC` plus `IA32_TSC_AUX` into ECX — unlike `RdrandEnforced`'s guest-chosen
+    /// destination, both destinations are architecturally fixed, so this variant carries no
+    /// register index, same as `RdtscEnforced`.
+    RdtscpEnforced,
     /// A `#UD` trapped by the enforced-regime KVM module's `ud2-enforce.patch` (same
     /// `KVM_EXIT_BAUD_DETERMINISM` mechanism, payload kind 2) at `rip`. Stock KVM already forces
     /// every `#UD` to exit (its own exception bitmap always includes `UD_VECTOR`, for its
@@ -124,6 +131,11 @@ pub enum DispatchOutcome {
     /// `linux::run_one_exit`/`pmu` write it there via `KVM_SET_REGS` (also setting RFLAGS.CF),
     /// same "never surfaced past that one call site" rule as `ServeEnforcedRdtsc`.
     ServeEnforcedRdrand { gpr_index: u8, value: u64 },
+    /// `Exit::RdtscpEnforced` resolved to this work-clock value plus the served `IA32_TSC_AUX`;
+    /// `linux::run_one_exit` writes `value` into EDX:EAX and `tsc_aux` into ECX (zero-extended,
+    /// same as real `RDTSCP`) via `KVM_SET_REGS` — never surfaced past that one call site, same
+    /// rule as `ServeEnforcedRdtsc`.
+    ServeEnforcedRdtscp { value: u64, tsc_aux: u32 },
     /// `Exit::RdseedEnforced` resolved to a known rewritten site: `value` goes into the GPR named
     /// by `site.gpr_index` (same RDRAND flag semantics as `ServeEnforcedRdrand`) and RIP advances
     /// to `rip + site.length` — past the whole `UD2`+`NOP` sequence, not just the 2-byte `UD2`.
@@ -154,6 +166,12 @@ pub trait TimeSource {
     /// RDTSC-exiting and return the work-clock value (bit-exact...)") — the same formula
     /// `serve_rdmsr(MSR_IA32_TSC)` already computes, since both must agree bit-for-bit.
     fn serve_enforced_rdtsc(&mut self) -> u64;
+    /// The enforced-regime value for a trapped `RDTSCP`'s ECX (`IA32_TSC_AUX`, todo.md §3.3/§14):
+    /// must agree bit-for-bit with `serve_rdmsr(MSR_IA32_TSC_AUX)` — a guest that reads the aux
+    /// value via `RDTSCP` and one that reads it via the MSR are the same state. Exposed as its own
+    /// method (rather than routing through `serve_rdmsr`) because `MSR_IA32_TSC_AUX`'s numeric
+    /// constant lives in `baud-multiverse`/`baud-snapshot`, not this crate.
+    fn serve_enforced_tsc_aux(&mut self) -> u32;
     /// The enforced-regime value for a trapped `RDRAND` (todo.md §3.2: "enforced ... serves the
     /// tape") — a deterministic draw that must reproduce identically across a double-run of the
     /// same tape, but is otherwise independent of `serve_enforced_rdtsc`'s work-clock formula.
@@ -205,6 +223,10 @@ pub fn dispatch_exit(
         Exit::IrqWindowOpen => Ok(DispatchOutcome::Continue),
         Exit::Debug => Ok(DispatchOutcome::SingleStepBoundary),
         Exit::RdtscEnforced => Ok(DispatchOutcome::ServeEnforcedRdtsc(time.serve_enforced_rdtsc())),
+        Exit::RdtscpEnforced => Ok(DispatchOutcome::ServeEnforcedRdtscp {
+            value: time.serve_enforced_rdtsc(),
+            tsc_aux: time.serve_enforced_tsc_aux(),
+        }),
         Exit::RdrandEnforced { gpr_index } => {
             Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value: time.serve_enforced_rdrand() })
         }
