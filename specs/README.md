@@ -48,6 +48,7 @@ The deterministic VMM and everything execution reproducibility depends on.
 |------|------|---------|
 | [baud-tracing.md](./baud-tracing.md) | [crates/baud-tracing](../crates/baud-tracing/) | Cross-check plane (VMM exit log vs independent witness) |
 | [baud-stream.md](./baud-stream.md) | [crates/baud-stream](../crates/baud-stream/) | Guest framebuffer capture / fingerprint / render |
+| [baud-fingerprint.md](./baud-fingerprint.md) | [crates/baud-fingerprint](../crates/baud-fingerprint/) | Timed-exit determinism check: capture + render + cross-VM compare (`vm0`/`vm1`) |
 
 ## Security & Identity
 
