@@ -55,6 +55,7 @@ fn build_router(state: AppState) -> Router {
         // Image (guest-image contract, todo.md §4, specs/baud-packages.md §9)
         .route("/image/lint", post(routes::image::lint))
         .route("/image/rewrite-rdseed", post(routes::image::rewrite_rdseed))
+        .route("/image/build", post(routes::image::build))
         // Keys
         .route("/keys/init", post(routes::keys::init))
         .route("/keys/show", get(routes::keys::show))

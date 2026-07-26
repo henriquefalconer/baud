@@ -4871,3 +4871,52 @@ drive/h0.sh through h7.sh (stock module) ALL PASS on real /dev/kvm. Full verific
   - todo.md §14 item 1 updated with this progress and a trimmed "still open" list (CLI/server `baud image build` wiring, multi-file rootfs assembly, end-to-end spec.toml->image composition, Buildroot/pinned-Nix themselves, `/dev/vport` tape endpoint -- all genuinely still open)
   - Full verification green: cargo build/clippy/test --workspace all clean (0 failures); drive/h0.sh through drive/h7.sh (stock module) all PASS on real /dev/kvm; new drive/pkg-image-build.sh PASSES on real hardware
 ---
+
+
+Committed a8f5611. Pushed to origin/main. Post-push verification: local main (a8f5611) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle (fuser: no users). Summary: this iteration closed spec §4.5's image_build_is_reproducible test for real via two new baud-packages modules (a pure-Rust reproducible initramfs builder, and make-based bzImage build automation with deterministic env vars), hardware-verified with a new drive/pkg-image-build.sh that built a real kernel twice and got a byte-identical bzImage. todo.md still has pending items: §14 item 1's CLI/server wiring + multi-file rootfs assembly + Buildroot/Nix are still open, item 2 (H7 OS-entropy residual perf_event-read jitter / static_call trampoline) is unresolved, item 3 (H8 Mario rebuild) is still blocked on the rest of item 1 -- emitting NEXT.
+
+## 2026-07-26T08:48:03 UTC (38min) - Session usage — build-12 [sonnet]
+- cost $5.0949 (from claude -p)
+- context 195,762 tok peak of 1M (20%) across 63 inference calls, monotonic
+- models sonnet-5 $5.0918 (in 136 / out 68,109 / cache-read 9,644,246) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/012-build-12.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 13
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Read todo.md in full. Pending items: (1) guest boot pipeline CLI/server wiring for baud-packages (compose initramfs.rs + kernel_build.rs into 'baud image build'), multi-file rootfs, /dev/vport tape endpoint, Buildroot/Nix; (2) H7 OS-entropy residual single-fd perf_event jitter (deep hardware debugging, mostly exhausted); (3) H8 Mario rebuild, blocked on #1. Investigating current CLI/server image command structure to scope the next concrete step for item 1.
+
+Dispatched research subagent to map baud-cli image commands, baud-server routes, baud-packages exports (initramfs.rs/kernel_build.rs/legacy build()), and tests/fixtures/linux-guest/BUILD.md, to scope a 'baud image build' pipeline command. Waiting on it.
+
+Survey done: baud image lint/rewrite-rdseed use base64 HTTP transfer; kernel_build/initramfs already exist as library functions but no baud image build command composes them. Designing GuestImageBuildConfig/build_guest_image in baud-packages (paths resolved server-side, matching how host probe works) + POST /image/build + baud image build CLI + drive script. Checking sha256 crate availability now.
+
+Implemented crates/baud-packages/src/guest_build.rs (GuestImageBuildConfig/build_guest_image/hash_image, sha2 dep added), wired POST /image/build in baud-server (spawn_blocking, matching /run/kvm pattern) and 'baud image build' CLI subcommand (--initramfs-entry archive:mode:source, repeatable). baud-packages/baud-server/baud-cli all build clean individually, 4 new unit tests pass. Now running full workspace build/clippy/test.
+
+cargo build/clippy --workspace both clean (0 errors; only pre-existing unrelated warnings in baud-tracing/baud-proto/baud-secret/baud-tape/baud-server). Running cargo test --workspace next.
+
+cargo test --workspace: 1 failure, linux::tests::rdtsc_guest_reproduces_high_bits_across_boots (baud-multiverse, real-hardware TSC test) — unrelated to this iteration's change (guest_build.rs/routes/CLI wiring touches no KVM/TSC code). Rerunning it alone to check for pre-existing hardware flakiness before treating as a regression.
+
+cargo test --workspace rerun clean, 0 failures — confirms rdtsc_guest_reproduces_high_bits_across_boots was a one-off real-hardware TSC jitter flake (already documented warm-up-boot workaround in that test; unrelated to this iteration's changes) not a regression. Proceeding to drive/h0.sh through h7.sh, one at a time.
+
+drive/h0.sh through h4.sh all PASS on real /dev/kvm. Continuing h5-h7.
+
+drive/h0.sh through h7.sh (stock module) all PASS on real /dev/kvm — standard gate green. Writing drive/pkg-build-cli.sh next: exercises the new 'baud image build' CLI end-to-end (real server, real kernel build via gcc-13, real musl-compiled /init) against the linux-guest fixture recipe, proving the CLI/server wiring (not just the library functions) actually works.
+
+Running new drive/pkg-build-cli.sh for real: real server, real gcc-13 kernel build (~4-5 min) driven entirely through 'baud image build --json' CLI, plus musl-gcc-compiled /init as the single initramfs entry.
+
+Dispatched subagent to update todo.md §14 item 1 with this iteration's findings (guest_build.rs, /image/build route, baud image build CLI, drive/pkg-build-cli.sh real-hardware result, and the newly-surfaced 'baud run kvm has no initramfs param' gap). Waiting on it before final verification pass and commit.
+
+## 2026-07-26T09:22:07 UTC - Changes committed.
+- Implemented todo.md §14 next-actions item 1's CLI/server wiring gap: composed the reproducible kernel-build and initramfs pieces (from the prior iteration) into one end-to-end `baud image build` pipeline
+- Files changed: crates/baud-packages/src/guest_build.rs (new), crates/baud-packages/src/lib.rs, crates/baud-packages/Cargo.toml, Cargo.toml, crates/baud-server/src/routes/image.rs, crates/baud-server/src/main.rs, crates/baud-cli/src/cmds/image.rs, drive/pkg-build-cli.sh (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New `crates/baud-packages/src/guest_build.rs`: `GuestImageBuildConfig`/`build_guest_image()` composes `kernel_build::build_bzimage` + `initramfs::build_reproducible_initramfs` into one pipeline writing `bzImage` + `initramfs.cpio.gz` into an output dir; pure `hash_image()` implements spec §4.5's exact image identity `sha256(bzImage ‖ initramfs.gz)` via a new `sha2` workspace dependency. 4 new unit tests, including one pinned against an independent `sha256sum` test vector.
+  - New `POST /image/build` route (`crates/baud-server/src/routes/image.rs`), run via `spawn_blocking` like `/host/probe`/`/run/kvm` since a real kernel build takes minutes; new `baud image build --kernel-src --config-fragment --cc --jobs --initramfs-entry archive:mode:source --output-dir` CLI subcommand (repeatable `--initramfs-entry`), following the same request/response conventions as `image lint`/`image rewrite-rdseed`.
+  - New `drive/pkg-build-cli.sh`, hardware-verified for real: starts a real `baud-server`, musl-gcc-compiles the `linux-guest` fixture's real `init.c`, and drives an entire real kernel build (gcc-13, ~4-5 min) through `baud image build --json` alone. **Result: PASSED** — `ok=true`, a real 1,913,856-byte `bzImage` and 2,257-byte `initramfs.cpio.gz` written to disk, well-formed 64-hex-char `bzimage_sha256`/`initramfs_sha256`/`image_hash` all present.
+  - Full verification green: `cargo build`/`clippy`/`test --workspace` all clean (0 failures — one unrelated pre-existing real-hardware TSC test, `rdtsc_guest_reproduces_high_bits_across_boots`, flaked once under full parallel load then passed clean in isolation and on a full-suite rerun, recorded in todo.md as an observed one-off, not a regression); `drive/h0.sh` through `drive/h7.sh` (stock module) all PASS on real `/dev/kvm`; new `drive/pkg-build-cli.sh` PASSES on real hardware.
+  - todo.md §14 item 1 updated: CLI/server wiring gap closed; still-open list trimmed and a new concrete next gap surfaced (`baud run kvm`'s `RunKvmBody` has no `initramfs` field yet, so a `baud image build`-produced image can't be booted through the CLI/server path end-to-end) — Buildroot/pinned-Nix, multi-file rootfs, and the `/dev/vport` tape endpoint remain open as before.
+---

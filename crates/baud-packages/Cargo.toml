@@ -12,6 +12,7 @@ toml = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 # rdseed build-time rewrite pass (todo.md §3.8/§4): real ELF section parsing + a real x86
 # decoder -- never a byte-grep over `SHF_EXECINSTR` sections.

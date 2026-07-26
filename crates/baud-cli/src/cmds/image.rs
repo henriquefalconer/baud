@@ -33,6 +33,32 @@ pub enum ImageAction {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Build a real, reproducible guest image: a `bzImage` (spec §4.1/§4.2) plus an
+    /// `initramfs.cpio.gz` (§4.3), composed end-to-end and reported with §4.5's image identity
+    /// hash (`sha256(bzImage ‖ initramfs.gz)`). All paths are resolved on the server host.
+    Build {
+        /// A writable, disposable kernel source tree (never the shared `~/wsl-kernel-src/src`
+        /// tree — copy it first, same rule `KernelBuildConfig::kernel_src` documents).
+        #[arg(long)]
+        kernel_src: String,
+        /// Kconfig fragment merged onto `allnoconfig` (e.g. `.../linux-guest/minimal.config`).
+        #[arg(long)]
+        config_fragment: String,
+        /// Compiler to build the kernel with.
+        #[arg(long, default_value = "gcc-13")]
+        cc: String,
+        /// Parallel build jobs (`make -jN`). Defaults to the server host's parallelism.
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// One initramfs entry as `archive_path:mode_octal:source_path`, e.g.
+        /// `init:755:/path/to/init`. Repeatable — order does not matter (entries are sorted
+        /// before archiving).
+        #[arg(long = "initramfs-entry")]
+        initramfs_entries: Vec<String>,
+        /// Directory the built `bzImage`/`initramfs.cpio.gz` are written into.
+        #[arg(long)]
+        output_dir: String,
+    },
 }
 
 pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
@@ -94,6 +120,53 @@ pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
             }
             fmt::print(&report, json);
         }
+        ImageAction::Build {
+            kernel_src,
+            config_fragment,
+            cc,
+            jobs,
+            initramfs_entries,
+            output_dir,
+        } => {
+            let entries = initramfs_entries
+                .iter()
+                .map(|raw| parse_initramfs_entry(raw))
+                .collect::<Result<Vec<_>>>()?;
+            let body = json!({
+                "kernel_src": kernel_src,
+                "config_fragment": config_fragment,
+                "cc": cc,
+                "jobs": jobs,
+                "initramfs_entries": entries,
+                "output_dir": output_dir,
+            });
+            let v = c.post("/image/build", &body).await?;
+            let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            fmt::print(&v, json);
+            if !ok {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
+}
+
+/// Parse one `--initramfs-entry archive_path:mode_octal:source_path` argument.
+fn parse_initramfs_entry(raw: &str) -> Result<serde_json::Value> {
+    let mut parts = raw.splitn(3, ':');
+    let (archive_path, mode_str, source_path) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(a), Some(m), Some(s)) if !a.is_empty() && !s.is_empty() => (a, m, s),
+        _ => anyhow::bail!(
+            "invalid --initramfs-entry '{raw}' — expected archive_path:mode_octal:source_path, \
+             e.g. init:755:/path/to/init"
+        ),
+    };
+    let mode = u32::from_str_radix(mode_str, 8).map_err(|e| {
+        anyhow::anyhow!("invalid mode '{mode_str}' in --initramfs-entry '{raw}' (expected octal): {e}")
+    })?;
+    Ok(json!({
+        "archive_path": archive_path,
+        "mode": mode,
+        "source_path": source_path,
+    }))
 }

@@ -1022,26 +1022,55 @@ snapshot, not a duplicate of it.
      directory on the real disk (`~/.baud-tmp`, cleaned up via a `trap ... EXIT`) before invoking the
      test — `tempfile::tempdir()` (used by the Rust test) honors `$TMPDIR`, worth remembering for any
      other drive script that stages large scratch data.
-     **Still open**: CLI/server wiring — no `baud image build` command exists yet (`baud image` only has
-     `lint` and `rewrite-rdseed`), so neither `initramfs.rs` nor `kernel_build.rs` is callable from any
-     real caller yet, and `baud-packages`'s existing `build()`/`BuildResult` is still the pre-KVM-pivot
-     single-ELF/Nix-flake path, untouched by this iteration; the reproducible-initramfs and kernel-build
-     pieces are not yet composed into one end-to-end "spec.toml in, guest image out" pipeline. The
-     initramfs builder is not yet assembling a real multi-file rootfs (harness scripts, agent binary)
-     beyond a single `/init`-style entry, and is not yet wired in to replace any of the three hand-built
-     `tests/fixtures/linux-guest/*initramfs.cpio.gz` files, which remain hand-built per their own
-     `BUILD.md`s. Buildroot (§4.5 Path 1) and pinned-Nix (§4.5 Path 2) themselves are still not
-     implemented — this iteration took the pragmatic third option this file's own text already flagged as
-     the "next concrete step" (plain from-source `make bzImage` reusing the already-checked-out kernel
-     tree) rather than either of those two, so a `nix`/`nix-env` toolchain is still not installed in this
-     dev sandbox and Buildroot remains unevaluated. The `/dev/vport` (or PIO) tape endpoint (§4.4) is
-     still not implemented; `bootparams::DETERMINISTIC_CMDLINE` also still isn't wired as any real
-     caller's default (`guest_kernel_boots_to_userspace` builds its own, similar but not identical,
-     cmdline string inline — see the bullet above for the exact diff) — either wire it as the fixture's
-     cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned` and
-     `init_powers_off_deterministically` remain unwritten (`image_build_is_reproducible` is now written
-     and passing — see above). H8 (Mario, item 3 below) is still blocked on the rest of item 1, not just
-     this kernel-build sub-piece.
+     **This iteration (ralph iteration 13): the CLI/server wiring gap above is now closed.** New
+     `crates/baud-packages/src/guest_build.rs` composes the two already-tested pieces into one callable
+     pipeline: `GuestImageBuildConfig` (a `KernelBuildConfig` + a slice of `InitramfsFileEntry` + an
+     `output_dir`), `build_guest_image()` (runs `build_bzimage`, reads every initramfs entry's
+     `source_path` from disk, runs `build_reproducible_initramfs`, writes both outputs into
+     `output_dir`), and a pure, independently-unit-tested `hash_image()` implementing spec §4.5's exact
+     image identity — `sha256(bzImage ‖ initramfs.gz)` — via a new `sha2` workspace dependency (the
+     existing `blake3` convention used for `BuildResult::closure_hash` was deliberately not reused here,
+     since §4.5's own text names `sha256` specifically). 4 new unit tests, including one pinned against
+     an independent `sha256sum` test vector, not just internal self-consistency. Exposed end-to-end:
+     `POST /image/build` (`crates/baud-server/src/routes/image.rs`, run in `spawn_blocking` like
+     `/host/probe` and `/run/kvm` — a real kernel build takes minutes and shells out to `make`, so it
+     must not block the async runtime) and `baud image build --kernel-src --config-fragment --cc --jobs
+     --initramfs-entry archive_path:mode_octal:source_path --output-dir` (repeatable
+     `--initramfs-entry`, e.g. `init:755:/path/to/init`) in `crates/baud-cli/src/cmds/image.rs`. All
+     paths are resolved on the server host, not transferred as content — a kernel source tree is far too
+     large to shuttle as `/image/rewrite-rdseed`-style base64.
+     **Hardware-verified end-to-end** via new `drive/pkg-build-cli.sh`: starts a real `baud-server`,
+     musl-gcc-compiles the `linux-guest` fixture's real `init.c`, then drives the *entire* build through
+     `baud image build --json` alone (real `gcc-13`, real `~/wsl-kernel-src/src` scratch-copied tree,
+     ~4-5 min) — real result: `ok=true`, a real 1,913,856-byte `bzImage` and a real 2,257-byte
+     `initramfs.cpio.gz` written to disk, and well-formed 64-hex-char `bzimage_sha256`/
+     `initramfs_sha256`/`image_hash` all present in the response. Not part of the standard h0-h7 gate
+     (opt-in, same convention as `drive/pkg-image-build.sh` and the enforced-regime scripts — one real
+     kernel compile takes several minutes). `cargo build`/`clippy`/`test --workspace` all clean; `drive/
+     h0.sh` through `drive/h7.sh` (stock module) all still PASS on real `/dev/kvm` (one incidental
+     finding: `linux::tests::rdtsc_guest_reproduces_high_bits_across_boots`, an unrelated pre-existing
+     real-hardware TSC test in `baud-multiverse` this iteration never touched, flaked once under full
+     `cargo test --workspace` parallel load — high=0x5a768 vs 0x32659f — then passed clean both in
+     isolation and on a full-suite rerun; recorded here as an observed one-off real-hardware jitter, not
+     chased further since it reproduces neither reliably nor in isolation).
+     **Still open**: the initramfs builder's multi-file capacity is now mechanism-complete
+     (`--initramfs-entry` is repeatable and `InitramfsFileEntry`/`GuestImageBuildConfig` already take a
+     slice) but still only exercised with a single `/init`-style entry — no real harness-script/agent-
+     binary multi-file rootfs has been assembled or tested yet, and the three hand-built `tests/fixtures/
+     linux-guest/*initramfs.cpio.gz` files are not yet replaced by this pipeline's output (they remain
+     hand-built per their own `BUILD.md`s). Buildroot (§4.5 Path 1) and pinned-Nix (§4.5 Path 2)
+     themselves are still not implemented — this and the prior iteration both took the pragmatic
+     from-source `make bzImage` third option instead; a `nix`/`nix-env` toolchain is still not installed
+     in this dev sandbox and Buildroot remains unevaluated. The `/dev/vport` (or PIO) tape endpoint
+     (§4.4) is still not implemented. `bootparams::DETERMINISTIC_CMDLINE` still isn't wired as any real
+     caller's default. **New gap surfaced by this iteration's own drive script**: `baud run kvm`
+     (`crates/baud-server/src/routes/run_kvm.rs`'s `RunKvmBody`) has no `initramfs` field at all, so a
+     `baud image build`-produced image cannot yet be booted through the CLI/server path end-to-end (only
+     `Multiverse::boot_with_rdseed_sites`/`boot_guest`'s own `initramfs: Option<&[u8]>` param, called
+     directly from Rust tests, actually threads one through) — closing that is the next concrete step
+     toward a true "spec in, guest booted" CLI flow, ahead of Buildroot/Nix. Tests
+     `boot_params_seed_is_pinned` and `init_powers_off_deterministically` remain unwritten. H8 (Mario,
+     item 3 below) is still blocked on the rest of item 1, not just this piece.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-

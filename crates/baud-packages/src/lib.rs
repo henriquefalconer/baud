@@ -30,6 +30,7 @@ use std::path::PathBuf;
 
 mod spec;
 mod flake;
+mod guest_build;
 mod image;
 mod initramfs;
 mod kernel_build;
@@ -38,6 +39,10 @@ mod workload_lint;
 
 pub use spec::{WorkloadSpec, WorkloadPackage};
 pub use flake::FlakeTemplate;
+pub use guest_build::{
+    build_guest_image, hash_image, GuestImageBuildConfig, GuestImageBuildResult,
+    InitramfsFileEntry,
+};
 pub use image::{
     image_lint, lint_kernel_config, ConfigState, GuestImageManifest, LintReport, LintViolation,
     FORBIDDEN_REAL_TIMERS, TAPE_DEVICE_CONFIG,
