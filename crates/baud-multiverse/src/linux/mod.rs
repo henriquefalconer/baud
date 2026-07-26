@@ -507,6 +507,11 @@ pub struct HaltOutcome {
     pub console_output: Vec<u8>,
     /// `blake3:<hex>` of the whole guest-RAM region, computed right after the halt.
     pub ram_hash: String,
+    /// The vCPU's RIP at the moment the halt was observed (`KVM_GET_REGS`, read right after the
+    /// `Hlt`/`Shutdown` dispatch returns) — the "identical exit point" half of spec §4.3's
+    /// `init_powers_off_deterministically`: a clean shutdown must land at the same instruction
+    /// across two boots, not just produce the same RAM/console bytes.
+    pub exit_pc: u64,
 }
 
 /// One stopping condition [`Multiverse::run_until_branch_or_halt`] can report — either the guest
@@ -854,7 +859,17 @@ impl Multiverse {
     /// how to serve is `Err(DeterminismHole)`, never a silent continue (specs/baud-vcpu.md §3).
     pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, DeterminismHole> {
         baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
-        Ok(HaltOutcome { console_output: self.bus.console.output().to_vec(), ram_hash: self.ram_hash() })
+        Ok(HaltOutcome {
+            console_output: self.bus.console.output().to_vec(),
+            ram_hash: self.ram_hash(),
+            exit_pc: self.current_rip()?,
+        })
+    }
+
+    /// The vCPU's current RIP (`KVM_GET_REGS`) — the building block [`HaltOutcome::exit_pc`] and
+    /// every other halt-site call below reads to name the exact instruction a shutdown landed at.
+    fn current_rip(&self) -> Result<u64, DeterminismHole> {
+        self.guest.vcpu.get_regs().map(|regs| regs.rip).map_err(|e| DeterminismHole(e.to_string()))
     }
 
     /// Every byte the guest has written to the console so far, in order — the live equivalent of
@@ -936,6 +951,7 @@ impl Multiverse {
                 let halt = HaltOutcome {
                     console_output: self.bus.console.output().to_vec(),
                     ram_hash: self.ram_hash(),
+                    exit_pc: self.current_rip()?,
                 };
                 return Ok((RunUntilBranchOutcome::Halted(halt), records));
             }
@@ -1048,6 +1064,7 @@ impl Multiverse {
                     let halt = HaltOutcome {
                         console_output: self.bus.console.output().to_vec(),
                         ram_hash: self.ram_hash(),
+                        exit_pc: self.current_rip()?,
                     };
                     return Ok((ticks, halt));
                 }
@@ -1121,6 +1138,7 @@ impl Multiverse {
                     let halt = HaltOutcome {
                         console_output: self.bus.console.output().to_vec(),
                         ram_hash: self.ram_hash(),
+                        exit_pc: self.current_rip()?,
                     };
                     return Ok((ticks, RunUntilBranchOutcome::Halted(halt), records));
                 }
@@ -1307,6 +1325,36 @@ mod tests {
         );
     }
 
+    /// Reads the `SETUP_RNG_SEED` node's 32 seed bytes back out of a booted `Multiverse`'s real
+    /// guest RAM via `hdr.setup_data` (shared by
+    /// [`rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived`] and
+    /// [`boot_params_seed_is_pinned`] rather than duplicated per-test): also asserts
+    /// `hdr.setup_data` itself points at the fixed node address, since a wrong pointer would make
+    /// every downstream seed-byte comparison meaningless.
+    fn read_rng_seed_via_hdr(mv: &Multiverse) -> [u8; bootparams::RNG_SEED_LEN] {
+        use vm_memory::Bytes;
+
+        let mut zero_page = vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
+        mv.guest
+            .guest_mem
+            .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
+            .expect("read back the zero page from real guest RAM");
+        let params: linux_loader::loader::bootparam::boot_params =
+            unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const _) };
+        let setup_data_addr = params.hdr.setup_data;
+        assert_eq!(
+            setup_data_addr,
+            layout::RNG_SEED_SETUP_DATA_ADDR,
+            "hdr.setup_data must point at the fixed RNG-seed node address"
+        );
+        let mut seed = [0u8; bootparams::RNG_SEED_LEN];
+        mv.guest
+            .guest_mem
+            .read_slice(&mut seed, GuestAddress(setup_data_addr + 16))
+            .expect("read back the seed bytes from real guest RAM");
+        seed
+    }
+
     /// specs/baud-multiverse.md §3.8's "Boot RNG seed", wired end-to-end through the real
     /// `Multiverse::boot` flow (not just `bootparams`'s own unit tests): the `SETUP_RNG_SEED`
     /// `setup_data` node baud writes must (1) actually land in real guest RAM at the address
@@ -1315,45 +1363,52 @@ mod tests {
     /// changes it — the same `all_input_is_tape_derived` guarantee applied to this boot-time input.
     #[test]
     fn rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived() {
-        use vm_memory::Bytes;
-
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
         let tape_a = b"tape A".to_vec();
         let tape_b = b"tape B".to_vec();
 
-        let read_seed_via_hdr = |mv: &Multiverse| -> [u8; bootparams::RNG_SEED_LEN] {
-            let mut zero_page = vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
-            mv.guest
-                .guest_mem
-                .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
-                .expect("read back the zero page from real guest RAM");
-            let params: linux_loader::loader::bootparam::boot_params =
-                unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const _) };
-            let setup_data_addr = params.hdr.setup_data;
-            assert_eq!(
-                setup_data_addr,
-                layout::RNG_SEED_SETUP_DATA_ADDR,
-                "hdr.setup_data must point at the fixed RNG-seed node address"
-            );
-            let mut seed = [0u8; bootparams::RNG_SEED_LEN];
-            mv.guest
-                .guest_mem
-                .read_slice(&mut seed, GuestAddress(setup_data_addr + 16))
-                .expect("read back the seed bytes from real guest RAM");
-            seed
-        };
-
         let boot_a1 = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None).expect("boot A1 failed");
-        let seed_a1 = read_seed_via_hdr(&boot_a1);
+        let seed_a1 = read_rng_seed_via_hdr(&boot_a1);
 
         let boot_a2 = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a, None).expect("boot A2 failed");
-        let seed_a2 = read_seed_via_hdr(&boot_a2);
+        let seed_a2 = read_rng_seed_via_hdr(&boot_a2);
         assert_eq!(seed_a1, seed_a2, "the same tape must reproduce the identical RNG seed");
 
         let boot_b = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b, None).expect("boot B failed");
-        let seed_b = read_seed_via_hdr(&boot_b);
+        let seed_b = read_rng_seed_via_hdr(&boot_b);
         assert_ne!(seed_a1, seed_b, "a different tape must change the RNG seed");
+    }
+
+    /// specs/baud-multiverse.md §4.2's `boot_params_seed_is_pinned`: "two boots write an identical
+    /// seed node; early CRNG init is reproducible" — restated as its own spec-named test, distinct
+    /// from [`rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived`]'s broader
+    /// tape-derivation proof (same-tape reproducibility *and* different-tape divergence). `hello-guest`
+    /// touches no CRNG (no libc, no scheduler), so this test proves the boot-time *input* early CRNG
+    /// init reads — the pinned seed node itself, plus the rest of the deterministic boot around it —
+    /// is reproducible on every boot the machine performs. The guest-observable CRNG *output* being
+    /// reproducible from that same pinned input is proven separately, on a real Linux kernel, by
+    /// `os_entropy_is_deterministic` (enforced-regime, `#[ignore]`d — real hardware-trapped RDTSC is
+    /// required there; see that test's own doc for why).
+    #[test]
+    fn boot_params_seed_is_pinned() {
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let tape = b"boot-params-seed-is-pinned tape".to_vec();
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape.clone(), None).expect("first boot failed");
+        let first_seed = read_rng_seed_via_hdr(&first);
+        let first_halt = first.run_to_first_halt().expect("first run failed");
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, tape, None).expect("second boot failed");
+        let second_seed = read_rng_seed_via_hdr(&second);
+        let second_halt = second.run_to_first_halt().expect("second run failed");
+
+        assert_eq!(first_seed, second_seed, "two boots of the same tape must write an identical RNG-seed node");
+        assert_eq!(
+            first_halt.console_output, second_halt.console_output,
+            "a reproducible seed node must not perturb the rest of the deterministic boot"
+        );
     }
 
     /// todo.md §4.2's initramfs wiring (`bootparams::write_initramfs`), closed against a real boot
@@ -2191,6 +2246,56 @@ mod tests {
             tick_counts[0], tick_counts[1],
             "the same image+tape must survive the same number of periodic ticks before its own \
              natural halt across two boots"
+        );
+    }
+
+    /// specs/baud-multiverse.md §4.3's `init_powers_off_deterministically`: "a clean VMM-detected
+    /// shutdown at an identical exit point across two boots." Reuses the same real `linux-guest`
+    /// fixture and open-ended periodic-timer engine as [`guest_kernel_boots_to_userspace`] — its
+    /// `/init` (`tests/fixtures/linux-guest/init.c`) calls `reboot(RB_POWER_OFF)` right after
+    /// printing its marker (§4.3's exact shutdown path, a real triple-fault the run loop resolves to
+    /// `VcpuExit::Shutdown`/`HaltOutcome`, not a hand-assembled `hlt` loop like `hello-guest`). Two
+    /// boots of the same image+tape must land the halt at the identical instruction
+    /// (`HaltOutcome::exit_pc`, `KVM_GET_REGS`'s RIP read right after the halt is observed) — the
+    /// "identical exit point" the spec names, distinct from `guest_kernel_boots_to_userspace`'s own
+    /// weaker "same tick count" check and from `double_boot_ram_hash_identical`'s much stronger
+    /// (and, per todo.md §14, not yet fully passing) full-RAM comparison.
+    #[test]
+    fn init_powers_off_deterministically() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_initramfs();
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE;
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
+
+        let mut exit_pcs = Vec::new();
+        for i in 0..2 {
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
+            let (_ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+                .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            assert!(
+                console.contains(LINUX_GUEST_MARKER),
+                "run {i}: guest must reach /init and print its marker before powering off; got:\n{console}"
+            );
+            exit_pcs.push(halt.exit_pc);
+        }
+        assert_eq!(
+            exit_pcs[0], exit_pcs[1],
+            "a clean VMM-detected shutdown must land at the identical instruction across two boots \
+             of the same image+tape"
         );
     }
 

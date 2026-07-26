@@ -5138,3 +5138,47 @@ pkg-boot-cli.sh: PASS (explicit --cmdline CLI path also confirmed still working)
   - Researched (4 parallel Explore subagents) and ruled out three other candidate next-steps as out-of-scope for one iteration: virtio-rng (no virtqueue/Bus infra exists, genuinely multi-day), /dev/vport tape endpoint (confirmed non-blocking -- no currently-gating test needs it), and /run/kvm/resume's lineage gap (confirmed genuinely bigger -- no per-node tape-suffix bytes are persisted anywhere today).
   - Updated todo.md to close the DETERMINISTIC_CMDLINE production-wiring gap and record the ruled-out alternatives with citations.
 ---
+
+Post-push verification: local main (733532c) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle. This iteration closed the DETERMINISTIC_CMDLINE production-wiring gap flagged across multiple prior iterations (12/14/16), and ruled out virtio-rng / /dev/vport / resume-lineage as out-of-scope via 4 parallel research subagents before picking this well-scoped item. Full verification green: cargo build/clippy/test --workspace clean, drive/h0.sh-h7.sh (8/8), drive/m9.sh-m12.sh (4/4), drive/pkg-boot-cli.sh all PASS on real /dev/kvm. todo.md still has pending items (Buildroot/pinned-Nix image builder, virtio-rng device, /dev/vport endpoint, H7 residual RCB/perf_event jitter, /run/kvm/resume lineage, H8 Mario rebuild) -- emitting NEXT.
+
+## 2026-07-26T11:35:39 UTC (24min) - Session usage — build-17 [sonnet]
+- cost $5.6244 (from claude -p)
+- context 175,939 tok peak of 1M (18%) across 81 inference calls, monotonic
+- models sonnet-5 $5.6213 (in 1,944 / out 50,446 / cache-read 11,390,319) · haiku-4-5 $0.0031
+- subagents (4) sonnet-5 x4
+- transcript: ralph/.run/20260726T004845Z/017-build-17.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 18
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick the next step.
+
+Chose 'boot_params_seed_is_pinned' and 'init_powers_off_deterministically' -- the two spec-named tests flagged as unwritten in todo.md section 14 (§4.2/§4.3), a well-scoped gap distinct from the multi-day items (virtio-rng, /dev/vport, resume lineage) already ruled out last iteration. Researching existing test coverage first to avoid duplicating rng_seed_setup_data / guest_kernel_boots_to_userspace tests.
+
+Research done. rng_seed_setup_data test already covers half of boot_params_seed_is_pinned; the shutdown-determinism test needs new plumbing to capture exit RIP into HaltOutcome. Reading the actual source files now to implement both tests.
+
+Implemented both tests: boot_params_seed_is_pinned (hello-guest, same-tape RNG-seed-node reproducibility) and init_powers_off_deterministically (linux-guest, new HaltOutcome::exit_pc field threaded through all 4 halt sites via a new current_rip() helper). Compiling baud-multiverse now to check for errors.
+
+Both new tests pass on real /dev/kvm. Running init_powers_off_deterministically 5x to check for the known RCB-jitter flakiness class before trusting it, plus the full linux::tests module for regressions.
+
+5/5 clean for init_powers_off_deterministically -- no jitter observed (unlike os_entropy_is_deterministic/double_boot_ram_hash_identical, this only compares the halt RIP, not raw console text or full RAM, so it sidesteps the documented residual jitter). Starting full verification protocol: cargo build --workspace.
+
+cargo build --workspace clean. Running cargo clippy --workspace --all-targets.
+
+clippy clean -- all warnings are pre-existing and unrelated (baud-tracing aya::Bpf deprecation, baud-tape-agent/baud-server misc lints), zero from crates/baud-multiverse/src/linux/mod.rs. Running cargo test --workspace.
+
+cargo test --workspace: 41/41 test binaries green, 0 failures (baud-multiverse: 89 passed including the two new tests, 6 ignored as expected -- enforced-regime tests). Running drive/h0.sh through h7.sh individually.
+
+drive/h0.sh through h7.sh: 8/8 PASS on real /dev/kvm, no regressions. Running drive/m9.sh through m12.sh.
+
+m9.sh-m12.sh: 4/4 PASS, no regressions. Full verification green. Updating todo.md to close the boot_params_seed_is_pinned / init_powers_off_deterministically gap.
+
+## 2026-07-26T12:00:48 UTC - Changes committed.
+- Wrote the two spec-named tests todo.md flagged as unwritten: boot_params_seed_is_pinned and init_powers_off_deterministically.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - boot_params_seed_is_pinned: two hello-guest boots of the same tape write an identical SETUP_RNG_SEED node and produce identical console output; extracted the existing read_seed_via_hdr closure into a shared read_rng_seed_via_hdr helper reused by both this test and rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived.
+  - init_powers_off_deterministically: added HaltOutcome::exit_pc (vCPU RIP at halt, via a new Multiverse::current_rip() KVM_GET_REGS helper) threaded through all 4 halt-detecting call sites; new test boots the real linux-guest fixture (whose /init calls reboot(RB_POWER_OFF), a genuine triple-fault Shutdown exit) twice and asserts the halt RIP is bit-identical across boots.
+  - Updated todo.md section 14 and the section 12 test matrix (row 26) to mark both tests done, alongside the already-done guest_kernel_boots_to_userspace and image_build_is_reproducible.
+---

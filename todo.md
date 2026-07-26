@@ -800,7 +800,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 | 23 | Journal/observations in plaintext at rest | `baud-snapshot-store` age-encrypts universes + tapes | `snapshot_store_bodies_are_ciphertext` |
 | 24 | Two-plane cross-check is counts-only, misses ordering | Compare ordered exit sequences | `planes_agree_on_healthy_run` |
 | 25 | `rdseed`-exiting unavailable under nested virt (WSL2) | An L0 Hyper-V mask, not a CPU limit — MSR `0x48B` bit 48 (RDSEED-exiting) absent while bit 43 (RDRAND-exiting) is present; handled by the build-time rewrite; both trappable on bare-metal Intel | H0 records both bits (`rdmsr -f 48:48`/`-f 43:43 0x48B`); `no_rdseed_opcode_survives_in_image` |
-| 26 | A real Linux guest now boots to userspace, but only as a hand-built fixture (`linux-guest`, §14) — the automated image pipeline does not exist | A real image pipeline: minimal builtin kernel + deterministic cmdline + boot_params (E820, `SETUP_RNG_SEED`) + reproducible initramfs + `/init` + a tape endpoint, built by `baud-packages` (§4) | `guest_kernel_boots_to_userspace` (done); `boot_params_seed_is_pinned`; `init_powers_off_deterministically`; `image_build_is_reproducible` |
+| 26 | A real Linux guest now boots to userspace, but only as a hand-built fixture (`linux-guest`, §14) — the automated *pipeline* (Buildroot/pinned-Nix, §4.5) still does not exist, though the from-source `make bzImage` path (`baud-packages`'s `kernel_build`/`initramfs`/`guest_build` modules) is built and hardware-tested | A real image pipeline: minimal builtin kernel + deterministic cmdline + boot_params (E820, `SETUP_RNG_SEED`) + reproducible initramfs + `/init` + a tape endpoint, built by `baud-packages` (§4) | `guest_kernel_boots_to_userspace` (done); `boot_params_seed_is_pinned` (done); `init_powers_off_deterministically` (done); `image_build_is_reproducible` (done) |
 | 27 | OS-entropy determinism must be shown, not asserted | Boot a real Linux guest and prove the CRNG is a pure function of the tape end-to-end (§4, §3.8) | `os_entropy_is_deterministic` (H7); `double_boot_ram_hash_identical` |
 | 28 | An arbitrary interactive program must be driven to a goal, reproducibly, inside Linux | The emulator example (§11) runs inside the H7 guest; identical probe + framebuffer streams across boots; goal reached; shrink+replay holds | `interactive_probe_stream_is_identical`; `framebuffer_hashes_identical`; `mario_stream_is_live_and_rederivable` |
 | 29 | Example specifics could leak into core crates | The engine stays generic; all workload code lives under `examples/` (§11.0) | `no_workload_specifics_in_core` |
@@ -1175,9 +1175,34 @@ snapshot, not a duplicate of it.
      for a real replay — closing it needs `SnapshotStore` to additionally track each node's full
      root-to-node replay-tape lineage, a materially bigger change, out of scope this iteration; resume's
      generate mode rejects a `frame_run_id_prefix` request outright with a clear error rather than
-     silently ignoring it. Tests `boot_params_seed_is_pinned` and
-     `init_powers_off_deterministically` remain unwritten. H8 (Mario, item 3 below) is still blocked on
-     the rest of item 1, not just this piece.
+     silently ignoring it.
+     **This iteration (ralph iteration 18): `boot_params_seed_is_pinned` and
+     `init_powers_off_deterministically`, the two spec-named tests flagged above as unwritten, are now
+     written and hardware-verified.** `boot_params_seed_is_pinned` (`crates/baud-multiverse/src/linux/
+     mod.rs`) reuses the `hello-guest` fixture: two boots of the same tape must write an identical
+     `SETUP_RNG_SEED` node (the existing `read_seed_via_hdr` closure from
+     `rng_seed_setup_data_is_wired_into_a_real_boot_and_is_tape_derived` was extracted into a shared
+     `read_rng_seed_via_hdr` helper both tests now call, rather than duplicating the unsafe zero-page
+     read) and console output must also match, proving the pinned seed doesn't perturb the rest of the
+     deterministic boot; the guest-observable CRNG *output* side of "early CRNG init is reproducible" is
+     covered separately by the already-existing `os_entropy_is_deterministic` (enforced-regime,
+     `#[ignore]`d), since `hello-guest` has no libc/CRNG to observe. `init_powers_off_deterministically`
+     needed one small piece of new plumbing: `HaltOutcome` gained an `exit_pc: u64` field (the vCPU's
+     RIP read via a new `Multiverse::current_rip()` helper, `KVM_GET_REGS`, right after each of the
+     four halt-detecting call sites observes `Hlt`/`Shutdown`) — the "identical exit point" spec §4.3
+     names, previously not captured anywhere (`TimerTick` already captured `rip` but only for the
+     interrupt-boundary case, not the halt case). The new test reuses `guest_kernel_boots_to_userspace`'s
+     real `linux-guest` fixture and periodic-timer engine (its `/init` genuinely calls
+     `reboot(RB_POWER_OFF)`, a real triple-fault `VcpuExit::Shutdown` — unlike `hello-guest`'s hand-
+     assembled `hlt` loop) and asserts `HaltOutcome::exit_pc` is bit-identical across two boots. Both
+     **passed on real `/dev/kvm`** (`init_powers_off_deterministically` re-run 5x clean, no jitter
+     observed — it compares only the halt RIP, not raw console text or full RAM, so it doesn't hit the
+     residual RCB/`perf_event`-read-jitter floor documented in item 2 below).
+     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h0.sh`-`h7.sh`
+     (8/8) and `drive/m9.sh`-`m12.sh` (4/4) all still PASS on real `/dev/kvm` — no regressions from the
+     widened `HaltOutcome`. Closes matrix row 26's two remaining named tests (§12); `guest_kernel_boots_
+     to_userspace` and `image_build_is_reproducible` were already done. H8 (Mario, item 3 below) is still
+     blocked on the rest of item 1, not just this piece.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-
