@@ -90,9 +90,9 @@ Do not perform any additional work after the promise. All verification happens b
 
 Nothing will resume you: this session ends when you stop, and an unfinished step is lost.
 
-Long commands: split them into one Bash call per step, each with `timeout` (max 600000 ms), and append a progress note before each (silent sessions get terminated) — never chain with `&&` and never background, because a backgrounded command cannot be waited on here: completion notifications, `Monitor` and `ScheduleWakeup` all do nothing, and `sleep N; cat` is blocked.
+Long commands: split them into one Bash call per step, each with `timeout` (max 600000 ms), and append a progress note before each (silent sessions get terminated) — never chain with `&&`, and never background a command whose result you need: a backgrounded command is killed when the session ends, and a chained `sleep 30; …` wait is refused outright. To wait for something, poll inside ONE call (`until <check>; do sleep 5; done`) or use `Monitor`, which does work here — its events come back as new turns. Never use `ScheduleWakeup`: its delay is clamped to 60s while this session exits in about ten, so the wakeup can never fire, yet it replies that one is scheduled and that there is nothing more to do this turn.
 
-Subagents are synchronous: an Agent call returns its result inside this turn. There is no background agent to wait for and nothing will notify you later — if you catch yourself waiting on one, its result is already in the tool result above.
+Subagents are ASYNCHRONOUS by default. An Agent call without `run_in_background: false` returns a launch acknowledgement in milliseconds — not a result — and the subagent's output arrives later as a separate turn. Pass `run_in_background: false` whenever you need the result to carry on: measured, that returns the finished report inline, against a 13ms "launched successfully" ack by default. Either way you never wait for a subagent by stopping; stopping is what loses the iteration.
 
 Before ending, re-read your last paragraph. If it is a plan, a question, or a promise about work you have not done ("Waiting for…", "I'll…"), the step is not closed — do it now.
 
