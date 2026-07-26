@@ -5589,3 +5589,5 @@ todo.md updated with this iteration's findings (37 insertions, 0 deletions, both
   - 4 new hardware-independent tests in `console.rs`'s `virtio_rng_service_tests` (pure `vm-memory` anonymous-mmap memory, no KVM/perf): no-op-before-ready, real driver-negotiation-through-notify-through-drain end-to-end, same-seed/different-seed determinism, and reset+renegotiate cursor-rebuild regression.
   - Verification: `cargo build --workspace` clean; `cargo clippy --workspace --all-targets` 0 new warnings (confirmed against the same pre-existing warning list prior iterations documented); `cargo test --workspace` 0 failures (baud-multiverse: 113 passed, 8 ignored); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`, no regressions.
 ---
+
+Post-push verification: git push succeeded (cfc1413..817d345 main -> main); local HEAD matches origin/main tip exactly (817d345); working tree clean. Full build/clippy/test/drive-script suite was run against this exact commit content before pushing. todo.md still has pending items (virtio-rng interrupt-delivery + boot/CLI wiring, H8/FCEUX Qt5, H9 Ubuntu) -- emitting NEXT.
