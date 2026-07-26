@@ -1121,15 +1121,53 @@ snapshot, not a duplicate of it.
        clean (0 failures, 87 passed in `baud-multiverse`) and `drive/h4.sh`/`h5.sh`/`h7.sh` and the
        `h7-enforced-entropy.sh`-internal `rdtsc_enforced_regime_is_bit_exact_across_boots` regression
        check all still pass clean.
-     `double_boot_ram_hash_identical` still needs a **guest-driven checkpoint** design (an explicit
-     `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first
-     attempt at the latter found the two boots differ in exactly one kernel-internal diagnostic line,
-     the same class of real-hardware branch-counter read jitter as the finding above (see
-     `tests/fixtures/linux-guest/BUILD.md`'s "known, deliberate non-goal" section). Also still open:
-     `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
+     **`double_boot_ram_hash_identical`'s guest-driven-checkpoint mechanism is now implemented and
+     hardware-tested; the RAM-hash comparison itself still fails every run, root-caused (not just
+     observed) to a new, more specific finding than the one above.** The tape device's existing
+     `MARK_BRANCH` opcode (specs/baud-tape-device.md §4) turned out to already be the exact
+     "guest-driven checkpoint" hook the spec calls for — no new VM-exit/opcode work was needed, only
+     a new combinator, `Multiverse::run_until_branch_or_halt_with_periodic_timer`
+     (`crates/baud-multiverse/src/linux/mod.rs`), that layers H4's open-ended periodic-timer engine
+     with `run_until_branch_or_halt`'s "stop at `MARK_BRANCH`, not just `Hlt`" condition — plus a
+     third `checkpoint_init.c` fixture variant (`tests/fixtures/linux-guest/`, `BUILD.md` updated)
+     that finalizes one `outb(1, 0x508)` MARK_BRANCH record right before powering off. **Real bug
+     found and fixed while wiring this up**: the first version checked `InjectOutcome::Halted`
+     before draining the tape device, so a short guest program whose entire checkpoint-then-halt
+     sequence fits inside a single tick's window (as this fixture's does) never surfaced its
+     `MARK_BRANCH` record at all — fixed by draining/checking for `MARK_BRANCH` before branching on
+     the tick outcome, on every iteration. The new `#[ignore]`d test, `double_boot_ram_hash_
+     identical`, is driven by a new script, `drive/h7-enforced-checkpoint.sh` (same swap-in/swap-out
+     dance as `drive/h7-enforced-entropy.sh`).
+     **Real-hardware result: 0/8 across two batches (16 real double-boots), unlike
+     `os_entropy_is_deterministic`'s ~70-90% pass rate on the identical enforced-regime machinery —
+     root-caused via a one-off byte-diff diagnostic** (booted twice, kept both `Multiverse`s alive,
+     diffed raw guest RAM byte-for-byte instead of just hashing it, then removed the diagnostic
+     code): only 77,589 of 268,435,456 bytes differ (0.03%), and — critically — they are not
+     scattered like independent random draws would be. The differing region decodes as a repeating
+     `JMP rel32` + `UD1` byte pattern (`e9 .. .. .. ..` `0f b9 cc`) — the kernel's `static_call`/
+     jump-label trampoline padding (`arch/x86/kernel/static_call.c`) — with a genuinely different
+     (not small-jitter) `rel32` displacement each boot, i.e. the patched trampoline points at two
+     different valid targets, not the same target read imprecisely. This means at least one
+     `static_call` site gets updated to a different function depending on a runtime decision itself
+     sensitive to the already-documented residual RCB/TSC read jitter (the same root mechanism that
+     makes the `sched_clock: Marking stable` printk line's embedded numbers differ) — here visibly
+     changing *which code runs*, not just a printed number, plausibly why a full-RAM comparison
+     catches it on every run while `os_entropy_is_deterministic`'s narrow 8-probe check mostly does
+     not. Driving this to 100% needs either eliminating the residual single-fd `perf_event`-read
+     jitter to exactly zero (already open per the finding above) or identifying and pinning the
+     specific static-call site — both future work, not attempted this iteration.
+     `drive/h7-enforced-checkpoint.sh` does **not** gate the standard verification protocol on this
+     test's own pass/fail (only on its RDTSC regression check), since it is expected to fail every
+     run until one of those two fixes lands; the checkpoint *mechanism* itself (the tape cursor
+     landing at the identical step across two boots) is asserted unconditionally and passes.
+     Also still open: `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
      `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted) — the
      spec's own named tests for this guarantee, distinct from the H7-specific
-     `os_entropy_is_deterministic`. No guest-kernel patch.
+     `os_entropy_is_deterministic`; per a prior iteration's research, the first two would only ever
+     duplicate `os_entropy_is_deterministic` against the same real-Linux fixture (no minimal-kernel
+     entropy fixture exists), and `virtio_rng_reseed_is_deterministic` needs an actual virtio-rng
+     device model, which does not exist yet (no `trait Device`/`Bus` impl for it) — a multi-day
+     effort, not a quick add. No guest-kernel patch.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

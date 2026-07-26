@@ -80,6 +80,55 @@ cd entropy_rootfs && touch -h -d '@1' init . && \
 Only `entropy_init.c` and `entropy_initramfs.cpio.gz` are checked in (same convention as the main
 fixture: the compiled `entropy_init` binary and `entropy_rootfs/` build directory are not).
 
+## `checkpoint_init.c` / `checkpoint_initramfs.cpio.gz` — H7 `double_boot_ram_hash_identical`
+
+A third `/init` for the same already-built `bzImage` (again no kernel rebuild): identical to
+`init.c` except it finalizes one extra tape-device record right before powering off —
+`outb(1, 0x508)`, the tape device's `MARK_BRANCH` control op (opcode 1, no payload,
+specs/baud-tape-device.md §4) at its fixed base port (`crates/baud-multiverse/src/tape_bus.rs`'s
+`TAPE_DEVICE_BASE = 0x0500` + `reg::CONTROL = 0x08`). This is the "known, deliberate non-goal"
+section's own prescribed fix: a **guest-driven checkpoint** the VMM hashes RAM at, instead of a
+wall-clock point or raw console/RAM comparison across a full boot (both of which embed the
+real-hardware RCB/TSC read jitter that section documents). Regenerate the same way:
+
+```bash
+musl-gcc -static -Os -o checkpoint_init checkpoint_init.c && strip checkpoint_init
+mkdir -p checkpoint_rootfs && cp checkpoint_init checkpoint_rootfs/init && chmod 755 checkpoint_rootfs/init
+cd checkpoint_rootfs && touch -h -d '@1' init . && \
+    find . -print0 | sort -z | cpio -o -H newc -R +0:+0 --reproducible --null | gzip -9n \
+    > ../checkpoint_initramfs.cpio.gz
+```
+
+Only `checkpoint_init.c` and `checkpoint_initramfs.cpio.gz` are checked in, same convention as the
+other two `/init` variants.
+
+**This still needs the enforced (RDTSC/RDTSCP-trapping) `kvm_intel.ko`, exactly like
+`os_entropy_is_deterministic`** — under the stock module, raw (untrapped) `rdtsc` reads real
+hardware time, and the kernel's early boot code (e.g. `sched_clock`'s stability calibration) prints
+those real, run-varying numbers into the kernel's own `printk` ring buffer well before `/init` ever
+runs — bytes that stay resident in guest RAM (part of the kernel's static data, not something the
+checkpoint's *placement* can avoid) and would make a full-RAM hash disagree regardless of when the
+checkpoint fires. Moving the checkpoint later only avoids *console-output*/wall-clock comparison
+points; it does not exempt already-printed, TSC-tainted bytes sitting in RAM. `double_boot_ram_hash_
+identical` (`crates/baud-multiverse/src/linux/mod.rs`) is `#[ignore]`d for this reason and driven by
+`drive/h7-enforced-checkpoint.sh`, the same swap-in/swap-out dance as `drive/h7-enforced-entropy.sh`.
+
+**Real-hardware result even under the enforced module: fails every run (0/8, twice), root-caused
+by a one-off byte-diff diagnostic.** Unlike `os_entropy_is_deterministic`'s ~70-90% pass rate on
+the identical enforced-regime machinery, diffing raw guest RAM byte-for-byte (not just hashing it)
+across two boots found only 77,589 of 268,435,456 bytes differ (0.03%), clustered in a repeating
+`JMP rel32` + `UD1` byte pattern — the kernel's `static_call`/jump-label trampoline padding — with
+a genuinely different (not small-jitter) jump-target displacement each boot. So at least one
+`static_call` site gets patched to a different function depending on a decision sensitive to the
+same residual RCB/TSC read jitter already documented for the `sched_clock: Marking stable` printk
+line, except here it changes which code the trampoline jumps to instead of only a printed number —
+plausibly why a full-RAM comparison catches it on every run while `os_entropy_is_deterministic`'s
+narrow 8-probe check mostly does not. The guest-driven-checkpoint *mechanism* this test exists to
+prove (the tape cursor lands at the identical step across two boots, asserted unconditionally) is
+complete and correctly wired; driving the RAM-hash comparison itself to 100% needs either
+eliminating the residual jitter to exactly zero or pinning the specific static-call site, both
+still open (todo.md §14 next-actions item 2).
+
 ## Why `/init` uses raw port I/O, not `write(1, ...)`
 
 `init.c` writes its marker via `iopl(3)` + inline `outb` straight to COM1's data register (`0x3f8`)
