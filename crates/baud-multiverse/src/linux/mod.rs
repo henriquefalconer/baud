@@ -2842,6 +2842,60 @@ mod tests {
         );
     }
 
+    /// specs/baud-multiverse.md §3.8's `virtio_rng_reseed_is_deterministic`: "with a tape-fed
+    /// virtio-rng source ..., continuous reseeding does not perturb the output stream across a
+    /// double-run." `virtio_rng_init.c` now loops four separate `read()`s over the same open
+    /// `/dev/hwrng` fd instead of one -- four distinct request/completion round-trips through
+    /// `VirtioMmioTransport`/`SplitVirtqueue::process_available` per boot (§14 next-actions item 1
+    /// confirmed the host-side device model and `run_to_first_halt_with_periodic_timer_and_
+    /// virtio_rng`'s halt-servicing loop already generically support repeated completions; only the
+    /// guest payload needed to actually issue more than one). This is the "over a longer run" case
+    /// `guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots` explicitly did not
+    /// cover (that test's `/init` read exactly once).
+    #[test]
+    fn virtio_rng_reseed_is_deterministic() {
+        let first = run_linux_guest_virtio_rng_once(31337);
+        let second = run_linux_guest_virtio_rng_once(31337);
+
+        fn extract_reads(console: &str) -> Vec<&str> {
+            console
+                .lines()
+                .filter_map(|l| l.strip_prefix("baud-guest: hwrng-bytes:"))
+                .collect()
+        }
+        let first_reads = extract_reads(&first);
+        let second_reads = extract_reads(&second);
+
+        assert_eq!(
+            first_reads.len(),
+            4,
+            "the guest must complete all four separate hwrng reads (continuous reseeding, not \
+             just the initial one); got:\n{first}"
+        );
+
+        let mut distinct = first_reads.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            4,
+            "each of the four reads must draw fresh entropy from the tape-seeded stream, not \
+             repeat a cached value; got reads: {first_reads:?}"
+        );
+
+        assert_eq!(
+            first_reads, second_reads,
+            "continuous reseeding across repeated virtio-rng completions must not perturb the \
+             output stream across a double-run: same seed twice must yield the identical sequence \
+             of reads"
+        );
+        assert_eq!(
+            first, second,
+            "the full console output, including every reseed round-trip, must be byte-identical \
+             across two boots of the same image+tape+seed"
+        );
+    }
+
     /// Same guarantee as `virtio_rng_interrupt_delivery_is_reproducible_across_two_boots`, but
     /// through a real Linux guest's own driver stack end to end: the exact hex bytes its `/init`
     /// reads from `/dev/hwrng` (via `drivers/char/hw_random/virtio-rng.c`'s real request/completion

@@ -6009,3 +6009,26 @@ Chose to implement virtio_rng_reseed_is_deterministic (§3.8) — the continuous
 Note: found tools/pauseresume_ab.sh (an Arm-A/B/C RCB-counter experiment from a prior session) still running in the background against a clean tree, mutating crates/baud-multiverse/src/linux/mod.rs transiently. It finished and self-reverted via its own EXIT trap (git checkout -- <file>) partway through my edit, wiping my first attempt at the new test. Saved a diff first, confirmed the file was back to clean HEAD, and re-applied just my test addition -- no interference with that script's own experiment, which is unrelated to this iteration's work. Proceeding to build the guest fixture and run the new test.
 
 New test virtio_rng_reseed_is_deterministic passes on real /dev/kvm (all 4 reads distinct entropy, byte-identical across two boots). Also re-ran the two pre-existing virtio-rng tests with the updated 4-read fixture -- both still pass. Updated BUILD.md. Now running full clippy/test/drive verification.
+
+cargo build/clippy/test --workspace all clean: baud-multiverse now 131 passed/8 ignored (up from 130), 0 failures across the whole workspace. No new clippy warnings in touched crates. Now running drive/h0.sh through h7.sh individually.
+
+drive/h0.sh through h6.sh all PASS on real /dev/kvm, no regressions. h7.sh (real Linux kernel boot) running now in background.
+
+drive/h7.sh PASS, drive/m9.sh-m13.sh 5/5 PASS. Now running the pkg-* drive scripts that share the rebuilt linux-guest fixture (boot-cli, multifile-initramfs, dynamic-link, and all four virtio-rng-*-cli scripts) to confirm no regressions.
+
+pkg-boot-cli.sh, pkg-multifile-initramfs.sh, pkg-dynamic-link.sh all PASS -- no regressions from the virtio_rng_init.c change (they use different fixtures/init binaries). Now running all four drive/pkg-virtio-rng-*-cli.sh scripts.
+
+All four drive/pkg-virtio-rng-*-cli.sh scripts PASS on real /dev/kvm, no regressions (these use tests/fixtures/virtio-rng-guest/, a separate hand-assembled fixture untouched by this iteration). Full verification suite is green end to end. Updating todo.md with a subagent now, then committing.
+
+todo.md updated via subagent, verified clean (no 'Iteration' text introduced, virtio_rng_reseed_is_deterministic marked closed, new paragraph documents the work, pauseresume_ab.sh hazard noted). Appending final progress block and committing now.
+
+## 2026-07-26T22:05:22 UTC - Changes committed.
+- Closed spec §3.8's virtio_rng_reseed_is_deterministic: a real Linux kernel's own virtio-rng driver now proven deterministic across *repeated* reseeds, not just the initial read.
+- Files changed: crates/baud-multiverse/tests/fixtures/linux-guest/{virtio_rng_init.c,virtio_rng_initramfs.cpio.gz,BUILD.md}, crates/baud-multiverse/src/linux/mod.rs, todo.md.
+- **Brief description of changes:**
+  - virtio_rng_init.c now loops four separate read()s over the same open /dev/hwrng fd (was one), printing each round's hex bytes on its own console line before rebooting; virtio_rng_initramfs.cpio.gz rebuilt from the new source via the existing musl-gcc + cpio recipe, no kernel rebuild.
+  - New test virtio_rng_reseed_is_deterministic (crates/baud-multiverse/src/linux/mod.rs) boots the guest twice with the same seed and asserts: all four reads complete each boot, the four reads within a boot are pairwise distinct (fresh entropy each time, not a cached value), and the full sequence of reads plus the entire console output is byte-identical across the two boots -- the exact spec-named guarantee.
+  - Found the gap needed zero host-side or run-loop changes: Multiverse::run_to_first_halt_with_periodic_timer_and_virtio_rng's halt-servicing loop already re-checks VirtioMmioTransport::notify_count() (a monotonic counter) every tick, and DeviceBus::service_virtio_rng/SplitVirtqueue::process_available already drain all newly-available descriptor chains per call -- only the guest payload needed to actually issue more than one read.
+  - Incidental finding: tools/pauseresume_ab.sh (a prior session's RCB work-clock A/B/C experiment) was still running as an orphaned background process, transiently patching the same crates/baud-multiverse/src/linux/mod.rs with a revert-on-exit trap. It exited mid-edit and its trap correctly reverted the whole file, wiping my first attempt at the new test -- no work was lost since a diff had been saved first and the test was cleanly re-applied afterward. Documented as a hazard in todo.md for anyone running that script across a session boundary in the future.
+  - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings; baud-multiverse 131 passed/8 ignored, up from 130); the two pre-existing virtio-rng tests re-run against the updated fixture with no regression; drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), drive/pkg-boot-cli.sh, drive/pkg-multifile-initramfs.sh, drive/pkg-dynamic-link.sh, and all four drive/pkg-virtio-rng-*-cli.sh scripts all PASS on real /dev/kvm.
+---

@@ -2095,13 +2095,52 @@ snapshot, not a duplicate of it.
      itself is still not implemented — still needed for H8 (FCEUX/Xvfb + its dependency closure) and
      H9 (Ubuntu), which need a *rootfs*, not just a kernel driver proof; this iteration's virtio_rng
      proof did not need Buildroot/Nix because it only needed a single-binary initramfs, same pattern
-     as every other fixture in that directory. `virtio_rng_reseed_is_deterministic` (§3.8) — this
-     iteration's two new tests are a real, meaningful step toward it (a real driver's *initial* read
-     is now proven deterministic across boots) but are not literally that spec-named test, which
-     implies continuous reseeding over a longer run (e.g. multiple reads/requests over time), not
-     yet exercised here — this test still cannot be marked passing. H8 Mario is still blocked on the
-     FCEUX Qt5/SDL2/Xvfb packaging problem, untouched this iteration; H9 Ubuntu is still not
-     started.
+     as every other fixture in that directory. `virtio_rng_reseed_is_deterministic` (§3.8) is now
+     closed — see the paragraph immediately below and `linux-guest/BUILD.md`'s "Continuous
+     reseeding" section for the four-read fixture and the new test proving it byte-identical across
+     two boots. H8 Mario is still blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem, untouched
+     since the finding above; H9 Ubuntu is still not started.
+     `crates/baud-multiverse/tests/fixtures/linux-guest/virtio_rng_init.c` was changed to loop four
+     separate `read()`s over the same open `/dev/hwrng` fd (previously exactly one read), printing
+     each round's hex bytes on its own `baud-guest: hwrng-bytes:` console line before rebooting, and
+     `virtio_rng_initramfs.cpio.gz` in the same directory was rebuilt from the new source via the
+     existing musl-gcc + cpio recipe already documented in `BUILD.md` — no kernel rebuild needed,
+     same shared `bzImage`. A new test, `virtio_rng_reseed_is_deterministic`, was added to
+     `crates/baud-multiverse/src/linux/mod.rs` right after
+     `guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng`: it boots the guest twice
+     with the same seed, extracts all four `hwrng-bytes:` lines from each boot's console output, and
+     asserts (a) all four reads complete each boot, (b) the four reads within one boot are pairwise
+     distinct (proving each read draws fresh entropy from the tape-seeded stream rather than a
+     cached/repeated value), and (c) the full sequence of reads — and the entire console output — is
+     byte-identical across the two boots. This is the exact spec-named test from
+     `specs/baud-multiverse.md` §3.8 / line 274 above. The gap closed with zero host-side or run-loop
+     changes: both a research subagent and direct code reading confirmed
+     `Multiverse::run_to_first_halt_with_periodic_timer_and_virtio_rng`'s halt-servicing loop already
+     generically re-checks `VirtioMmioTransport::notify_count()` (a monotonic counter, not a one-shot
+     flag) on every timer tick, and `DeviceBus::service_virtio_rng` / `SplitVirtqueue::
+     process_available` already drain all newly-available descriptor chains per call, not just one —
+     the only real gap was the guest payload itself issuing a single read, smaller follow-up work
+     than the note above implied. `linux-guest/BUILD.md`'s "Continuous reseeding —
+     `virtio_rng_reseed_is_deterministic` (spec §3.8)" section documents this in full detail. Full
+     verification on real `/dev/kvm`: `cargo build --workspace`, `cargo clippy --workspace
+     --all-targets`, and `cargo test --workspace` all clean, zero new warnings; `baud-multiverse` now
+     131 passed/8 ignored (up from 130). The two pre-existing tests
+     `guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng` and
+     `guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots` were re-run against the
+     updated four-read fixture and both still pass — no regression from the fixture change.
+     `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`,
+     `drive/pkg-multifile-initramfs.sh`, `drive/pkg-dynamic-link.sh` (all three boot the shared
+     `linux-guest` `bzImage`, confirming the fixture change caused no regressions), and all four
+     `drive/pkg-virtio-rng-*-cli.sh` scripts (`pkg-virtio-rng-cli.sh`,
+     `pkg-virtio-rng-replay-cli.sh`, `pkg-virtio-rng-branch-resume-cli.sh`,
+     `pkg-virtio-rng-generate-cli.sh` — these use a separate, untouched hand-assembled
+     `tests/fixtures/virtio-rng-guest/` fixture) all PASS on real `/dev/kvm`; no regressions anywhere.
+     Separately noted as a hazard, not a code bug: `tools/pauseresume_ab.sh` (the RCB work-clock A/B/C
+     experiment script) was found still running as an orphaned background process against this same
+     `crates/baud-multiverse/src/linux/mod.rs` during this work, transiently patching the file with a
+     `trap ... EXIT` that reverts it via `git checkout --` on exit — if left running across a session
+     boundary it can silently clobber concurrent edits to that file; no data was lost here, but
+     anyone running that script should be aware of this.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

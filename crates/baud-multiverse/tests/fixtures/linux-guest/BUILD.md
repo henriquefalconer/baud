@@ -263,6 +263,31 @@ own virtio_mmio/virtio-rng drivers have exercised baud's virtio-mmio transport e
 still-open pieces are the Buildroot/pinned-Nix packaging pipeline itself (§4.5) and H8/H9, which need
 it for far larger rootfs images than this hand-built single-binary initramfs.
 
+### Continuous reseeding — `virtio_rng_reseed_is_deterministic` (spec §3.8)
+
+The two tests above only proved the guest's *initial* `/dev/hwrng` read is deterministic — a single
+request/completion round-trip. The spec-named test asks for more: "continuous reseeding does not
+perturb the output stream across a double-run," implying multiple reads over the run, not just one.
+Closing this needed **no host-side or run-loop change** — `Multiverse::
+run_to_first_halt_with_periodic_timer_and_virtio_rng`'s halt-servicing loop already re-checks
+`VirtioMmioTransport::notify_count()` (a monotonic counter, not a one-shot flag) on every tick, and
+`DeviceBus::service_virtio_rng`/`SplitVirtqueue::process_available` already drain *all* newly-available
+descriptor chains each call, not just one — both were already generic enough to service an arbitrary
+number of completions per boot. The only real gap was the guest payload itself only ever issuing one.
+
+Fixed by changing `virtio_rng_init.c` to loop four separate `read()`s over the same open `/dev/hwrng`
+fd (instead of one), printing each round's hex bytes on its own `baud-guest: hwrng-bytes:` line before
+rebooting. Rebuild `virtio_rng_initramfs.cpio.gz` the same way as any other initramfs here (see
+"Regenerating the initramfs" above, substituting `virtio_rng_init.c` as the source and
+`virtio_rng_initramfs.cpio.gz` as the output) — no kernel rebuild needed, same `bzImage`.
+
+Real-hardware result: **`virtio_rng_reseed_is_deterministic`** (`crates/baud-multiverse/src/linux/
+mod.rs`) passes — all four reads complete, each draws distinct bytes from the tape-seeded entropy
+stream (not a cached/repeated value), and the full sequence of four reads — and the entire console
+output — is byte-identical across two boots of the same image+tape+seed. This closes the spec-named
+test; still open for §3.8 as a whole is exercising the same guarantee on the full Buildroot/Nix-built
+rootfs images H8/H9 will eventually use, not just this single-binary initramfs.
+
 ## Why `/init` uses raw port I/O, not `write(1, ...)`
 
 `init.c` writes its marker via `iopl(3)` + inline `outb` straight to COM1's data register (`0x3f8`)

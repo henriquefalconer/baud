@@ -74,20 +74,27 @@ int main(void) {
         }
         out_str("baud-guest: hwrng-open-ok\n");
 
-        unsigned char rbuf[16];
-        ssize_t n = read(fd, rbuf, sizeof(rbuf));
-        close(fd);
-        if (n <= 0) {
-            out_str("baud-guest: hwrng-read-failed\n");
-            goto done;
-        }
-        out_str("baud-guest: hwrng-bytes:");
+        /* Read multiple times, not once: a single read only proves the *initial* virtio-rng
+         * completion is deterministic. Looping exercises repeated request/completion round-trips
+         * through the same open fd -- the "continuous reseeding" spec §3.8 names -- so the run
+         * genuinely re-notifies the device and re-drains the entropy stream several times per
+         * boot, not just once. */
         static const char hex[] = "0123456789abcdef";
-        for (ssize_t i = 0; i < n; i++) {
-            char pair[2] = { hex[(rbuf[i] >> 4) & 0xf], hex[rbuf[i] & 0xf] };
-            out_bytes(pair, 2);
+        for (int round = 0; round < 4; round++) {
+            unsigned char rbuf[16];
+            ssize_t n = read(fd, rbuf, sizeof(rbuf));
+            if (n <= 0) {
+                out_str("baud-guest: hwrng-read-failed\n");
+                goto done;
+            }
+            out_str("baud-guest: hwrng-bytes:");
+            for (ssize_t i = 0; i < n; i++) {
+                char pair[2] = { hex[(rbuf[i] >> 4) & 0xf], hex[rbuf[i] & 0xf] };
+                out_bytes(pair, 2);
+            }
+            out_str("\n");
         }
-        out_str("\n");
+        close(fd);
     }
 
 done:
