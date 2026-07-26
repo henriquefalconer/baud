@@ -2299,6 +2299,111 @@ mod tests {
         );
     }
 
+    /// todo.md §14 item 1's remaining named gap: "the initramfs builder's multi-file capacity is
+    /// now mechanism-complete ... but still only exercised with a single `/init`-style entry -- no
+    /// real harness-script/agent-binary multi-file rootfs has been assembled or tested yet."
+    ///
+    /// Unlike every other `linux-guest` variant above, this test does not read a hand-`cpio`'d
+    /// fixture off disk -- it builds the initramfs itself, at test time, via
+    /// `baud_packages::initramfs::build_reproducible_initramfs` with **two** distinct entries
+    /// (`/init` + `/helper`), the real reproducible-cpio pipeline spec §4.5 names, not a shell
+    /// recipe. `multifile_init.c` execs the bundled `/helper` and waits for it before powering off,
+    /// so a real KVM boot reaching both markers proves the pipeline-built archive is not just
+    /// byte-correct (already covered by `initramfs.rs`'s own unit tests) but genuinely bootable and
+    /// multi-file-capable -- the concrete shape §11's eventual harness+emulator image will need.
+    /// Reuses the already-built, checked-in `bzImage` (no kernel rebuild: nothing about this test
+    /// touches kernel config).
+    #[test]
+    #[ignore]
+    fn guest_boots_a_pipeline_built_multi_file_initramfs() {
+        if std::process::Command::new("musl-gcc")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("Skipping guest_boots_a_pipeline_built_multi_file_initramfs: musl-gcc not found on PATH");
+            return;
+        }
+
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest");
+        let scratch = tempfile::tempdir().unwrap();
+
+        let compile = |source: &str, output: &std::path::Path| {
+            let status = std::process::Command::new("musl-gcc")
+                .args(["-static", "-Os", "-o"])
+                .arg(output)
+                .arg(fixture_dir.join(source))
+                .status()
+                .unwrap_or_else(|e| panic!("failed to spawn musl-gcc for {source}: {e}"));
+            assert!(status.success(), "musl-gcc failed to compile {source}");
+            let strip_status = std::process::Command::new("strip").arg(output).status();
+            assert!(strip_status.map(|s| s.success()).unwrap_or(false), "strip failed for {source}");
+        };
+
+        let init_bin = scratch.path().join("init");
+        let helper_bin = scratch.path().join("helper");
+        compile("multifile_init.c", &init_bin);
+        compile("helper.c", &helper_bin);
+
+        let entries = [
+            baud_packages::InitramfsEntry {
+                path: "init".to_string(),
+                mode: 0o755,
+                contents: std::fs::read(&init_bin).unwrap(),
+            },
+            baud_packages::InitramfsEntry {
+                path: "helper".to_string(),
+                mode: 0o755,
+                contents: std::fs::read(&helper_bin).unwrap(),
+            },
+        ];
+        let initramfs = baud_packages::build_reproducible_initramfs(&entries)
+            .expect("pipeline-built multi-file initramfs must assemble successfully");
+
+        let kernel = linux_guest_kernel_path();
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE;
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
+        const INIT_MARKER: &str = "baud-guest: multi-file init reached /init\n";
+        const HELPER_MARKER: &str = "baud-guest: helper executed from a multi-file initramfs\n";
+
+        let mut tick_counts = Vec::new();
+        for i in 0..2 {
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
+            let (ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+                .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            assert!(
+                console.contains(INIT_MARKER),
+                "run {i}: /init (bundled entry 1 of the pipeline-built archive) must run; got:\n{console}"
+            );
+            assert!(
+                console.contains(HELPER_MARKER),
+                "run {i}: /helper (bundled entry 2 of the pipeline-built archive) must be found and \
+                 exec'd by /init; got:\n{console}"
+            );
+            tick_counts.push(ticks.len());
+        }
+        assert_eq!(
+            tick_counts[0], tick_counts[1],
+            "the same pipeline-built image+tape must survive the same number of periodic ticks \
+             before its own natural halt across two boots"
+        );
+    }
+
     /// `tests/fixtures/linux-guest/entropy_init.c` -- a second `/init` for the same, already-built
     /// `linux-guest` kernel (no kernel rebuild needed: OS-entropy determinism is a userspace-visible
     /// property this fixture's own `minimal.config` already supports -- `CONFIG_DEVTMPFS_MOUNT=y`

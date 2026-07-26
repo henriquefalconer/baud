@@ -46,3 +46,8 @@ proptest = "1"
 # baud-tape-device's Frame-record hash agrees with baud-stream's own fingerprint function — no
 # non-test code in this crate depends on baud-stream.
 baud-stream = { path = "../baud-stream" }
+# Only for guest_boots_a_pipeline_built_multi_file_initramfs, which builds its initramfs via the
+# real reproducible-cpio pipeline (baud_packages::initramfs) instead of a hand-cpio'd fixture, to
+# prove the pipeline's multi-file capacity against a real KVM boot — no non-test code in this
+# crate depends on baud-packages.
+baud-packages = { path = "../baud-packages" }

@@ -465,6 +465,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "baud-host",
+ "baud-packages",
  "baud-proto",
  "baud-snapshot",
  "baud-stream",

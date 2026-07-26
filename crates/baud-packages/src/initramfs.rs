@@ -252,6 +252,40 @@ mod tests {
     }
 
     #[test]
+    fn multiple_distinct_files_are_all_preserved() {
+        // todo.md §14 item 1's named gap: every existing test/caller of this builder used exactly
+        // one entry. A real guest rootfs needs more than `/init` alone (e.g. §11's eventual
+        // harness + emulator pair) -- this asserts the builder genuinely archives N>1 distinct
+        // files, not just N=1 or N duplicates-that-get-rejected.
+        let entries = vec![
+            init_entry(b"init-binary-contents"),
+            InitramfsEntry { path: "helper".to_string(), mode: 0o755, contents: b"helper-binary-contents".to_vec() },
+            InitramfsEntry { path: "bin/tool".to_string(), mode: 0o700, contents: b"nested-tool-contents".to_vec() },
+        ];
+        let gz = build_reproducible_initramfs(&entries).unwrap();
+        let records = parse_newc_cpio(&gunzip(&gz));
+
+        let find = |name: &str| {
+            records.iter().find(|(n, _, _)| n == name).unwrap_or_else(|| panic!("{name} record must be present"))
+        };
+        let (_, init_mode, init_contents) = find("init");
+        assert_eq!(*init_mode, S_IFREG | 0o755);
+        assert_eq!(init_contents, b"init-binary-contents");
+
+        let (_, helper_mode, helper_contents) = find("helper");
+        assert_eq!(*helper_mode, S_IFREG | 0o755);
+        assert_eq!(helper_contents, b"helper-binary-contents");
+
+        let (_, tool_mode, tool_contents) = find("bin/tool");
+        assert_eq!(*tool_mode, S_IFREG | 0o700);
+        assert_eq!(tool_contents, b"nested-tool-contents");
+
+        // Exactly the three files plus their two implied directories (".", "bin") -- no entry
+        // silently dropped or duplicated.
+        assert_eq!(records.len(), 5, "expected 3 files + 2 directories, got: {records:?}");
+    }
+
+    #[test]
     fn duplicate_path_is_rejected() {
         let entries = vec![init_entry(b"a"), init_entry(b"b")];
         let err = build_reproducible_initramfs(&entries).unwrap_err();

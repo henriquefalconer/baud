@@ -1096,12 +1096,27 @@ snapshot, not a duplicate of it.
      `persist_kvm_run` signature); `drive/h0.sh` through `drive/h7.sh` (8/8) and `drive/m9.sh`/
      `m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no regressions from the schema/signature
      changes.
-     **Still open**: the initramfs builder's multi-file capacity is now mechanism-complete
-     (`--initramfs-entry` is repeatable and `InitramfsFileEntry`/`GuestImageBuildConfig` already take a
-     slice) but still only exercised with a single `/init`-style entry — no real harness-script/agent-
-     binary multi-file rootfs has been assembled or tested yet, and the three hand-built `tests/fixtures/
-     linux-guest/*initramfs.cpio.gz` files are not yet replaced by this pipeline's output (they remain
-     hand-built per their own `BUILD.md`s). Buildroot (§4.5 Path 1) and pinned-Nix (§4.5 Path 2)
+     **The initramfs builder's multi-file capacity is now real-hardware-verified, closed in ralph
+     iteration 19**: previously mechanism-complete (`--initramfs-entry` repeatable,
+     `InitramfsFileEntry`/`GuestImageBuildConfig` already took a slice) but exercised only with a
+     single `/init`-style entry anywhere in the repo. New unit test
+     `initramfs::tests::multiple_distinct_files_are_all_preserved` (`crates/baud-packages/src/
+     initramfs.rs`) round-trips 3 distinct files (including a nested `bin/tool` path) through
+     `build_reproducible_initramfs`. More importantly, new `#[ignore]`d real-hardware test
+     `guest_boots_a_pipeline_built_multi_file_initramfs` (`crates/baud-multiverse/src/linux/mod.rs`,
+     driven by new `drive/pkg-multifile-initramfs.sh`) builds a genuine 2-file initramfs
+     (`multifile_init.c` execs a bundled `helper.c`) via `build_reproducible_initramfs` **at test
+     time** — not a hand-`cpio`'d fixture — and boots it twice against the already-built, checked-in
+     `linux-guest` bzImage (no kernel rebuild) on real `/dev/kvm`: both files' markers present on
+     both boots, matching tick counts. **Real-hardware result: 5/5 clean, no jitter.** This proves the
+     pipeline's multi-file capacity is not just byte-correct in isolation but genuinely bootable —
+     the concrete shape a real multi-file rootfs (e.g. §11's eventual harness + emulator pair) will
+     need — closing the "no real harness-script/agent-binary multi-file rootfs has been assembled or
+     tested yet" gap named here in a prior iteration. The three hand-built `tests/fixtures/
+     linux-guest/*initramfs.cpio.gz` files are still not replaced by this pipeline's output (they
+     remain hand-built per their own `BUILD.md`s, unrelated to this gap — this item was about the
+     builder's *capability*, not about migrating every existing fixture off hand-cpio). Buildroot
+     (§4.5 Path 1) and pinned-Nix (§4.5 Path 2)
      themselves are still not implemented — this and the prior iteration both took the pragmatic
      from-source `make bzImage` third option instead; a `nix`/`nix-env` toolchain is still not installed
      in this dev sandbox and Buildroot remains unevaluated. The `/dev/vport` (or PIO) tape endpoint

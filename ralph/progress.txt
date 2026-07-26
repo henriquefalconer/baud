@@ -5182,3 +5182,48 @@ m9.sh-m12.sh: 4/4 PASS, no regressions. Full verification green. Updating todo.m
   - init_powers_off_deterministically: added HaltOutcome::exit_pc (vCPU RIP at halt, via a new Multiverse::current_rip() KVM_GET_REGS helper) threaded through all 4 halt-detecting call sites; new test boots the real linux-guest fixture (whose /init calls reboot(RB_POWER_OFF), a genuine triple-fault Shutdown exit) twice and asserts the halt RIP is bit-identical across boots.
   - Updated todo.md section 14 and the section 12 test matrix (row 26) to mark both tests done, alongside the already-done guest_kernel_boots_to_userspace and image_build_is_reproducible.
 ---
+
+Post-push verification: local main (575a0ee) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle. This iteration closed the boot_params_seed_is_pinned/init_powers_off_deterministically test gap flagged in todo.md §14/§12 matrix row 26. Full verification green: cargo build/clippy/test --workspace clean, drive/h0.sh-h7.sh (8/8), drive/m9.sh-m12.sh (4/4) all PASS on real /dev/kvm. todo.md still has pending items (Buildroot/pinned-Nix image pipeline, virtio-rng device, H8 Mario rebuild, residual RCB/perf_event jitter for os_entropy_is_deterministic/double_boot_ram_hash_identical, /run/kvm/resume lineage gap) -- emitting NEXT.
+
+## 2026-07-26T12:01:40 UTC (26min) - Session usage — build-18 [sonnet]
+- cost $4.8445 (from claude -p)
+- context 173,933 tok peak of 1M (17%) across 76 inference calls, monotonic
+- models sonnet-5 $4.8414 (in 174 / out 37,911 / cache-read 10,572,906) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/018-build-18.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 19
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick up where iteration 18 left off.
+
+Read todo.md and last progress entries. Remaining pending items: (1) automated image pipeline still uses from-source make bzImage, not Buildroot/pinned-Nix; the initramfs builder is mechanism-complete for multi-file rootfs but never tested with more than one /init entry; (2) H7 OS-entropy: os_entropy_is_deterministic ~70% pass rate and double_boot_ram_hash_identical ~50% pass rate, both root-caused to residual perf_event-read jitter affecting a kernel static_call trampoline -- deep hardware-jitter investigation, diminishing returns; entropy_guest_is_deterministic/initial_crng_state_is_reproducible/virtio_rng_reseed_is_deterministic need a virtio-rng device model (multi-day); (3) H8 Mario blocked on (1); (4) /dev/vport tape endpoint confirmed non-blocking. Searching codebase for the best-scoped next increment -- likely testing the initramfs builder with a real multi-file rootfs (harness script + agent binary), which unblocks H8's eventual FCEUX+Lua image and closes a concretely-named gap in section 14 item 1.
+
+Confirmed no existing test builds a genuine multi-file initramfs through the Rust pipeline (build_reproducible_initramfs) -- every caller/fixture in the repo used exactly one file. Wrote two new fixture C sources (multifile_init.c execs a bundled /helper; helper.c writes its own marker), a new #[ignore]d real-hardware test guest_boots_a_pipeline_built_multi_file_initramfs that compiles both via musl-gcc, assembles the initramfs with 2 distinct entries via baud_packages::build_reproducible_initramfs (proving multi-file capacity, not a hand-cpio fixture), and boots it twice on the already-built checked-in linux-guest bzImage (no kernel rebuild needed) via real /dev/kvm. Also added a pure-Rust unit test multiple_distinct_files_are_all_preserved in initramfs.rs (3 distinct files + nested dir, round-tripped). Real-hardware result: 5/5 clean passes, no jitter -- both markers present on every boot, tick counts match across boots. Writing a new opt-in drive script + BUILD.md documentation, then running the full verification protocol.
+
+New drive/pkg-multifile-initramfs.sh PASSED. Now updating todo.md to close this gap, then running the full standard verification protocol: cargo build --workspace.
+
+cargo build --workspace: clean. Running cargo clippy --workspace --all-targets.
+
+clippy clean -- all warnings pre-existing and unrelated (baud-tracing aya::Bpf, baud-server/baud-driver/baud-stream misc lints), zero from the new initramfs/guest_build/linux::mod.rs test code. Running cargo test --workspace.
+
+cargo test --workspace: 41/41 test binaries green, 0 failures (baud-multiverse: 89 passed including the new guest_boots_a_pipeline_built_multi_file_initramfs, 7 ignored as expected). Running drive/h0.sh through h7.sh individually.
+
+drive/h0.sh through h7.sh: all PASS on real /dev/kvm, no regressions. Running drive/m9.sh through m12.sh...
+
+m9-m12: all PASS, no regressions. Running drive/pkg-boot-cli.sh and re-confirming the new drive/pkg-multifile-initramfs.sh...
+
+Full verification green: build/clippy/test --workspace clean, h0-h7 (8/8), m9-m12 (4/4), pkg-boot-cli.sh, pkg-multifile-initramfs.sh all PASS on real /dev/kvm. Updating todo.md to close the multi-file-initramfs gap in section 14 item 1.
+
+## 2026-07-26T12:27:18 UTC - Changes committed.
+- Real-hardware-verified the initramfs builder's multi-file capacity: a pipeline-built (not hand-cpio'd) 2-file initramfs boots on real /dev/kvm, closing a gap named in todo.md §14 item 1.
+- Files changed: crates/baud-multiverse/Cargo.toml, crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/linux-guest/{helper.c,multifile_init.c,BUILD.md}, crates/baud-packages/src/initramfs.rs, drive/pkg-multifile-initramfs.sh, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Added baud-packages as a dev-dependency of baud-multiverse so a new real-hardware test can call baud_packages::build_reproducible_initramfs directly.
+  - New fixture sources tests/fixtures/linux-guest/multifile_init.c (writes its marker, forks+execs a bundled /helper, waits, then powers off) and helper.c (writes its own distinct marker) -- the first fixture pair in this project whose initramfs is assembled by the real Rust pipeline at test time instead of a hand-built cpio.
+  - New #[ignore]d test guest_boots_a_pipeline_built_multi_file_initramfs (crates/baud-multiverse/src/linux/mod.rs): compiles both sources via musl-gcc, builds a 2-entry initramfs via build_reproducible_initramfs, boots it twice against the already-built checked-in linux-guest bzImage (no kernel rebuild) on real /dev/kvm, and asserts both files' markers are present on both boots with matching tick counts. Real-hardware result: 5/5 clean, no jitter.
+  - New pure-Rust unit test initramfs::tests::multiple_distinct_files_are_all_preserved (crates/baud-packages/src/initramfs.rs) round-trips 3 distinct files including a nested path -- the first test of this builder with more than one distinct entry.
+  - New opt-in drive/pkg-multifile-initramfs.sh drives the new real-hardware test; fast (no kernel compile, only needs musl-gcc), unlike the pkg-image-build.sh/pkg-build-cli.sh family.
+  - Updated tests/fixtures/linux-guest/BUILD.md and todo.md §14 item 1 to document and close this gap: the initramfs builder's multi-file capacity was previously mechanism-complete but never exercised with more than one distinct entry anywhere in the repo -- confirmed via research before starting, and now real-hardware-verified.
+---

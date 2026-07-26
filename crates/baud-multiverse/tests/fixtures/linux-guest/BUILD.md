@@ -129,6 +129,37 @@ complete and correctly wired; driving the RAM-hash comparison itself to 100% nee
 eliminating the residual jitter to exactly zero or pinning the specific static-call site, both
 still open (todo.md §14 next-actions item 2).
 
+## `multifile_init.c` / `helper.c` — pipeline-built multi-file initramfs (todo.md §14 item 1)
+
+Unlike every `/init` variant above, this pair has **no checked-in `cpio.gz`** — the whole point of
+`guest_boots_a_pipeline_built_multi_file_initramfs`
+(`crates/baud-multiverse/src/linux/mod.rs`) is to prove `baud_packages::build_reproducible_
+initramfs` (the real Rust pipeline, todo.md §4.3/§4.5) can assemble more than one file and that the
+result is genuinely bootable, not just byte-correct in isolation. Every other fixture's initramfs
+was hand-`cpio`'d with exactly one file (`/init`); the builder's multi-file capacity (`&[
+InitramfsEntry]`, already used by `baud image build --initramfs-entry` end-to-end) had never been
+exercised with more than one distinct entry anywhere in the repo before this test.
+
+`multifile_init.c` writes its own marker, then `fork()`+`execl("/helper", ...)` — a second file
+bundled in the same archive — and waits for it before powering off; `helper.c` writes a second,
+distinct marker. The test itself compiles both with `musl-gcc`, calls
+`build_reproducible_initramfs` with both `InitramfsEntry`s at test time, and boots the result twice
+against the *already-built* `bzImage` above (no kernel rebuild — nothing here touches kernel
+config). Both markers present on both boots, with matching tick counts, means the pipeline-built
+archive was found, both files landed at the paths the archive names, and `/init` could actually
+`exec` the second one — the concrete shape a real multi-file rootfs (e.g. §11's eventual harness +
+emulator pair) will need. Real-hardware result: 5/5 clean, no jitter observed (this test's assertion
+surface, like `init_powers_off_deterministically`'s, is narrow enough to sidestep the residual
+RCB/`perf_event`-read jitter documented above for `os_entropy_is_deterministic`/
+`double_boot_ram_hash_identical`).
+
+Regenerate by hand only if debugging outside the test:
+
+```bash
+musl-gcc -static -Os -o multifile_init multifile_init.c && strip multifile_init
+musl-gcc -static -Os -o helper helper.c && strip helper
+```
+
 ## Why `/init` uses raw port I/O, not `write(1, ...)`
 
 `init.c` writes its marker via `iopl(3)` + inline `outb` straight to COM1's data register (`0x3f8`)
