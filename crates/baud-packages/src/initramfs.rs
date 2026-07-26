@@ -19,21 +19,50 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use flate2::{write::GzEncoder, Compression, GzBuilder};
 
-/// One regular file to place in the initramfs, relative to the rootfs root -- e.g. `"init"`,
-/// `"bin/harness"`. No leading `/` or `./`, and no `..` component (this builder only ever adds
-/// files under the root it is given, mirroring `find .` over a real rootfs directory).
+/// One node to place in the initramfs, relative to the rootfs root -- e.g. `"init"`,
+/// `"bin/harness"`, `"lib64/ld-linux-x86-64.so.2"`. No leading `/` or `./`, and no `..` component
+/// (this builder only ever adds nodes under the root it is given, mirroring `find .` over a real
+/// rootfs directory).
 #[derive(Debug, Clone)]
 pub struct InitramfsEntry {
     pub path: String,
-    /// Permission bits only (e.g. `0o755`) -- the newc `S_IFREG` file-type bits are added by the
-    /// builder, matching `find`'s own separation of "what kind of node" from "what mode bits".
-    pub mode: u32,
-    pub contents: Vec<u8>,
+    pub node: InitramfsNode,
+}
+
+/// What kind of filesystem node an [`InitramfsEntry`] is. Directory records are never listed here
+/// -- they are synthesized automatically by [`build_reproducible_initramfs`] from every entry's
+/// path prefix, exactly as a real `find .` walk would also produce them.
+#[derive(Debug, Clone)]
+pub enum InitramfsNode {
+    /// A regular file. `mode` is permission bits only (e.g. `0o755`) -- the newc `S_IFREG`
+    /// file-type bits are added by the builder, matching `find`'s own separation of "what kind of
+    /// node" from "what mode bits".
+    Regular { mode: u32, contents: Vec<u8> },
+    /// A symbolic link. `target` is the raw link target string, stored verbatim as the newc
+    /// record's data (no NUL terminator, matching real `cpio`'s own symlink encoding) -- needed
+    /// for any real glibc/distro rootfs, whose dynamic linker and versioned shared objects are
+    /// wired together almost entirely through symlinks (e.g. `/lib64/ld-linux-x86-64.so.2` is
+    /// itself commonly a symlink to a path under `/lib/x86_64-linux-gnu/`).
+    Symlink { target: String },
+}
+
+impl InitramfsEntry {
+    pub fn regular(path: impl Into<String>, mode: u32, contents: Vec<u8>) -> Self {
+        InitramfsEntry { path: path.into(), node: InitramfsNode::Regular { mode, contents } }
+    }
+
+    pub fn symlink(path: impl Into<String>, target: impl Into<String>) -> Self {
+        InitramfsEntry { path: path.into(), node: InitramfsNode::Symlink { target: target.into() } }
+    }
 }
 
 const NEWC_MAGIC: &[u8; 6] = b"070701";
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFLNK: u32 = 0o120000;
+/// Symlink permission bits `cpio`/`find` conventionally report (the kernel never checks a
+/// symlink's own permission bits -- only the target's, resolved separately).
+const SYMLINK_MODE: u32 = 0o777;
 /// §4.3's fixed mtime (`touch -h -d '@1'`): every record gets the same, reproducible timestamp
 /// rather than the real build wall-clock time.
 const FIXED_MTIME: u32 = 1;
@@ -110,25 +139,33 @@ pub fn build_reproducible_initramfs(entries: &[InitramfsEntry]) -> Result<Vec<u8
         if !seen_paths.insert(entry.path.clone()) {
             bail!("duplicate initramfs entry path: {}", entry.path);
         }
+        if let InitramfsNode::Symlink { target } = &entry.node {
+            if target.is_empty() {
+                bail!("symlink initramfs entry has an empty target: {}", entry.path);
+            }
+        }
         dirs.extend(implied_dirs(&entry.path));
     }
 
-    // One flat, sorted list of (path, is_dir, mode, contents) -- `find . | sort` order: "." is the
-    // lowest byte value ('.' == 0x2e) among any real path, so the root directory always leads.
-    let mut records: Vec<(&str, bool, u32, &[u8])> = Vec::new();
+    // One flat, sorted list of (path, is_dir, mode, nlink, data) -- `find . | sort` order: "." is
+    // the lowest byte value ('.' == 0x2e) among any real path, so the root directory always leads.
+    let mut records: Vec<(&str, bool, u32, u32, &[u8])> = Vec::new();
     for dir in &dirs {
-        records.push((dir.as_str(), true, S_IFDIR | 0o755, &[]));
+        records.push((dir.as_str(), true, S_IFDIR | 0o755, 2, &[]));
     }
     for entry in entries {
-        records.push((entry.path.as_str(), false, S_IFREG | (entry.mode & 0o7777), entry.contents.as_slice()));
+        let (mode, nlink, data): (u32, u32, &[u8]) = match &entry.node {
+            InitramfsNode::Regular { mode, contents } => (S_IFREG | (mode & 0o7777), 1, contents.as_slice()),
+            InitramfsNode::Symlink { target } => (S_IFLNK | SYMLINK_MODE, 1, target.as_bytes()),
+        };
+        records.push((entry.path.as_str(), false, mode, nlink, data));
     }
     records.sort_by(|a, b| a.0.cmp(b.0));
 
     let mut cpio = Vec::new();
-    for (i, (path, is_dir, mode, data)) in records.iter().enumerate() {
+    for (i, (path, _is_dir, mode, nlink, data)) in records.iter().enumerate() {
         let ino = (i + 1) as u32;
-        let nlink = if *is_dir { 2 } else { 1 };
-        write_record(&mut cpio, ino, *mode, nlink, data.len() as u32, path, data);
+        write_record(&mut cpio, ino, *mode, *nlink, data.len() as u32, path, data);
     }
     write_record(&mut cpio, 0, 0, 1, 0, "TRAILER!!!", &[]);
 
@@ -200,7 +237,7 @@ mod tests {
     }
 
     fn init_entry(contents: &[u8]) -> InitramfsEntry {
-        InitramfsEntry { path: "init".to_string(), mode: 0o755, contents: contents.to_vec() }
+        InitramfsEntry::regular("init", 0o755, contents.to_vec())
     }
 
     #[test]
@@ -238,11 +275,7 @@ mod tests {
 
     #[test]
     fn nested_paths_get_synthesized_directory_entries() {
-        let entries = vec![InitramfsEntry {
-            path: "bin/harness".to_string(),
-            mode: 0o755,
-            contents: b"harness-binary".to_vec(),
-        }];
+        let entries = vec![InitramfsEntry::regular("bin/harness", 0o755, b"harness-binary".to_vec())];
         let gz = build_reproducible_initramfs(&entries).unwrap();
         let records = parse_newc_cpio(&gunzip(&gz));
 
@@ -259,8 +292,8 @@ mod tests {
         // files, not just N=1 or N duplicates-that-get-rejected.
         let entries = vec![
             init_entry(b"init-binary-contents"),
-            InitramfsEntry { path: "helper".to_string(), mode: 0o755, contents: b"helper-binary-contents".to_vec() },
-            InitramfsEntry { path: "bin/tool".to_string(), mode: 0o700, contents: b"nested-tool-contents".to_vec() },
+            InitramfsEntry::regular("helper", 0o755, b"helper-binary-contents".to_vec()),
+            InitramfsEntry::regular("bin/tool", 0o700, b"nested-tool-contents".to_vec()),
         ];
         let gz = build_reproducible_initramfs(&entries).unwrap();
         let records = parse_newc_cpio(&gunzip(&gz));
@@ -294,15 +327,59 @@ mod tests {
 
     #[test]
     fn absolute_path_is_rejected() {
-        let entries = vec![InitramfsEntry { path: "/init".to_string(), mode: 0o755, contents: vec![] }];
+        let entries = vec![InitramfsEntry::regular("/init", 0o755, vec![])];
         let err = build_reproducible_initramfs(&entries).unwrap_err();
         assert!(err.to_string().contains("relative path"), "{err}");
     }
 
     #[test]
     fn dot_dot_path_is_rejected() {
-        let entries = vec![InitramfsEntry { path: "../escape".to_string(), mode: 0o755, contents: vec![] }];
+        let entries = vec![InitramfsEntry::regular("../escape", 0o755, vec![])];
         let err = build_reproducible_initramfs(&entries).unwrap_err();
         assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    #[test]
+    fn round_trip_preserves_a_symlink() {
+        // The real-world case this exists for: a glibc rootfs's dynamic linker is almost always
+        // reached through a symlink (e.g. `/lib64/ld-linux-x86-64.so.2` ->
+        // `../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` on Debian/Ubuntu) -- todo.md §14 item 1's
+        // H8-prerequisite gap ("InitramfsEntry has no symlink entry type").
+        let entries = vec![
+            InitramfsEntry::regular("lib/x86_64-linux-gnu/ld-linux-x86-64.so.2", 0o755, b"real-loader-bytes".to_vec()),
+            InitramfsEntry::symlink("lib64/ld-linux-x86-64.so.2", "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"),
+        ];
+        let gz = build_reproducible_initramfs(&entries).unwrap();
+        let records = parse_newc_cpio(&gunzip(&gz));
+
+        let (_, link_mode, link_target) = records
+            .iter()
+            .find(|(name, _, _)| name == "lib64/ld-linux-x86-64.so.2")
+            .expect("symlink record must be present");
+        assert_eq!(*link_mode, S_IFLNK | SYMLINK_MODE);
+        assert_eq!(link_target, b"../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2");
+
+        // Both the symlink's own implied directory ("lib64") and the real file's nested
+        // directories ("lib", "lib/x86_64-linux-gnu") must be synthesized, exactly as for a
+        // regular file.
+        let names: Vec<&str> = records.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert!(names.contains(&"lib64"));
+        assert!(names.contains(&"lib"));
+        assert!(names.contains(&"lib/x86_64-linux-gnu"));
+    }
+
+    #[test]
+    fn build_is_byte_for_byte_reproducible_with_a_symlink() {
+        let entries = vec![InitramfsEntry::symlink("lib64/ld-linux-x86-64.so.2", "../lib/ld.so")];
+        let a = build_reproducible_initramfs(&entries).unwrap();
+        let b = build_reproducible_initramfs(&entries).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_symlink_target_is_rejected() {
+        let entries = vec![InitramfsEntry::symlink("dangling", "")];
+        let err = build_reproducible_initramfs(&entries).unwrap_err();
+        assert!(err.to_string().contains("empty target"), "{err}");
     }
 }

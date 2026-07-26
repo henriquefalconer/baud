@@ -160,6 +160,49 @@ musl-gcc -static -Os -o multifile_init multifile_init.c && strip multifile_init
 musl-gcc -static -Os -o helper helper.c && strip helper
 ```
 
+## `dynamic_init.c` — a real dynamically-linked glibc `/init` (todo.md §14 item 1, H8 prerequisite)
+
+Like the multi-file pair above, this has **no checked-in `cpio.gz`** — `guest_boots_a_dynamically_
+linked_glibc_init` (`crates/baud-multiverse/src/linux/mod.rs`) builds the initramfs itself, at test
+time, via `build_reproducible_initramfs`. Unlike every other `/init` in this directory, `dynamic_
+init.c` is compiled **without** `-static`: it is a real, dynamically-linked glibc binary, whose
+`ld-linux-x86-64.so.2` + `libc.so.6` must be resolved out of the initramfs at runtime, not baked
+into a single static blob. This is the concrete prerequisite H8 (§11, Super Mario Bros / FCEUX)
+needs and that todo.md flagged as missing: no dynamically-linked binary had ever booted through this
+pipeline, and `InitramfsEntry` had no symlink node type at all — a hard blocker, since a real distro/
+Buildroot/Nix glibc rootfs reaches its dynamic linker almost universally through a symlink
+(`/lib64/ld-linux-x86-64.so.2` -> a versioned path under `/lib/x86_64-linux-gnu/` on Debian/Ubuntu,
+confirmed via this exact dev host's own `/lib64/ld-linux-x86-64.so.2`).
+
+The test compiles `dynamic_init.c` with:
+
+```bash
+gcc -no-pie -O0 -o dynamic_init dynamic_init.c -Wl,-rpath=/lib/x86_64-linux-gnu
+```
+
+`-no-pie` gives a fixed load address (`0x400000`), matching this project's determinism ethos (a PIE
+binary's ASLR load bias would be a fresh nondeterminism source this hypervisor does not model or
+control at the guest-userspace level). `-Wl,-rpath=...` bakes a `DT_RUNPATH` of
+`/lib/x86_64-linux-gnu` into the binary, so glibc's own `ld.so` resolves the direct `NEEDED
+libc.so.6` dependency straight from that path with no `/etc/ld.so.cache` (this initramfs has none)
+and no reliance on ld.so's compiled-in default search dirs.
+
+The initramfs the test assembles carries exactly four entries:
+- `init` — the compiled `dynamic_init` binary.
+- `lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` — this **dev host's own** real interpreter file, read
+  straight off `/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` (this host's glibc *is* the guest's
+  glibc — both are the identical x86_64 Linux ABI, so no cross-build or vendored glibc is needed).
+- `lib/x86_64-linux-gnu/libc.so.6` — likewise, this host's own real `libc.so.6`.
+- `lib64/ld-linux-x86-64.so.2` — a **symlink** (`InitramfsEntry::symlink`, new this iteration) to
+  `../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2`, matching exactly what `dynamic_init`'s own
+  `PT_INTERP` names (confirmed via `readelf -l dynamic_init`: `[Requesting program interpreter:
+  /lib64/ld-linux-x86-64.so.2]`) — the kernel's ELF loader opens this path verbatim to find the
+  interpreter before the interpreter itself ever runs.
+
+Real-hardware result: **5/5 clean, no jitter** (`drive/pkg-dynamic-link.sh`) — the first
+dynamically-linked binary ever booted through baud-multiverse, and the first real (non-unit-test)
+exercise of `InitramfsEntry::symlink`.
+
 ## Why `/init` uses raw port I/O, not `write(1, ...)`
 
 `init.c` writes its marker via `iopl(3)` + inline `outb` straight to COM1's data register (`0x3f8`)

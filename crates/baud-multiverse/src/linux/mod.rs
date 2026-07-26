@@ -2372,16 +2372,8 @@ mod tests {
         compile("helper.c", &helper_bin);
 
         let entries = [
-            baud_packages::InitramfsEntry {
-                path: "init".to_string(),
-                mode: 0o755,
-                contents: std::fs::read(&init_bin).unwrap(),
-            },
-            baud_packages::InitramfsEntry {
-                path: "helper".to_string(),
-                mode: 0o755,
-                contents: std::fs::read(&helper_bin).unwrap(),
-            },
+            baud_packages::InitramfsEntry::regular("init", 0o755, std::fs::read(&init_bin).unwrap()),
+            baud_packages::InitramfsEntry::regular("helper", 0o755, std::fs::read(&helper_bin).unwrap()),
         ];
         let initramfs = baud_packages::build_reproducible_initramfs(&entries)
             .expect("pipeline-built multi-file initramfs must assemble successfully");
@@ -2425,6 +2417,114 @@ mod tests {
         assert_eq!(
             tick_counts[0], tick_counts[1],
             "the same pipeline-built image+tape must survive the same number of periodic ticks \
+             before its own natural halt across two boots"
+        );
+    }
+
+    /// todo.md §14 item 1's H8 (Mario) prerequisite: no dynamically-linked binary has ever booted
+    /// through this pipeline (every fixture so far, including the multi-file one above, links
+    /// statically via `musl-gcc -static`), and `InitramfsEntry` had no symlink node type at all --
+    /// a hard blocker for any real glibc/Buildroot/Nix rootfs, whose dynamic linker is reached
+    /// almost universally through a symlink (`/lib64/ld-linux-x86-64.so.2` -> a versioned path
+    /// under `/lib/x86_64-linux-gnu/` on Debian/Ubuntu, confirmed via this dev host's own
+    /// `/lib64/ld-linux-x86-64.so.2`). This test builds a real, non-static, glibc-linked `/init`
+    /// (`dynamic_init.c`, `-no-pie` for a fixed, deterministic load address, `-Wl,-rpath=...` so
+    /// the executable's own `DT_RUNPATH` resolves `libc.so.6` without needing an `/etc/ld.so.cache`
+    /// this initramfs has none of) and assembles an initramfs carrying the host's own real
+    /// `ld-linux-x86-64.so.2` + `libc.so.6` (this dev host's glibc *is* the guest's glibc -- both
+    /// are the identical x86_64 Linux ABI, no cross-build needed) as regular files, plus the
+    /// `/lib64/ld-linux-x86-64.so.2` symlink the compiled binary's own `PT_INTERP` names, via
+    /// `build_reproducible_initramfs`'s new `InitramfsEntry::symlink`. Reuses the already-built,
+    /// checked-in `bzImage` (no kernel rebuild: `CONFIG_BINFMT_ELF=y` already loads dynamic ELFs
+    /// the same way as static ones -- it is the same handler, gated only on `PT_INTERP` being
+    /// present and resolvable).
+    #[test]
+    #[ignore]
+    fn guest_boots_a_dynamically_linked_glibc_init() {
+        let host_ld_so = Path::new("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2");
+        let host_libc = Path::new("/lib/x86_64-linux-gnu/libc.so.6");
+        if std::process::Command::new("gcc")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+            || !host_ld_so.exists()
+            || !host_libc.exists()
+        {
+            eprintln!(
+                "Skipping guest_boots_a_dynamically_linked_glibc_init: gcc or \
+                 /lib/x86_64-linux-gnu/{{ld-linux-x86-64.so.2,libc.so.6}} not found on this host"
+            );
+            return;
+        }
+
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest");
+        let scratch = tempfile::tempdir().unwrap();
+        let init_bin = scratch.path().join("dynamic_init");
+        let status = std::process::Command::new("gcc")
+            .args(["-no-pie", "-O0", "-o"])
+            .arg(&init_bin)
+            .arg(fixture_dir.join("dynamic_init.c"))
+            .arg("-Wl,-rpath=/lib/x86_64-linux-gnu")
+            .status()
+            .unwrap_or_else(|e| panic!("failed to spawn gcc: {e}"));
+        assert!(status.success(), "gcc failed to compile dynamic_init.c");
+
+        let entries = [
+            baud_packages::InitramfsEntry::regular("init", 0o755, std::fs::read(&init_bin).unwrap()),
+            baud_packages::InitramfsEntry::regular(
+                "lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                0o755,
+                std::fs::read(host_ld_so).unwrap(),
+            ),
+            baud_packages::InitramfsEntry::regular(
+                "lib/x86_64-linux-gnu/libc.so.6",
+                0o755,
+                std::fs::read(host_libc).unwrap(),
+            ),
+            baud_packages::InitramfsEntry::symlink(
+                "lib64/ld-linux-x86-64.so.2",
+                "../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            ),
+        ];
+        let initramfs = baud_packages::build_reproducible_initramfs(&entries)
+            .expect("pipeline-built dynamically-linked initramfs must assemble successfully");
+
+        let kernel = linux_guest_kernel_path();
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE;
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
+        const INIT_MARKER: &str = "baud-guest: dynamically-linked init reached /init\n";
+
+        let mut tick_counts = Vec::new();
+        for i in 0..2 {
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
+            let (ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+                .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            assert!(
+                console.contains(INIT_MARKER),
+                "run {i}: dynamically-linked /init must run to completion (ld.so must resolve \
+                 libc.so.6 through the pipeline-built initramfs's symlink+regular-file layout); \
+                 got:\n{console}"
+            );
+            tick_counts.push(ticks.len());
+        }
+        assert_eq!(
+            tick_counts[0], tick_counts[1],
+            "the same dynamically-linked image+tape must survive the same number of periodic ticks \
              before its own natural halt across two boots"
         );
     }

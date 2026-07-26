@@ -1218,6 +1218,53 @@ snapshot, not a duplicate of it.
      widened `HaltOutcome`. Closes matrix row 26's two remaining named tests (§12); `guest_kernel_boots_
      to_userspace` and `image_build_is_reproducible` were already done. H8 (Mario, item 3 below) is still
      blocked on the rest of item 1, not just this piece.
+     **This iteration (ralph iteration 21): `InitramfsEntry` gained a symlink node type, and a real
+     dynamically-linked glibc binary booted through the pipeline for the first time — one concrete
+     H8 prerequisite closed, not H8 itself.** `crates/baud-packages/src/initramfs.rs`'s
+     `InitramfsEntry` was refactored from a flat `{path, mode, contents}` struct (regular files
+     only) into `{path, node: InitramfsNode}`, where `InitramfsNode` is `Regular { mode, contents }`
+     or `Symlink { target }`, plus `InitramfsEntry::regular(...)`/`InitramfsEntry::symlink(...)`
+     constructors; `build_reproducible_initramfs` now writes real newc-cpio symlink records
+     (`S_IFLNK`, mode `0o120000 | 0o777`, data = the raw target bytes with no NUL terminator). 3 new
+     unit tests (`round_trip_preserves_a_symlink`, `build_is_byte_for_byte_reproducible_with_a_
+     symlink`, `empty_symlink_target_is_rejected`) all pass; the existing call sites
+     (`crates/baud-packages/src/guest_build.rs`, `crates/baud-multiverse/src/linux/mod.rs`) were
+     updated to the new constructor API with no behavior change for regular-file callers. This
+     closes the hard blocker any real glibc/Buildroot/Nix rootfs would hit, since a dynamic linker
+     is reached almost universally through a symlink. New fixture `crates/baud-multiverse/tests/
+     fixtures/linux-guest/dynamic_init.c` — a real, dynamically-linked (non-static, `-no-pie` for a
+     fixed deterministic load address, `-Wl,-rpath=/lib/x86_64-linux-gnu`) glibc `/init`, compiled
+     with plain `gcc`, unlike every other fixture in that directory (all `musl-gcc -static`). New
+     test `guest_boots_a_dynamically_linked_glibc_init` (`crates/baud-multiverse/src/linux/mod.rs`)
+     builds an initramfs at test time via `build_reproducible_initramfs` carrying the compiled
+     `init` binary, this dev host's own real `/lib/x86_64-linux-gnu/{ld-linux-x86-64.so.2,
+     libc.so.6}` as regular-file entries (this host's glibc *is* the guest's glibc — identical
+     x86_64 Linux ABI, no cross-build needed), and a symlink entry `lib64/ld-linux-x86-64.so.2` ->
+     `../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` matching the compiled binary's own `PT_INTERP`;
+     boots twice against the already-built, checked-in `linux-guest` bzImage (no kernel rebuild).
+     **Real-hardware result: 5/5 clean, no jitter** (run manually plus via new drive script
+     `drive/pkg-dynamic-link.sh`, opt-in like `drive/pkg-multifile-initramfs.sh`, not part of the
+     standard h0-h7 gate). This is the first dynamically-linked binary ever booted through
+     baud-multiverse (every prior fixture was statically linked via musl-gcc) and the first real
+     (non-unit-test) exercise of the new symlink support. `cargo build`/`clippy`/`test --workspace`
+     all clean (0 new warnings — a handful of pre-existing clippy warnings in
+     `crates/baud-multiverse/src/timesource.rs`, `crates/baud-tape-agent/src/transport.rs`,
+     `crates/baud-server/src/routes/{fuzz,replay,tracing}.rs` predate this iteration, confirmed via
+     `git status`); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m12.sh` (4/4) all still PASS on
+     real `/dev/kvm`, no regressions; `drive/pkg-multifile-initramfs.sh` (opt-in, shares
+     `initramfs.rs`) re-run as a regression check, still PASSED. **Still open, not attempted this
+     iteration**: the real FCEUX + Lua rootfs itself (`examples/mario/` still has the old pre-KVM-
+     pivot `nes_bridge.c`/stdin-stub design flagged elsewhere as needing a full rebuild); the
+     Buildroot/pinned-Nix image pipeline (§4.5, still no `nix`/`buildroot` toolchain in this dev
+     sandbox); virtio-rng (confirmed again: `crates/baud-multiverse/src/console.rs`'s `DeviceBus` is
+     a hardcoded PIO-only if/else chain, `mmio_read`/`mmio_write` always fall through to
+     `OpenBusFallback`, zero virtqueue/virtio-mmio code anywhere); the three spec-named entropy
+     tests (`entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
+     `virtio_rng_reseed_is_deterministic`) were investigated and found to be either genuine
+     duplicates of the already-passing `os_entropy_is_deterministic` (the first two) or blocked on
+     the same missing virtio-rng infra (the third) — deliberately not added, since they would add
+     zero new coverage while costing multi-minute enforced-regime real-hardware boots each; H9
+     Ubuntu still not started.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-

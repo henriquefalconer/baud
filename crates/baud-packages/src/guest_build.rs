@@ -87,11 +87,7 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
                 entry.archive_path
             )
         })?;
-        entries.push(InitramfsEntry {
-            path: entry.archive_path.clone(),
-            mode: entry.mode,
-            contents,
-        });
+        entries.push(InitramfsEntry::regular(entry.archive_path.clone(), entry.mode, contents));
     }
     let initramfs_bytes = build_reproducible_initramfs(&entries)?;
 

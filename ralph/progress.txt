@@ -5283,3 +5283,56 @@ Committed (f2b8136). Pushing to origin/main.
 ---
 
 Post-push verification: local main (f2b8136) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle, stock kvm_intel/kvm module correctly restored after both enforced-regime drive-script runs (no leftover swapped state). This iteration closed todo.md section 14 next-actions item 2's residual RCB/perf_event jitter gap for both os_entropy_is_deterministic and double_boot_ram_hash_identical, previously chased across several prior iterations without full resolution. todo.md still has pending items (Buildroot/pinned-Nix image pipeline, virtio-rng device, /dev/vport tape endpoint (non-blocking), H8 Mario blocked on the rest of item 1, H9 Ubuntu distro milestone not started) -- emitting NEXT.
+
+## 2026-07-26T13:25:43 UTC (58min) - Session usage — build-20 [sonnet]
+- cost $11.5031 (from claude -p)
+- context 259,529 tok peak of 1M (26%) across 112 inference calls, monotonic
+- models sonnet-5 $9.2728 (in 266 / out 87,014 / cache-read 21,066,248) · opus-5[1m] $2.2272 · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x1 · opus-5 x1
+- transcript: ralph/.run/20260726T004845Z/020-build-20.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 21
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Read todo.md section 14 (build status) and section 12 (matrix) in full. Iteration 20 closed the H7 RCB perf_event jitter gap (both os_entropy_is_deterministic and double_boot_ram_hash_identical now real-hardware-verified). Remaining open items per todo.md: Buildroot/pinned-Nix image pipeline (§4.5), virtio-rng device model (needed for virtio_rng_reseed_is_deterministic), /dev/vport tape endpoint (confirmed non-blocking), H8 Mario (blocked on rest of item 1 - the automated image pipeline), H9 Ubuntu (not started). Dispatching research subagents to verify current implementation state before picking this iteration's item, since instructions require confirming nothing is already implemented before assuming a gap.
+
+Dispatched 3 parallel Sonnet research agents: (1) virtio-rng/device-bus current state, (2) guest image pipeline dynamic-linking/H8-readiness state, (3) H7 sibling entropy tests + Buildroot/Nix toolchain availability. Waiting for results to pick this iteration's concrete, achievably-scoped item.
+
+Research agent 3/3 back: entropy_guest_is_deterministic / initial_crng_state_is_reproducible are genuinely cheap (hours-scale) additions riding the existing os_entropy_is_deterministic fixture/machinery; virtio_rng_reseed_is_deterministic and Buildroot/Nix pipeline remain multi-day (confirmed no nix/buildroot toolchain installed, no Device/Bus/virtqueue infra). Waiting on the other 2 research agents (virtio-rng device-bus internals, H8 dynamic-linking readiness).
+
+Research agent 2/3 back: virtio-rng confirmed genuinely multi-day (no Device/Bus MMIO support at all today -- DeviceBus is a hardcoded PIO-only if/else chain, zero virtqueue/virtio-mmio code anywhere; MMIO reads/writes always fall through to OpenBusFallback). Ruled out as this iteration's item. Waiting on the last research agent (H8 dynamic-linking readiness) before deciding.
+
+All 3 research agents back. Decision: virtio-rng and Buildroot/Nix are genuinely multi-day (confirmed, no shortcut). The entropy matrix tests (entropy_guest_is_deterministic/initial_crng_state_is_reproducible) would be pure duplicates of the already-passing os_entropy_is_deterministic -- not real new coverage, so skipping per the no-duplicate-work principle. Chose the real, scoped, code-level gap instead: H8 Mario is blocked on the guest pipeline never having booted a dynamically-linked binary, and crates/baud-packages/src/initramfs.rs has no symlink entry support at all (needed for any glibc rootfs: ld-linux-x86-64.so.2, libc.so.6, versioned .so symlinks). Implementing symlink support + a real dynamically-linked glibc /init fixture, hardware-boot-verified -- this is the concrete next brick toward H8, not H8 itself.
+
+Symlink support landed in crates/baud-packages/src/initramfs.rs (InitramfsNode::{Regular,Symlink} enum, InitramfsEntry::regular()/symlink() constructors) -- 12/12 unit tests pass including 3 new symlink tests. Updated the 3 existing call sites (guest_build.rs, linux/mod.rs x2) to the new constructor API, cargo build -p baud-packages -p baud-multiverse clean. Now building a real hardware-verified fixture: a dynamically-linked glibc /init through the existing pipeline, the actual H8 prerequisite gap this closes. Checking host toolchain and existing fixture BUILD.md conventions first.
+
+Added new fixture dynamic_init.c (a real, dynamically-linked glibc /init, -no-pie for a fixed load address) and Rust test guest_boots_a_dynamically_linked_glibc_init (crates/baud-multiverse/src/linux/mod.rs), which pipeline-builds an initramfs at test time carrying the host's own real ld-linux-x86-64.so.2 + libc.so.6 as regular files plus the /lib64/ld-linux-x86-64.so.2 symlink the binary's PT_INTERP names -- exercising the new InitramfsEntry::symlink support for real. Building now to check it compiles.
+
+guest_boots_a_dynamically_linked_glibc_init passed 5/5 clean real-hardware boots, no jitter. This is a real milestone: the first dynamically-linked binary ever booted through baud-multiverse, and it exercises the new InitramfsEntry::symlink support for real (not just in unit tests). Now adding a drive script, updating BUILD.md and todo.md, then running the full standard verification protocol.
+
+BUILD.md updated with a new 'dynamic_init.c' section documenting the fixture. Starting full standard verification protocol: cargo build --workspace, then clippy, then test --workspace, then drive/h0.sh through h7.sh, then drive/m9.sh-m12.sh, then the new drive/pkg-dynamic-link.sh and a pkg-multifile-initramfs.sh regression check (touched shared initramfs.rs) -- each as a separate Bash call per CLAUDE.md's instructions.
+
+cargo build/clippy/test --workspace all clean (0 new warnings, 0 test failures). Running drive/h0.sh-h7.sh one at a time now.
+
+drive/h0.sh through h7.sh: 8/8 PASS on real /dev/kvm, no regressions. Running drive/m9.sh-m12.sh next.
+
+drive/m9.sh-m12.sh: 4/4 PASS, no regressions. Running the opt-in pkg-multifile-initramfs.sh (shares initramfs.rs) as a regression check, then re-confirming pkg-dynamic-link.sh.
+
+All verification green. Updating todo.md via a subagent to record: InitramfsEntry symlink support + the first real dynamically-linked binary boot through the pipeline, closing part of H8's prerequisite gap.
+
+Waiting on the todo.md update subagent to finish before committing and pushing.
+
+## 2026-07-26T13:57:40 UTC - Changes committed.
+- Added symlink support to the initramfs pipeline and booted the first dynamically-linked binary through baud-multiverse, closing a real H8 (Mario) prerequisite gap.
+- Files changed: crates/baud-packages/src/initramfs.rs, crates/baud-packages/src/guest_build.rs, crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md, crates/baud-multiverse/tests/fixtures/linux-guest/dynamic_init.c (new), drive/pkg-dynamic-link.sh (new), todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - `InitramfsEntry` refactored from a flat `{path, mode, contents}` struct into `{path, node: InitramfsNode}` where `InitramfsNode` is `Regular { mode, contents }` or `Symlink { target }`, with `InitramfsEntry::regular()`/`InitramfsEntry::symlink()` constructors; `build_reproducible_initramfs` writes real newc-cpio symlink records. 3 new unit tests, 12/12 pass.
+  - New fixture `dynamic_init.c`: a real, dynamically-linked (non-static, `-no-pie`) glibc `/init`, unlike every prior fixture (all statically linked via musl-gcc). New test `guest_boots_a_dynamically_linked_glibc_init` pipeline-builds an initramfs carrying this dev host's own real ld.so + libc.so.6 plus a symlink matching the binary's PT_INTERP, and boots it against the already-built linux-guest kernel.
+  - Real-hardware result: 5/5 clean, no jitter. First dynamically-linked binary ever booted through baud-multiverse; first real (non-unit-test) exercise of the new symlink support.
+  - New opt-in `drive/pkg-dynamic-link.sh` (same convention as `drive/pkg-multifile-initramfs.sh`), PASSED.
+  - Full verification: cargo build/clippy/test --workspace clean (0 new warnings); drive/h0.sh-h7.sh (8/8) and m9.sh-m12.sh (4/4) PASS on real /dev/kvm; drive/pkg-multifile-initramfs.sh regression check PASS.
+  - todo.md §14 updated with this iteration's findings, including confirmation that virtio-rng and the Buildroot/Nix pipeline remain genuinely multi-day, and that the three spec-named entropy tests would be pure duplicates/blocked, not real new coverage.
+---
