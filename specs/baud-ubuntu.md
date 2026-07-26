@@ -37,9 +37,10 @@ crate.
 - Logging in / running workloads inside Ubuntu (the goal is a deterministic boot-to-login fingerprint; a
   workload harness is `baud-guest-harness` + a separate example).
 - Customizing the rootfs (only cmdline + a mask list + hypervisor-side pins; no source edits).
-- Guaranteeing the **PMU branch counter** is deterministic under nested WSL2 — that is validated at H0
-  (`rcb_is_deterministic_on_this_cpu`); if the L1 PMU is nondeterministic, the fingerprint run falls back to
-  bare metal (§3, §10).
+- Claiming the **PMU branch counter** is guest-level-validated under nested WSL2 from a userspace check alone.
+  On this host a userspace probe measures the conditional-branch counter as deterministic (`tools/pmucheck.c`,
+  `docs/determinism.md`), but the authoritative guest-filtered gate is H0 (`rcb_is_deterministic_on_this_cpu`);
+  only if it fails does the fingerprint run fall back to bare metal (§3, §10).
 
 ---
 
@@ -83,10 +84,12 @@ L0  Hyper-V              — Windows root hypervisor (VBS); exposes nested VMX t
   `RDRAND`-exiting — so `rdseed` is handled by the build-time image rewrite (`todo.md` §3.8, §4.6), exactly as
   for any guest.
 - **The determinism-critical dependency**: baud's work-clock is retired conditional branches read via
-  `perf_event_open` **on the L1 (WSL2) vCPU thread**. Nested-PMU virtualization under Hyper-V is the one
-  thing that must be validated before trusting the L2 fingerprint — `baud host probe` /
-  `rcb_is_deterministic_on_this_cpu` (H0) gates it. If the L1 PMU is unavailable or nondeterministic, run the
-  fingerprint on bare-metal Intel (the L2 boot itself still works under WSL2).
+  `perf_event_open` **on the L1 (WSL2) vCPU thread**. On this host the PMU **is** exposed under WSL2 and a
+  userspace probe measures the conditional-branch counter (`BR_INST_RETIRED.COND`) as bit-exact deterministic
+  (`20000003` ×3, while the all-branch event jitters ±1 — `tools/pmucheck.c`, `docs/determinism.md`). That is
+  a strong signal but userspace-only; the **authoritative** guest-filtered validation is H0 (`baud host probe`
+  / `rcb_is_deterministic_on_this_cpu`). Only if that guest-level check fails does the fingerprint run move to
+  bare-metal Intel (the L2 boot itself works under WSL2 regardless).
 
 ---
 
@@ -269,7 +272,7 @@ and `vm1` on separate cores → timed exit at `N` → assert the four fields equ
 | Concern | Handling |
 |---------|----------|
 | Nested-virt trust | The L2 guest is confined by KVM inside the L1 WSL2 guest; baud adds no host device / DMA passthrough |
-| PMU under nesting | The determinism proof depends on the L1 branch counter; H0 (`rcb_is_deterministic_on_this_cpu`) gates it; else run on bare metal |
+| PMU under nesting | The proof depends on the L1 branch counter; measured deterministic in userspace under WSL2 (`docs/determinism.md`), with H0 (`rcb_is_deterministic_on_this_cpu`) the authoritative guest-level gate; bare metal only if H0 fails |
 | Distro treated as trusted | It is a guest under the machine — same mediation as any workload; no crate carries distro specifics |
 | Fingerprint leaks host state | Hash excludes MMIO / host-written pages; all guest inputs are tape-served, not host-passthrough |
 

@@ -38,6 +38,31 @@ not need real KVM and pass on any OS. The Linux ioctl/`/proc`/`/sys` implementat
 Linux/KVM host (e.g. install a WSL2 distro with nested virt, or bare-metal Linux) and is the
 next H0 milestone action, tracked in `todo.md`.
 
+## Branch-counter (PMU) probe — 2026-07-25, WSL2 dev box
+
+The dev machine now has a WSL2 Ubuntu distro installed (nested virt on, `/dev/kvm` present). A userspace
+probe of the retired-branch PMU counter baud's work-clock depends on (`tools/pmucheck.c`: `perf_event_open`
+over a fixed 10M-iteration loop, three runs) measured, on the Dell XPS 13 9310 (Intel Tiger Lake) **inside
+WSL2**:
+
+| Event | Runs | Verdict |
+|---|---|---|
+| `BR_INST_RETIRED.COND` (raw `0x11c4`; the work-clock event) | `20000003`, `20000003`, `20000003` | **deterministic** ✓ |
+| `PERF_COUNT_HW_BRANCH_INSTRUCTIONS` (all branches) | `25000016`, `25000017`, `25000016` | ±1 — **rejected** |
+
+Environment confirmations: `systemd-detect-virt` = `wsl`, `grep -c vmx /proc/cpuinfo` = `16`, `/dev/kvm`
+present, `CONFIG_PERF_EVENTS=y`. So the hardware PMU **is** exposed to the WSL2 (L1) guest under Hyper-V — the
+conditional-branch counter baud uses is bit-exact, while the all-branch event is not. This is exactly why the
+work-clock counts conditional branches only (`specs/baud-multiverse.md` §4, `todo.md` §3.3): had it used
+`HW_BRANCH_INSTRUCTIONS`, "stop at count N" would land a branch off run-to-run and the cross-VM fingerprint
+(`specs/baud-fingerprint.md`) would spuriously diverge.
+
+**Status: userspace PASS, guest-level H0 pending.** This proves the counter is available and deterministic in
+L1 userspace, but the authoritative gate is guest-filtered counting across `KVM_RUN`
+(`rcb_is_deterministic_on_this_cpu`, via `baud host probe` / `drive/h0.sh`) — run once baud builds in this
+WSL2 distro. If the guest-level check also passes, the H9 cross-VM fingerprint can run nested; only if it
+fails does the fingerprint move to bare-metal Intel.
+
 ---
 
 ## Prior art: Antithesis

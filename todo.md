@@ -134,9 +134,11 @@ modes. Full component detail in `specs/baud-multiverse.md`; the single-vCPU stat
 ### 3.3 Time — a work-clock
 
 - **Spec**: the guest's time is a function of work done. Count **retired conditional branches** with
-  `perf_event_open` on the vCPU thread (guest-filtered); virtual timestamp = `base + k × branch_count`; feed
-  that into every time source. Raw retired-instruction count is forbidden (it double-counts faults and
-  interrupts).
+  `perf_event_open` on the vCPU thread (guest-filtered) — the raw `BR_INST_RETIRED.COND` event (Intel
+  `0xC4`/umask `0x11`), **not** `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`, which counts all branches and is
+  measurably nondeterministic (±1 on Tiger Lake; the conditional-only event is bit-exact — see
+  `docs/determinism.md`). Virtual timestamp = `base + k × branch_count`; feed that into every time source. Raw
+  retired-instruction count is forbidden (it double-counts faults and interrupts).
 - **`rdtsc`/`rdtscp` — hardware-trapped.** Every `rdtsc` exits to the VMM (the patched `kvm_intel` sets
   `CPU_BASED_RDTSC_EXITING`, a VM-execution control stock KVM does not expose to userspace) and is served the
   work-clock value — bit-exact and work-proportional, not wall-clock-affine. `KVM_SET_TSC_KHZ` pins the

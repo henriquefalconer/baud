@@ -80,8 +80,11 @@ from, the tape. It is the first deliverable.
     gate (`IF CPUID.01H:ECX.RDRAND[bit 30] = 0 THEN #UD`, SDM) against the guest's *configured* leaves, so a
     guest that ignores the mask and issues `rdrand`/`rdseed` anyway takes `#UD` instead of reading real
     entropy. Verified on real hardware (§8, `rdrand_guest_is_flagged`).
-- **Work-clock**: `perf_event_open(PERF_COUNT_HW_BRANCH_INSTRUCTIONS, conditional, guest-filtered)` on the
-  vCPU thread; `virtual_tsc = base + k × rcb`. Raw retired-instruction count is forbidden (double-counts).
+- **Work-clock**: a guest-filtered `perf_event_open` on **retired conditional branches** on the vCPU thread —
+  the raw event `BR_INST_RETIRED.COND` (Intel event `0xC4`, umask `0x11`; the raw encoding is
+  microarchitecture-specific), **not** `PERF_COUNT_HW_BRANCH_INSTRUCTIONS`, which counts *all* branches and is
+  measurably nondeterministic (±1 across runs on Tiger Lake — `docs/determinism.md`). `virtual_tsc = base + k
+  × rcb`. Raw retired-instruction count is likewise forbidden (double-counts faults/interrupts).
 - **MSR filter**: `KVM_X86_SET_MSR_FILTER` routes `IA32_TSC`/`TSC_AUX`/`TSC_DEADLINE` to the VMM.
 
 ---

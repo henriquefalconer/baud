@@ -278,7 +278,7 @@ authoritative guest-level gate remains H0's `rcb_is_deterministic_on_this_cpu`.
 | A false "identical" (both wrong the same way) | The banner assert proves each VM actually reached login; the hash covers all guest RAM |
 | Hash leaks host state | Canonical RAM slots only; MMIO / host-written / pvclock pages excluded from the digest |
 | Comparator masks a divergence | Structured field compare (not text); label deliberately excluded; first-divergence named |
-| Counter not trustworthy | Gated on H0 `rcb_is_deterministic_on_this_cpu`; a nondeterministic counter is refused, not fudged |
+| Counter not trustworthy | Use the raw `BR_INST_RETIRED.COND` event (the all-branch `HW_BRANCH_INSTRUCTIONS` is measured ±1, `docs/determinism.md`); gated on H0 `rcb_is_deterministic_on_this_cpu`; a nondeterministic counter is refused, not fudged |
 
 ---
 
