@@ -1191,6 +1191,46 @@ snapshot, not a duplicate of it.
      root-to-node replay-tape lineage, a materially bigger change, out of scope this iteration; resume's
      generate mode rejects a `frame_run_id_prefix` request outright with a clear error rather than
      silently ignoring it.
+     **RESOLVED: `/run/kvm/resume`'s lineage gap is now closed — no per-node full-lineage tape storage
+     needed after all.** The premise above ("closing it needs `SnapshotStore` to additionally track each
+     node's full root-to-node replay-tape lineage") turned out to be more than necessary: `resume` never
+     needs the *whole* replay tape from root, only the *specific* tape suffix a given branch call fed to
+     `Multiverse::branch` on top of the restored `Universe` — exactly parallel to how `/run/kvm/branch`'s
+     own trick works (its branch point is captured with an empty tape, so a branch's own suffix already
+     is its whole replay tape; resume's restored point is captured with whatever prefix reached it, so
+     resume's own suffix is everything else needed on top of that *specific* restore). `kvm_run_meta`
+     gained nullable `store_run_id`/`snapshot_node_id` columns (`migrations/0012_kvm_run_meta_resume_
+     restore.sql`) identifying a restore-based row (as opposed to a reboot-based one, which leaves both
+     `NULL`); `RunKvmResumeBody` gained `frame_run_ids: Vec<Option<String>>` (mirroring `RunKvmBranchBody`
+     exactly) and `DriverGenerateSpec::frame_run_id_prefix` is now honored by `resume()`'s generate mode
+     too (previously hard-rejected with "resume has no kernel_path/cmdline to reboot from"). Both persist
+     via the existing `persist_branch_frames` helper (renamed in spirit, not in code — still used by both
+     routes) with `kernel_path`/`cmdline` left `""` and `store_run_id`/`snapshot_node_id` set to the
+     request's own `(run_id, node_id)` instead. `stream::render` gained `render_frames_from_real_restore`
+     (`crates/baud-server/src/routes/stream.rs`) alongside the existing `render_frames_from_real_replay`:
+     when a `kvm_run_meta` row has `store_run_id`/`snapshot_node_id` set, it calls the same
+     `reconstruct_universe` + `Multiverse::branch` + drain primitives `resume_and_branch` itself uses,
+     instead of rebooting a kernel — reproducing a resume-originated run's real frames with **no kernel
+     image and no reboot at all**. New unit test `resumed_branch_records_are_reproducible_via_independent_
+     restore` (`crates/baud-server/src/routes/run_kvm.rs`) proves the mechanism directly: an independent
+     `reconstruct_universe`+`Multiverse::branch` call reproduces byte-identical `Msg::Frame` records to the
+     original live `resume_and_branch` call over the same persisted point + suffix. New drive script
+     `drive/m13.sh` (mirroring `drive/m12.sh`'s structure) proves it end-to-end over real HTTP against a
+     real `baud-server` on real `/dev/kvm`: `/run/kvm/branch { persist_run_id }` (persist-only, no fork)
+     establishes a checkpoint, `/run/kvm/resume { frame_run_ids }` restores+forks it with **no kernel
+     reboot** and persists a real `Frame` record, `GET /runs/:id/frames` shows the row, `POST /runs/:id/
+     stream/render` decodes the guest's real pixels (the same `(10,10,10),(20,20,20),(30,30,30),(40,40,40)`
+     framebuffer-guest pixel sequence `drive/m11.sh`'s plain-boot path and `drive/m12.sh`'s branch path
+     both prove), and re-rendering reproduces byte-identically. CLI: `baud run kvm-resume` gained
+     `--frame-run-id` (repeatable) and `--frame-run-id-prefix`, mirroring `kvm-branch`'s flags. `cargo
+     build`/`clippy`/`test --workspace` all clean (0 failures; `baud-server` 26/26, including the new
+     unit test); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`,
+     including `drive/m11.sh`'s pre-existing synthetic-fallback check (a `kvm_run_meta`-less run still
+     renders via the old gradient path — confirms the widened `kvm_run_meta` schema/query is additive,
+     not a regression). This closes matrix row … n/a (this gap was surfaced during build, not §12-listed)
+     — the FCEUX/Qt5 packaging-footprint finding above (item 3, H8) remains the actual next blocker for
+     the guest-boot-pipeline milestone; this item was a separate, smaller wiring gap that had been open
+     since iteration 16/17 and is now done.
      **This iteration (ralph iteration 18): `boot_params_seed_is_pinned` and
      `init_powers_off_deterministically`, the two spec-named tests flagged above as unwritten, are now
      written and hardware-verified.** `boot_params_seed_is_pinned` (`crates/baud-multiverse/src/linux/
@@ -1531,6 +1571,25 @@ snapshot, not a duplicate of it.
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window
      (`baud stream tail | ffplay`), and the README hero + centralized GIF. All NES specifics stay under
      `examples/` (`no_workload_specifics_in_core`).
+
+     **Research finding, still open**: Ubuntu's packaged `fceux` (2.6.5+dfsg1-2build4, `universe`) is a
+     Qt5 GUI app, not headless — `apt-get install --dry-run fceux` pulls 64 new packages (~128MB
+     installed): the full Qt5 stack (Core/Gui/Widgets/Qml/Quick/Network/DBus/Svg/Wayland/X11), SDL2,
+     ALSA, PulseAudio, libinput, XCB/X11 client libs, audio codecs. The man page documents `--nogui
+     {0|1}`, but the binary itself contains the string `"Error: Qt/SDL version does not support
+     --no-gui option."` — this build rejects that flag. No true console/headless FCEUX variant exists
+     in the Ubuntu package; building from upstream source doesn't help either, since upstream is the
+     same Qt5+SDL2 GUI architecture, not an alternative lighter build. `liblua5.1-0` (the exact version
+     FCEUX's Lua scripting wants) is small and available, so Lua is not the blocker — Qt5/SDL2/OpenGL/X11
+     windowing is. `QT_QPA_PLATFORM=offscreen` (via `libqt5gui5t64`'s offscreen QPA plugin) is a
+     theoretically viable workaround but unverified, and would still need software OpenGL (Mesa
+     llvmpipe) since the guest has no GPU passthrough. Net: ~two orders of magnitude more guest-image
+     plumbing than the `dynamic_init.c` precedent (`crates/baud-multiverse/tests/fixtures/linux-guest/
+     dynamic_init.c` — just ld-linux + libc, 4 initramfs entries) — every one of 64+ transitive `.so`s
+     would need individual `ldd`/`readelf` identification and manual initramfs copying, no package
+     manager in-guest. Not an architectural dead end, just confirmed genuinely large: likely needs a
+     Buildroot/Nix packaging pipeline, or first empirically validating `QT_QPA_PLATFORM=offscreen`, or
+     exploring an older pre-Qt5 SDL-only FCEUX release.
   4. **Generic-core guardrail — done.** New `crates/baud-packages/src/workload_lint.rs`: a
      `FORBIDDEN_WORKLOAD_TERMS` list (Mario/NES-specific terms per `specs/baud-mario.md` §4 — `fceux`,
      `joypad`, `harness.lua`, `game.nes`, `oper_mode`, `super_mario`, `mario_bros`, plus the six Mario

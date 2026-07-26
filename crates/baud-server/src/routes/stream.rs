@@ -147,30 +147,62 @@ pub async fn render(
     let fmt = body.format.as_deref().unwrap_or("y4m").to_string();
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
-    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>)>(
+    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>)>(
         "SELECT kernel_path, cmdline, tape_hex, initramfs_path, periodic_timer_period_rcb, \
-         periodic_timer_vector, periodic_timer_max_ticks FROM kvm_run_meta WHERE run_id = ?",
+         periodic_timer_vector, periodic_timer_max_ticks, store_run_id, snapshot_node_id \
+         FROM kvm_run_meta WHERE run_id = ?",
     )
     .bind(&run_id)
     .fetch_optional(&state.db)
     .await;
 
     let frames: Result<Vec<(u32, u32, Vec<u8>)>, Value> = match kvm_meta {
-        Ok(Some((kernel_path, cmdline, tape_hex, initramfs_path, period_rcb, vector, max_ticks))) => {
+        Ok(Some((
+            kernel_path,
+            cmdline,
+            tape_hex,
+            initramfs_path,
+            period_rcb,
+            vector,
+            max_ticks,
+            store_run_id,
+            snapshot_node_id,
+        ))) => {
             let periodic_timer = match (period_rcb, vector, max_ticks) {
                 (Some(p), Some(v), Some(m)) => Some((p as u64, v as u8, m as u32)),
                 _ => None,
             };
-            render_frames_from_real_replay(
-                kernel_path,
-                cmdline,
-                tape_hex,
-                initramfs_path,
-                periodic_timer,
-                from_step,
-                to_step,
-            )
-            .await
+            // A resume-originated run (todo.md §14's "`/run/kvm/resume`'s lineage gap") has no
+            // kernel to reboot — `store_run_id`/`snapshot_node_id` name the `Universe` to restore
+            // from `SnapshotStore` instead, with `tape_hex` as the suffix to feed it. Every
+            // reboot-based row (`run()`/`branch()`) leaves both `NULL`, so this is mutually
+            // exclusive with the `kernel_path`/`cmdline` reboot path below, never both.
+            match (store_run_id, snapshot_node_id) {
+                (Some(store_run_id), Some(snapshot_node_id)) => {
+                    render_frames_from_real_restore(
+                        state.snapshot_store.clone(),
+                        store_run_id,
+                        snapshot_node_id,
+                        tape_hex,
+                        periodic_timer,
+                        from_step,
+                        to_step,
+                    )
+                    .await
+                }
+                _ => {
+                    render_frames_from_real_replay(
+                        kernel_path,
+                        cmdline,
+                        tape_hex,
+                        initramfs_path,
+                        periodic_timer,
+                        from_step,
+                        to_step,
+                    )
+                    .await
+                }
+            }
         }
         Ok(None) => render_frames_from_stored_hashes(&state, &run_id, from_step, to_step).await,
         Err(e) => Err(json!({ "error": format!("db error: {e}") })),
@@ -308,6 +340,95 @@ async fn render_frames_from_real_replay(
     _to_step: Option<u64>,
 ) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
     Err(json!({ "error": "real KVM replay is only available on target_os = \"linux\"" }))
+}
+
+/// Restore-and-replay: `POST /run/kvm/resume`'s counterpart to `render_frames_from_real_replay`,
+/// for a run that has no kernel to reboot (`kvm_run_meta.store_run_id`/`snapshot_node_id` set
+/// instead of a real `kernel_path`/`cmdline`, see `render()`'s own doc). Reconstructs the
+/// `Universe` at `(store_run_id, snapshot_node_id)` from `SnapshotStore` exactly as
+/// `routes::run_kvm::reconstruct_universe` does for a live `/run/kvm/resume` call, forks it with
+/// `tape_hex` as a tape *suffix* via `Multiverse::branch` (not a whole-boot tape — this is the same
+/// `WORK_CLOCK_K`/`Multiverse::branch` primitive `resume_and_branch` uses, so this reproduces
+/// exactly what that live call did), runs it to its first halt/`MARK_BRANCH`, and drains the real
+/// `Msg::Frame` records it produces — the restore-based analogue of the reboot-based path, closing
+/// todo.md §14's "`/run/kvm/resume`'s lineage gap" (no per-node full-tape-from-root reconstruction
+/// needed: only this one node's own tape suffix, which `RunKvmResumeBody::frame_run_ids`/
+/// `DriverGenerateSpec::frame_run_id_prefix` now persist).
+#[cfg(target_os = "linux")]
+async fn render_frames_from_real_restore(
+    store: std::sync::Arc<baud_snapshot_store::SnapshotStore>,
+    store_run_id: String,
+    snapshot_node_id: String,
+    tape_suffix_hex: String,
+    periodic_timer: Option<(u64, u8, u32)>,
+    from_step: u64,
+    to_step: Option<u64>,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    let tape_suffix = match hex_decode(&tape_suffix_hex) {
+        Some(t) => t,
+        None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
+    };
+    let records = tokio::task::spawn_blocking(move || -> Result<Vec<baud_proto::Msg>, String> {
+        let universe = crate::routes::run_kvm::reconstruct_universe(&store, &store_run_id, &snapshot_node_id)?;
+        let mut branch = baud_multiverse::linux::Multiverse::branch(
+            &universe,
+            tape_suffix,
+            crate::routes::run_kvm::WORK_CLOCK_K,
+            None,
+        )
+        .map_err(|e| format!("restore branch error: {e}"))?;
+        let mut records = match periodic_timer {
+            Some((period_rcb, vector, max_ticks)) => {
+                let (_ticks, _outcome, records) = branch
+                    .run_until_branch_or_halt_with_periodic_timer(period_rcb, vector, max_ticks)
+                    .map_err(|e| format!("determinism hole: {e}"))?;
+                records
+            }
+            None => {
+                let (_outcome, records) = branch
+                    .run_until_branch_or_halt(crate::routes::run_kvm::BRANCH_MAX_EXITS)
+                    .map_err(|e| format!("determinism hole: {e}"))?;
+                records
+            }
+        };
+        records.extend(branch.drain_tape_records());
+        Ok(records)
+    })
+    .await
+    .expect("stream/render restore task panicked");
+
+    let records = match records {
+        Ok(records) => records,
+        Err(e) => return Err(json!({ "error": format!("restore-replay error: {e}") })),
+    };
+
+    Ok(records
+        .into_iter()
+        .filter_map(|m| match m {
+            baud_proto::Msg::Frame(frame) => Some(frame),
+            _ => None,
+        })
+        .filter(|r| r.step >= from_step && to_step.is_none_or(|to| r.step <= to))
+        .filter_map(|r| {
+            let bytes = r.bytes?;
+            let rgba = baud_stream::to_rgba(&bytes, &r.format);
+            Some((r.width, r.height, rgba))
+        })
+        .collect())
+}
+
+/// Non-Linux stub, mirroring `render_frames_from_real_replay`'s own — see its doc for why.
+#[cfg(not(target_os = "linux"))]
+async fn render_frames_from_real_restore(
+    _store: std::sync::Arc<baud_snapshot_store::SnapshotStore>,
+    _store_run_id: String,
+    _snapshot_node_id: String,
+    _tape_suffix_hex: String,
+    _periodic_timer: Option<(u64, u8, u32)>,
+    _from_step: u64,
+    _to_step: Option<u64>,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    Err(json!({ "error": "real KVM restore-replay is only available on target_os = \"linux\"" }))
 }
 
 /// Pre-pivot fallback: the stored frame records contain only content hashes (the agent omits raw

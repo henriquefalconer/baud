@@ -203,6 +203,21 @@ pub enum RunAction {
         /// Bound on ticks before giving up. Only used when `--periodic-timer-period-rcb` is set.
         #[arg(long, default_value_t = 2000)]
         periodic_timer_max_ticks: u32,
+        /// A run id under which to persist one `--branch-tape-hex` branch's replay inputs and
+        /// frames (`kvm_run_meta`/`frame_records`) — same convention as `kvm-branch
+        /// --frame-run-id`, but persists a *restore*-based row (this call's `--run-id`/`--node-id`
+        /// plus the branch's own tape suffix) instead of a reboot-based one, since resuming never
+        /// boots a kernel. `baud stream render`/`baud stream frames` replay it via restore, not
+        /// reboot. Repeat once per `--branch-tape-hex`, in the same order; pass an empty string to
+        /// skip persisting a given branch. Ignored when `--generate-seed`/`--generate-count` are
+        /// set — use `--frame-run-id-prefix` instead.
+        #[arg(long = "frame-run-id")]
+        frame_run_ids: Vec<String>,
+        /// Generate mode's analogue of `--frame-run-id`: persist every generated branch's frames
+        /// under the run id `"{prefix}-{i}"` (`i` = the branch's 0-based index in this call).
+        /// Ignored when `--branch-tape-hex` is set instead of `--generate-seed`/`--generate-count`.
+        #[arg(long)]
+        frame_run_id_prefix: Option<String>,
     },
 }
 
@@ -358,6 +373,8 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             periodic_timer_period_rcb,
             periodic_timer_vector,
             periodic_timer_max_ticks,
+            frame_run_ids,
+            frame_run_id_prefix,
         } => {
             let mut body = json!({
                 "run_id": run_id,
@@ -376,9 +393,16 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                     "count": count,
                     "tape_len_bytes": generate_tape_len_bytes,
                     "strategy": { "maximize": maximize },
+                    "frame_run_id_prefix": frame_run_id_prefix,
                 });
             } else {
                 body["branch_tapes_hex"] = json!(branch_tapes_hex);
+                if !frame_run_ids.is_empty() {
+                    body["frame_run_ids"] = json!(frame_run_ids
+                        .iter()
+                        .map(|s| if s.is_empty() { serde_json::Value::Null } else { json!(s) })
+                        .collect::<Vec<_>>());
+                }
             }
             let v = c.post("/run/kvm/resume", &body).await?;
             fmt::print(&v, json);

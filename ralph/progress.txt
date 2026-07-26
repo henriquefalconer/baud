@@ -5336,3 +5336,73 @@ Waiting on the todo.md update subagent to finish before committing and pushing.
   - Full verification: cargo build/clippy/test --workspace clean (0 new warnings); drive/h0.sh-h7.sh (8/8) and m9.sh-m12.sh (4/4) PASS on real /dev/kvm; drive/pkg-multifile-initramfs.sh regression check PASS.
   - todo.md §14 updated with this iteration's findings, including confirmation that virtio-rng and the Buildroot/Nix pipeline remain genuinely multi-day, and that the three spec-named entropy tests would be pure duplicates/blocked, not real new coverage.
 ---
+
+Post-push verification: local main (5ea5f84) matches origin/main exactly (fetch + rev-parse confirmed). /dev/kvm confirmed idle (fuser: no process), stock kvm_intel/kvm modules loaded (this iteration never touched the enforced-regime module swap). This iteration closed a real H8 (Mario) prerequisite: InitramfsEntry gained symlink support and the first dynamically-linked binary ever booted through baud-multiverse (5/5 clean real-hardware boots). todo.md still has pending items (Buildroot/pinned-Nix image pipeline, virtio-rng device, the rest of H8's FCEUX+Lua rootfs, H9 Ubuntu) -- emitting NEXT.
+
+## 2026-07-26T13:58:45 UTC (33min) - Session usage — build-21 [sonnet]
+- cost $8.1207 (from claude -p)
+- context 221,586 tok peak of 1M (22%) across 90 inference calls, monotonic
+- models sonnet-5 $8.1175 (in 326 / out 83,114 / cache-read 16,770,412) · haiku-4-5 $0.0031
+- subagents (4) sonnet-5 x4
+- transcript: ralph/.run/20260726T004845Z/021-build-21.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 22
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where iteration 21 left off.
+
+Chose to continue the guest-boot-pipeline work (todo.md item 1/H8): building on iteration 21's symlink + dynamic-linking support, investigate what it takes to boot a real FCEUX (NES emulator) binary through the pipeline as the next concrete step toward examples/mario's rebuild -- it's the largest still-open, non-blocked item (Buildroot/Nix and virtio-rng are out of scope; H9 Ubuntu is a much bigger lift).
+
+Launched two research subagents: one surveying examples/mario/ + specs/baud-mario.md + the dynamic_init.c precedent from iteration 21, another checking FCEUX/Lua availability on this host via apt. Waiting on results before deciding the concrete scope for this iteration.
+
+Finding: Ubuntu's packaged fceux (2.6.5+dfsg1) is a Qt5 GUI app pulling ~64 packages / ~128MB of Qt5/SDL2/OpenGL/ALSA/X11 transitive deps, with --nogui explicitly non-functional in this build -- not a fit for the tiny-dependency-closure pattern dynamic_init.c proved (just ld-linux+libc). Booting real FCEUX this iteration is out of scope. Waiting on the second research agent (examples/mario current state + spec) before picking a different concrete next step.
+
+Key finding: FCEUX as packaged in Ubuntu (2.6.5+dfsg1, Qt5-based) pulls ~64 packages / ~128MB of Qt5+SDL2+OpenGL+X11+ALSA transitive deps and --nogui is non-functional in this build -- booting a real FCEUX guest this iteration is not tractable (confirmed via research, not just assumed). examples/mario/ is confirmed still 100% the old pre-KVM stub (nes_bridge.c simulation-mode fake, no harness.lua/probes.toml/new spec.toml exist). Recording this and re-scoping to a smaller, concrete, currently-blocked wiring gap instead: /run/kvm/resume's real-replay lineage gap (flagged in iteration 17 as 'genuinely bigger' -- SnapshotStore has parent pointers + tape_range metadata but no route ever calls put_tape/get_tape to persist per-node tape bytes).
+
+todo.md updated with the FCEUX/Qt5 packaging-blocker finding under H8's next-actions item. Still waiting on the SnapshotStore/tape-lineage research agent before scoping the /run/kvm/resume implementation.
+
+Scoped the fix: /run/kvm/branch already solves this by reusing kvm_run_meta.tape_hex directly (no need for SnapshotStore-level per-node tape storage -- that mechanism is dead code, confirmed unused in production). Plan: extend kvm_run_meta with nullable store_run_id/snapshot_node_id columns, add frame_run_ids support to /run/kvm/resume (currently hard-rejected), persist a restore-based kvm_run_meta row on resume, and add a stream.rs restore-and-replay path (reconstruct universe from SnapshotStore, Multiverse::branch with the persisted tape suffix, drain real frames) alongside the existing reboot-and-replay path. Starting implementation now.
+
+run_kvm.rs: kvm_run_meta now carries optional store_run_id/snapshot_node_id (migration 0012); /run/kvm/resume gained frame_run_ids (fixed-tape) + honors generate.frame_run_id_prefix (previously hard-rejected), persisting a restore-based kvm_run_meta row via the existing persist_branch_frames helper. cargo build/test -p baud-server green, all 18 existing run_kvm unit tests still pass unchanged. Now wiring stream::render's restore-and-replay path.
+
+Added new run_kvm.rs test resumed_branch_records_are_reproducible_via_independent_restore -- PASSED on real /dev/kvm. Now running new drive/m13.sh (HTTP end-to-end: branch persist-only -> resume with frame_run_ids -> stream/render restore-and-replay) for the first time.
+
+drive/m13.sh (new): PASSED end-to-end on real /dev/kvm -- branch persist-only establishes a node, resume with frame_run_ids restores+forks it (no kernel reboot) and persists a real kvm_run_meta row, stream/render's new restore-and-replay path decodes the guest's real pixels, re-render is byte-identical. This closes the /run/kvm/resume lineage gap flagged since iteration 17. Now wiring CLI flags for resume's frame_run_ids.
+
+CLI: baud run kvm-resume gained --frame-run-id (repeatable) and --frame-run-id-prefix, mirroring kvm-branch's flags, wired to the new server-side fields. cargo build -p baud-cli clean. Starting the full pre-push verification protocol: cargo build --workspace, then clippy, then test --workspace, then drive/h0.sh through h7.sh and m9.sh-m13.sh sequentially, each as a separate Bash call per CLAUDE.md's instructions.
+
+cargo build --workspace and cargo clippy --workspace --all-targets both green (clippy shows only pre-existing warnings unrelated to this iteration's changes). Running cargo test --workspace now.
+
+cargo test --workspace: ALL GREEN (0 failed across every crate, baud-server 26/26). Now running drive/h0.sh through h7.sh and m9.sh-m13.sh sequentially, one Bash call each.
+
+All drive scripts h0-h7 and m9-m13 PASSED on real /dev/kvm (m13 new, m9-m12 regression-checked). todo.md updated recording the resume-lineage gap closure. Appending final progress block and committing.
+
+## 2026-07-26T14:42:47 UTC - Changes committed.
+- Closed the `/run/kvm/resume`'s lineage gap (open since ralph iteration 16/17): a resume-originated
+  run can now get a real, replayable `kvm_run_meta` row via snapshot-*restore*-and-replay, not just
+  reboot-and-replay.
+- Files changed: crates/baud-server/migrations/0012_kvm_run_meta_resume_restore.sql (new),
+  crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs,
+  crates/baud-cli/src/cmds/run.rs, drive/m13.sh (new), todo.md.
+- **Brief description of changes:**
+  - `kvm_run_meta` gained nullable `store_run_id`/`snapshot_node_id` columns identifying a
+    restore-based row (vs. the existing reboot-based `kernel_path`/`cmdline` row).
+  - `RunKvmResumeBody` gained `frame_run_ids: Vec<Option<String>>` (mirroring
+    `RunKvmBranchBody`), and `DriverGenerateSpec::frame_run_id_prefix` is now honored by
+    `resume()`'s generate mode too (previously hard-rejected outright).
+  - `stream::render` gained `render_frames_from_real_restore`: when a `kvm_run_meta` row is
+    restore-based, it reconstructs the `Universe` from `SnapshotStore` and re-forks it via
+    `Multiverse::branch` with the persisted tape suffix, instead of rebooting a kernel — a
+    resume-originated run's real frames are now reproducible with no kernel image at all.
+  - New unit test `resumed_branch_records_are_reproducible_via_independent_restore` proves the
+    core mechanism directly; new `drive/m13.sh` (mirroring `drive/m12.sh`) proves it end-to-end
+    over real HTTP against a real `baud-server` on real `/dev/kvm` — PASSED.
+  - CLI: `baud run kvm-resume` gained `--frame-run-id`/`--frame-run-id-prefix`.
+  - Also recorded a new research finding in todo.md: Ubuntu's packaged `fceux` is a Qt5 GUI app
+    pulling ~64 packages/~128MB of transitive deps with a non-functional `--no-gui`, confirming
+    H8 (Mario/FCEUX) is not a single-iteration task — informs future prioritization.
+  - Verification: `cargo build`/`clippy`/`test --workspace` all clean (0 failures, 0 new clippy
+    warnings); `drive/h0.sh` through `drive/h7.sh` (8/8) and `drive/m9.sh` through `drive/m13.sh`
+    (5/5, including the new m13) all PASS on real `/dev/kvm`, no regressions.
+---

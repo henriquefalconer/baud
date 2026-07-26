@@ -142,6 +142,8 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                     tape_hex: &tape_hex,
                     initramfs_path: body.initramfs_path.as_deref(),
                     periodic_timer,
+                    store_run_id: None,
+                    snapshot_node_id: None,
                 };
                 match persist_kvm_run(&state, run_id, &params, &records).await {
                     Ok(frames_recorded) => response["frames_recorded"] = json!(frames_recorded),
@@ -172,6 +174,15 @@ struct KvmBootParams<'a> {
     tape_hex: &'a str,
     initramfs_path: Option<&'a str>,
     periodic_timer: Option<(u64, u8, u32)>,
+    /// Set only for a resume-originated (restore-based) persisted run, where `tape_hex` is a tape
+    /// *suffix* fed to `Multiverse::branch` on top of the `Universe` this names, not a whole-boot
+    /// tape for `kernel_path` (which is `""` and unused in that case) — `stream::render`'s
+    /// restore-and-replay path (`render_frames_from_real_restore`) reconstructs that `Universe`
+    /// from `SnapshotStore` instead of rebooting a kernel. `None` for every reboot-based caller
+    /// (`run()`, `branch()`), which is the only kind of row that existed before this field.
+    store_run_id: Option<&'a str>,
+    /// Paired with `store_run_id` above — the specific node within that store run to restore.
+    snapshot_node_id: Option<&'a str>,
 }
 
 async fn persist_kvm_run(
@@ -198,8 +209,9 @@ async fn persist_kvm_run(
 
     sqlx::query(
         "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, initramfs_path, \
-         periodic_timer_period_rcb, periodic_timer_vector, periodic_timer_max_ticks, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         periodic_timer_period_rcb, periodic_timer_vector, periodic_timer_max_ticks, \
+         store_run_id, snapshot_node_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
             kernel_path = excluded.kernel_path,
             cmdline = excluded.cmdline,
@@ -208,6 +220,8 @@ async fn persist_kvm_run(
             periodic_timer_period_rcb = excluded.periodic_timer_period_rcb,
             periodic_timer_vector = excluded.periodic_timer_vector,
             periodic_timer_max_ticks = excluded.periodic_timer_max_ticks,
+            store_run_id = excluded.store_run_id,
+            snapshot_node_id = excluded.snapshot_node_id,
             created_at = excluded.created_at",
     )
     .bind(run_id)
@@ -218,6 +232,8 @@ async fn persist_kvm_run(
     .bind(period_rcb)
     .bind(vector)
     .bind(max_ticks)
+    .bind(params.store_run_id)
+    .bind(params.snapshot_node_id)
     .bind(now)
     .execute(&state.db)
     .await
@@ -361,8 +377,9 @@ const MAX_BRANCHES_PER_REQUEST: usize = 256;
 /// deliberately generous headroom for a real guest, not a tuned value — it exists so a guest that
 /// never calls `MARK_BRANCH` and never halts fails loud (`DeterminismHole`, the same "no silent
 /// non-termination" convention `run_until_branch_or_halt` itself follows) instead of blocking an
-/// HTTP request forever.
-const BRANCH_MAX_EXITS: u32 = 65536;
+/// HTTP request forever. `pub(crate)` so `stream::render_frames_from_real_restore` can reuse the
+/// same bound for a resume-originated run's restore-and-replay.
+pub(crate) const BRANCH_MAX_EXITS: u32 = 65536;
 
 #[derive(Debug, Deserialize)]
 pub struct RunKvmBranchBody {
@@ -453,11 +470,13 @@ pub struct DriverGenerateSpec {
     /// generated branch's run id ahead of time the way `frame_run_ids` names a `branch_tapes_hex`
     /// entry, since the driver — not the caller — chooses each branch's tape; the index-derived
     /// name is the simplest scheme that still gives every branch a distinct, reproducible id.
-    /// **Only honored by `/run/kvm/branch`'s generate mode** — `/run/kvm/resume` reuses this same
-    /// spec type for its own generate mode, but resume never has a `kernel_path`/`cmdline` to
-    /// reboot from (it reconstructs a `Universe` from the store, not from a kernel image), so there
-    /// is nothing a real-replay reboot could target; `resume` rejects a request that sets this
-    /// field rather than silently ignoring it.
+    /// Honored by both `/run/kvm/branch`'s and `/run/kvm/resume`'s generate modes.
+    /// `/run/kvm/branch` persists a reboot-based row (`kernel_path`/`cmdline` + this branch's own
+    /// tape); `/run/kvm/resume` has no kernel image to reboot (it reconstructs a `Universe` from the
+    /// store), so it persists a *restore*-based row instead — `store_run_id`/`snapshot_node_id`
+    /// (the point resumed from) + this branch's own tape suffix — which `stream::render`'s
+    /// restore-and-replay path (`render_frames_from_real_restore`) reproduces via
+    /// `Multiverse::branch` instead of a reboot.
     #[serde(default)]
     pub frame_run_id_prefix: Option<String>,
 }
@@ -466,10 +485,14 @@ fn default_generate_tape_len_bytes() -> u32 {
     4
 }
 
-/// Persist one branch's frames under `run_id` via [`persist_kvm_run`] and return the JSON fragment
-/// `branch()` folds into its response's `frame_persistence` array — shared by the fixed-tape
-/// (`RunKvmBranchBody::frame_run_ids`) and generate (`DriverGenerateSpec::frame_run_id_prefix`)
-/// modes, mirroring `run()`'s own single-boot `persist_kvm_run` call.
+/// Persist one branch/resume's frames under `run_id` via [`persist_kvm_run`] and return the JSON
+/// fragment `branch()`/`resume()` fold into their responses' `frame_persistence` array — shared by
+/// the fixed-tape (`RunKvmBranchBody::frame_run_ids`, `RunKvmResumeBody::frame_run_ids`) and
+/// generate (`DriverGenerateSpec::frame_run_id_prefix`, honored by both routes) modes, mirroring
+/// `run()`'s own single-boot `persist_kvm_run` call. `resume()`'s call sites pass a `params` whose
+/// `store_run_id`/`snapshot_node_id` are `Some` (a restore-based row) instead of a real
+/// `kernel_path`/`cmdline` (a reboot-based row) — the name predates that and is kept for the
+/// smaller diff, not because this is branch-specific.
 async fn persist_branch_frames(
     state: &AppState,
     run_id: &str,
@@ -545,6 +568,8 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                             tape_hex: &outcome.tape_hex,
                             initramfs_path: body.initramfs_path.as_deref(),
                             periodic_timer,
+                            store_run_id: None,
+                            snapshot_node_id: None,
                         };
                         frame_persistence.push(
                             persist_branch_frames(&state, &run_id, &params, &outcome.records).await,
@@ -637,6 +662,8 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         tape_hex: &body.branch_tapes_hex[i],
                         initramfs_path: body.initramfs_path.as_deref(),
                         periodic_timer,
+                        store_run_id: None,
+                        snapshot_node_id: None,
                     };
                     frame_persistence
                         .push(persist_branch_frames(&state, run_id, &params, &branch_records).await);
@@ -1161,6 +1188,20 @@ pub struct RunKvmResumeBody {
     /// "`/run/kvm/resume` ... still do not accept either" gap for this route's half of it.
     #[serde(default)]
     pub periodic_timer: Option<PeriodicTimerSpec>,
+    /// One optional run id per entry in `branch_tapes_hex` — mirrors `RunKvmBranchBody::
+    /// frame_run_ids`, but for a *restore*-based replay instead of a reboot-based one:
+    /// `stream::render`'s restore-and-replay path (`render_frames_from_real_restore`) reconstructs
+    /// the `Universe` at `(run_id, node_id)` above — the point this call resumes *from*, shared by
+    /// every branch in the request — and feeds it that branch's own tape suffix via
+    /// `Multiverse::branch`, instead of rebooting a kernel with a whole-boot tape. This works for
+    /// the same structural reason `RunKvmBranchBody::frame_run_ids` does: the replay target (a
+    /// kernel+cmdline there, a store run id + node id here) is fixed for the whole call, and each
+    /// branch's own suffix is everything else needed to reproduce it exactly — no per-node
+    /// full-tape-from-root lineage reconstruction is needed, only this one node's own suffix. Closes
+    /// the "`/run/kvm/resume`'s lineage gap" todo.md §14 flagged (`SnapshotStore` already tracked
+    /// parent/`tape_range` lineage, but no route ever persisted a resumed branch's own tape bytes).
+    #[serde(default)]
+    pub frame_run_ids: Vec<Option<String>>,
 }
 
 /// POST /run/kvm/resume — reconstruct a [`baud_snapshot::Universe`] previously persisted by
@@ -1194,28 +1235,43 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                 )
             }));
         }
-        // `frame_run_id_prefix` needs a `kernel_path`/`cmdline` to reboot from for a real-replay
-        // frame persist — `resume` never has one (it reconstructs a `Universe` from the store, not
-        // from a kernel image, see `RunKvmResumeBody`'s own doc), so honoring it here would either
-        // silently no-op or persist wrong replay inputs. Reject loudly instead
-        // (`DriverGenerateSpec::frame_run_id_prefix`'s own doc names this exact restriction).
-        if spec.frame_run_id_prefix.is_some() {
-            return Json(json!({
-                "error": "generate.frame_run_id_prefix is not supported by /run/kvm/resume \
-                          (resume has no kernel_path/cmdline to reboot from for real-replay frame \
-                          persistence) — use /run/kvm/branch instead"
-            }));
-        }
+        // `frame_run_id_prefix` used to be rejected outright here ("resume has no kernel_path/
+        // cmdline to reboot from"), which was true for a *reboot*-based replay but not the only way
+        // to reproduce a resume-originated run's frames: `render_frames_from_real_restore`
+        // reconstructs the `Universe` at `(run_id, node_id)` and re-derives each branch from it via
+        // `Multiverse::branch`, so a real-replay target exists after all — see this field's own doc.
+        let frame_run_id_prefix = spec.frame_run_id_prefix.clone();
+        let run_id_for_task = run_id.clone();
+        let node_id_for_task = node_id_hex.clone();
         let result = tokio::task::spawn_blocking(move || {
-            resume_and_generate(store.as_ref(), &run_id, &node_id_hex, spec, periodic_timer)
+            resume_and_generate(store.as_ref(), &run_id_for_task, &node_id_for_task, spec, periodic_timer)
         })
         .await
         .expect("run/kvm/resume (generate) task panicked");
 
         return match result {
             Ok((outcomes, summary)) => {
-                let branches: Vec<Value> = outcomes.into_iter().map(generated_outcome_to_json).collect();
-                Json(json!({
+                let mut branches = Vec::with_capacity(outcomes.len());
+                let mut frame_persistence = Vec::new();
+                for (i, outcome) in outcomes.into_iter().enumerate() {
+                    if let Some(prefix) = &frame_run_id_prefix {
+                        let frame_run_id = format!("{prefix}-{i}");
+                        let params = KvmBootParams {
+                            kernel_path: "",
+                            cmdline: "",
+                            tape_hex: &outcome.tape_hex,
+                            initramfs_path: None,
+                            periodic_timer,
+                            store_run_id: Some(&run_id),
+                            snapshot_node_id: Some(&node_id_hex),
+                        };
+                        frame_persistence.push(
+                            persist_branch_frames(&state, &frame_run_id, &params, &outcome.records).await,
+                        );
+                    }
+                    branches.push(generated_outcome_to_json(outcome));
+                }
+                let mut response = json!({
                     "ok": true,
                     "branches": branches,
                     "driver_summary": {
@@ -1224,7 +1280,11 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                         "best_tape_hex": summary.best_tape_hex,
                         "cumulative_generation": summary.cumulative_generation,
                     },
-                }))
+                });
+                if !frame_persistence.is_empty() {
+                    response["frame_persistence"] = json!(frame_persistence);
+                }
+                Json(response)
             }
             Err(e) => Json(json!({ "error": e })),
         };
@@ -1241,6 +1301,15 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
             )
         }));
     }
+    if !body.frame_run_ids.is_empty() && body.frame_run_ids.len() != body.branch_tapes_hex.len() {
+        return Json(json!({
+            "error": format!(
+                "frame_run_ids length ({}) must match branch_tapes_hex length ({})",
+                body.frame_run_ids.len(),
+                body.branch_tapes_hex.len()
+            )
+        }));
+    }
     let mut tape_suffixes = Vec::with_capacity(body.branch_tapes_hex.len());
     for hex in &body.branch_tapes_hex {
         match hex_decode(hex) {
@@ -1249,18 +1318,39 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
         }
     }
 
+    let run_id_for_task = run_id.clone();
+    let node_id_for_task = node_id_hex.clone();
     let result = tokio::task::spawn_blocking(move || {
-        resume_and_branch(store.as_ref(), &run_id, &node_id_hex, tape_suffixes, periodic_timer)
+        resume_and_branch(store.as_ref(), &run_id_for_task, &node_id_for_task, tape_suffixes, periodic_timer)
     })
     .await
     .expect("run/kvm/resume task panicked");
 
     match result {
-        // `_records`: resume has no kernel_path/cmdline to reboot a real replay from, so there is
-        // nothing to persist these into yet — see `resume_and_branch`'s widened return type doc.
-        Ok((outcomes, _records)) => {
-            let branches: Vec<Value> = outcomes.into_iter().map(branch_outcome_to_json).collect();
-            Json(json!({ "ok": true, "branches": branches }))
+        Ok((outcomes, records)) => {
+            let mut branches = Vec::with_capacity(outcomes.len());
+            let mut frame_persistence = Vec::new();
+            for (i, (outcome, branch_records)) in outcomes.into_iter().zip(records).enumerate() {
+                if let Some(Some(frame_run_id)) = body.frame_run_ids.get(i) {
+                    let params = KvmBootParams {
+                        kernel_path: "",
+                        cmdline: "",
+                        tape_hex: &body.branch_tapes_hex[i],
+                        initramfs_path: None,
+                        periodic_timer,
+                        store_run_id: Some(&run_id),
+                        snapshot_node_id: Some(&node_id_hex),
+                    };
+                    frame_persistence
+                        .push(persist_branch_frames(&state, frame_run_id, &params, &branch_records).await);
+                }
+                branches.push(branch_outcome_to_json(outcome));
+            }
+            let mut response = json!({ "ok": true, "branches": branches });
+            if !frame_persistence.is_empty() {
+                response["frame_persistence"] = json!(frame_persistence);
+            }
+            Json(response)
         }
         Err(e) => Json(json!({ "error": e })),
     }
@@ -1623,6 +1713,74 @@ mod tests {
             "resuming a persisted universe must reproduce byte-identical branch outcomes to \
              branching directly from the in-memory universe"
         );
+    }
+
+    /// Closes todo.md §14's "`/run/kvm/resume`'s lineage gap": the exact mechanism
+    /// `stream::render_frames_from_real_restore` uses (`reconstruct_universe` +
+    /// `Multiverse::branch` + `run_until_branch_or_halt` + drain) must reproduce byte-identical
+    /// `Msg::Frame` records to a live `resume_and_branch` call over the same persisted point and
+    /// suffix — proving a restore-based replay (no kernel reboot) is indistinguishable from the
+    /// original resume it's replaying, the same guarantee `persisted_universe_resumes_and_branches_
+    /// without_reboot` establishes for branch outcomes, extended to the tape-device records a
+    /// caller's `frame_run_ids`/`frame_run_id_prefix` persist.
+    #[test]
+    fn resumed_branch_records_are_reproducible_via_independent_restore() {
+        let kernel = framebuffer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "restore-replay-test";
+
+        let (_outcomes, _records, persisted) =
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None)
+                .expect("persist-only boot_snapshot_and_branch failed");
+        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        assert_eq!(returned_run_id, run_id);
+
+        // What a live `POST /run/kvm/resume { frame_run_ids }` call drains and persists.
+        let (_first_outcomes, first_records) =
+            resume_and_branch(&store, run_id, &node_id_hex, vec![vec![]], None)
+                .expect("first resume_and_branch failed");
+
+        // Independently reconstructing the same universe and re-forking it with the same suffix —
+        // exactly what `render_frames_from_real_restore` does — must reproduce the same records.
+        let universe =
+            reconstruct_universe(&store, run_id, &node_id_hex).expect("reconstruct_universe failed");
+        let mut branch = baud_multiverse::linux::Multiverse::branch(&universe, vec![], WORK_CLOCK_K, None)
+            .expect("independent Multiverse::branch failed");
+        let (_outcome, mut second_records) = branch
+            .run_until_branch_or_halt(BRANCH_MAX_EXITS)
+            .expect("independent run_until_branch_or_halt failed");
+        second_records.extend(branch.drain_tape_records());
+
+        let first_frames: Vec<baud_proto::FrameRecord> = first_records[0]
+            .iter()
+            .filter_map(|m| match m {
+                baud_proto::Msg::Frame(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        let second_frames: Vec<baud_proto::FrameRecord> = second_records
+            .into_iter()
+            .filter_map(|m| match m {
+                baud_proto::Msg::Frame(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!first_frames.is_empty(), "framebuffer-guest must emit at least one Frame record");
+        assert_eq!(
+            first_frames.len(),
+            second_frames.len(),
+            "independent restore must produce the same number of Frame records as the original resume"
+        );
+        for (a, b) in first_frames.iter().zip(second_frames.iter()) {
+            assert_eq!(a.width, b.width);
+            assert_eq!(a.height, b.height);
+            assert_eq!(
+                a.bytes, b.bytes,
+                "independent restore must reproduce byte-identical pixel data to the original resume"
+            );
+        }
     }
 
     #[test]
