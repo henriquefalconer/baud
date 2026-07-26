@@ -2025,6 +2025,85 @@ mod tests {
         );
     }
 
+    /// `tests/fixtures/linux-guest/`'s real, compiled (not hand-assembled) Linux 6.18 kernel and
+    /// initramfs -- see that directory's `BUILD.md` for exact provenance/regeneration and the three
+    /// real bugs (two in this crate, one in `baud-vcpu`) this fixture's first real boot caught.
+    fn linux_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest/bzImage")
+    }
+
+    fn linux_guest_initramfs() -> Vec<u8> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest/initramfs.cpio.gz");
+        std::fs::read(path).expect("read linux-guest initramfs fixture")
+    }
+
+    /// The exact marker `tests/fixtures/linux-guest/init.c`'s `/init` writes (via raw `outb` to
+    /// COM1, not `write(1, ...)` -- that directory's `BUILD.md` explains why) right before it powers
+    /// off, asserted verbatim so a change to either side is caught rather than silently drifting.
+    const LINUX_GUEST_MARKER: &str = "baud-guest: minimal kernel reached /init\n";
+
+    /// todo.md §14 item 1 / §26 (`guest_kernel_boots_to_userspace`): the first time this project has
+    /// booted a real, unmodified Linux kernel through baud-multiverse all the way to a real `/init`
+    /// process, driven entirely by H4's periodic-interrupt-injection engine
+    /// (`run_to_first_halt_with_periodic_timer`) rather than any pre-known tick count -- the guest's
+    /// own scheduler timer needs are satisfied by the same `KVM_INTERRUPT` mechanism the
+    /// hand-assembled `timer-guest` fixture already exercises, with no LAPIC device model needed
+    /// (`tests/fixtures/linux-guest/BUILD.md` explains why).
+    ///
+    /// Asserts two boots of the same image+tape each independently reach `/init`'s marker and halt
+    /// cleanly after the *same number* of periodic ticks (its own real-hardware-observed
+    /// determinism signal) -- but deliberately **not** that the two boots' full console output or
+    /// RAM hash are byte-identical. That stronger check exists (`double_boot_ram_hash_identical`,
+    /// H7) but needs a guest-driven checkpoint (todo.md's own spec for it): a first attempt here
+    /// found the two boots' text differs in exactly one kernel-internal diagnostic line
+    /// (`sched_clock: Marking stable`) that embeds raw TSC-derived numbers sensitive to this
+    /// project's already-documented small real-hardware branch-counter read jitter
+    /// (`RCB_HARDWARE_JITTER_TOLERANCE`) -- seeing that number differ is not the same as the guest's
+    /// actual instruction stream differing, which is exactly why the spec calls for a checkpoint
+    /// instead of raw console/RAM comparison for this stronger guarantee (see this fixture's
+    /// `BUILD.md` for the full account).
+    #[test]
+    fn guest_kernel_boots_to_userspace() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_initramfs();
+        let cmdline = "console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable \
+                       no_timer_check reboot=t panic=-1 printk.time=0 i8042.noaux i8042.nomux \
+                       i8042.nopnp 8250.nr_uarts=1 rdinit=/init";
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR (arch/x86/include/asm/irq_vectors.h)
+
+        let mut tick_counts = Vec::new();
+        for i in 0..2 {
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
+            let (ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+                .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            assert!(
+                console.contains(LINUX_GUEST_MARKER),
+                "run {i}: guest must reach /init and print its marker; got:\n{console}"
+            );
+            tick_counts.push(ticks.len());
+        }
+        assert_eq!(
+            tick_counts[0], tick_counts[1],
+            "the same image+tape must survive the same number of periodic ticks before its own \
+             natural halt across two boots"
+        );
+    }
+
     /// H5's named test (specs/baud-snapshot.md §7, todo.md §10): `Multiverse::snapshot`/`restore`
     /// wired for the first time against a real guest and real KVM hardware (todo.md §14 tracked
     /// this exact gap: "nothing calls snapshot/restore/DirtyRing on real KVM hardware yet").

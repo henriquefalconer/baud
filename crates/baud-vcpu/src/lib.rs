@@ -70,6 +70,18 @@ pub enum Exit<'a> {
     /// gone). `dispatch_exit` must ask `TimeSource::resolve_rdseed_site` whether `rip` is a known
     /// rewrite site before serving anything.
     RdseedEnforced { rip: u64 },
+    /// `KVM_EXIT_IRQ_WINDOW_OPEN` — the signal `boundary::PmuStepper::run_until_irq_window` is
+    /// waiting for after `request_interrupt_window` was set (specs/baud-vcpu.md §5 step 4's
+    /// fallback): the vCPU is now injectable. Not a device access with a value to serve, just a
+    /// "you may proceed" control signal, so `dispatch_exit` resolves it to `Continue` like `Hlt`/
+    /// `Debug` — a real bug until fixed here (todo.md §14): this exit reason previously fell into
+    /// `Unmodeled`, so any guest that actually needed the request-interrupt-window fallback (i.e.
+    /// was not already injectable the instant `inject_at` checked) hit the run-loop's determinism-
+    /// hole catch-all instead of ever reaching `run_until_irq_window`'s own readiness check. Every
+    /// fixture up to a real Linux kernel happened to stay injectable throughout (interrupts never
+    /// genuinely disabled for long), so this path was never exercised until a real kernel's early
+    /// boot — which disables interrupts for real stretches — forced it for the first time.
+    IrqWindowOpen,
     /// Any exit kind `dispatch_exit`'s caller does not recognize or does not yet model. Carries
     /// the KVM exit's name so a `DeterminismHole` names what leaked. This is the one arm that
     /// exists specifically so nothing new can silently "just continue" (specs/baud-vcpu.md §3).
@@ -190,6 +202,7 @@ pub fn dispatch_exit(
             Ok(DispatchOutcome::Continue)
         }
         Exit::Hlt | Exit::Shutdown => Ok(DispatchOutcome::Halted),
+        Exit::IrqWindowOpen => Ok(DispatchOutcome::Continue),
         Exit::Debug => Ok(DispatchOutcome::SingleStepBoundary),
         Exit::RdtscEnforced => Ok(DispatchOutcome::ServeEnforcedRdtsc(time.serve_enforced_rdtsc())),
         Exit::RdrandEnforced { gpr_index } => {

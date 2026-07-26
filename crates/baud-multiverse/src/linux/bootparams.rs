@@ -180,13 +180,21 @@ fn zeroed_boot_params() -> boot_params {
     unsafe { std::mem::zeroed() }
 }
 
-/// A minimal, honest e820 map: the first megabyte is `reserved` (real x86 firmware convention —
-/// legacy BIOS/VGA/option-ROM range baud never emulates any of), everything from
-/// [`layout::HIMEM_START`] to `ram_size` is `usable` RAM. No holes, no MMIO windows — baud's
-/// "subtractive rule" machine has none (specs/baud-multiverse.md §3.6).
+/// A minimal, honest e820 map: page zero is `reserved` (the conventional real-mode IVT/BDA
+/// carve-out, [`layout::LOW_MEM_RAM_START`]'s doc), [`layout::LOW_MEM_RAM_START`] to
+/// [`layout::HIMEM_START`] is `usable` (real-hardware finding: Linux's `reserve_real_mode()`
+/// unconditionally needs sub-1MiB memory, panicking otherwise — that constant's doc has the full
+/// story), and everything from [`layout::HIMEM_START`] to `ram_size` is `usable` RAM. No holes, no
+/// MMIO windows beyond that — baud's "subtractive rule" machine has none (specs/baud-multiverse.md
+/// §3.6).
 fn write_e820_map(params: &mut boot_params, ram_size: usize) {
     let entries = [
-        boot_e820_entry { addr: 0, size: layout::HIMEM_START, r#type: E820_RESERVED },
+        boot_e820_entry { addr: 0, size: layout::LOW_MEM_RAM_START, r#type: E820_RESERVED },
+        boot_e820_entry {
+            addr: layout::LOW_MEM_RAM_START,
+            size: layout::HIMEM_START - layout::LOW_MEM_RAM_START,
+            r#type: E820_RAM,
+        },
         boot_e820_entry {
             addr: layout::HIMEM_START,
             size: (ram_size as u64).saturating_sub(layout::HIMEM_START),
@@ -214,10 +222,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn e820_map_reserves_the_first_megabyte_and_marks_the_rest_usable() {
+    fn e820_map_reserves_page_zero_and_marks_the_rest_usable() {
         let mut params = boot_params { hdr: Default::default(), ..zeroed_boot_params() };
         write_e820_map(&mut params, layout::GUEST_RAM_SIZE);
-        assert_eq!(params.e820_entries, 2);
+        assert_eq!(params.e820_entries, 3);
         // `boot_e820_entry` is `#[repr(C, packed)]`, so even a copied-out local of that struct
         // type keeps its fields unaligned — `assert_eq!` takes references internally, which would
         // be undefined behavior on a packed field (E0793). Copy each scalar field out by value
@@ -226,13 +234,20 @@ mod tests {
             let e = params.e820_table[0];
             (e.r#type, e.addr, e.size)
         };
-        let (ram_type, ram_addr, ram_size) = {
+        let (low_ram_type, low_ram_addr, low_ram_size) = {
             let e = params.e820_table[1];
+            (e.r#type, e.addr, e.size)
+        };
+        let (ram_type, ram_addr, ram_size) = {
+            let e = params.e820_table[2];
             (e.r#type, e.addr, e.size)
         };
         assert_eq!(reserved_type, E820_RESERVED);
         assert_eq!(reserved_addr, 0);
-        assert_eq!(reserved_size, layout::HIMEM_START);
+        assert_eq!(reserved_size, layout::LOW_MEM_RAM_START);
+        assert_eq!(low_ram_type, E820_RAM);
+        assert_eq!(low_ram_addr, layout::LOW_MEM_RAM_START);
+        assert_eq!(low_ram_addr + low_ram_size, layout::HIMEM_START);
         assert_eq!(ram_type, E820_RAM);
         assert_eq!(ram_addr, layout::HIMEM_START);
         assert_eq!(ram_addr + ram_size, layout::GUEST_RAM_SIZE as u64);

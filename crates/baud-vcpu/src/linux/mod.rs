@@ -73,7 +73,7 @@ pub fn convert_exit(exit: VcpuExit<'_>) -> Exit<'_> {
         VcpuExit::Unknown => Exit::Unmodeled("Unknown"),
         VcpuExit::Exception => Exit::Unmodeled("Exception"),
         VcpuExit::Hypercall(_) => Exit::Unmodeled("Hypercall"),
-        VcpuExit::IrqWindowOpen => Exit::Unmodeled("IrqWindowOpen"),
+        VcpuExit::IrqWindowOpen => Exit::IrqWindowOpen,
         VcpuExit::FailEntry(..) => Exit::Unmodeled("FailEntry"),
         VcpuExit::Intr => Exit::Unmodeled("Intr"),
         VcpuExit::SetTpr => Exit::Unmodeled("SetTpr"),

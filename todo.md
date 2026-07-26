@@ -800,7 +800,7 @@ Every risk found in review, the guarantee it becomes, and the test that proves i
 | 23 | Journal/observations in plaintext at rest | `baud-snapshot-store` age-encrypts universes + tapes | `snapshot_store_bodies_are_ciphertext` |
 | 24 | Two-plane cross-check is counts-only, misses ordering | Compare ordered exit sequences | `planes_agree_on_healthy_run` |
 | 25 | `rdseed`-exiting unavailable under nested virt (WSL2) | An L0 Hyper-V mask, not a CPU limit — MSR `0x48B` bit 48 (RDSEED-exiting) absent while bit 43 (RDRAND-exiting) is present; handled by the build-time rewrite; both trappable on bare-metal Intel | H0 records both bits (`rdmsr -f 48:48`/`-f 43:43 0x48B`); `no_rdseed_opcode_survives_in_image` |
-| 26 | No real Linux guest exists yet — only hand-assembled payloads | A real image pipeline: minimal builtin kernel + deterministic cmdline + boot_params (E820, `SETUP_RNG_SEED`) + reproducible initramfs + `/init` + a tape endpoint, built by `baud-packages` (§4) | `guest_kernel_boots_to_userspace`; `boot_params_seed_is_pinned`; `init_powers_off_deterministically`; `image_build_is_reproducible` |
+| 26 | A real Linux guest now boots to userspace, but only as a hand-built fixture (`linux-guest`, §14) — the automated image pipeline does not exist | A real image pipeline: minimal builtin kernel + deterministic cmdline + boot_params (E820, `SETUP_RNG_SEED`) + reproducible initramfs + `/init` + a tape endpoint, built by `baud-packages` (§4) | `guest_kernel_boots_to_userspace` (done); `boot_params_seed_is_pinned`; `init_powers_off_deterministically`; `image_build_is_reproducible` |
 | 27 | OS-entropy determinism must be shown, not asserted | Boot a real Linux guest and prove the CRNG is a pure function of the tape end-to-end (§4, §3.8) | `os_entropy_is_deterministic` (H7); `double_boot_ram_hash_identical` |
 | 28 | An arbitrary interactive program must be driven to a goal, reproducibly, inside Linux | The emulator example (§11) runs inside the H7 guest; identical probe + framebuffer streams across boots; goal reached; shrink+replay holds | `interactive_probe_stream_is_identical`; `framebuffer_hashes_identical`; `mario_stream_is_live_and_rederivable` |
 | 29 | Example specifics could leak into core crates | The engine stays generic; all workload code lives under `examples/` (§11.0) | `no_workload_specifics_in_core` |
@@ -911,6 +911,51 @@ snapshot, not a duplicate of it.
   calls it outside its own test (`deterministic_cmdline_matches_the_spec_exactly`). This closes the
   `bootparams.rs`/initramfs sub-item that item 1 below used to list as open; the boot-pipeline items still
   open are relisted there.
+  **A real, compiled Linux 6.18 kernel now boots through baud-multiverse's real KVM boot flow all the way
+  to a real `/init` userspace process** — the first time this project has booted an actual, unmodified
+  Linux kernel to userspace, not a hand-assembled fixture payload. New test
+  `guest_kernel_boots_to_userspace` (`crates/baud-multiverse/src/linux/mod.rs`) boots the same image+tape
+  twice via `Multiverse::boot_with_rdseed_sites` and H4's `run_to_first_halt_with_periodic_timer`
+  (§14 next-actions item 1's open-ended injection engine, no pre-known tick count) and asserts each run
+  independently reaches `/init`'s marker and halts cleanly after the *same number* of periodic ticks —
+  deliberately not asserting byte-identical console output or RAM hash across the two boots (see below).
+  New fixture `crates/baud-multiverse/tests/fixtures/linux-guest/` (`bzImage`, `initramfs.cpio.gz`,
+  `init.c`, `minimal.config`) is documented start-to-finish in that directory's `BUILD.md`, including a
+  `minimal.config` fragment implementing spec §4.1's required/disabled Kconfig list and a finding that no
+  LAPIC device model was needed: with no memory region registered at the LAPIC's fixed MMIO base, register
+  reads fall through to baud's existing open-bus fallback, the kernel concludes "No local APIC present"
+  and falls back to `Using NULL legacy PIC`, and H4's `KVM_INTERRUPT`-based injection still delivers
+  `LOCAL_TIMER_VECTOR` (`0xec`) regardless, logged as (harmless) "Spurious LAPIC timer interrupt". New
+  drive script `drive/h7.sh` runs this as a partial H7 (boot-to-userspace leg only; OS-entropy and the
+  double-boot RAM-hash comparison remain open, see item 2 below). Getting here required fixing three real
+  bugs, all documented in `tests/fixtures/linux-guest/BUILD.md`: (1) `baud-vcpu`'s `VcpuExit::IrqWindowOpen`
+  was mapped to `Exit::Unmodeled` (`crates/baud-vcpu/src/linux/mod.rs`) instead of ever reaching
+  `boundary::PmuStepper::run_until_irq_window`'s fallback, invisible until a guest genuinely held
+  interrupts disabled for a real stretch (every prior fixture stayed injectable throughout); fixed with a
+  proper `Exit::IrqWindowOpen` variant that `dispatch_exit` resolves to `Continue`
+  (`crates/baud-vcpu/src/lib.rs`), covered by a new regression unit test
+  (`irq_window_open_continues_rather_than_faulting`, `crates/baud-vcpu/src/tests.rs`); (2) e820 left the
+  entire first megabyte `reserved`, but Linux's `reserve_real_mode()` panics without sub-1MiB usable
+  memory for the real-mode trampoline, fixed via a new `layout::LOW_MEM_RAM_START` (`0x1000`,
+  `crates/baud-multiverse/src/layout.rs`) plus a low-memory `usable` e820 entry
+  (`crates/baud-multiverse/src/linux/bootparams.rs`); (3) the guest kernel config needed
+  `CONFIG_X86_IOPL_IOPERM=y` for `/init`'s `iopl(3)` + raw `outb` marker write, used instead of
+  `write(1, ...)` because this machine has no interrupt controller so the 8250 UART's interrupt-driven tty
+  transmit path never drains (an early plain-`write` `/init` booted clean to shutdown with no marker at
+  all). **Still open, not attempted or fixed this iteration**: `os_entropy_is_deterministic` (H7's
+  OS-entropy leg); `double_boot_ram_hash_identical` needs a guest-driven checkpoint design (an explicit
+  `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first attempt
+  at strict full-console-byte-equality across two boots of this real kernel found the two differ in exactly
+  one kernel-internal line (`sched_clock: Marking stable (A,B)->(C,0)`, printing raw TSC-derived numbers
+  sensitive to the already-documented `RCB_HARDWARE_JITTER_TOLERANCE`), which is exactly why a checkpoint-
+  based approach is needed instead; the real image-build pipeline in `crates/baud-packages` (Buildroot or
+  pinned-Nix per spec §4.5) still does not exist — `linux-guest`'s kernel+initramfs are checked into the
+  repo and built by hand per the fixture's own `BUILD.md`, the same fixture-vs-automated-pipeline gap that
+  already existed for every other fixture in that directory; and `bootparams::DETERMINISTIC_CMDLINE` is
+  still not wired as any real caller's default — `guest_kernel_boots_to_userspace` builds its own cmdline
+  string inline, close to but not identical to `DETERMINISTIC_CMDLINE` (it omits `no-kvmclock`, `pci=off
+  acpi=off`, `quiet loglevel=1`, `random.trust_cpu=off random.trust_bootloader=on`, and `nomodule`, kept
+  off for boot-log debugging visibility while bringing the fixture up).
 - **Next actions (this rewrite)** — a sequence, each step enabling the next:
   1. **Guest boot pipeline (§4)** — the enabling milestone.
      **H4 interrupt injection is now wired into an open-ended run loop** (the sub-step that was blocking
@@ -930,20 +975,35 @@ snapshot, not a duplicate of it.
      `timer_tick_lands_at_identical_instruction` (rare per-tick jitter over tolerance is a known real-
      hardware branch-counter read-precision limit, not a logic bug; keep tick counts in a test low for
      exactly this reason — more ticks multiplies the chance any single one trips the tolerance).
-     **Still open**: nothing yet actually *calls* this from a real kernel boot. `bootparams.rs` itself is now
-     done — `e820`, `SETUP_RNG_SEED`, and initramfs wiring plus `DETERMINISTIC_CMDLINE` are all in place (see
-     the bullet above) — but `DETERMINISTIC_CMDLINE` isn't wired as any caller's default yet, and there is no
-     real image to boot. What remains is essentially everything else in the real image pipeline in
-     `baud-packages`: a minimal builtin kernel (Buildroot → pinned Nix, §4.5 — **blocked on a kernel-build
-     toolchain not currently installed in this dev sandbox: confirmed this session that `nix`/`nix-env` isn't
-     present; the CLAUDE.md-documented bare-metal WSL2 host likely can have one installed, or a plain
-     from-source `make bzImage` could reuse the kernel source tree already checked out at
-     `~/wsl-kernel-src/src` for the enforced-module work — next concrete step**), a reproducible initramfs
-     builder + static `/init` (§4.3/§4.4), and the `/dev/vport` (or PIO) tape endpoint. Tests
-     `guest_kernel_boots_to_userspace`, `boot_params_seed_is_pinned`, `init_powers_off_deterministically`,
-     `image_build_is_reproducible`.
-  2. **H7 — OS-entropy end-to-end (rides on #1)** — boot the real Linux guest and prove the CRNG is a pure
-     function of the tape: `os_entropy_is_deterministic`, `double_boot_ram_hash_identical`,
+     **`guest_kernel_boots_to_userspace` is now done**: a real, compiled Linux 6.18 kernel
+     (`crates/baud-multiverse/tests/fixtures/linux-guest/`, built by hand per that directory's `BUILD.md`,
+     not yet by an automated pipeline) boots through this open-ended engine all the way to a real `/init`
+     process, hardware-verified twice for matching tick counts (`crates/baud-multiverse/src/linux/mod.rs`;
+     partial drive coverage in `drive/h7.sh`). Three real bugs fixed to get there — a `baud-vcpu`
+     `IrqWindowOpen` dispatch bug, e820's missing sub-1MiB usable memory (Linux's `reserve_real_mode()`
+     panics without it), and a missing `CONFIG_X86_IOPL_IOPERM=y` guest kernel config — are detailed in the
+     bullet above and in that `BUILD.md`.
+     **Still open**: the real image-build pipeline in `baud-packages` itself still does not exist — a
+     minimal builtin kernel (Buildroot → pinned Nix, §4.5 — **blocked on a kernel-build toolchain not
+     currently installed in this dev sandbox: confirmed this session that `nix`/`nix-env` isn't present;
+     the CLAUDE.md-documented bare-metal WSL2 host likely can have one installed, or a plain from-source
+     `make bzImage` could reuse the kernel source tree already checked out at `~/wsl-kernel-src/src` for
+     the enforced-module work — next concrete step**), a reproducible initramfs builder + static `/init`
+     driven by that pipeline rather than hand-built per a fixture's `BUILD.md` (§4.3/§4.4), and the
+     `/dev/vport` (or PIO) tape endpoint; `bootparams::DETERMINISTIC_CMDLINE` also still isn't wired as any
+     real caller's default (`guest_kernel_boots_to_userspace` builds its own, similar but not identical,
+     cmdline string inline — see the bullet above for the exact diff) — either wire it as the fixture's
+     cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned`,
+     `init_powers_off_deterministically`, `image_build_is_reproducible` remain unwritten.
+  2. **H7 — OS-entropy end-to-end (rides on #1)** — partially unblocked: the boot-to-userspace leg now
+     exists (`guest_kernel_boots_to_userspace`, `drive/h7.sh`), but the OS-entropy tests themselves are
+     untouched (`os_entropy_is_deterministic` needs a static probe calling `getrandom()`/reading
+     `/dev/urandom`, byte-identical across two boots — not attempted this iteration), and
+     `double_boot_ram_hash_identical` needs a **guest-driven checkpoint** design (an explicit
+     `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first
+     attempt at the latter found the two boots differ in exactly one kernel-internal diagnostic line
+     sensitive to already-documented real-hardware branch-counter read jitter (see the bullet above and
+     `tests/fixtures/linux-guest/BUILD.md`'s "known, deliberate non-goal" section). Also still open:
      `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`,
      `virtio_rng_reseed_is_deterministic` (virtio-rng tape-fed via an ever-ready FIFO, or omitted). No
      guest-kernel patch.

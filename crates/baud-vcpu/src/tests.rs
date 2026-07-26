@@ -139,6 +139,21 @@ fn hlt_and_shutdown_report_halted() {
     assert_eq!(dispatch_exit(Exit::Shutdown, &mut bus, &mut time).unwrap(), DispatchOutcome::Halted);
 }
 
+/// Regression for a real bug (todo.md §14): `IrqWindowOpen` used to fall into `Exit::Unmodeled`,
+/// so any guest that genuinely needed `boundary::PmuStepper::run_until_irq_window`'s fallback (not
+/// already injectable the instant `inject_at` checked) hit the determinism-hole catch-all instead
+/// of `run_until_irq_window`'s own readiness check ever running — first surfaced by a real Linux
+/// kernel's early boot, which disables interrupts for real stretches.
+#[test]
+fn irq_window_open_continues_rather_than_faulting() {
+    let mut bus = RecordingBus::default();
+    let mut time = RecordingTime::default();
+    assert_eq!(
+        dispatch_exit(Exit::IrqWindowOpen, &mut bus, &mut time).unwrap(),
+        DispatchOutcome::Continue
+    );
+}
+
 #[test]
 fn debug_reports_single_step_boundary() {
     let mut bus = RecordingBus::default();

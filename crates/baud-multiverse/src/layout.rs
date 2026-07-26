@@ -23,6 +23,20 @@ pub const GUEST_RAM_SIZE: usize = 256 * 1024 * 1024; // 256 MiB
 /// `KernelLoader::load`.
 pub const HIMEM_START: u64 = 0x0010_0000;
 
+/// Start of the low-memory `usable` e820 range `write_e820_map` reports (real-hardware finding,
+/// todo.md §14: a real Linux kernel's `reserve_real_mode()` unconditionally needs sub-1MiB memory
+/// for the AP-bringup/ACPI-resume real-mode trampoline — `init_real_mode()` panics outright
+/// ("Real mode trampoline was not allocated") if none is available, even though this machine never
+/// uses SMP or ACPI resume). Page zero itself stays reserved (the conventional real-mode IVT/BDA
+/// carve-out every x86 boot convention keeps aside, matching Firecracker's own low-memory e820
+/// layout) even though nothing here is a real BIOS; every fixed low-memory structure this crate
+/// writes (zero page, RNG seed, page tables, GDT, cmdline) sits inside this same usable range too —
+/// safe because the kernel copies everything it still needs (`boot_params`, the command line) into
+/// its own compiled-in memory during early 64-bit entry, well before `memblock`/e820 parsing ever
+/// runs, and switches off baud's bootstrap page tables onto its own static ones just as early — the
+/// same handoff contract every direct-boot VMM (Firecracker included) already relies on.
+pub const LOW_MEM_RAM_START: u64 = 0x0000_1000;
+
 /// Where the compressed kernel image itself is loaded — comfortably above `HIMEM_START` and below
 /// where a small guest's own working set would grow, per the same fixed-address convention every
 /// rust-vmm reference VMM (Firecracker/cloud-hypervisor) uses for direct kernel boot.
