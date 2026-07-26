@@ -37,6 +37,12 @@ pub mod tape_bus;
 pub mod timesource;
 pub mod virtio_mmio;
 
+// Uses `vm-memory`, which is a Linux-gated dependency (see this crate's Cargo.toml — same reason
+// `linux/` below is gated): unlike `virtio_mmio.rs`'s pure register bookkeeping, this module
+// dereferences guest-physical addresses through `vm-memory` directly.
+#[cfg(target_os = "linux")]
+pub mod virtio_queue;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

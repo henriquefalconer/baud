@@ -12,16 +12,18 @@
 // workload-specifics" rule the `workload_lint` guardrail enforces (this is baud's own transport
 // code, not a Mario/NES leak).
 //
-// **What this module deliberately does not do yet** (todo.md-tracked as the next real chunk, not
-// a bug here): it does not parse a virtqueue's descriptor/avail/used rings out of guest memory,
-// and it does not raise a real interrupt — `QueueNotify` only records that a notification arrived
-// (`notify_count`/`last_notified_queue`), and `InterruptStatus` always reads `0`. A real device
-// (e.g. virtio-rng) needs both: reading descriptors via `vm-memory`, writing tape-seeded bytes
-// into them, publishing a used-ring entry, and injecting an interrupt through the existing
-// exact-boundary engine (`baud_vcpu::boundary`) or a new one — deferred because this host has no
-// in-kernel irqchip (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called, `linux/mod.rs`), so
-// which vector a `virtio_mmio.device=` IRQ number resolves to is unverified and needs its own
-// investigation before it can be wired in, not stubbed here.
+// **What this module deliberately does not do** (register-level bookkeeping only, by design — see
+// `crate::virtio_queue` for the layer above): it never dereferences `desc`/`driver`/`device` as
+// guest-memory addresses itself, and it does not raise a real interrupt — `QueueNotify` only
+// records that a notification arrived (`notify_count`/`last_notified_queue`), and
+// `InterruptStatus` always reads `0`. [`Self::queue_ring_config`] hands the negotiated addresses to
+// `crate::virtio_queue::SplitVirtqueue`, which walks a queue's descriptor table / avail ring / used
+// ring over real `vm-memory` (todo.md §14 next-actions item 1) — that piece is now implemented and
+// hardware-independently tested, but nothing yet drives it from `QueueNotify` automatically, and
+// injecting a real interrupt through the exact-boundary engine (`baud_vcpu::boundary`) or a new one
+// is still deferred: this host has no in-kernel irqchip (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are
+// never called, `linux/mod.rs`), so which vector a `virtio_mmio.device=` IRQ number resolves to is
+// unverified and needs its own investigation before that can be wired in, not stubbed here.
 //
 // Every register is a naturally-aligned 32-bit word (the only access width the virtio-mmio spec
 // permits); this mirrors `console.rs`'s `Console::pio_read`'s own precedent for a narrower-than-
@@ -107,6 +109,24 @@ struct QueueState {
     device: u64,
 }
 
+/// The negotiated ring layout for one queue, handed out by [`VirtioMmioTransport::queue_ring_config`]
+/// once the driver has marked it ready — the public shape `crate::virtio_queue::SplitVirtqueue`
+/// consumes to walk the actual descriptor table / avail ring / used ring over `vm-memory`. Field
+/// names match spec 1.1's own terms: `desc` is the descriptor table address, `driver` is the avail
+/// ring ("driver area"), `device` is the used ring ("device area").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueRingConfig {
+    /// The driver-negotiated queue size (number of descriptor-table/avail-ring/used-ring slots) —
+    /// spec 1.1 §2.6: every ring's size is this same value.
+    pub num: u32,
+    /// Guest-physical address of the descriptor table (spec 1.1 §2.6.5).
+    pub desc: u64,
+    /// Guest-physical address of the avail ring, spec 1.1's "driver area" (§2.6.6).
+    pub driver: u64,
+    /// Guest-physical address of the used ring, spec 1.1's "device area" (§2.6.8).
+    pub device: u64,
+}
+
 /// A virtio-mmio v2 transport register block for one device. `Bus::mmio_read`/`mmio_write` accept
 /// the *absolute* guest-physical address (matching every other [`Bus`] impl in this crate,
 /// `console.rs`'s `Console`/`Cmos` included) and reject anything outside `[base, base + len)` via
@@ -188,6 +208,20 @@ impl VirtioMmioTransport {
     /// negotiation order: a real device does not police driver correctness, it only reacts).
     pub fn status(&self) -> u32 {
         self.status
+    }
+
+    /// The negotiated ring layout for `queue_index` — `None` until the driver has both selected a
+    /// real queue (`queue_index` in range) *and* marked it ready (`REG_QUEUE_READY = 1`), since
+    /// `desc`/`driver`/`device` are meaningless addresses before that (spec 1.1 §3.1.1: the driver
+    /// writes them, then sets `QueueReady`, in that order). This is the handoff point to
+    /// [`crate::virtio_queue::SplitVirtqueue`], which walks these addresses through `vm-memory` —
+    /// this module only ever tracks them as opaque register bits, never dereferences them itself.
+    pub fn queue_ring_config(&self, queue_index: u32) -> Option<QueueRingConfig> {
+        let queue = self.queues.get(queue_index as usize)?;
+        if !queue.ready {
+            return None;
+        }
+        Some(QueueRingConfig { num: queue.num, desc: queue.desc, driver: queue.driver, device: queue.device })
     }
 
     /// Writing `0` to the status register is the driver's device-reset request (spec 1.1 §2.1:
@@ -495,6 +529,26 @@ mod tests {
         t.mmio_read(BASE + 0x1000, &mut data);
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
         t.mmio_write(BASE - 1, &[1, 2, 3, 4]); // must not panic
+    }
+
+    #[test]
+    fn queue_ring_config_is_none_until_the_queue_is_marked_ready() {
+        let mut t = VirtioMmioTransport::new_rng(BASE);
+        assert_eq!(t.queue_ring_config(0), None, "unready queue exposes no ring config");
+        assert_eq!(t.queue_ring_config(1), None, "out-of-range queue index");
+
+        write_reg(&mut t, REG_QUEUE_SEL, 0);
+        write_reg(&mut t, REG_QUEUE_NUM, 256);
+        write_reg(&mut t, REG_QUEUE_DESC_LOW, 0x1000_0000);
+        write_reg(&mut t, REG_QUEUE_DRIVER_LOW, 0x1000_1000);
+        write_reg(&mut t, REG_QUEUE_DEVICE_LOW, 0x1000_2000);
+        assert_eq!(t.queue_ring_config(0), None, "addresses alone are not enough without QueueReady");
+
+        write_reg(&mut t, REG_QUEUE_READY, 1);
+        assert_eq!(
+            t.queue_ring_config(0),
+            Some(QueueRingConfig { num: 256, desc: 0x1000_0000, driver: 0x1000_1000, device: 0x1000_2000 }),
+        );
     }
 
     #[test]

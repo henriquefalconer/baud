@@ -226,8 +226,9 @@ pub struct DeviceBus {
     /// [`Self::with_tape`], [`Self::restore`]) leaves it unset, so no existing boot path's MMIO
     /// behavior changes: an unset slot falls straight through to `fallback` exactly as before this
     /// device existed. Not yet wired into any real boot's cmdline/CLI (todo.md-tracked next step —
-    /// this transport has no virtqueue-ring or interrupt-delivery implementation yet, see that
-    /// module's doc).
+    /// `crate::virtio_queue::SplitVirtqueue` can now walk this transport's negotiated rings once a
+    /// caller drives it from `queue_ring_config`, but nothing calls that automatically on
+    /// `QueueNotify` yet, and real interrupt delivery is still unimplemented, see that module's doc).
     virtio_rng: Option<VirtioMmioTransport>,
     fallback: OpenBusFallback,
 }
@@ -246,6 +247,13 @@ impl DeviceBus {
     /// that address window to it instead of [`OpenBusFallback`].
     pub fn enable_virtio_rng(&mut self) {
         self.virtio_rng = Some(VirtioMmioTransport::new_rng(crate::layout::VIRTIO_MMIO_RNG_BASE));
+    }
+
+    /// The virtio-rng transport, if [`Self::enable_virtio_rng`] has been called — the read access a
+    /// caller needs to fetch `queue_ring_config` and drive `crate::virtio_queue::SplitVirtqueue`
+    /// against real guest memory (`self.virtio_rng` is otherwise private to this module).
+    pub fn virtio_rng(&self) -> Option<&VirtioMmioTransport> {
+        self.virtio_rng.as_ref()
     }
 
     /// A [`DeviceBus`] reconstructed from a `Universe` snapshot's device row

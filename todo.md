@@ -1356,6 +1356,57 @@ snapshot, not a duplicate of it.
      specifically, distinct from the pre-existing warning list already documented in prior
      iterations); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all still PASS on
      real `/dev/kvm`, no regressions from the widened `DeviceBus`.
+     **This iteration (ralph iteration 24): the next slice of the gap iteration 23 explicitly scoped
+     out — real split-virtqueue descriptor-chain/avail-ring/used-ring parsing over `vm-memory` — is
+     now done; the interrupt-routing question is still not.** New `crates/baud-multiverse/src/
+     virtio_queue.rs` (gated `#[cfg(target_os = "linux")]` in `lib.rs`, since it depends on the Linux-
+     gated `vm-memory` crate — unlike `virtio_mmio.rs`, which has no `vm-memory` dependency and stays
+     ungated): a `SplitVirtqueue` struct that walks a virtio spec 1.1 §2.6 split virtqueue — reads the
+     driver's `avail.idx`, walks each newly-posted descriptor chain via the `NEXT` flag (bounded to at
+     most `queue_size` hops, so a non-terminating/self-looping chain is rejected as `ChainTooLong`
+     rather than looped on forever), calls a caller-supplied `fill` closure once per *writable*
+     descriptor only (read-only descriptors are never touched), writes the filled bytes into guest
+     memory via `vm_memory::Bytes::write_slice`, and publishes one used-ring entry per chain (head
+     descriptor index + total bytes written) via `process_available()`. Deliberately device-agnostic —
+     the same "generic core" rule `VirtioMmioTransport` itself follows — it has no opinion on what
+     bytes fill a buffer, only on ring mechanics; a caller (virtio-rng, or later virtio-blk) supplies
+     `fill`. `VirtioMmioTransport` (`crates/baud-multiverse/src/virtio_mmio.rs`) gained a new public
+     accessor, `queue_ring_config(queue_index) -> Option<QueueRingConfig>`, returning the negotiated
+     `{num, desc, driver, device}` addresses once a queue is marked ready (`REG_QUEUE_READY`) — the
+     handoff point between the register-only transport and the new ring-walking module; `console.rs`'s
+     `DeviceBus` gained a matching `virtio_rng() -> Option<&VirtioMmioTransport>` read accessor
+     (previously fully private, unreachable from outside the module). 11 new unit tests in
+     `virtio_queue.rs` (all hardware-independent — pure `vm-memory` `GuestMemoryMmap::from_ranges`
+     anonymous-mmap memory, no KVM/perf touched, following `bootparams.rs`'s own `test_guest_mem()`
+     convention): a single writable descriptor filled and published; read-only descriptors never
+     written to; chained (`NEXT`-linked) descriptors walked and their written-byte totals summed into
+     one used-ring entry; multiple available chains drained in one `process_available()` call; a
+     self-looping non-terminating chain rejected without hanging; an out-of-range descriptor index
+     rejected; an indirect descriptor (`VIRTQ_DESC_F_INDIRECT`) rejected as unsupported rather than
+     silently mis-parsed as a data buffer; a zero-size (unconfigured) queue no-ops without
+     dereferencing any guest address; and an end-to-end test that drives a real `VirtioMmioTransport`
+     through the actual driver-enumeration/queue-setup register sequence and feeds its
+     `queue_ring_config` output into a live `SplitVirtqueue`, proving the two modules compose
+     correctly, not just in isolation — plus 1 new test in `virtio_mmio.rs`
+     (`queue_ring_config_is_none_until_the_queue_is_marked_ready`). **What this explicitly still does
+     not do, the same scoping boundary iteration 23 drew**: nothing calls
+     `SplitVirtqueue::process_available` automatically from `VirtioMmioTransport::write_register`'s
+     `QueueNotify` arm yet (no wiring from notify to ring-draining), `InterruptStatus` still always
+     reads `0` (no real interrupt is ever raised after a used-ring publish), and nothing wires any of
+     this into a real boot's cmdline/CLI/server route — the same open interrupt-routing question from
+     iteration 23 (this host registers no in-kernel irqchip, so which vector a
+     `virtio_mmio.device=` IRQ number resolves to remains unverified) is still unresolved and still the
+     next real blocker before a live guest driver could be exercised end-to-end.
+     `virtio_rng_reseed_is_deterministic` (the spec-named test) still cannot pass until that follow-up
+     work lands. `cargo build`/`clippy`/`test --workspace` all clean (0 failures; confirmed zero *new*
+     clippy warnings via a targeted `grep` restricted to the changed files, distinct from the pre-
+     existing warning list already documented in prior iterations — this iteration's warnings are all
+     pre-existing, in unrelated files: `baud-tracing`'s deprecated `aya::Bpf`,
+     `baud-multiverse/src/lib.rs`'s `EntropyDevice`/`InputDevice`/`NetDevice`/`ExitDevice` derivable-
+     impl suggestions, `baud-tape-agent/src/transport.rs`,
+     `baud-server/src/routes/{fuzz,replay,tracing}.rs`); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-
+     `m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions from the widened
+     `VirtioMmioTransport`/`DeviceBus` public surface.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
      two-fd RCB-counter epoch disagreement that caused most of `os_entropy_is_deterministic`'s
      flakiness is now reconciled into a single shared fd, plus a second, independent console-
@@ -1623,6 +1674,10 @@ snapshot, not a duplicate of it.
      vector a `virtio_mmio.device=` IRQ resolves to is unverified), and boot/cmdline/CLI wiring
      are all still open — still a multi-day effort in total, just a smaller remaining slice than
      before. No guest-kernel patch.
+     **Correction (ralph iteration 24)**: the "real virtqueue ring parsing over `vm-memory`" piece named
+     as still-open just above is now done — see item 1's ralph-iteration-24 note above
+     (`crates/baud-multiverse/src/virtio_queue.rs`'s `SplitVirtqueue`). Interrupt delivery and boot/
+     cmdline/CLI wiring remain open exactly as described.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

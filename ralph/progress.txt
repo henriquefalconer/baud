@@ -5494,3 +5494,54 @@ todo.md updated with ralph iteration 23's finding: virtio-mmio v2 transport regi
     `drive/h7.sh` (8/8) and `drive/m9.sh` through `drive/m13.sh` (5/5) all PASS on real
     `/dev/kvm`, no regressions.
 ---
+
+Post-push verification: git push succeeded (b7b9ca6..7ee620b main -> main); local HEAD matches origin/main tip exactly (7ee620b); working tree clean. Full build/clippy/test/drive-script suite (h0-h7, m9-m13) was run against this exact commit content before pushing. todo.md still has pending items (H8/FCEUX Qt5, virtio-rng ring+IRQ+CLI wiring, H9 Ubuntu) -- emitting NEXT.
+
+## 2026-07-26T15:18:18 UTC (35min) - Session usage — build-23 [sonnet]
+- cost $5.3224 (from claude -p)
+- context 197,397 tok peak of 1M (20%) across 66 inference calls, monotonic
+- models sonnet-5 $5.3193 (in 150 / out 59,883 / cache-read 10,543,967) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/023-build-23.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 24
+═══════════════════════════════════════════════════════
+
+Studying todo.md and progress.txt to pick the next step...
+
+Chose to continue the virtio-rng slice: last iteration (23) built the virtio-mmio v2 transport register layer only (no ring parsing, no interrupt delivery, not wired into boot). This iteration's step: implement real virtqueue descriptor/avail/used-ring parsing over vm-memory (hardware-independently testable), the next concrete non-stub slice per todo.md's own scoping notes.
+
+Reading virtio_mmio.rs directly while research subagents study vm-memory conventions elsewhere in the crate and the Bus trait (confirmed Bus has no guest-memory access — ring parsing needs a memory handle threaded in separately, not through mmio_read/write).
+
+(Note: accidentally spawned one placeholder subagent with no task; it will complete trivially and its output is being ignored — no repo changes from it.) Waiting for the two real research agents on virtio_mmio/DeviceBus wiring and vm-memory conventions.
+
+Still waiting on the two research agents (virtio_mmio/DeviceBus wiring; vm-memory conventions elsewhere in baud-multiverse) before writing the ring-parsing module.
+
+First research agent (virtio_mmio/DeviceBus wiring) is back: confirmed Bus trait has no memory-access parameter anywhere in the call chain (run_one_exit/step_exit never receive guest_mem), so ring-processing must be driven from Multiverse itself (the one place self.bus and self.guest.guest_mem are both in scope), not through Bus::mmio_write. Queue ring addresses (desc/driver/device) are stored as whole u64s in a private QueueState with no existing accessors — a ring-parsing module needs new pub accessors on VirtioMmioTransport or to live inside virtio_mmio.rs. vm-memory convention across the crate: GuestMemory = GuestMemoryMmap<()>, always a bare reference (never Arc), accessed via the Bytes trait's read_slice/write_slice + GuestAddress, errors wrapped in a crate-local enum with offset context. Waiting on the second agent for corroboration, then starting implementation.
+
+Research complete. Implementing: (1) a QueueRingConfig accessor on VirtioMmioTransport exposing negotiated desc/driver/device addrs once a queue is marked ready, (2) a new crates/baud-multiverse/src/virtio_queue.rs implementing real split-virtqueue descriptor-chain/avail-ring/used-ring parsing over vm-memory (generic, device-agnostic, hardware-independently tested — no KVM needed, following bootparams.rs's GuestMemoryMmap::from_ranges test convention). Interrupt delivery and boot/CLI wiring remain out of scope this iteration (still blocked on the undecided IRQ-vector question already documented).
+
+New crates/baud-multiverse/src/virtio_queue.rs (SplitVirtqueue: real split-virtqueue descriptor-chain/avail-ring/used-ring parsing over vm-memory) plus VirtioMmioTransport::queue_ring_config accessor: 11 new unit tests all pass (fill+publish, chained NEXT descriptors, read-only descriptors never written, multiple chains drained per call, corrupt self-looping chain rejected without hanging, out-of-range descriptor index rejected, indirect descriptors rejected, zero-size queue no-ops without touching memory, plus an end-to-end test driving a real VirtioMmioTransport's driver-enumeration sequence into a SplitVirtqueue). Full baud-multiverse --lib suite: 109 passed, 0 failed, 8 ignored (enforced-regime/opt-in as expected), 211s. Now running cargo build/clippy/test --workspace.
+
+cargo build --workspace clean; cargo clippy --workspace --all-targets: 0 new warnings (confirmed via grep — all pre-existing warnings are in unrelated files: baud-tracing's deprecated aya::Bpf, baud-multiverse/src/lib.rs's EntropyDevice/InputDevice/NetDevice/ExitDevice derivable-impl suggestions, baud-tape-agent/transport.rs, baud-server routes/{fuzz,replay,tracing}.rs — none touch virtio_mmio.rs/virtio_queue.rs/console.rs). Running cargo test --workspace now.
+
+cargo test --workspace: 0 failures across every crate (baud-multiverse 109 passed/8 ignored, all others clean). Running drive/h0.sh through drive/h7.sh and drive/m9.sh-m13.sh individually against real /dev/kvm next.
+
+drive/h0.sh through drive/h7.sh (8/8) and drive/m9.sh through drive/m13.sh (5/5) all PASS on real /dev/kvm, no regressions. Updating todo.md with this iteration's progress note now.
+
+Dispatched a subagent to append this iteration's findings to todo.md (matching the existing ralph-iteration-23 prose style, appended right after that note, no deletions). Waiting for it to finish before committing.
+
+todo.md updated with this iteration's findings (appended after the ralph-iteration-23 note in item 1, plus a correction pointer in item 2 where a now-stale 'still open' claim existed). Verified diff looks correct. Committing now.
+
+## 2026-07-26T15:52:00 UTC - Changes committed.
+- Implemented real split-virtqueue ring parsing (descriptor table + avail ring + used ring) over vm-memory for the virtio-mmio v2 transport, the next slice of the virtio-rng gap iteration 23 left open.
+- Files changed: crates/baud-multiverse/src/virtio_queue.rs (new), crates/baud-multiverse/src/virtio_mmio.rs, crates/baud-multiverse/src/console.rs, crates/baud-multiverse/src/lib.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New crates/baud-multiverse/src/virtio_queue.rs: SplitVirtqueue walks a real split virtqueue (spec 1.1 §2.6) over vm-memory — drains newly-available descriptor chains (following NEXT links, bounded against non-terminating/self-looping chains), fills writable descriptors via a caller-supplied closure (read-only descriptors are never written), and publishes one used-ring entry per chain. Device-agnostic (no opinion on what bytes fill a buffer). Gated #[cfg(target_os = "linux")] since vm-memory is a Linux-only dependency in this crate's Cargo.toml.
+  - VirtioMmioTransport (virtio_mmio.rs) gained queue_ring_config(queue_index) -> Option<QueueRingConfig>, exposing the negotiated desc/driver/device addresses once a queue is marked ready — the handoff point to SplitVirtqueue.
+  - DeviceBus (console.rs) gained a virtio_rng() -> Option<&VirtioMmioTransport> read accessor (previously fully private).
+  - 11 new hardware-independent unit tests in virtio_queue.rs plus 1 new test in virtio_mmio.rs, including an end-to-end test driving a real VirtioMmioTransport's driver-enumeration sequence into a live SplitVirtqueue.
+  - Still open (unchanged from iteration 23's scoping): nothing auto-drains a queue on QueueNotify, InterruptStatus always reads 0 (no real interrupt raised), and no boot/cmdline/CLI wiring exists yet — blocked on the same unresolved interrupt-vector question (no in-kernel irqchip on this host).
+  - Verification: cargo build/clippy/test --workspace all clean (0 failures, 0 new clippy warnings — confirmed via targeted grep); drive/h0.sh-h7.sh (8/8) and drive/m9.sh-m13.sh (5/5) all PASS on real /dev/kvm, no regressions.
+---
