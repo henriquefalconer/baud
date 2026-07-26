@@ -506,12 +506,13 @@ pub struct RunKvmBranchBody {
     /// Same field as [`RunKvmBody::virtio_rng`], applied to every branch this call forks (not the
     /// boot that establishes the branch point itself — the device is enabled/seeded fresh on each
     /// forked `Multiverse::branch`, mirroring a cold boot, since virtio-rng device state is not
-    /// itself part of the snapshot/restore/branch contract). Only honored by this route's
-    /// fixed-tape (`branch_tapes_hex`) mode, via `run_until_branch_or_halt_with_virtio_rng`/
-    /// `run_until_branch_or_halt_with_periodic_timer_and_virtio_rng` — `generate` mode is unaffected
-    /// (still runs with virtio-rng disabled), closing todo.md §14 next-actions item 1's
-    /// "`/run/kvm/branch`/`/run/kvm/resume` don't accept a `virtio_rng` field at all" gap for the
-    /// fixed-tape half. `None` (the default) preserves this route's exact prior behavior.
+    /// itself part of the snapshot/restore/branch contract), via
+    /// `run_until_branch_or_halt_with_virtio_rng`/
+    /// `run_until_branch_or_halt_with_periodic_timer_and_virtio_rng` for the fixed-tape
+    /// (`branch_tapes_hex`) path — honored equally by `generate` mode
+    /// (`run_driver_generated_branches_with_persist`), closing todo.md §14 next-actions item 1's
+    /// "`/run/kvm/branch`/`/run/kvm/resume` don't accept a `virtio_rng` field at all" gap in full.
+    /// `None` (the default) preserves this route's exact prior behavior.
     #[serde(default)]
     pub virtio_rng: Option<VirtioRngSpec>,
     /// One optional run id per entry in `branch_tapes_hex` (same length, or omitted entirely) —
@@ -640,6 +641,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                 persist_ref,
                 initramfs.as_deref(),
                 periodic_timer,
+                virtio_rng,
             )
         })
         .await
@@ -658,7 +660,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                             tape_hex: &outcome.tape_hex,
                             initramfs_path: body.initramfs_path.as_deref(),
                             periodic_timer,
-                            virtio_rng: None,
+                            virtio_rng,
                             store_run_id: None,
                             snapshot_node_id: None,
                         };
@@ -1016,6 +1018,7 @@ fn boot_snapshot_and_generate(
     persist: Option<(&SnapshotStore, &str)>,
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary, Option<PersistedRef>), String> {
     let universe = boot_and_snapshot(kernel_path, cmdline, initramfs)?;
     let persisted = match persist {
@@ -1026,8 +1029,14 @@ fn boot_snapshot_and_generate(
     // (`parent: None, at_step: 0`, `persist_universe`'s own contract) — that's the parent every
     // interesting generated branch chains onto.
     let root_parent = persisted_root_parent(&persisted)?;
-    let (outcomes, summary) =
-        run_driver_generated_branches_with_persist(&universe, spec, persist, root_parent, periodic_timer)?;
+    let (outcomes, summary) = run_driver_generated_branches_with_persist(
+        &universe,
+        spec,
+        persist,
+        root_parent,
+        periodic_timer,
+        virtio_rng,
+    )?;
     Ok((outcomes, summary, persisted))
 }
 
@@ -1042,7 +1051,7 @@ fn run_driver_generated_branches(
     universe: &baud_snapshot::Universe,
     spec: DriverGenerateSpec,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
-    run_driver_generated_branches_with_persist(universe, spec, None, None, None)
+    run_driver_generated_branches_with_persist(universe, spec, None, None, None, None)
 }
 
 /// Draws a tape with `Driver::draw_bits`, fork+runs it, scores it from its drained tape-device
@@ -1067,6 +1076,7 @@ fn run_driver_generated_branches_with_persist(
     persist: Option<(&SnapshotStore, &str)>,
     parent: Option<baud_snapshot_store::NodeId>,
     periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
     let mut driver = baud_driver::Driver::new(spec.seed, spec.strategy, baud_driver::TacticsSpec::default());
     if let Some((store, run_id)) = persist {
@@ -1088,14 +1098,32 @@ fn run_driver_generated_branches_with_persist(
         }
         let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix.clone(), WORK_CLOCK_K, None)
             .map_err(|e| format!("branch {i} error: {e}"))?;
-        let (run_outcome, mut records) = match periodic_timer {
-            Some((period_rcb, vector, max_ticks)) => {
+        if let Some((seed, _, _)) = virtio_rng {
+            branch.enable_virtio_rng();
+            branch.seed_virtio_rng_entropy(seed);
+        }
+        let (run_outcome, mut records) = match (periodic_timer, virtio_rng) {
+            (Some((period_rcb, timer_vector, max_ticks)), Some((_, rng_vector, _))) => {
+                let (_ticks, outcome, records) = branch
+                    .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng(
+                        period_rcb,
+                        timer_vector,
+                        rng_vector,
+                        max_ticks,
+                    )
+                    .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
+                (outcome, records)
+            }
+            (Some((period_rcb, vector, max_ticks)), None) => {
                 let (_ticks, outcome, records) = branch
                     .run_until_branch_or_halt_with_periodic_timer(period_rcb, vector, max_ticks)
                     .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
                 (outcome, records)
             }
-            None => branch
+            (None, Some((_, rng_vector, max_exits))) => branch
+                .run_until_branch_or_halt_with_virtio_rng(rng_vector, max_exits)
+                .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
+            (None, None) => branch
                 .run_until_branch_or_halt(BRANCH_MAX_EXITS)
                 .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
         };
@@ -1303,9 +1331,8 @@ pub struct RunKvmResumeBody {
     #[serde(default)]
     pub periodic_timer: Option<PeriodicTimerSpec>,
     /// Same field as [`RunKvmBranchBody::virtio_rng`], applied to every branch this call forks from
-    /// the reconstructed universe — only honored by this route's fixed-tape (`branch_tapes_hex`)
-    /// mode, `generate` mode is unaffected. `None` (the default) preserves this route's exact prior
-    /// behavior.
+    /// the reconstructed universe — honored by both this route's fixed-tape (`branch_tapes_hex`)
+    /// and `generate` modes. `None` (the default) preserves this route's exact prior behavior.
     #[serde(default)]
     pub virtio_rng: Option<VirtioRngSpec>,
     /// One optional run id per entry in `branch_tapes_hex` — mirrors `RunKvmBranchBody::
@@ -1365,7 +1392,14 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
         let run_id_for_task = run_id.clone();
         let node_id_for_task = node_id_hex.clone();
         let result = tokio::task::spawn_blocking(move || {
-            resume_and_generate(store.as_ref(), &run_id_for_task, &node_id_for_task, spec, periodic_timer)
+            resume_and_generate(
+                store.as_ref(),
+                &run_id_for_task,
+                &node_id_for_task,
+                spec,
+                periodic_timer,
+                virtio_rng,
+            )
         })
         .await
         .expect("run/kvm/resume (generate) task panicked");
@@ -1383,7 +1417,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                             tape_hex: &outcome.tape_hex,
                             initramfs_path: None,
                             periodic_timer,
-                            virtio_rng: None,
+                            virtio_rng,
                             store_run_id: Some(&run_id),
                             snapshot_node_id: Some(&node_id_hex),
                         };
@@ -1560,10 +1594,18 @@ fn resume_and_generate(
     node_id_hex: &str,
     spec: DriverGenerateSpec,
     periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
     let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
-    run_driver_generated_branches_with_persist(&universe, spec, Some((store, run_id)), Some(parent), periodic_timer)
+    run_driver_generated_branches_with_persist(
+        &universe,
+        spec,
+        Some((store, run_id)),
+        Some(parent),
+        periodic_timer,
+        virtio_rng,
+    )
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
@@ -1739,6 +1781,52 @@ mod tests {
              interrupt to the guest's own ISR, observing the exact same seeded entropy byte a \
              direct boot with the identical seed does"
         );
+    }
+
+    /// Closes the "generate mode is unaffected" gap the prior iteration's own virtio_rng wiring
+    /// deliberately left open (todo.md §14 next-actions item 1): `/run/kvm/branch`'s
+    /// `DriverGenerateSpec` path (`run_driver_generated_branches_with_persist`) now also threads
+    /// `virtio_rng` to every generated branch's own fresh `Multiverse::branch`, exactly like the
+    /// fixed-tape sibling test above — `virtio-rng-guest` never reads its tape suffix at all (see
+    /// that fixture's own `BUILD.md`: its ISR fires from the virtio-rng interrupt alone, not from
+    /// tape content), so a driver-generated tape suffix must reproduce the identical console output
+    /// a direct boot with the same seed does, regardless of what bytes the driver happened to draw.
+    #[test]
+    fn boot_snapshot_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch() {
+        let kernel = virtio_rng_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
+        let spec = DriverGenerateSpec {
+            seed: 7,
+            count: 3,
+            tape_len_bytes: 4,
+            strategy: baud_driver::StrategySpec::default(),
+            frame_run_id_prefix: None,
+        };
+
+        let (outcomes, _summary, _persisted) =
+            boot_snapshot_and_generate(&kernel, cmdline, spec, None, None, None, virtio_rng)
+                .expect("boot_snapshot_and_generate with virtio_rng failed");
+
+        let ((direct_console_output, ..), _direct_records) =
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng)
+                .expect("direct boot_run_and_drain with virtio_rng failed");
+
+        assert_eq!(outcomes.len(), 3);
+        for outcome in &outcomes {
+            assert!(outcome.mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
+            assert_eq!(
+                outcome.console_output.first(), Some(&b'R'),
+                "the guest's own ISR marker must still be the first byte observed through a \
+                 generated branch"
+            );
+            assert_eq!(
+                outcome.console_output, direct_console_output,
+                "a driver-generated branch must deliver the real virtio-rng interrupt to the \
+                 guest's own ISR, observing the exact same seeded entropy byte a direct boot with \
+                 the identical seed does, regardless of the generated tape suffix"
+            );
+        }
     }
 
     /// Server-level analogue of `baud-multiverse`'s own `double_boot_memory_identical`
@@ -2051,6 +2139,51 @@ mod tests {
         );
     }
 
+    /// Generate-mode analogue of `resume_and_branch_with_virtio_rng_delivers_interrupt_and_restore_
+    /// reproduces_it` — closes the same "generate mode is unaffected" gap
+    /// `boot_snapshot_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch` closes for a
+    /// fresh boot, but for `/run/kvm/resume`'s generate mode (`resume_and_generate`) instead.
+    #[test]
+    fn resume_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch() {
+        let kernel = virtio_rng_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let (_dir, store) = temp_snapshot_store();
+        let run_id = "virtio-rng-generate-restore-test";
+        let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
+        let spec = DriverGenerateSpec {
+            seed: 7,
+            count: 3,
+            tape_len_bytes: 4,
+            strategy: baud_driver::StrategySpec::default(),
+            frame_run_id_prefix: None,
+        };
+
+        let (_outcomes, _records, persisted) =
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None)
+                .expect("persist-only boot_snapshot_and_branch failed");
+        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        assert_eq!(returned_run_id, run_id);
+
+        let (resumed_outcomes, _summary) =
+            resume_and_generate(&store, run_id, &node_id_hex, spec, None, virtio_rng)
+                .expect("resume_and_generate with virtio_rng failed");
+
+        let ((direct_console_output, ..), _direct_records) =
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng)
+                .expect("direct boot_run_and_drain with virtio_rng failed");
+
+        assert_eq!(resumed_outcomes.len(), 3);
+        for outcome in &resumed_outcomes {
+            assert!(outcome.mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
+            assert_eq!(
+                outcome.console_output, direct_console_output,
+                "a resumed, driver-generated branch must deliver the real virtio-rng interrupt to \
+                 the guest's own ISR, observing the exact same seeded entropy byte a direct boot \
+                 with the identical seed does"
+            );
+        }
+    }
+
     #[test]
     fn resume_rejects_unknown_run() {
         let (_dir, store) = temp_snapshot_store();
@@ -2159,7 +2292,7 @@ mod tests {
             frame_run_id_prefix: None,
         };
         let (_outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None)
                 .expect("boot_snapshot_and_generate with persist failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2250,7 +2383,7 @@ mod tests {
         };
 
         let (outcomes, summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None)
                 .expect("boot_snapshot_and_generate failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2327,7 +2460,7 @@ mod tests {
         };
 
         let (outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None)
                 .expect("boot_snapshot_and_generate failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2484,7 +2617,7 @@ mod tests {
             strategy: baud_driver::StrategySpec::default(),
             frame_run_id_prefix: None,
         };
-        let (outcomes, _summary) = resume_and_generate(&store, run_id, &node_id_hex, spec, None)
+        let (outcomes, _summary) = resume_and_generate(&store, run_id, &node_id_hex, spec, None, None)
             .expect("resume_and_generate failed");
 
         assert_eq!(outcomes.len(), 3);
@@ -2537,7 +2670,7 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None)
+        resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None, None)
             .expect("first resume_and_generate failed");
         let run = baud_snapshot_store::RunId::new(run_id.to_owned());
         assert!(store.has_driver_state(&run), "generate mode must persist driver state when it persists at all");
@@ -2546,7 +2679,7 @@ mod tests {
         assert_eq!(state_after_first.generation, 3, "generation must advance by spec.count on the first call");
         assert_eq!(state_after_first.reservoir.len(), 3, "every generation's tape should join the reservoir");
 
-        resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None)
+        resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None, None)
             .expect("second resume_and_generate failed");
         let state_after_second: baud_driver::DriverState =
             serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state")).expect("decode state");

@@ -5787,3 +5787,57 @@ New drive/pkg-virtio-rng-branch-resume-cli.sh (comprehensive real-hardware end-t
 ---
 
 Post-push verification: git push was a clean fast-forward (2ceff4e..7d91a90), working tree clean, origin/main matches local main exactly. All verification (build/clippy/test/drive gate, including the new pkg-virtio-rng-branch-resume-cli.sh) was run against this exact commit before pushing.
+
+## 2026-07-26T19:00:56 UTC (38min) - Session usage — build-29 [sonnet]
+- cost $11.7177 (from claude -p)
+- context 299,031 tok peak of 1M (30%) across 135 inference calls, monotonic
+- models sonnet-5 $11.7146 (in 292 / out 82,143 / cache-read 28,223,780) · haiku-4-5 $0.0031
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/029-build-29.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 30
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Read todo.md Build Status. Remaining open items: (1) virtio_rng silently ignored in 'generate' mode for /run/kvm/branch and /run/kvm/resume; (2) virtio_mmio driver-binding research question; (3) virtio_rng_reseed_is_deterministic needs a real Linux guest; (4) H8 Mario blocked on FCEUX Qt5 packaging; (5) H9 Ubuntu not started. Investigating generate-mode virtio_rng wiring as the next concrete, scoped step...
+
+Chose closing todo.md §14 item 1's generate-mode virtio_rng gap: /run/kvm/branch and /run/kvm/resume's generate (DriverGenerateSpec) mode silently ignores the virtio_rng field today, unlike the fixed-tape (branch_tapes_hex) mode wired last iteration. All the underlying Multiverse combinators already exist; this is pure server-route wiring plus tests.
+
+Wired virtio_rng through generate-mode server routes (run_driver_generated_branches_with_persist, boot_snapshot_and_generate, resume_and_generate) and fixed a real CLI bug where kvm-branch/kvm-resume never sent virtio_rng in the JSON body at all when --generate-seed was set. Building to check for missed call sites...
+
+Added two new server-level tests for generate-mode virtio_rng (boot_snapshot_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch and resume_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch), mirroring the existing fixed-tape ones. Building and running baud-server tests now...
+
+cargo build and clippy both clean (only pre-existing warnings in unrelated files). Running the new and existing virtio_rng generate-mode tests on real /dev/kvm now...
+
+All 5 virtio_rng tests pass on real /dev/kvm, including the two new generate-mode tests. Running full cargo test --workspace now...
+
+cargo test --workspace: all green, 0 failures across every crate. Running drive/h0.sh through h7.sh next, one at a time...
+
+drive/h0.sh PASS. Running h1..h7 sequentially...
+
+h0-h5 all PASS. Continuing h6, h7...
+
+h0-h7 all PASS (8/8). Running m9..m13 next...
+
+m9-m13 all PASS. Running pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh, pkg-virtio-rng-branch-resume-cli.sh next (these most directly exercise the CLI wiring I touched)...
+
+All existing drive scripts pass. Wrote a new drive/pkg-virtio-rng-generate-cli.sh proving generate-mode virtio_rng end-to-end through the real 'baud' CLI (both kvm-branch and kvm-resume). Running it now...
+
+New drive/pkg-virtio-rng-generate-cli.sh PASSES, proving generate-mode virtio_rng end-to-end via the real CLI (including the CLI body-construction bug fix). Updating todo.md to close this gap now...
+
+Updated todo.md §14 to record this iteration's generate-mode virtio_rng closure and the CLI-body bug fix. Running final cargo build/clippy/test regression pass before committing...
+
+## 2026-07-26T19:33:16 UTC - Changes committed.
+- Wired virtio_rng through /run/kvm/branch's and /run/kvm/resume's generate (DriverGenerateSpec) mode, closing the last-open half of todo.md §14's virtio-rng gap; also fixed a real, independent CLI bug where --virtio-rng-seed silently never reached the server when --generate-seed was set.
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-cli/src/cmds/run.rs, drive/pkg-virtio-rng-generate-cli.sh (new), todo.md.
+- **Brief description of changes:**
+  - run_driver_generated_branches_with_persist (and its boot_snapshot_and_generate/resume_and_generate/run_driver_generated_branches wrappers) gained a virtio_rng: Option<(u64, u8, u32)> parameter, mirroring run_branches's existing fixed-tape dispatch: enable_virtio_rng/seed_virtio_rng_entropy fresh on every forked branch, then dispatch on (periodic_timer, virtio_rng) to the matching run_until_branch_or_halt* combinator (all four combinators already existed from the prior iteration — pure server-route wiring, no new baud-multiverse code).
+  - branch()/resume() HTTP handlers now pass their already-parsed virtio_rng through to the generate-mode functions, and the frame-persistence KvmBootParams they build for a generated branch's replay row now carry the real virtio_rng value instead of a hardcoded None.
+  - Found and fixed a real CLI bug while wiring this: baud-cli's kvm-branch/kvm-resume commands only ever set body["virtio_rng"] inside the fixed-tape (branch_tapes_hex) arm of their generate/fixed-tape match, so --virtio-rng-seed silently vanished from the request whenever --generate-seed was set — moved both blocks out of the else arm so they apply unconditionally.
+  - Updated stale doc comments on RunKvmBranchBody::virtio_rng/RunKvmResumeBody::virtio_rng and the CLI's --virtio-rng-seed flags that claimed "generate mode is unaffected"/"only honored in fixed-tape mode".
+  - New unit tests (real-hardware-verified): boot_snapshot_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch, resume_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch — each generates 3 branches against virtio-rng-guest (which never reads its own tape suffix) and confirms every one's console output matches a direct boot with the identical seed.
+  - New drive/pkg-virtio-rng-generate-cli.sh proves it end-to-end through the real `baud` CLI binary (kvm-branch --generate-seed/--generate-count/--virtio-rng-seed, then kvm-resume the same way against the persisted point) — this is the test that would have caught the CLI-body bug, since it drives the actual binary rather than constructing JSON directly.
+  - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh, pkg-virtio-rng-branch-resume-cli.sh, and the new pkg-virtio-rng-generate-cli.sh all PASS on real /dev/kvm.
+---

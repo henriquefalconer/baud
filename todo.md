@@ -1900,17 +1900,53 @@ snapshot, not a duplicate of it.
      warnings in any touched file); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5),
      `drive/pkg-boot-cli.sh`, `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`, and
      the new `drive/pkg-virtio-rng-branch-resume-cli.sh` all PASS on real `/dev/kvm`, no regressions.
-     **Still open**: `generate` mode (`/run/kvm/branch`'s and `/run/kvm/resume`'s
-     `DriverGenerateSpec` path) still runs every branch with virtio_rng disabled, even when the
-     caller sets `virtio_rng` — the field is silently ignored there, not rejected (a caller relying
-     on generate-mode + virtio_rng would get no error, just no device); the "which vector would an
-     unmodified Linux guest's real `virtio_mmio` driver bind to" research question remains untouched;
-     `virtio_rng_reseed_is_deterministic` (the spec-named test) still needs a real Linux guest that
-     actually negotiates and uses the device, not just this hand-assembled fixture, and no fixture
-     exists yet that both drives virtio-rng and emits frames in the same guest (so
-     `render_frames_from_real_restore`'s virtio_rng plumbing is only proven as a no-op so far, same
-     caveat `render_frames_from_real_replay`'s own test already had); H8 Mario is still blocked on the
-     FCEUX Qt5/SDL2 packaging problem; H9 Ubuntu is still not started.
+     **This iteration closes the last-open half of the virtio-rng gap: `generate` mode.**
+     `/run/kvm/branch`'s and `/run/kvm/resume`'s `DriverGenerateSpec` path
+     (`run_driver_generated_branches_with_persist`, `crates/baud-server/src/routes/run_kvm.rs`) used
+     to silently run every driver-generated branch with virtio_rng disabled even when the caller set
+     the field — no error, just no device. It now threads `virtio_rng` through exactly like the
+     fixed-tape path added last iteration: `enable_virtio_rng`/`seed_virtio_rng_entropy` on each
+     freshly forked branch, then dispatches on `(periodic_timer, virtio_rng)` to the matching one of
+     the four `run_until_branch_or_halt*` combinators (all of which already existed —
+     this is pure route-level wiring, no new `baud-multiverse` primitive needed).
+     `boot_snapshot_and_generate`/`resume_and_generate` both gained the same `virtio_rng` parameter,
+     threaded from `RunKvmBranchBody::virtio_rng`/`RunKvmResumeBody::virtio_rng` (both fields already
+     existed; only their doc comments claiming "generate mode is unaffected" were wrong after this
+     change and are now fixed).
+     **A real, independent CLI-side bug was found and fixed alongside this**: `baud-cli`'s
+     `kvm-branch`/`kvm-resume` handlers (`crates/baud-cli/src/cmds/run.rs`) only ever wrote
+     `body["virtio_rng"]` inside the fixed-tape (`else`) arm of the generate/fixed-tape match — so
+     `--virtio-rng-seed` silently vanished from the HTTP request whenever `--generate-seed` was also
+     set, even before this iteration's server-side fix, and would have kept silently vanishing after
+     it. Moved both `if let Some(seed) = virtio_rng_seed { body["virtio_rng"] = ... }` blocks out of
+     the `else` arm so they run unconditionally in both commands.
+     New tests, both real-hardware-verified: `boot_snapshot_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch`
+     and `resume_and_generate_with_virtio_rng_delivers_interrupt_to_a_branch`
+     (`crates/baud-server/src/routes/run_kvm.rs`) — each generates 3 branches against
+     `virtio-rng-guest` (which never reads its own tape suffix — see that fixture's `BUILD.md` — so a
+     matching console output across all 3 differently-generated tapes proves the interrupt was
+     delivered, not that the tape happened to match) and confirms every one's console output matches
+     a direct `boot_run_and_drain` boot with the identical seed. New drive script
+     `drive/pkg-virtio-rng-generate-cli.sh` proves it end-to-end through the real `baud` CLI (not just
+     the library level) against a live `baud-server` on real `/dev/kvm`: `kvm-branch --generate-seed
+     --generate-count 3 --virtio-rng-seed 42` delivers the interrupt to all 3 branches, and
+     `kvm-resume --generate-seed --generate-count 2 --virtio-rng-seed 42` against the persisted point
+     reproduces it with no re-boot — this is also the test that would have caught the CLI-body bug
+     above, since it drives the real CLI binary end-to-end rather than constructing the JSON body
+     directly.
+     `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new
+     warnings); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`,
+     `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`,
+     `drive/pkg-virtio-rng-branch-resume-cli.sh`, and the new
+     `drive/pkg-virtio-rng-generate-cli.sh` all PASS on real `/dev/kvm`, no regressions.
+     **Still open**: the "which vector would an unmodified Linux guest's real `virtio_mmio` driver
+     bind to" research question remains untouched; `virtio_rng_reseed_is_deterministic` (the
+     spec-named test) still needs a real Linux guest that actually negotiates and uses the device,
+     not just this hand-assembled fixture, and no fixture exists yet that both drives virtio-rng and
+     emits frames in the same guest (so `render_frames_from_real_restore`'s virtio_rng plumbing is
+     only proven as a no-op so far, same caveat `render_frames_from_real_replay`'s own test already
+     had); H8 Mario is still blocked on the FCEUX Qt5/SDL2 packaging problem; H9 Ubuntu is still not
+     started.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window
