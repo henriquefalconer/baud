@@ -63,6 +63,7 @@ The deterministic VMM and everything execution reproducibility depends on.
 |------|------|---------|
 | [baud-raftlet.md](./baud-raftlet.md) | examples/raftlet (guest image) | Validation target (planted-bug distributed toy) |
 | [baud-mario.md](./baud-mario.md) | examples/mario (guest image) | Validation target (FCEUX in Linux driven to game completion) |
+| [baud-ubuntu.md](./baud-ubuntu.md) | examples/ubuntu (guest image) | Validation target (full Ubuntu 18.04.1 boot; cross-VM determinism fingerprint) |
 
 ## Superseded
 
