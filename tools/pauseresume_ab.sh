@@ -125,10 +125,17 @@ if [[ "$RUN_ARM_C" == 1 ]]; then
     neutralize_pauseresume && add_exclude_host || { echo "ERROR: Arm C patch did not apply; reverting." >&2; exit 1; }
     git --no-pager diff --stat -- "$FILE"
 
+    # Force a FULL rebuild: A->B->C reuse the incremental cache, and rustc's incremental
+    # compilation can emit a spurious error (observed: a lifetime error in an unrelated test
+    # closure) that a clean build does not. This makes the compile-check authoritative.
+    echo "[ab] cargo clean -p baud-multiverse (full rebuild; rules out incremental-cache glitches)..."
+    cargo clean -p baud-multiverse >/dev/null 2>&1 || true
     echo "[ab] compile-checking Arm C (cargo test --no-run)..."
     if ! cargo test -q -p baud-multiverse --lib --no-run >/tmp/ab_armc_build.log 2>&1; then
-        echo "  [ab] Arm C DID NOT COMPILE — set_exclude_host may differ in this perf-event(-open-sys)"
-        echo "       version; see /tmp/ab_armc_build.log. Skipping the run."
+        echo "  [ab] Arm C DID NOT COMPILE (from a clean build) — see /tmp/ab_armc_build.log."
+        echo "       If the error is 'no method set_exclude_host', the perf-event(-open-sys) version"
+        echo "       differs; if it's an unrelated lifetime/borrow error, that closure has a latent"
+        echo "       bug in the current tree (not caused by exclude_host). Skipping the run."
         C_STATUS="compile-fail"
         git checkout -- "$FILE"
     else
@@ -142,7 +149,15 @@ if [[ "$RUN_ARM_C" == 1 ]]; then
         DPID=$!
         wait "$DPID"; RC=$?
         cat "$LOGC"
-        if [[ "$RC" -eq 124 || "$RC" -eq 143 ]]; then
+        if grep -qE 'error: could not compile|error\[E[0-9]|error: lifetime' "$LOGC"; then
+            # The build failed DURING the drive even though the pre-check passed -> a
+            # nondeterministic (incremental) rebuild. Not a determinism result; force a clean retry.
+            echo "  [ab] Arm C BUILD FAILED during the run (pre-check had passed) — a nondeterministic"
+            echo "       rebuild; this is NOT a determinism result. Re-run: cargo clean -p baud-multiverse"
+            echo "       && RUN_ARM_C=1 bash tools/pauseresume_ab.sh"
+            C_STATUS="build-failed"
+            restore_module
+        elif [[ "$RC" -eq 124 || "$RC" -eq 143 ]]; then
             echo "  [ab] Arm C exceeded ${ARMC_TIMEOUT}s — the work-clock stalled (exclude_host degenerate under guest exec)."
             C_STATUS="stalled"
             restore_module
@@ -198,7 +213,12 @@ fi
 if [[ "$RUN_ARM_C" == 1 ]]; then
     case "$C_STATUS" in
       compile-fail)
-        echo "  A-vs-C: INCONCLUSIVE — Arm C didn't compile (set_exclude_host name/version mismatch)." ;;
+        echo "  A-vs-C: INCONCLUSIVE — Arm C didn't compile from a clean build (see /tmp/ab_armc_build.log;"
+        echo "          'no method set_exclude_host' = version mismatch, else a latent lifetime/borrow bug"
+        echo "          in an unrelated closure — not caused by exclude_host)." ;;
+      build-failed)
+        echo "  A-vs-C: INCONCLUSIVE — Arm C's build failed mid-run (nondeterministic incremental rebuild),"
+        echo "          so exclude_host was NOT evaluated. Retry: cargo clean -p baud-multiverse && RUN_ARM_C=1 …" ;;
       stalled)
         echo "  A-vs-C: exclude_host is DEGENERATE under guest execution (work-clock stalled -> hang)."
         echo "          It CANNOT replace pause/resume; the code's 'exclude_host non-functional' claim stands." ;;
