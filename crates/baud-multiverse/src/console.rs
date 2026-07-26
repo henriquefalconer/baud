@@ -21,6 +21,7 @@
 // hardware-independent and runs on this Windows dev machine with no KVM/perf, the same pattern
 // `cpuid.rs`/`layout.rs`/`baud-vcpu`'s `boundary.rs` use.
 
+use crate::pic8259::Pic8259;
 use crate::tape_bus::TapeBus;
 use crate::virtio_mmio::VirtioMmioTransport;
 use baud_vcpu::{Bus, OpenBusFallback, OPEN_BUS_BYTE};
@@ -217,17 +218,27 @@ impl Bus for Cmos {
     fn mmio_write(&mut self, _addr: u64, _data: &[u8]) {}
 }
 
-/// Composes [`Console`] (COM1), [`Cmos`] (ports 0x70/0x71), and [`TapeBus`] (the tape device,
+/// Composes [`Console`] (COM1), [`Cmos`] (ports 0x70/0x71), [`Pic8259`] (ports
+/// 0x20/0x21/0xA0/0xA1, `crate::pic8259`), and [`TapeBus`] (the tape device,
 /// specs/baud-tape-device.md) with [`OpenBusFallback`] for every other address — the device bus
 /// the boot flow's run loop dispatches every exit through (`linux::Multiverse`). Matches todo.md
-/// §3.6's subtractive rule: "down to a console plus the tape device" (`Cmos` is not a fourth real
-/// device in the same sense — it never reads real time or real hardware, it exists only to
-/// terminate a boot-time poll loop deterministically, see that type's doc).
+/// §3.6's subtractive rule: "down to a console plus the tape device" (`Cmos`/`Pic8259` are not
+/// real devices in the same sense — neither reads real time/hardware or ever raises a real
+/// interrupt of its own; both exist only to satisfy a boot-time guest probe deterministically,
+/// see each type's own doc).
 #[derive(Default)]
 pub struct DeviceBus {
     pub console: Console,
     pub tape: TapeBus,
     cmos: Cmos,
+    /// The dual-8259 PIC bookkeeping stub (`crate::pic8259`), ports 0x20/0x21/0xA0/0xA1 -- makes
+    /// an unmodified Linux guest's `probe_8259A()`/`init_8259A()` succeed instead of falling
+    /// through to `OpenBusFallback`'s fixed `0xFF`, which previously left `nr_legacy_irqs() == 0`
+    /// and every ISA-IRQ `request_irq()` (including `virtio_mmio.device=`'s) failing with
+    /// `-EINVAL`. Present unconditionally (unlike `virtio_rng`, there is no opt-in state to
+    /// gate this on) since it is pure guest-write-derived bookkeeping with no side effects on any
+    /// other device.
+    pic: Pic8259,
     /// The virtio-rng transport register block (`crate::virtio_mmio`), `None` until
     /// [`Self::enable_virtio_rng`] is called — every existing constructor (`Default`,
     /// [`Self::with_tape`], [`Self::restore`]) leaves it unset, so no existing boot path's MMIO
@@ -260,6 +271,14 @@ impl DeviceBus {
     /// from outside `console.rs`).
     pub fn with_tape(tape: Vec<u8>) -> Self {
         DeviceBus { tape: TapeBus::new(tape), ..Default::default() }
+    }
+
+    /// The dual-8259 PIC's current bookkeeping state — exposed so a caller/test can confirm a
+    /// guest's own `probe_8259A()`/`init_8259A()`/`enable_8259A_irq()` sequence, issued through
+    /// real `IN`/`OUT` PIO exits, took effect (`Pic8259::master_imr`/`slave_imr`) without needing
+    /// to poke `Bus::pio_read` directly.
+    pub fn pic(&self) -> &Pic8259 {
+        &self.pic
     }
 
     /// Installs a virtio-rng transport at [`crate::layout::VIRTIO_MMIO_RNG_BASE`] — opt-in (no
@@ -354,6 +373,7 @@ impl DeviceBus {
             console: Console::with_output(console_output),
             tape: tape_bus,
             cmos: Cmos,
+            pic: Pic8259::default(),
             virtio_rng: None,
             #[cfg(target_os = "linux")]
             virtio_rng_queue: None,
@@ -372,6 +392,8 @@ impl Bus for DeviceBus {
             self.tape.pio_read(port, data);
         } else if Cmos::in_range(port) {
             self.cmos.pio_read(port, data);
+        } else if Pic8259::in_range(port) {
+            self.pic.pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -384,6 +406,8 @@ impl Bus for DeviceBus {
             self.tape.pio_write(port, data);
         } else if Cmos::in_range(port) {
             self.cmos.pio_write(port, data);
+        } else if Pic8259::in_range(port) {
+            self.pic.pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }

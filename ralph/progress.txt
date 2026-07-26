@@ -5892,3 +5892,46 @@ drive/m9.sh-m13.sh all PASS (5/5). Full regression suite green with no code chan
   - Caveat recorded in todo.md: no NES ROM was loaded in either test (none exists in-repo, for copyright reasons), so it remains unproven that fceux under Xvfb can run an actual game loop or drive the Lua harness over time — only that process startup itself doesn't crash the way it does under the offscreen QPA plugin. H8 is still open, not unblocked.
   - Verification: no Rust code was touched this iteration; ran the full regression suite anyway per the loop protocol — cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, only pre-existing documented warnings); drive/h0.sh-h7.sh (8/8) and drive/m9.sh-m13.sh (5/5) all PASS on real /dev/kvm.
 ---
+
+Post-push verification: git push was a clean fast-forward (5177d65..266211e), working tree clean, origin/main matches local main exactly (266211e). All verification (build/clippy/test, drive/h0.sh-h7.sh, drive/m9.sh-m13.sh) was run against this exact commit's parent before pushing (no code changed, so no re-run needed after push).
+
+Iteration complete: empirically ruled out QT_QPA_PLATFORM=offscreen for FCEUX and found Xvfb as a viable headless-rendering alternative, recorded in todo.md, all verification green, pushed clean. todo.md still has pending items (H8 Mario -- Xvfb+X11 packaging still needed, H9 Ubuntu not started, virtio_mmio IRQ-vector research for an unmodified Linux guest, Buildroot/pinned-Nix image pipeline) -- emitting NEXT.
+
+## 2026-07-26T19:58:28 UTC (24min) - Session usage — build-31 [sonnet]
+- cost $3.1841 (from claude -p)
+- context 161,534 tok peak of 1M (16%) across 46 inference calls, monotonic
+- models sonnet-5 $3.1809 (in 106 / out 25,605 / cache-read 6,243,583) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260726T004845Z/031-build-31.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 32
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and progress history...
+
+Chose to tackle the long-standing 'which vector does an unmodified Linux guest's virtio_mmio driver resolve to' research question -- the VMM never calls KVM_CREATE_IRQCHIP, so there's no PIC/IOAPIC, and every prior iteration explicitly deferred this. It's the direct blocker for virtio_rng_reseed_is_deterministic (needs a real Linux guest, not the hand-assembled fixture) and for H9 Ubuntu's device interrupts generally. Dispatching an Opus subagent to research the concrete architecture question before implementing.
+
+Implemented crates/baud-multiverse/src/pic8259.rs -- a dual-8259 PIC bookkeeping stub answering the long-open 'which vector does an unmodified Linux virtio_mmio driver resolve to' question: isa_irq_vector(irq)=0x30+irq (grep-confirmed against real Linux 6.18.33 source via the Opus research subagent). Wired into DeviceBus at ports 0x20/0x21/0xA0/0xA1 (previously fell through to OpenBusFallback's fixed 0xFF, which fails Linux's probe_8259A() and leaves nr_legacy_irqs()==0, making every ISA-IRQ request_irq() -EINVAL). 8 new hardware-independent unit tests all pass. cargo build -p baud-multiverse clean. Now extending the existing virtio-rng-guest hand-assembled fixture to exercise the real probe_8259A+init_8259A bring-up sequence on real hardware...
+
+New test guests_own_pic_bring_up_sequence_leaves_the_expected_bookkeeping_state PASSES on real /dev/kvm -- proves the guest's real IN/OUT PIO exits (probe_8259A + init_8259A ICW1-4 both chips + enable_8259A_irq(5)-equivalent unmask) round-trip correctly through the new Pic8259 stub, not just in the pure-Rust unit tests. Rebuilt the virtio-rng-guest fixture's bzImage with the extended payload.s. Now running full cargo build/clippy/test --workspace and the drive/*.sh gate before committing...
+
+cargo build/clippy --workspace clean (0 new warnings; fixed one my own new pic8259.rs test introduced). cargo test --workspace: ALL GREEN, 0 failures (baud-multiverse 128 passed/8 ignored -- up from 119, the 9 new pic8259 tests including the real-hardware one; baud-server 43 passed/2 ignored, unchanged). Running drive/h0.sh through h7.sh one at a time next...
+
+drive/h0.sh-h7.sh: 8/8 PASS. drive/m9.sh-m13.sh: 5/5 PASS. Running the pkg-virtio-rng-*-cli.sh regression scripts next since they exercise the DeviceBus/console.rs surface I touched...
+
+All drive/*.sh regression scripts green (h0-h7, m9-m13, pkg-boot-cli, pkg-virtio-rng-cli, pkg-virtio-rng-replay-cli, pkg-virtio-rng-branch-resume-cli, pkg-virtio-rng-generate-cli) -- the new Pic8259 device wired unconditionally into DeviceBus introduces no regressions anywhere, including the real Linux-kernel boot path (pkg-boot-cli.sh boots linux-guest's real 6.18 kernel to /init). Dispatching a subagent to update todo.md with this iteration's finding now...
+
+todo.md updated with this iteration's finding (the 'which vector' research question is answered, Pic8259 implemented and hardware-verified). Appending the Changes-committed progress block and committing now...
+
+## 2026-07-26T20:35:33 UTC - Changes committed.
+- Answered the long-open "which vector would an unmodified Linux guest's real virtio_mmio driver bind to" research question with real code and a real-hardware test: implemented Pic8259, a dual-8259 PIC bookkeeping stub, and extended the virtio-rng-guest fixture to exercise the real Linux PIC bring-up sequence.
+- Files changed: crates/baud-multiverse/src/pic8259.rs (new), crates/baud-multiverse/src/lib.rs, crates/baud-multiverse/src/console.rs, crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/virtio-rng-guest/payload.s, crates/baud-multiverse/tests/fixtures/virtio-rng-guest/bzImage (rebuilt), crates/baud-multiverse/tests/fixtures/virtio-rng-guest/BUILD.md, todo.md.
+- **Brief description of changes:**
+  - Dispatched an Opus research subagent to trace, with grep-confirmed citations against real Linux 6.18.33 source, exactly why an unmodified guest's virtio_mmio driver could never register its interrupt handler on this VMM (no in-kernel irqchip means probe_8259A() fails against the open-bus fallback's fixed 0xFF, so nr_legacy_irqs()==0 and every ISA-IRQ request_irq() returns -EINVAL) and what vector it would need once fixed (ISA_IRQ_VECTOR(irq) = 0x30+irq, arch/x86/include/asm/irq_vectors.h) -- plus a kernel-source-cited ruling-out of the two heavier alternatives (KVM_CREATE_IRQCHIP breaks baud's own injection mechanism and adds host-timing risk; KVM_SET_LAPIC/KVM_GET_LAPIC require an irqchip too).
+  - New crates/baud-multiverse/src/pic8259.rs: a pure-bookkeeping, hardware-independent dual-8259 stub (IMR + ICW1-4 init-sequence state machine per chip, EOI writes absorbed as no-ops since baud always delivers directly via KVM_INTERRUPT, unchanged) plus isa_irq_vector(irq)=0x30+irq. 8 new unit tests, all pass.
+  - Wired unconditionally into console::DeviceBus at ports 0x20/0x21/0xA0/0xA1 (previously open-bus fallback).
+  - Extended tests/fixtures/virtio-rng-guest/payload.s to issue the exact probe_8259A + init_8259A (ICW1-4, both chips) + enable_8259A_irq(5)-equivalent unmask sequence a real Linux boot would, ahead of its existing virtio-mmio negotiation; rebuilt bzImage. New real-hardware test guests_own_pic_bring_up_sequence_leaves_the_expected_bookkeeping_state (via a new Multiverse::pic() accessor) confirms the guest's real PIO writes land correctly (master IMR 0xdf, slave 0xff) on real /dev/kvm.
+  - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings -- fixed one clippy identity_op my own new test introduced before commit); baud-multiverse 119->128 passed (8 ignored, unchanged); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), drive/pkg-boot-cli.sh (real Linux 6.18 kernel boot to /init, confirming no regression), drive/pkg-virtio-rng-cli.sh, drive/pkg-virtio-rng-replay-cli.sh, drive/pkg-virtio-rng-branch-resume-cli.sh, drive/pkg-virtio-rng-generate-cli.sh all PASS on real /dev/kvm, no regressions.
+  - Still open: a real unmodified Linux guest boot far enough to exercise the real virtio_mmio.c/virtio-rng.c drivers (needs CONFIG_VIRTIO* + a real initramfs, blocked on the same Buildroot/pinned-Nix pipeline as H8/H9) -- so virtio_rng_reseed_is_deterministic still can't pass, but the vector half of that blocker is now closed; H8 Mario (FCEUX/Xvfb packaging) and H9 Ubuntu remain not started.
+---

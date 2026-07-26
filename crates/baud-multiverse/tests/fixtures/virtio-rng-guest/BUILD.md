@@ -46,14 +46,33 @@ exact byte an independent `SplitMix64::new(seed).next_u64()` computation on the 
 `DeviceBus::service_virtio_rng` wrote into guest memory are the ones the guest's own code reads
 back, through a real delivered CPU interrupt, with no in-kernel irqchip at all.
 
-## What this does *not* answer
+## Update: the PIC bring-up sequence, and the vector question
 
-This closes the "can baud deliver *a* real interrupt to *a* guest's virtio-rng ISR, at a vector
+This closed the "can baud deliver *a* real interrupt to *a* guest's virtio-rng ISR, at a vector
 baud itself chooses" question — using exactly the same "just stage `KVM_SET_VCPU_EVENTS` and let
 the next `KVM_RUN` deliver it" trick `timer-guest` already proved for Linux's fixed
-`LOCAL_TIMER_VECTOR`. It does **not** answer which vector an *unmodified Linux* kernel's real
-`virtio_mmio`/`virtio_rng` driver stack would resolve its `virtio_mmio.device=<size>@<base>:<irq>`
-cmdline IRQ number to via `request_irq()` — unlike the LAPIC timer, an ordinary device IRQ line is
-normally resolved through an IOAPIC/PIC, which doesn't exist here, so a real Linux guest's own
-vector assignment for this device remains unverified. Nor does this wire virtio-rng into any real
-boot's cmdline/CLI/server route — both are still open, separate work (todo.md §14).
+`LOCAL_TIMER_VECTOR`. What it did **not** answer, at the time it was written, was which vector an
+*unmodified Linux* kernel's real `virtio_mmio`/`virtio_rng` driver stack would resolve its
+`virtio_mmio.device=<size>@<base>:<irq>` cmdline IRQ number to via `request_irq()` — unlike the
+LAPIC timer, an ordinary device IRQ line is normally resolved through an IOAPIC/PIC, which this
+VMM registers no in-kernel emulation of at all.
+
+That question is now answered, and `payload.s` was extended to prove the mechanism on real
+hardware, not just reason about it: `crate::pic8259::Pic8259` is a new dual-8259 bookkeeping stub
+(ports 0x20/0x21/0xA0/0xA1) wired into `DeviceBus`, and `_start` now issues the exact byte
+sequence Linux's own `probe_8259A()` + `init_8259A()` (`arch/x86/kernel/i8259.c`) do — a
+distinguishing mask write/readback on each chip's data port, then the full ICW1→ICW4 handshake on
+both chips, then an `enable_8259A_irq(5)`-equivalent unmask — before the virtio-mmio negotiation
+below, proving the new stub doesn't disturb anything else this fixture depends on. Per
+`arch/x86/include/asm/irq_vectors.h`'s `ISA_IRQ_VECTOR(irq) = 0x30 + irq` (grep-confirmed against
+real Linux 6.18.33 source, see `pic8259.rs`'s own doc for the full derivation), an unmodified
+guest's `virtio_mmio.device=…:5` would resolve to vector `0x35` — this fixture's own IDT still
+uses its own independently-chosen `VECTOR` (`0x31`, unchanged) for the interrupt baud actually
+injects, since baud's direct-injection mechanism has never depended on the PIC's hardware ICW2
+vector base or on `ISA_IRQ_VECTOR()` either; `0x35` is what a *real* Linux `request_irq(5, …)`
+driver would need baud to inject at, once one exists.
+
+Nor does this wire virtio-rng into any real boot's cmdline/CLI/server route, or actually boot an
+unmodified Linux kernel far enough to exercise its real `virtio_mmio.c`/`virtio-rng.c` drivers
+(still blocked on the Buildroot/pinned-Nix guest-image pipeline, §4.5 — the same prerequisite
+blocking H8/H9) — both remain separate, still-open work (todo.md §14).

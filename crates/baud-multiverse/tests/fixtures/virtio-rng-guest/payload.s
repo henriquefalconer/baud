@@ -4,6 +4,14 @@
 
 .equ COM1, 0x3f8
 .equ VECTOR, 0x31
+
+# The legacy dual-8259 PIC ports (crate::pic8259) -- see below for why this fixture now also
+# issues the exact byte sequence Linux's own `probe_8259A()`/`init_8259A()` (`arch/x86/kernel/
+# i8259.c`) do, on real hardware, against baud's new `Pic8259` bookkeeping stub.
+.equ PIC_M_CMD, 0x20
+.equ PIC_M_DATA, 0x21
+.equ PIC_S_CMD, 0xa0
+.equ PIC_S_DATA, 0xa1
 # baud-multiverse always sets RIP = kernel_load + KERNEL_64BIT_ENTRY_OFFSET
 # (layout::KERNEL_LOAD_ADDR = 0x00200000, layout::KERNEL_64BIT_ENTRY_OFFSET = 0x200) -- same
 # runtime-base convention as ../timer-guest/payload.s; see its own comment for why absolute (non
@@ -55,6 +63,63 @@
 
 _start:
     lidt [rip + idtr]
+
+    # probe_8259A() (arch/x86/kernel/i8259.c): write a distinguishing mask byte to each chip's
+    # data (IMR) port and read it back -- on `OpenBusFallback` (fixed 0xff, ignores writes, what
+    # every VMM ever built for this fixture had before `crate::pic8259::Pic8259` existed) this
+    # readback would still read 0xff and the probe would conclude no PIC is present, so this
+    # fixture issuing it for real (even though nothing here branches on the result -- the
+    # equivalent host-side assertion lives in `pic8259.rs`'s own unit tests) proves the exact
+    # guest-visible byte pattern a real kernel issues survives round-trip through the new stub on
+    # real KVM, not just in a pure-Rust unit test.
+    mov dx, PIC_M_DATA
+    mov al, 0xfb
+    out dx, al
+    in al, dx
+    mov dx, PIC_S_DATA
+    mov al, 0xfb
+    out dx, al
+    in al, dx
+
+    # init_8259A(): ICW1 (init, cascade, ICW4 needed) -> ICW2 (hardware vector base, unmodeled by
+    # the stub -- see pic8259.rs's doc on why baud's own direct-injection vector is a function of
+    # the ISA IRQ number, not this byte) -> ICW3 (cascade wiring) -> ICW4 (8086 mode), master then
+    # slave -- the identical sequence a real Linux boot issues before any ISA IRQ, including the
+    # one `virtio_mmio.device=<size>@<base>:<irq>` would name, can be unmasked.
+    mov dx, PIC_M_CMD
+    mov al, 0x11
+    out dx, al
+    mov dx, PIC_M_DATA
+    mov al, 0x20
+    out dx, al
+    mov al, 0x04
+    out dx, al
+    mov al, 0x01
+    out dx, al
+
+    mov dx, PIC_S_CMD
+    mov al, 0x11
+    out dx, al
+    mov dx, PIC_S_DATA
+    mov al, 0x28
+    out dx, al
+    mov al, 0x02
+    out dx, al
+    mov al, 0x01
+    out dx, al
+
+    # enable_8259A_irq(5)'s real effect: unmask bit 5 on the master, leave the slave fully masked
+    # -- this fixture's own interrupt still arrives at baud's independently-chosen VECTOR (0x31)
+    # via direct `KVM_INTERRUPT` injection, never through this PIC (see pic8259.rs's doc); this is
+    # exercised purely to prove the bring-up sequence itself does not disturb anything else this
+    # fixture depends on (the virtio-mmio negotiation below, the IDT, COM1).
+    mov dx, PIC_M_DATA
+    mov al, 0xdf
+    out dx, al
+    mov dx, PIC_S_DATA
+    mov al, 0xff
+    out dx, al
+
     sti
 
     mov edi, VIRTIO_BASE

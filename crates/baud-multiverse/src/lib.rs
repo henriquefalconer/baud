@@ -33,6 +33,7 @@ pub mod console;
 pub mod cpuid;
 pub mod dirty;
 pub mod layout;
+pub mod pic8259;
 pub mod tape_bus;
 pub mod timesource;
 pub mod virtio_mmio;

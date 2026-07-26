@@ -1192,6 +1192,14 @@ impl Multiverse {
         self.bus.virtio_rng()
     }
 
+    /// The dual-8259 PIC bookkeeping stub's current state (`crate::pic8259::Pic8259`) — read
+    /// access for a caller/test that wants to confirm a guest's own `probe_8259A()`/
+    /// `init_8259A()`/`enable_8259A_irq()` sequence, issued through real `IN`/`OUT` PIO exits,
+    /// actually took effect.
+    pub fn pic(&self) -> &crate::pic8259::Pic8259 {
+        self.bus.pic()
+    }
+
     /// Drain any virtio-rng `QueueNotify`s since the last call ([`DeviceBus::service_virtio_rng`],
     /// given this guest's real memory) and, if at least one chain was actually drained, deliver a
     /// real interrupt at `vector` to this guest's vCPU right now — H4's exact-boundary engine
@@ -2542,6 +2550,40 @@ mod tests {
         assert_eq!(
             first.ram_hash, second.ram_hash,
             "guest RAM at the guest's own natural halt must be byte-identical across two boots"
+        );
+    }
+
+    /// Real-hardware proof that `crate::pic8259::Pic8259` — the dual-8259 bookkeeping stub that
+    /// answers todo.md §14's long-open "which vector would an unmodified Linux guest's real
+    /// `virtio_mmio` driver bind to" question (see `pic8259.rs`'s own doc, and
+    /// `tests/fixtures/virtio-rng-guest/BUILD.md`'s "Update" section) — actually observes real
+    /// guest `IN`/`OUT` PIO exits, not just the pure-Rust unit tests in `pic8259.rs` itself.
+    /// `payload.s` now issues the exact `probe_8259A()` + `init_8259A()` + `enable_8259A_irq(5)`
+    /// byte sequence Linux issues before any ISA IRQ can be used, ahead of its virtio-mmio
+    /// negotiation; this asserts the resulting bookkeeping state is exactly what that sequence
+    /// implies (`0xdf` = every bit set except bit 5, `0xff` = the slave left fully masked), and
+    /// that this didn't perturb the rest of the guest's run (the existing marker+entropy-byte
+    /// assertion `virtio_rng_interrupt_reaches_the_guests_own_isr` already covers).
+    #[test]
+    fn guests_own_pic_bring_up_sequence_leaves_the_expected_bookkeeping_state() {
+        let kernel = virtio_rng_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let mut mv = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+        mv.enable_virtio_rng();
+        mv.seed_virtio_rng_entropy(42);
+        const MAX_EXITS: u32 = 200_000;
+        mv.run_to_first_halt_with_virtio_rng(VIRTIO_RNG_VECTOR, MAX_EXITS)
+            .expect("run_to_first_halt_with_virtio_rng failed");
+        assert_eq!(
+            mv.pic().master_imr(),
+            0xdf,
+            "master PIC IMR must have only IRQ5's bit clear after the guest's own \
+             enable_8259A_irq(5)-equivalent write"
+        );
+        assert_eq!(
+            mv.pic().slave_imr(),
+            0xff,
+            "slave PIC IMR must stay fully masked -- this fixture never unmasks any slave line"
         );
     }
 

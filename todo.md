@@ -1939,14 +1939,89 @@ snapshot, not a duplicate of it.
      `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`,
      `drive/pkg-virtio-rng-branch-resume-cli.sh`, and the new
      `drive/pkg-virtio-rng-generate-cli.sh` all PASS on real `/dev/kvm`, no regressions.
-     **Still open**: the "which vector would an unmodified Linux guest's real `virtio_mmio` driver
-     bind to" research question remains untouched; `virtio_rng_reseed_is_deterministic` (the
-     spec-named test) still needs a real Linux guest that actually negotiates and uses the device,
-     not just this hand-assembled fixture, and no fixture exists yet that both drives virtio-rng and
-     emits frames in the same guest (so `render_frames_from_real_restore`'s virtio_rng plumbing is
-     only proven as a no-op so far, same caveat `render_frames_from_real_replay`'s own test already
-     had); H8 Mario is still blocked on the FCEUX Qt5/SDL2 packaging problem; H9 Ubuntu is still not
-     started.
+     **Still open (at the time of the above)**: the "which vector would an unmodified Linux guest's
+     real `virtio_mmio` driver bind to" research question remained untouched; `virtio_rng_reseed_
+     is_deterministic` (the spec-named test) still needed a real Linux guest that actually
+     negotiates and uses the device, not just this hand-assembled fixture, and no fixture existed
+     yet that both drives virtio-rng and emits frames in the same guest (so `render_frames_from_
+     real_restore`'s virtio_rng plumbing is only proven as a no-op so far, same caveat `render_
+     frames_from_real_replay`'s own test already had); H8 Mario was still blocked on the FCEUX
+     Qt5/SDL2 packaging problem; H9 Ubuntu was still not started.
+  2a. **The "which vector" research question is now answered, with real code and a real-hardware
+     test, not just theory.** Dispatched an Opus research subagent to trace exactly what an
+     unmodified x86_64 Linux kernel does when it parses `virtio_mmio.device=<size>@<base>:<irq>`
+     on its command line, grep-confirmed against real Linux 6.18.33 source
+     (`~/wsl-kernel-src/src`, already present on this dev host from the enforced-module work):
+     `vm_cmdline_set` (`drivers/virtio/virtio_mmio.c`) registers a `platform_device` with a raw
+     `IORESOURCE_IRQ` resource, no ACPI/DT/fwnode translation at all — the cmdline number *is* the
+     Linux virq number. `request_irq()` on it fails with `-EINVAL` unless `irq_to_desc()` finds a
+     preallocated descriptor, and legacy IRQ descriptors are only preallocated at all if
+     `probe_8259A()` (`arch/x86/kernel/i8259.c`) — which writes a mask byte to port 0x21 and reads
+     it back — succeeds; this VMM registers no in-kernel irqchip at all
+     (`KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD` are never called, confirmed again by grep) and ports
+     0x20/0x21/0xA0/0xA1 fell straight through to `OpenBusFallback` (fixed `0xFF`, ignores writes),
+     so the probe would fail, `legacy_pic` would fall back to `null_legacy_pic`,
+     `nr_legacy_irqs() == 0`, and *every* ISA-IRQ `request_irq()` — including virtio_mmio's — would
+     return `-EINVAL` on a real kernel. Once the probe succeeds and `init_8259A()`'s ICW1..ICW4
+     handshake completes, `init_IRQ`/`init_ISA_irqs` (`arch/x86/kernel/apic/vector.c`,
+     `arch/x86/include/asm/irq_vectors.h`) populate `vector_irq[]` via
+     `ISA_IRQ_VECTOR(irq) = ((0x20+16)&~15)+irq = 0x30+irq` for `irq` in `0..16` — **this is the
+     CPU vector baud's own direct-injection mechanism (`KVM_INTERRUPT`, unchanged) must target for
+     a real Linux guest's ISA IRQ N to reach that guest's own registered handler.** The research
+     also ruled out the two heavier alternatives with kernel-source citations:
+     `KVM_CREATE_IRQCHIP` is a hard no (`kvm_vcpu_ioctl_interrupt` returns `-ENXIO` once
+     `pic_in_kernel()`, deleting baud's entire exact-boundary injection mechanism, plus it adds a
+     host-hrtimer-driven in-kernel LAPIC timer — a real determinism risk); `KVM_SET_LAPIC`/`KVM_GET_
+     LAPIC` without an irqchip are both gated on `lapic_in_kernel(vcpu)` and return `-EINVAL`; a
+     devicetree/hand-built-MADT route still needs an IOAPIC model on top, no smaller than option
+     (a). **Implemented the recommended minimal path**: new `crates/baud-multiverse/src/pic8259.rs`
+     — a pure-bookkeeping dual-8259 stub (no dependencies, hardware-independent, same pattern as
+     `console::Cmos`) modeling exactly what `probe_8259A()`/`init_8259A()`/`enable_8259A_irq()`/
+     `mask_and_ack_8259A()` touch: each chip's IMR (mask register, `0xFF` at reset) and an ICW-
+     sequence state machine (`ExpectIcw2/3/4` gated on `ICW1`'s `SINGLE`/`NEED_ICW4` bits) — OCW2
+     EOI writes are absorbed as no-ops (nothing here ever actually raises anything; baud still
+     always delivers directly via `KVM_INTERRUPT` at an exact boundary, unchanged) and a new
+     `pic8259::isa_irq_vector(irq) -> u8` helper implementing the `0x30+irq` formula. Wired
+     unconditionally into `console::DeviceBus` (no opt-in needed, unlike `virtio_rng` — pure
+     guest-write-derived bookkeeping with no side effects on any other device) at ports
+     0x20/0x21/0xA0/0xA1, previously unhandled and falling through to the open-bus fallback. 8 new
+     hardware-independent unit tests (probe-readback, full ICW1-4 handshake both chips, single-mode
+     ICW3-skip, per-IRQ-bit unmask, EOI-absorption, re-init-from-any-state, the vector formula) all
+     pass. **Extended the existing `tests/fixtures/virtio-rng-guest/` hand-assembled fixture** to
+     also issue this exact byte sequence — probe_8259A pattern, full ICW1-4 handshake on both
+     chips, an `enable_8259A_irq(5)`-equivalent unmask — ahead of its virtio-mmio negotiation
+     (`payload.s`, rebuilt via `build.py`; its own interrupt-injection vector stays the
+     independently-chosen `0x31`, unchanged, since baud's direct-injection mechanism has never
+     depended on the PIC's hardware ICW2 vector base). New real-hardware test
+     `guests_own_pic_bring_up_sequence_leaves_the_expected_bookkeeping_state`
+     (`crates/baud-multiverse/src/linux/mod.rs`, via a new `Multiverse::pic()` accessor) boots that
+     fixture and asserts the master/slave IMR end state (`0xdf`/`0xff`) exactly matches what the
+     guest's real `IN`/`OUT` PIO exits should have produced — proving the guest-visible byte
+     sequence a real kernel issues round-trips correctly through the new stub on real KVM, not just
+     in a pure-Rust unit test; `virtio_rng_interrupt_reaches_the_guests_own_isr` (unchanged
+     assertions) confirms the bring-up sequence doesn't disturb the rest of the fixture's run
+     either. `crates/baud-multiverse/tests/fixtures/virtio-rng-guest/BUILD.md` updated with a new
+     "Update" section recording the answered question. `cargo build`/`clippy --workspace
+     --all-targets`/`test --workspace` all clean (0 failures; one clippy `identity_op` warning my
+     own new unit test introduced was found and fixed before commit, not left as a new warning);
+     `baud-multiverse` went from 119 to 128 passed (8 ignored, unchanged) — the 9 new tests (8
+     pure-Rust + 1 real-hardware); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5),
+     `drive/pkg-boot-cli.sh` (including a real Linux 6.18 kernel boot to `/init`, confirming the
+     unconditionally-wired `Pic8259` introduces no regression even on the non-hand-assembled boot
+     path), `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`, `drive/pkg-virtio-
+     rng-branch-resume-cli.sh`, and `drive/pkg-virtio-rng-generate-cli.sh` all still PASS on real
+     `/dev/kvm`, no regressions.
+     **What this still does not do**: it does not boot an actual unmodified Linux kernel far enough
+     to exercise its real `drivers/virtio/virtio_mmio.c` + `drivers/char/hw_random/virtio-rng.c`
+     drivers — that needs `CONFIG_VIRTIO=y`/`CONFIG_VIRTIO_MMIO=y`/`CONFIG_VIRTIO_MMIO_CMDLINE_
+     DEVICES=y`/`CONFIG_HW_RANDOM_VIRTIO=y` added to the guest kernel config plus a real initramfs
+     with those drivers built in or loadable, and is still blocked on the same Buildroot/pinned-Nix
+     guest-image pipeline (§4.5) already blocking H8/H9 — so `virtio_rng_reseed_is_deterministic`
+     (the spec-named test) still cannot pass yet, but the previously-unknown "what vector" half of
+     that blocker is now closed: once a real Linux guest boots this far, `isa_irq_vector(5)` (or
+     whichever line the cmdline names) is exactly the value `service_virtio_rng_interrupt`/
+     `RunKvmBranchBody::virtio_rng`'s vector field should be given. H8 Mario is still blocked on the
+     FCEUX Qt5/SDL2/Xvfb packaging problem; H9 Ubuntu is still not started.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window
