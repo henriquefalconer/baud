@@ -5688,3 +5688,48 @@ todo.md updated with this iteration's findings. Committing.
 ---
 
 Post-push verification: git push was a clean fast-forward (14ec867..62098d4), working tree clean, origin/main matches local main. All verification (build/clippy/test/drive gate) was run against this exact commit before pushing. todo.md still has pending items (virtio_rng_reseed_is_deterministic needs a real Linux guest driver; H8 Mario blocked on Buildroot/Nix pipeline; H9 Ubuntu not started; branch/resume virtio-rng wiring; stream-replay virtio-rng wiring). Iteration 27 complete.
+
+## 2026-07-26T17:54:24 UTC (34min) - Session usage — build-27 [sonnet]
+- cost $9.1462 (from claude -p)
+- context 252,361 tok peak of 1M (25%) across 101 inference calls, monotonic
+- models sonnet-5 $9.1430 (in 232 / out 74,388 / cache-read 20,524,022) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/027-build-27.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 28
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose to wire the stream::render real-replay path's reboot sub-path (render_frames_from_real_replay/boot_and_drain_frames) to read back and honor the new virtio_rng_* kvm_run_meta columns -- it's the smallest well-scoped remaining slice of the virtio-rng wiring gap (existing run_to_first_halt_with_virtio_rng already does the heavy lifting; branch/resume need a whole new run-loop combinator first, out of scope for one iteration).
+
+Wired stream::render's reboot replay path (render_frames_from_real_replay/boot_and_drain_frames) to read back virtio_rng_seed/vector/max_exits from kvm_run_meta and pass them through -- restore-path (resume-originated runs) is left as documented still-open, since it needs a new run_until_branch_or_halt_with_virtio_rng combinator, out of scope for this slice. Running cargo build to check for compile errors...
+
+Added a new unit test (boot_and_drain_frames_with_virtio_rng_enabled_still_replays_real_pixels) proving virtio_rng threads correctly through the reboot replay path without perturbing framebuffer-guest's real pixels. Running cargo test -p baud-server now...
+
+baud-server unit tests pass (27/27, real /dev/kvm), including the new virtio_rng-in-replay test. Running clippy --workspace --all-targets next...
+
+Bundled render_frames_from_real_replay's 8 params into a RealReplayParams struct (same convention as run_kvm::KvmBootParams) to clear the too_many_arguments clippy warning my change introduced. Re-running cargo clippy --workspace --all-targets to confirm...
+
+Clippy confirms zero warnings in stream.rs/run_kvm.rs, no new warnings anywhere. Running cargo test --workspace (real /dev/kvm)...
+
+cargo test --workspace: 0 failures across whole workspace. Now running drive/h0.sh through h7.sh, then m9-m13.sh, then pkg-boot-cli.sh and pkg-virtio-rng-cli.sh, one at a time as required.
+
+drive/h0.sh through h7.sh: 8/8 PASS. Now running drive/m9.sh through m13.sh...
+
+drive/m9.sh-m13.sh: 5/5 PASS, no regressions (m11/m12/m13 in particular exercise stream::render's replay paths directly). Running opt-in drive/pkg-boot-cli.sh and pkg-virtio-rng-cli.sh regression checks since those exercise the exact routes I touched...
+
+Writing a new drive/pkg-virtio-rng-replay-cli.sh end-to-end proof: /run/kvm with virtio_rng+run_id persists the 3 new columns (verified via direct sqlite read), then POST /runs/:id/stream/render replays with virtio_rng re-enabled and decodes the guest's real pixels, deterministically. Running it now on real /dev/kvm...
+
+## 2026-07-26T18:22:39 UTC - Changes committed.
+- Wired stream::render's real-replay (reboot) path to read back and honor the virtio_rng_* kvm_run_meta columns a /run/kvm --virtio-rng-* boot persists.
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, drive/pkg-virtio-rng-replay-cli.sh (new), todo.md.
+- **Brief description of changes:**
+  - boot_and_drain_frames gained a virtio_rng: Option<(u64,u8,u32)> param (previously hardcoded None, silently discarding the caller's intent), threaded straight into the already-capable boot_run_and_drain.
+  - stream::render's kvm_run_meta SELECT now also pulls virtio_rng_seed/virtio_rng_vector/virtio_rng_max_exits and passes them to render_frames_from_real_replay (the reboot sub-path only -- render_frames_from_real_restore still has no virtio_rng support, blocked on a missing run_until_branch_or_halt_with_virtio_rng combinator in baud-multiverse, same prerequisite gap as /run/kvm/branch and /run/kvm/resume not accepting virtio_rng at all).
+  - Bundled render_frames_from_real_replay's now-8 params into a new RealReplayParams struct (both cfg variants) to clear the too_many_arguments clippy warning the new param introduced.
+  - New unit test boot_and_drain_frames_with_virtio_rng_enabled_still_replays_real_pixels proves enabling virtio_rng is a real no-op for a guest (framebuffer-guest) that never touches the virtio-mmio window, and stays double-run deterministic.
+  - New drive/pkg-virtio-rng-replay-cli.sh: real end-to-end proof over live HTTP -- POST /run/kvm { run_id, virtio_rng } persists the three columns (confirmed via a direct sqlite read), POST /runs/:id/stream/render replays with virtio_rng re-enabled and decodes the guest's real, unperturbed pixels, deterministically across two renders.
+  - Verification: cargo build / clippy --workspace --all-targets / test --workspace all clean (0 failures, 0 new warnings, confirmed zero warnings in the touched files specifically); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), drive/pkg-boot-cli.sh, drive/pkg-virtio-rng-cli.sh, and the new drive/pkg-virtio-rng-replay-cli.sh all PASS on real /dev/kvm.
+---

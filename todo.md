@@ -1823,6 +1823,50 @@ snapshot, not a duplicate of it.
      separate research, not plumbing. `virtio_rng_reseed_is_deterministic` (the spec-named test) still
      needs a *real Linux guest* (not this hand-assembled fixture) to actually negotiate and use the
      device before it can pass — this iteration closes the mechanism's reachability, not that guest.
+     **This iteration closes exactly the "`stream::render`'s real-replay path does not read the
+     new `virtio_rng_*` columns back yet" gap flagged above — for the reboot sub-path only.**
+     `crates/baud-server/src/routes/run_kvm.rs`'s `boot_and_drain_frames` gained a
+     `virtio_rng: Option<(u64, u8, u32)>` parameter (previously it hardcoded `None` into
+     `boot_run_and_drain`, silently discarding whatever the caller wanted), now threaded straight
+     through unchanged. `crates/baud-server/src/routes/stream.rs`'s `render()` handler's `kvm_run_meta`
+     SELECT now also pulls `virtio_rng_seed`/`virtio_rng_vector`/`virtio_rng_max_exits` (the three
+     columns iteration 27's `migrations/0013_kvm_run_meta_virtio_rng.sql` added), decodes them into
+     an `Option<(u64, u8, u32)>`, and passes that to `render_frames_from_real_replay` — but, as the
+     inline comment at `stream.rs:191-193` already flagged and this iteration confirms is still true,
+     *not* to `render_frames_from_real_restore` (the restore-based sub-path), since there is still no
+     `run_until_branch_or_halt_with_virtio_rng`-family combinator for it in `baud-multiverse`; that
+     remains the same still-open gap as `/run/kvm/branch`/`/run/kvm/resume` not accepting `virtio_rng`
+     at all. Because `render_frames_from_real_replay` was already at 7 positional params before this
+     8th one, both the real `#[cfg(target_os = "linux")]` impl and its `#[cfg(not(target_os =
+     "linux"))]` stub had their params bundled into a new `RealReplayParams` struct (`stream.rs:284-
+     293` real, `stream.rs:365-371` stub) to stay under clippy's `too_many_arguments`. New unit test
+     `boot_and_drain_frames_with_virtio_rng_enabled_still_replays_real_pixels`
+     (`run_kvm.rs:1614-1643`) boots the framebuffer-guest fixture twice with virtio_rng enabled
+     (`Some((42u64, 0x31u8, 200_000u32))`) and asserts the emitted pixels are both identical to the
+     virtio_rng-disabled baseline and identical to each other — proving enabling the device is a real
+     no-op for a guest that never touches the virtio-mmio window, and that the replay path stays
+     double-run deterministic with it enabled. **Real-hardware-verified end-to-end** via new
+     `drive/pkg-virtio-rng-replay-cli.sh` (opt-in, same convention as `drive/pkg-virtio-rng-cli.sh`):
+     boots framebuffer-guest via a real `POST /run/kvm { run_id, virtio_rng }` HTTP call, reads the
+     real sqlite `kvm_run_meta` row directly (Python's `sqlite3` module, not through the API) to
+     confirm all three `virtio_rng_*` columns round-tripped exactly as sent, then calls `POST
+     /runs/:id/stream/render`
+     twice and confirms both renders decode to the guest's real, unperturbed pixels — byte-identical
+     across the two renders, over real HTTP against a live `baud-server`, on real `/dev/kvm` hardware.
+     `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new
+     warnings — confirmed via a targeted check of the touched files `stream.rs`/`run_kvm.rs` only);
+     `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`, and
+     `drive/pkg-virtio-rng-cli.sh` all still PASS on real `/dev/kvm`, no regressions from the widened
+     `boot_and_drain_frames` signature or the `RealReplayParams` refactor. **Still open, unchanged**:
+     `render_frames_from_real_restore` still doesn't support virtio_rng; `/run/kvm/branch`
+     (`RunKvmBranchBody`) and `/run/kvm/resume` (`RunKvmResumeBody`) still don't accept a `virtio_rng`
+     field at all — both blocked on the missing `run_until_branch_or_halt_with_virtio_rng`-family
+     combinator in `crates/baud-multiverse/src/linux/mod.rs` (real new run-loop plumbing, not just
+     server wiring); the "which vector would an unmodified Linux guest's real `virtio_mmio` driver
+     bind to" research question remains untouched; `virtio_rng_reseed_is_deterministic` (the
+     spec-named test) still needs a real Linux guest that actually negotiates and uses the device, not
+     just this hand-assembled fixture; H8 Mario is still blocked on the FCEUX Qt5/SDL2 packaging
+     problem; H9 Ubuntu is still not started.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

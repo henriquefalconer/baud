@@ -147,9 +147,11 @@ pub async fn render(
     let fmt = body.format.as_deref().unwrap_or("y4m").to_string();
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
-    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>)>(
+    #[allow(clippy::type_complexity)]
+    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>)>(
         "SELECT kernel_path, cmdline, tape_hex, initramfs_path, periodic_timer_period_rcb, \
-         periodic_timer_vector, periodic_timer_max_ticks, store_run_id, snapshot_node_id \
+         periodic_timer_vector, periodic_timer_max_ticks, store_run_id, snapshot_node_id, \
+         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits \
          FROM kvm_run_meta WHERE run_id = ?",
     )
     .bind(&run_id)
@@ -167,9 +169,16 @@ pub async fn render(
             max_ticks,
             store_run_id,
             snapshot_node_id,
+            rng_seed,
+            rng_vector,
+            rng_max_exits,
         ))) => {
             let periodic_timer = match (period_rcb, vector, max_ticks) {
                 (Some(p), Some(v), Some(m)) => Some((p as u64, v as u8, m as u32)),
+                _ => None,
+            };
+            let virtio_rng = match (rng_seed, rng_vector, rng_max_exits) {
+                (Some(s), Some(v), Some(m)) => Some((s as u64, v as u8, m as u32)),
                 _ => None,
             };
             // A resume-originated run (todo.md §14's "`/run/kvm/resume`'s lineage gap") has no
@@ -179,6 +188,9 @@ pub async fn render(
             // exclusive with the `kernel_path`/`cmdline` reboot path below, never both.
             match (store_run_id, snapshot_node_id) {
                 (Some(store_run_id), Some(snapshot_node_id)) => {
+                    // Restore-and-replay has no `run_until_branch_or_halt_with_virtio_rng`
+                    // combinator yet (todo.md §14) — `virtio_rng` is not threaded here, same
+                    // still-open gap as `/run/kvm/resume` itself not accepting `virtio_rng`.
                     render_frames_from_real_restore(
                         state.snapshot_store.clone(),
                         store_run_id,
@@ -191,15 +203,16 @@ pub async fn render(
                     .await
                 }
                 _ => {
-                    render_frames_from_real_replay(
+                    render_frames_from_real_replay(RealReplayParams {
                         kernel_path,
                         cmdline,
                         tape_hex,
                         initramfs_path,
                         periodic_timer,
+                        virtio_rng,
                         from_step,
                         to_step,
-                    )
+                    })
                     .await
                 }
             }
@@ -268,6 +281,20 @@ pub async fn render(
     }
 }
 
+/// Bundles `render_frames_from_real_replay`'s params — kept as a struct rather than 8 positional
+/// args, same convention as `run_kvm::KvmBootParams`, to stay under clippy's `too_many_arguments`.
+#[cfg(target_os = "linux")]
+struct RealReplayParams {
+    kernel_path: String,
+    cmdline: String,
+    tape_hex: String,
+    initramfs_path: Option<String>,
+    periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
+    from_step: u64,
+    to_step: Option<u64>,
+}
+
 /// Real replay: re-boot the exact kernel/cmdline/tape a `/run/kvm { run_id: ... }` call recorded
 /// in `kvm_run_meta`, drain the real `Msg::Frame` records it produces (raw pixel bytes included —
 /// `FrameRecord::bytes` is always `Some` for a live boot, `baud_multiverse::linux::Multiverse::
@@ -277,14 +304,18 @@ pub async fn render(
 /// hash-seeded gradient.
 #[cfg(target_os = "linux")]
 async fn render_frames_from_real_replay(
-    kernel_path: String,
-    cmdline: String,
-    tape_hex: String,
-    initramfs_path: Option<String>,
-    periodic_timer: Option<(u64, u8, u32)>,
-    from_step: u64,
-    to_step: Option<u64>,
+    params: RealReplayParams,
 ) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+    let RealReplayParams {
+        kernel_path,
+        cmdline,
+        tape_hex,
+        initramfs_path,
+        periodic_timer,
+        virtio_rng,
+        from_step,
+        to_step,
+    } = params;
     let tape = match hex_decode(&tape_hex) {
         Some(t) => t,
         None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
@@ -304,6 +335,7 @@ async fn render_frames_from_real_replay(
             tape,
             initramfs.as_deref(),
             periodic_timer,
+            virtio_rng,
         )
     })
     .await
@@ -330,14 +362,20 @@ async fn render_frames_from_real_replay(
 /// real Linux+KVM hosts (`CLAUDE.md`), but `stream.rs` itself is not Linux-gated, so this stub
 /// keeps a non-Linux `cargo check` compiling instead of failing on the Linux-only call below.
 #[cfg(not(target_os = "linux"))]
+struct RealReplayParams {
+    kernel_path: String,
+    cmdline: String,
+    tape_hex: String,
+    initramfs_path: Option<String>,
+    periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
+    from_step: u64,
+    to_step: Option<u64>,
+}
+
+#[cfg(not(target_os = "linux"))]
 async fn render_frames_from_real_replay(
-    _kernel_path: String,
-    _cmdline: String,
-    _tape_hex: String,
-    _initramfs_path: Option<String>,
-    _periodic_timer: Option<(u64, u8, u32)>,
-    _from_step: u64,
-    _to_step: Option<u64>,
+    _params: RealReplayParams,
 ) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
     Err(json!({ "error": "real KVM replay is only available on target_os = \"linux\"" }))
 }

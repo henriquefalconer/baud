@@ -413,19 +413,18 @@ fn boot_run_and_drain(
 /// Re-boot a real KVM guest and return only the `Msg::Frame` records it produced, in order — the
 /// primitive `stream::render`'s real-replay path uses to regenerate actual pixels for a run that
 /// `/run/kvm` persisted (`kvm_run_meta`), instead of fabricating a synthetic gradient from a
-/// stored hash. `virtio_rng` replay is not yet wired here (`stream::render`'s query never reads
-/// the new `virtio_rng_*` columns) — every real-replay call passes `None`, same as before this
-/// field existed; a virtio-rng-enabled run's frames replay identically as long as the guest's own
-/// frame emission does not depend on entropy content, and re-wiring the DB read is separate,
-/// smaller future work.
+/// stored hash. `virtio_rng` is threaded through exactly like `periodic_timer` — `stream::render`
+/// now reads the `virtio_rng_*` columns back and passes them here, so a virtio-rng-enabled run
+/// replays with the device enabled and seeded identically to its original boot.
 pub(crate) fn boot_and_drain_frames(
     kernel_path: &Path,
     cmdline: &str,
     tape: Vec<u8>,
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<Vec<baud_proto::FrameRecord>, String> {
-    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer, None)?;
+    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer, virtio_rng)?;
     Ok(records
         .into_iter()
         .filter_map(|m| match m {
@@ -1591,8 +1590,8 @@ mod tests {
         let kernel = framebuffer_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None).expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None).expect("second boot failed");
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None).expect("first boot failed");
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None).expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
         assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
@@ -1610,6 +1609,39 @@ mod tests {
         // synthetic hash-seeded gradient.
         let rgba = baud_stream::to_rgba(frame.bytes.as_ref().unwrap(), &frame.format);
         assert_eq!(rgba.len(), 2 * 2 * 4, "2x2 Indexed8 frame must expand to 16 RGBA bytes");
+    }
+
+    /// Closes the "`stream::render`'s real-replay path does not read the new `virtio_rng_*`
+    /// columns back" gap (todo.md §14): `boot_and_drain_frames` now threads a `virtio_rng` param
+    /// all the way to `Multiverse::enable_virtio_rng`/`run_to_first_halt_with_virtio_rng`, exactly
+    /// as `render()` does once it decodes the three `kvm_run_meta` columns into this tuple.
+    /// `framebuffer-guest` never touches the virtio-mmio window at all, so per
+    /// `device_bus_mmio_falls_through_to_open_bus_until_virtio_rng_is_enabled`'s own guarantee,
+    /// enabling the device must be a pure no-op for this guest's own frame emission — this proves
+    /// the wiring is correct (a real seed reaches the boot) without perturbing the one thing this
+    /// test can actually observe (the emitted pixels), and that two boots with virtio_rng enabled
+    /// stay double-run deterministic.
+    #[test]
+    fn boot_and_drain_frames_with_virtio_rng_enabled_still_replays_real_pixels() {
+        let kernel = framebuffer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
+
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng)
+            .expect("first boot failed");
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng)
+            .expect("second boot failed");
+
+        assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
+        assert_eq!(
+            first[0].bytes, second[0].bytes,
+            "enabling virtio_rng must not perturb framebuffer-guest's own emitted pixels"
+        );
+        assert_eq!(
+            first[0].bytes,
+            Some(vec![10u8, 20, 30, 40]),
+            "virtio_rng, unused by this guest, must not change its real pixel bytes at all"
+        );
     }
 
     /// Server-level analogue of `baud-multiverse`'s own `double_boot_memory_identical`
