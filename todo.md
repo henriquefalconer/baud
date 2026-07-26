@@ -1971,6 +1971,23 @@ snapshot, not a duplicate of it.
      manager in-guest. Not an architectural dead end, just confirmed genuinely large: likely needs a
      Buildroot/Nix packaging pipeline, or first empirically validating `QT_QPA_PLATFORM=offscreen`, or
      exploring an older pre-Qt5 SDL-only FCEUX release.
+
+     **Follow-up finding, still open**: `QT_QPA_PLATFORM=offscreen` is now confirmed NOT viable, not just
+     unverified — `apt-get install -y fceux` completes cleanly (fceux 2.6.5+dfsg1-2build4 plus its full
+     Qt5/SDL2/X11 dependency chain, no errors), but `env -u DISPLAY -u WAYLAND_DISPLAY
+     QT_QPA_PLATFORM=offscreen fceux` (no ROM) reliably segfaults (exit 139) within under 2 seconds, with
+     or without `LIBGL_ALWAYS_SOFTWARE=1`, immediately after two `Qt Warning: QOpenGLWidget: Failed to
+     create context` lines on stderr — the offscreen QPA plugin cannot back a real OpenGL context, and
+     FCEUX's `QOpenGLWidget`-based renderer does not fall back gracefully. A new, more promising
+     alternative: `xvfb-run -a --server-args="-screen 0 1024x768x24" fceux` (a virtual X server providing
+     a real, if virtual, X11/GLX surface) survived at least 3 seconds with no crash and no fatal Qt error.
+     Caveat: no NES ROM was loaded in either test (none exists in-repo, for copyright reasons), so it's
+     still unproven that fceux under `Xvfb` can run an actual game loop, drive the Lua scripting harness,
+     or emit frames over time — only that the process itself doesn't crash on startup the way it does
+     under the offscreen QPA plugin. This narrows, but does not close, the packaging problem: the viable
+     target is now bundling a minimal `Xvfb` + its X11/font dependency closure into the guest initramfs
+     alongside fceux + Lua (still likely wants Buildroot/pinned-Nix per §4.5), not chasing pure GPU-less
+     offscreen rendering.
   4. **Generic-core guardrail — done.** New `crates/baud-packages/src/workload_lint.rs`: a
      `FORBIDDEN_WORKLOAD_TERMS` list (Mario/NES-specific terms per `specs/baud-mario.md` §4 — `fceux`,
      `joypad`, `harness.lua`, `game.nes`, `oper_mode`, `super_mario`, `mario_bros`, plus the six Mario

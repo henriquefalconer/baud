@@ -5841,3 +5841,54 @@ Updated todo.md §14 to record this iteration's generate-mode virtio_rng closure
   - New drive/pkg-virtio-rng-generate-cli.sh proves it end-to-end through the real `baud` CLI binary (kvm-branch --generate-seed/--generate-count/--virtio-rng-seed, then kvm-resume the same way against the persisted point) — this is the test that would have caught the CLI-body bug, since it drives the actual binary rather than constructing JSON directly.
   - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh, pkg-virtio-rng-branch-resume-cli.sh, and the new pkg-virtio-rng-generate-cli.sh all PASS on real /dev/kvm.
 ---
+
+Post-push verification: git push was a clean fast-forward (2921167..5177d65), working tree clean, origin/main matches local main exactly (5177d65). All verification (build/clippy/test, drive/h0.sh-h7.sh, drive/m9.sh-m13.sh, all pkg-virtio-rng-*-cli.sh including the new generate one) was run against this exact commit before pushing.
+
+Iteration complete: closed generate-mode virtio_rng gap + fixed CLI body bug, all verification green, pushed clean. todo.md still has pending items (H8 Mario FCEUX packaging, H9 Ubuntu, virtio_mmio vector research, virtio_rng_reseed_is_deterministic real-guest test) — emitting NEXT.
+
+## 2026-07-26T19:34:27 UTC (34min) - Session usage — build-30 [sonnet]
+- cost $6.5321 (from claude -p)
+- context 213,113 tok peak of 1M (21%) across 104 inference calls, monotonic
+- models sonnet-5 $6.5289 (in 208 / out 41,092 / cache-read 15,918,058) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260726T004845Z/030-build-30.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 31
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick the next step.
+
+Chose to investigate H8's remaining FCEUX packaging blocker (todo.md §14 item 3): empirically validate whether QT_QPA_PLATFORM=offscreen lets Ubuntu's packaged fceux run headless, since prior iterations flagged this as "theoretically viable but unverified" and it's the cheapest lever to unblock Mario before committing to a full Buildroot/Nix pipeline. Also scoping the virtio_mmio IRQ-vector research question as a secondary candidate.
+
+fceux + full Qt5/SDL2 dependency chain installed cleanly via apt (no --dry-run needed this time). Now testing headless operation with QT_QPA_PLATFORM=offscreen and no DISPLAY set...
+
+Result: fceux 2.6.5+dfsg1-2build4 SEGFAULTS under QT_QPA_PLATFORM=offscreen (with or without LIBGL_ALWAYS_SOFTWARE=1) -- exit 139, right after 'QOpenGLWidget: Failed to create context'. The offscreen QPA plugin does not support a real GL context here, so this workaround is conclusively NOT viable, not just unverified. Trying Xvfb+llvmpipe as a different headless route before ruling out non-Buildroot options entirely...
+
+Result: fceux survives at least 3s under Xvfb (xvfb-run -a --server-args='-screen 0 1024x768x24' fceux) with NO segfault -- unlike QT_QPA_PLATFORM=offscreen which crashes immediately (exit 139, right after 'QOpenGLWidget: Failed to create context'). Genuinely new finding: a virtual X server, not the offscreen QPA plugin, is the viable headless route for FCEUX's Qt5+OpenGL renderer. Recording this in todo.md via a subagent -- it changes the H8 guest-image plumbing story (Xvfb + X11 libs instead of chasing pure-offscreen rendering, which is now conclusively ruled out).
+
+Dispatched a subagent to record the fceux headless finding in todo.md §14 item 3. Meanwhile starting cargo build --workspace to reconfirm baseline is green (no Rust code touched this iteration, but the loop protocol requires verifying main tip before commit)...
+
+cargo build --workspace clean (only the known pre-existing baud-tracing aya::Bpf deprecation warnings, already documented in prior iterations). Running clippy --workspace --all-targets next...
+
+clippy --workspace --all-targets: only pre-existing warnings across the workspace (no errors, nothing in files touched this iteration since no Rust code changed). Running cargo test --workspace next (this is the long one)...
+
+cargo test --workspace: all green, 0 failed (baud-multiverse 119 passed/8 ignored, baud-server 43 passed/2 ignored, everything else clean). Running drive/h0.sh through h7.sh one at a time next...
+
+drive/h0.sh, h1.sh, h2.sh all PASS on real /dev/kvm. Continuing through h3-h7...
+
+h3-h5 all PASS. Continuing h6, h7...
+
+h6, h7 PASS. Full h0-h7 gate is 8/8 green. Running drive/m9.sh-m13.sh next...
+
+drive/m9.sh-m13.sh all PASS (5/5). Full regression suite green with no code changes. Preparing to commit todo.md update + progress.txt.
+
+## 2026-07-26T19:57:44 UTC - Changes committed.
+- Empirically validated (not just researched) the H8 FCEUX headless-rendering blocker on the real dev host, narrowing todo.md §14 item 3's open packaging question.
+- Files changed: todo.md (new "Follow-up finding, still open" paragraph in §14 item 3), ralph/progress.txt.
+- **Brief description of changes:**
+  - Installed fceux 2.6.5+dfsg1-2build4 for real (`apt-get install -y fceux`, not just --dry-run) on this dev host — full Qt5/SDL2/X11 dependency chain installed cleanly.
+  - Confirmed `QT_QPA_PLATFORM=offscreen` (previously flagged in todo.md as "theoretically viable but unverified") is conclusively NOT viable: fceux segfaults (exit 139) within under 2 seconds, with or without `LIBGL_ALWAYS_SOFTWARE=1`, right after `QOpenGLWidget: Failed to create context` — the offscreen QPA plugin cannot back a real GL context here and FCEUX's OpenGL-based renderer does not fall back gracefully.
+  - Found a new, more promising alternative: `xvfb-run -a --server-args="-screen 0 1024x768x24" fceux` (a virtual X server, installed via `apt-get install -y xvfb`) survives at least 3 seconds with no crash or fatal Qt error — a real, positive finding that narrows the H8 guest-image plumbing target from "chase pure GPU-less offscreen rendering" (now ruled out) to "bundle a minimal Xvfb + its X11/font dependency closure into the guest initramfs alongside fceux + Lua" (still likely needs Buildroot/pinned-Nix per §4.5).
+  - Caveat recorded in todo.md: no NES ROM was loaded in either test (none exists in-repo, for copyright reasons), so it remains unproven that fceux under Xvfb can run an actual game loop or drive the Lua harness over time — only that process startup itself doesn't crash the way it does under the offscreen QPA plugin. H8 is still open, not unblocked.
+  - Verification: no Rust code was touched this iteration; ran the full regression suite anyway per the loop protocol — cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, only pre-existing documented warnings); drive/h0.sh-h7.sh (8/8) and drive/m9.sh-m13.sh (5/5) all PASS on real /dev/kvm.
+---
