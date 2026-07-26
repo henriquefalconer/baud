@@ -5639,3 +5639,50 @@ drive/m9.sh through drive/m13.sh (5/5) all PASS on real /dev/kvm, no regressions
   - Still open (documented in todo.md, not attempted): which vector an unmodified Linux guest's real `virtio_mmio` driver would bind to via `request_irq()` (no IOAPIC/PIC here to resolve one dynamically), and wiring virtio-rng into any real boot's cmdline/CLI/server route.
   - Verification: `cargo build --workspace` clean; `cargo clippy --workspace --all-targets` 0 new warnings; `cargo test --workspace` 0 failures (one transient `rdtsc_guest_reproduces_high_bits_across_boots` flake under parallel load, confirmed a pre-existing one-off hardware-jitter flake via isolated rerun and a clean full-suite rerun, not a regression); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`.
 ---
+
+Post-push verification: git push succeeded (653d6cc..14ec867 main -> main); local HEAD matches origin/main tip exactly (14ec867); working tree clean. Full build/clippy/test/drive-script suite was run against this exact commit content before pushing, all green. todo.md still has pending items (virtio-rng boot/cmdline/CLI wiring + unmodified-Linux IRQ-vector resolution, H8 FCEUX Qt5, H9 Ubuntu) -- emitting NEXT.
+
+## 2026-07-26T17:20:22 UTC (54min) - Session usage — build-26 [sonnet]
+- cost $15.1552 (from claude -p)
+- context 357,708 tok peak of 1M (36%) across 130 inference calls, monotonic
+- models sonnet-5 $15.1521 (in 1,540 / out 140,730 / cache-read 34,658,367) · haiku-4-5 $0.0031
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/026-build-26.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 27
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md and specs/ first.
+
+Chose to wire virtio-rng device enablement + interrupt servicing into a real boot's cmdline/CLI/server route (baud run kvm), the last open piece before virtio_rng_reseed_is_deterministic per todo.md item 1. Researching exact current wiring gap first.
+
+Found existing virtio-rng device model (transport/queue/interrupt) is fully hardware-verified but never reachable through baud run kvm CLI/server. Implementing the boot/cmdline/CLI wiring: new Multiverse run-loop variants, RunKvmBody.virtio_rng field, migration, and CLI flags.
+
+CLI/server wiring compiles clean. Writing drive/pkg-virtio-rng-cli.sh to prove enable_virtio_rng+seed+interrupt-servicing reachable end-to-end through baud run kvm over real HTTP against the hand-assembled virtio-rng-guest fixture.
+
+End-to-end CLI/server proof PASSED on real /dev/kvm: baud run kvm --virtio-rng-seed 42 --virtio-rng-vector 49 against the virtio-rng-guest fixture produced console_output_hex=5295 (marker 'R' + entropy byte), confirming the interrupt fired through the real HTTP path. Now running full cargo build/clippy/test and the standard drive gate.
+
+cargo build/clippy --workspace both clean (zero new warnings in touched files, confirmed via targeted grep against run_kvm.rs/linux/mod.rs/cmds/run.rs). Now running cargo test --workspace.
+
+cargo test --workspace: 0 failures across all crates (baud-multiverse 118 passed/8 ignored). Now running the standard drive/h0.sh-h7.sh gate one script at a time.
+
+drive/h0.sh through drive/h7.sh: 8/8 PASS on real /dev/kvm, no regressions. Running drive/m9.sh-m13.sh next.
+
+drive/m9.sh through drive/m13.sh: 5/5 PASS, no regressions from widened kvm_run_meta schema/boot_run_and_drain signature. Re-running drive/pkg-boot-cli.sh and the new drive/pkg-virtio-rng-cli.sh as final regression checks.
+
+All regression checks pass, no regressions. Updating todo.md to record this iteration's virtio-rng CLI/server wiring, then committing and pushing.
+
+todo.md updated with this iteration's findings. Committing.
+
+## 2026-07-26T17:52:57 UTC - Changes committed.
+- Wired the virtio-rng device (transport/queue/interrupt, already hardware-verified in prior iterations) into a real boot's cmdline/CLI/server route for the first time.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/migrations/0013_kvm_run_meta_virtio_rng.sql, crates/baud-cli/src/cmds/run.rs, drive/pkg-virtio-rng-cli.sh (new), todo.md.
+- **Brief description of changes:**
+  - Added `Multiverse::run_to_first_halt_with_virtio_rng` and `run_to_first_halt_with_periodic_timer_and_virtio_rng`, promoting the per-exit notify-and-service polling idiom from a test-only loop to a reusable API; refactored the existing `virtio_rng_interrupt_reaches_the_guests_own_isr`/`virtio_rng_interrupt_delivery_is_reproducible_across_two_boots` tests to use it (found and fixed a real bug in the process: the merged loop needed a much higher exit budget than the original two-phase test, since `payload.s`'s own 20,000-iteration busy-loop now counts against the same bound).
+  - `RunKvmBody` gained an optional `virtio_rng: { seed, vector, max_exits }` spec; `boot_run_and_drain` now enables/seeds the device and dispatches to the right run-loop combination based on whether `periodic_timer`/`virtio_rng` are set; persisted into three new nullable `kvm_run_meta` columns (migration 0013).
+  - `baud run kvm` CLI gained `--virtio-rng-seed`/`--virtio-rng-vector`/`--virtio-rng-max-exits`.
+  - New `drive/pkg-virtio-rng-cli.sh`: real-hardware end-to-end proof that `baud run kvm --virtio-rng-seed 42 --virtio-rng-vector 49` against the checked-in `virtio-rng-guest` fixture delivers a real interrupt through the actual CLI/server path (console_output_hex="5295": the guest's own ISR marker plus its real tape-seeded entropy byte).
+  - Still open (documented in todo.md): `/run/kvm/branch`/`/run/kvm/resume` don't accept `virtio_rng` yet; `stream::render`'s real-replay path doesn't read the new columns back; the deeper question of which vector an *unmodified Linux* guest's own `virtio_mmio` driver would bind to (no IOAPIC/PIC here) remains separate, unresolved research — `virtio_rng_reseed_is_deterministic` still needs a real Linux guest, not just this hand-assembled fixture.
+  - Verification: `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new warnings); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`; `drive/pkg-boot-cli.sh` and the new `drive/pkg-virtio-rng-cli.sh` both PASS.
+---

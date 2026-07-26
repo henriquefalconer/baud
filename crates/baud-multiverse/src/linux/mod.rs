@@ -1228,6 +1228,107 @@ impl Multiverse {
         Ok(processed)
     }
 
+    /// Drive the guest to its first `Hlt`/`Shutdown` (like [`run_to_first_halt`]
+    /// (Self::run_to_first_halt)), but poll [`virtio_rng`](Self::virtio_rng)'s `notify_count()`
+    /// after every single exit and, whenever it changes, drain + deliver a real interrupt via
+    /// [`service_virtio_rng_interrupt`](Self::service_virtio_rng_interrupt) — the exact idiom
+    /// `virtio_rng_interrupt_reaches_the_guests_own_isr`'s test loop already proved on real
+    /// hardware, promoted here from a test-only loop to a real, reusable entry point so
+    /// `baud-server`'s `/run/kvm` route (and the `baud run kvm` CLI) can boot any guest that talks
+    /// the virtio-rng wire protocol, not just a Rust test calling `Multiverse` directly — todo.md
+    /// §14 next-actions item 1's last-open "boot/cmdline/CLI wiring" gap.
+    ///
+    /// Requires [`enable_virtio_rng`](Self::enable_virtio_rng) (and typically
+    /// [`seed_virtio_rng_entropy`](Self::seed_virtio_rng_entropy)) to already have been called;
+    /// with virtio-rng never enabled this behaves exactly like `run_to_first_halt` (the
+    /// `notify_count` poll is always `None`, so nothing is ever serviced). `max_exits` bounds a
+    /// guest that never halts (the same "no silent non-termination" convention every other run
+    /// loop here follows).
+    ///
+    /// This does **not** solve which vector an *unmodified Linux* guest's own `virtio_mmio` driver
+    /// would resolve its cmdline IRQ number to via `request_irq()` (there is no IOAPIC/PIC here to
+    /// resolve one dynamically) — `vector` is still caller-specified, exactly as the hand-
+    /// assembled `virtio-rng-guest` fixture's own IDT gate is. That deeper question remains open.
+    pub fn run_to_first_halt_with_virtio_rng(
+        &mut self,
+        vector: u8,
+        max_exits: u32,
+    ) -> Result<HaltOutcome, DeterminismHole> {
+        let mut exits = 0u32;
+        let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+        loop {
+            if exits >= max_exits {
+                return Err(DeterminismHole(format!(
+                    "run_to_first_halt_with_virtio_rng: guest did not halt within {max_exits} exits"
+                )));
+            }
+            let outcome = self.step_exit()?;
+            exits += 1;
+            if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
+                return Ok(HaltOutcome {
+                    console_output: self.bus.console.output().to_vec(),
+                    ram_hash: self.ram_hash(),
+                    exit_pc: self.current_rip()?,
+                });
+            }
+            let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+            if notify_count != last_notify_count {
+                last_notify_count = notify_count;
+                self.service_virtio_rng_interrupt(vector)?;
+            }
+        }
+    }
+
+    /// [`run_to_first_halt_with_periodic_timer`](Self::run_to_first_halt_with_periodic_timer)'s
+    /// open-ended periodic-timer engine, combined with [`run_to_first_halt_with_virtio_rng`]
+    /// (Self::run_to_first_halt_with_virtio_rng)'s notify-and-service polling — the entry point a
+    /// real Linux guest needs when it requires periodic timer ticks for `calibrate_delay` **and**
+    /// talks to virtio-rng, since the two open-ended loops above are each exhaustive on their own
+    /// (a real kernel needs the periodic-timer engine regardless of virtio-rng). The `notify_count`
+    /// check happens once per delivered tick (not once per host-side exit, unlike the plain
+    /// virtio-rng loop above) — coarser-grained, since a real kernel guest's own ticks are already
+    /// frequent relative to how often `getrandom()`/hwrng reseeds actually run.
+    pub fn run_to_first_halt_with_periodic_timer_and_virtio_rng(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        virtio_rng_vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        let mut ticks = Vec::new();
+        let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+        for _ in 0..max_ticks {
+            let baseline = self.time.current_rcb();
+            let target_rcb = baseline.saturating_add(period_rcb);
+            let mut stepper =
+                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
+            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector)
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            match outcome {
+                baud_vcpu::boundary::InjectOutcome::Injected(point) => {
+                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                    let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+                    if notify_count != last_notify_count {
+                        last_notify_count = notify_count;
+                        self.service_virtio_rng_interrupt(virtio_rng_vector)?;
+                    }
+                }
+                baud_vcpu::boundary::InjectOutcome::Halted(_) => {
+                    let halt = HaltOutcome {
+                        console_output: self.bus.console.output().to_vec(),
+                        ram_hash: self.ram_hash(),
+                        exit_pc: self.current_rip()?,
+                    };
+                    return Ok((ticks, halt));
+                }
+            }
+        }
+        Err(DeterminismHole(format!(
+            "run_to_first_halt_with_periodic_timer_and_virtio_rng: guest did not halt within \
+             {max_ticks} periodic ticks"
+        )))
+    }
+
     /// Every tape-device record (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`,
     /// specs/baud-tape-device.md §4) the guest has emitted and not yet drained. Callers typically
     /// call this after [`run_to_first_halt`](Self::run_to_first_halt) to collect what the guest
@@ -2280,26 +2381,14 @@ mod tests {
         mv.enable_virtio_rng();
         mv.seed_virtio_rng_entropy(seed);
 
-        const MAX_EXITS: u32 = 200; // the negotiate/setup sequence needs ~19 real MMIO exits
-        let mut exits = 0u32;
-        loop {
-            assert!(exits < MAX_EXITS, "guest never issued QueueNotify within {MAX_EXITS} exits");
-            let outcome = mv.step_exit().expect("step_exit failed");
-            assert!(
-                !matches!(outcome, baud_vcpu::DispatchOutcome::Halted),
-                "guest halted before ever notifying the virtio-rng queue"
-            );
-            exits += 1;
-            if mv.virtio_rng().map(|t| t.notify_count()) == Some(1) {
-                break;
-            }
-        }
-
-        let processed =
-            mv.service_virtio_rng_interrupt(VIRTIO_RNG_VECTOR).expect("service + interrupt delivery failed");
-        assert_eq!(processed, 1, "exactly the one posted descriptor must be drained");
-
-        let halt = mv.run_to_first_halt().expect("run to halt after injection failed");
+        // ~19 real MMIO exits for negotiate/setup/notify, then `payload.s`'s own busy-loop (20,000
+        // outer iterations, one `out 0x80` exit each, deliberately long enough for the interrupt to
+        // land mid-loop) plus the ISR/halt tail -- this run loop (unlike the original two-phase
+        // version) counts every one of those against the same budget, so this is generous, not tight.
+        const MAX_EXITS: u32 = 200_000;
+        let halt = mv
+            .run_to_first_halt_with_virtio_rng(VIRTIO_RNG_VECTOR, MAX_EXITS)
+            .expect("run_to_first_halt_with_virtio_rng failed");
         let expected_byte = crate::timesource::SplitMix64::new(seed).next_u64().to_le_bytes()[0];
         (halt, expected_byte)
     }

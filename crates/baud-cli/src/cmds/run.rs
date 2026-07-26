@@ -95,6 +95,24 @@ pub enum RunAction {
         /// Bound on ticks before giving up. Only used when `--periodic-timer-period-rcb` is set.
         #[arg(long, default_value_t = 2000)]
         periodic_timer_max_ticks: u32,
+        /// Seed the virtio-rng device's own tape-derived entropy stream and enable it
+        /// (`Multiverse::enable_virtio_rng`/`seed_virtio_rng_entropy`) — setting this enables the
+        /// device for the boot, mirroring `--periodic-timer-period-rcb`'s "presence enables"
+        /// convention. Does not resolve what vector an unmodified Linux guest's own `virtio_mmio`
+        /// driver would bind to via `request_irq()` (there is no IOAPIC/PIC here) — the guest image
+        /// must already know to use `--virtio-rng-vector`.
+        #[arg(long)]
+        virtio_rng_seed: Option<u64>,
+        /// Interrupt vector delivered on a serviced `QueueNotify`. Defaults to `0x31`, the vector
+        /// `tests/fixtures/virtio-rng-guest/payload.s`'s own IDT gate uses. Only used when
+        /// `--virtio-rng-seed` is set.
+        #[arg(long, default_value_t = 0x31)]
+        virtio_rng_vector: u8,
+        /// Bound on host-side exits before giving up when `--periodic-timer-period-rcb` is not also
+        /// set (unused otherwise, since that loop is bounded by `--periodic-timer-max-ticks`
+        /// instead). Only used when `--virtio-rng-seed` is set.
+        #[arg(long, default_value_t = 200_000)]
+        virtio_rng_max_exits: u32,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
     /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
@@ -286,6 +304,9 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             periodic_timer_period_rcb,
             periodic_timer_vector,
             periodic_timer_max_ticks,
+            virtio_rng_seed,
+            virtio_rng_vector,
+            virtio_rng_max_exits,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -300,6 +321,13 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                     "period_rcb": period_rcb,
                     "vector": periodic_timer_vector,
                     "max_ticks": periodic_timer_max_ticks,
+                });
+            }
+            if let Some(seed) = virtio_rng_seed {
+                body["virtio_rng"] = json!({
+                    "seed": seed,
+                    "vector": virtio_rng_vector,
+                    "max_exits": virtio_rng_max_exits,
                 });
             }
             let v = c.post("/run/kvm", &body).await?;

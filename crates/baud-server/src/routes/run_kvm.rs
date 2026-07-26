@@ -63,6 +63,46 @@ pub struct RunKvmBody {
     /// behavior.
     #[serde(default)]
     pub periodic_timer: Option<PeriodicTimerSpec>,
+    /// Enable and seed the virtio-rng device (`Multiverse::enable_virtio_rng`/
+    /// `seed_virtio_rng_entropy`) and service its `QueueNotify`s with a real delivered interrupt
+    /// (`Multiverse::run_to_first_halt_with_virtio_rng` /
+    /// `run_to_first_halt_with_periodic_timer_and_virtio_rng` when `periodic_timer` is also set) —
+    /// hardware-proven against `tests/fixtures/virtio-rng-guest/` but, before this field, reachable
+    /// only from a Rust test calling `Multiverse` directly, never through the CLI/server path
+    /// (todo.md §14 next-actions item 1's last-open "boot/cmdline/CLI wiring" gap). `None` (the
+    /// default) preserves this route's exact prior behavior — virtio-rng stays disabled, exactly
+    /// like every existing `boot`/`restore` call site.
+    #[serde(default)]
+    pub virtio_rng: Option<VirtioRngSpec>,
+}
+
+/// See [`RunKvmBody::virtio_rng`]'s doc for why this exists at all.
+#[derive(Debug, Deserialize)]
+pub struct VirtioRngSpec {
+    /// Seeds the device's own tape-derived entropy sub-stream (`SplitMix64`), independent of the
+    /// `rdrand`/`rdseed` substream and the boot `SETUP_RNG_SEED` (spec §3.8's domain-separation
+    /// convention).
+    pub seed: u64,
+    /// Interrupt vector delivered on a serviced `QueueNotify`. Defaults to `0x31`, the vector
+    /// `tests/fixtures/virtio-rng-guest/payload.s`'s own IDT gate is registered at — this does
+    /// **not** resolve what vector an unmodified Linux guest's real `virtio_mmio` driver would bind
+    /// to via `request_irq()` (there is no IOAPIC/PIC here to resolve one dynamically); the caller
+    /// must still know and supply the right vector for its own guest image.
+    #[serde(default = "default_virtio_rng_vector")]
+    pub vector: u8,
+    /// Bound on host-side exits before giving up when no `periodic_timer` is also set (the same
+    /// "no silent non-termination" convention as `PeriodicTimerSpec::max_ticks`) — unused when
+    /// `periodic_timer` is set, since that loop is instead bounded by `max_ticks`.
+    #[serde(default = "default_virtio_rng_max_exits")]
+    pub max_exits: u32,
+}
+
+fn default_virtio_rng_vector() -> u8 {
+    0x31
+}
+
+fn default_virtio_rng_max_exits() -> u32 {
+    200_000
 }
 
 /// See [`RunKvmBody::periodic_timer`]'s doc for why this exists at all.
@@ -117,13 +157,14 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
         None => None,
     };
     let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
+    let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
     let tape_hex = body.tape_hex.clone();
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
     let result = tokio::task::spawn_blocking(move || {
-        boot_run_and_drain(&kernel_path, &cmdline, tape, initramfs.as_deref(), periodic_timer)
+        boot_run_and_drain(&kernel_path, &cmdline, tape, initramfs.as_deref(), periodic_timer, virtio_rng)
     })
     .await
     .expect("run/kvm task panicked");
@@ -142,6 +183,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                     tape_hex: &tape_hex,
                     initramfs_path: body.initramfs_path.as_deref(),
                     periodic_timer,
+                    virtio_rng,
                     store_run_id: None,
                     snapshot_node_id: None,
                 };
@@ -174,6 +216,8 @@ struct KvmBootParams<'a> {
     tape_hex: &'a str,
     initramfs_path: Option<&'a str>,
     periodic_timer: Option<(u64, u8, u32)>,
+    /// `(seed, vector, max_exits)` — see [`RunKvmBody::virtio_rng`]'s doc.
+    virtio_rng: Option<(u64, u8, u32)>,
     /// Set only for a resume-originated (restore-based) persisted run, where `tape_hex` is a tape
     /// *suffix* fed to `Multiverse::branch` on top of the `Universe` this names, not a whole-boot
     /// tape for `kernel_path` (which is `""` and unused in that case) — `stream::render`'s
@@ -206,12 +250,17 @@ async fn persist_kvm_run(
         Some((p, v, m)) => (Some(p as i64), Some(v as i64), Some(m as i64)),
         None => (None, None, None),
     };
+    let (rng_seed, rng_vector, rng_max_exits) = match params.virtio_rng {
+        Some((s, v, m)) => (Some(s as i64), Some(v as i64), Some(m as i64)),
+        None => (None, None, None),
+    };
 
     sqlx::query(
         "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, initramfs_path, \
          periodic_timer_period_rcb, periodic_timer_vector, periodic_timer_max_ticks, \
+         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, \
          store_run_id, snapshot_node_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
             kernel_path = excluded.kernel_path,
             cmdline = excluded.cmdline,
@@ -220,6 +269,9 @@ async fn persist_kvm_run(
             periodic_timer_period_rcb = excluded.periodic_timer_period_rcb,
             periodic_timer_vector = excluded.periodic_timer_vector,
             periodic_timer_max_ticks = excluded.periodic_timer_max_ticks,
+            virtio_rng_seed = excluded.virtio_rng_seed,
+            virtio_rng_vector = excluded.virtio_rng_vector,
+            virtio_rng_max_exits = excluded.virtio_rng_max_exits,
             store_run_id = excluded.store_run_id,
             snapshot_node_id = excluded.snapshot_node_id,
             created_at = excluded.created_at",
@@ -232,6 +284,9 @@ async fn persist_kvm_run(
     .bind(period_rcb)
     .bind(vector)
     .bind(max_ticks)
+    .bind(rng_seed)
+    .bind(rng_vector)
+    .bind(rng_max_exits)
     .bind(params.store_run_id)
     .bind(params.snapshot_node_id)
     .bind(now)
@@ -295,20 +350,22 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None).map(|(outcome, _records)| outcome)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None).map(|(outcome, _records)| outcome)
 }
 
-/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`, see [`RunKvmBody`]'s doc for
-/// why both exist), run to first `Hlt`/`Shutdown`, then drain every tape-device record the guest
-/// emitted along the way (`Multiverse::drain_tape_records`) — the same boot `boot_and_run` does,
-/// plus the drain `/run/kvm`'s `run()` handler needs to persist real `Msg::Frame` records
-/// (previously captured in-process and immediately dropped, todo.md §14's eighteenth-brick gap).
+/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`, see
+/// [`RunKvmBody`]'s doc for why each exists), run to first `Hlt`/`Shutdown`, then drain every
+/// tape-device record the guest emitted along the way (`Multiverse::drain_tape_records`) — the
+/// same boot `boot_and_run` does, plus the drain `/run/kvm`'s `run()` handler needs to persist
+/// real `Msg::Frame` records (previously captured in-process and immediately dropped, todo.md
+/// §14's eighteenth-brick gap).
 fn boot_run_and_drain(
     kernel_path: &Path,
     cmdline: &str,
     tape: Vec<u8>,
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
@@ -322,14 +379,32 @@ fn boot_run_and_drain(
         rdseed_sites,
     )
     .map_err(|e| format!("boot error: {e}"))?;
-    let halt = match periodic_timer {
-        Some((period_rcb, vector, max_ticks)) => {
+    if let Some((seed, _, _)) = virtio_rng {
+        mv.enable_virtio_rng();
+        mv.seed_virtio_rng_entropy(seed);
+    }
+    let halt = match (periodic_timer, virtio_rng) {
+        (Some((period_rcb, timer_vector, max_ticks)), Some((_, rng_vector, _))) => {
+            let (_ticks, halt) = mv
+                .run_to_first_halt_with_periodic_timer_and_virtio_rng(
+                    period_rcb,
+                    timer_vector,
+                    rng_vector,
+                    max_ticks,
+                )
+                .map_err(|e| format!("determinism hole: {e}"))?;
+            halt
+        }
+        (Some((period_rcb, vector, max_ticks)), None) => {
             let (_ticks, halt) = mv
                 .run_to_first_halt_with_periodic_timer(period_rcb, vector, max_ticks)
                 .map_err(|e| format!("determinism hole: {e}"))?;
             halt
         }
-        None => mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?,
+        (None, Some((_, rng_vector, max_exits))) => mv
+            .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
+            .map_err(|e| format!("determinism hole: {e}"))?,
+        (None, None) => mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?,
     };
     let records = mv.drain_tape_records();
     Ok(((halt.console_output, halt.ram_hash, None, None), records))
@@ -338,7 +413,11 @@ fn boot_run_and_drain(
 /// Re-boot a real KVM guest and return only the `Msg::Frame` records it produced, in order — the
 /// primitive `stream::render`'s real-replay path uses to regenerate actual pixels for a run that
 /// `/run/kvm` persisted (`kvm_run_meta`), instead of fabricating a synthetic gradient from a
-/// stored hash.
+/// stored hash. `virtio_rng` replay is not yet wired here (`stream::render`'s query never reads
+/// the new `virtio_rng_*` columns) — every real-replay call passes `None`, same as before this
+/// field existed; a virtio-rng-enabled run's frames replay identically as long as the guest's own
+/// frame emission does not depend on entropy content, and re-wiring the DB read is separate,
+/// smaller future work.
 pub(crate) fn boot_and_drain_frames(
     kernel_path: &Path,
     cmdline: &str,
@@ -346,7 +425,7 @@ pub(crate) fn boot_and_drain_frames(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
 ) -> Result<Vec<baud_proto::FrameRecord>, String> {
-    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer)?;
+    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer, None)?;
     Ok(records
         .into_iter()
         .filter_map(|m| match m {
@@ -568,6 +647,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                             tape_hex: &outcome.tape_hex,
                             initramfs_path: body.initramfs_path.as_deref(),
                             periodic_timer,
+                            virtio_rng: None,
                             store_run_id: None,
                             snapshot_node_id: None,
                         };
@@ -662,6 +742,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         tape_hex: &body.branch_tapes_hex[i],
                         initramfs_path: body.initramfs_path.as_deref(),
                         periodic_timer,
+                        virtio_rng: None,
                         store_run_id: None,
                         snapshot_node_id: None,
                     };
@@ -1262,6 +1343,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                             tape_hex: &outcome.tape_hex,
                             initramfs_path: None,
                             periodic_timer,
+                            virtio_rng: None,
                             store_run_id: Some(&run_id),
                             snapshot_node_id: Some(&node_id_hex),
                         };
@@ -1338,6 +1420,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                         tape_hex: &body.branch_tapes_hex[i],
                         initramfs_path: None,
                         periodic_timer,
+                        virtio_rng: None,
                         store_run_id: Some(&run_id),
                         snapshot_node_id: Some(&node_id_hex),
                     };
@@ -1584,6 +1667,7 @@ mod tests {
             vec![],
             Some(&initramfs),
             Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+            None,
         )
         .expect("real linux-guest boot through boot_run_and_drain failed");
 

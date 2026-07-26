@@ -1768,11 +1768,61 @@ snapshot, not a duplicate of it.
      ralph-iteration-25 note above (`console.rs`'s `service_virtio_rng`). Interrupt delivery and
      boot/cmdline/CLI wiring are the only pieces still open before `virtio_rng_reseed_is_deterministic`
      can pass.
-     **Correction (this iteration)**: interrupt delivery is also now done — see item 1's note above
+     **Correction (ralph iteration 26)**: interrupt delivery is also now done — see item 1's note above
      (`VirtioMmioTransport::raise_used_buffer_notification` plus `Multiverse::service_virtio_rng_
      interrupt`). Boot/cmdline/CLI wiring (and, separately, which vector an unmodified Linux guest's
      `virtio_mmio` driver would actually bind to) is the only piece still open before `virtio_rng_
      reseed_is_deterministic` can pass.
+     **This iteration: boot/cmdline/CLI wiring is now done for the primary `/run/kvm` boot route —
+     branch/resume and stream-replay wiring remain smaller, separate follow-ups; the deeper
+     unmodified-Linux-driver IRQ-vector-resolution question is still untouched, as designed.** Two
+     new `Multiverse` run-loop entry points (`crates/baud-multiverse/src/linux/mod.rs`):
+     `run_to_first_halt_with_virtio_rng(vector, max_exits)` (promotes the exact per-exit `notify_count`
+     poll-and-service idiom the `virtio_rng_interrupt_reaches_the_guests_own_isr` test's own loop used
+     to a real, reusable API — that test was refactored to call it instead of duplicating the loop,
+     no behavior change) and `run_to_first_halt_with_periodic_timer_and_virtio_rng(period_rcb,
+     timer_vector, virtio_rng_vector, max_ticks)` (the same idea combined with H4's periodic-timer
+     engine, checking `notify_count` once per delivered tick rather than once per host-side exit,
+     since a real kernel guest needs periodic ticks regardless of virtio-rng). Refactoring the test
+     surfaced a real, easy-to-miss gotcha: the original two-phase test bounded only the setup/
+     negotiate exits (`MAX_EXITS = 200`) and then called an *unbounded* `run_to_first_halt()` for the
+     rest; the merged loop counts every exit against one budget, and `payload.s`'s own deliberate
+     20,000-iteration busy-loop (each iteration is one `out 0x80` exit, "long enough for the test
+     harness to observe the QueueNotify write... mid-loop") blows straight through 200 — fixed by
+     raising the bound to `200_000` (documented inline as generous, not tight). `crates/baud-server/
+     src/routes/run_kvm.rs` gained `RunKvmBody.virtio_rng: Option<VirtioRngSpec>` (`seed: u64`,
+     `vector: u8` default `0x31` — the fixture's own IDT-gate vector, `max_exits: u32` default
+     `200_000`), threaded through `boot_run_and_drain` (now taking a `virtio_rng: Option<(u64,u8,u32)>`
+     param, calling `enable_virtio_rng`/`seed_virtio_rng_entropy` right after boot and dispatching to
+     whichever of the four run-loop combinations `(periodic_timer, virtio_rng)` calls for) and
+     persisted into three new nullable `kvm_run_meta` columns (`virtio_rng_seed`/`_vector`/
+     `_max_exits`, `migrations/0013_kvm_run_meta_virtio_rng.sql`, same additive-columns convention as
+     `0011`/`0012`). `crates/baud-cli/src/cmds/run.rs`'s `RunAction::Kvm` gained `--virtio-rng-seed`
+     (presence enables, mirroring `--periodic-timer-period-rcb`'s convention), `--virtio-rng-vector`
+     (default `0x31`), `--virtio-rng-max-exits` (default `200_000`) — `KvmBranch`/`KvmResume` were
+     deliberately left unchanged (server-side branch/resume routes don't accept `virtio_rng` yet,
+     kept out of scope this iteration to stay focused). **Real-hardware-verified end-to-end** via new
+     `drive/pkg-virtio-rng-cli.sh` (opt-in, mirrors `drive/pkg-boot-cli.sh`'s structure): boots the
+     already-checked-in `tests/fixtures/virtio-rng-guest/bzImage` fixture through a real `baud run kvm
+     --virtio-rng-seed 42 --virtio-rng-vector 49 --json` CLI invocation against a live `baud-server`
+     over real HTTP — **real result: `ok=true`, `console_output_hex="5295"`** (the guest's own ISR's
+     `'R'` marker plus the real tape-seeded entropy byte, proving the interrupt was delivered through
+     the actual CLI/server path, not just a Rust test calling `Multiverse` directly). `cargo build`/
+     `clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new warnings —
+     confirmed via a targeted grep restricted to the files this iteration touched); `drive/h0.sh`-
+     `h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions
+     from the widened `kvm_run_meta` schema or `boot_run_and_drain`/`KvmBootParams` signatures;
+     `drive/pkg-boot-cli.sh` re-run clean as a regression check. **Still open**: `stream::render`'s
+     real-replay path (`boot_and_drain_frames`/`render_frames_from_real_replay`) does not read the new
+     `virtio_rng_*` columns back yet, so a virtio-rng-enabled run's frames always replay with the
+     device disabled (harmless unless a guest's frame emission itself depends on entropy content — no
+     current fixture does); `/run/kvm/branch`/`/run/kvm/resume` don't accept `virtio_rng` at all yet
+     (their `KvmBootParams` literals were updated to compile with `virtio_rng: None`, not to actually
+     support it); and, unchanged, the deeper "which vector would an unmodified Linux guest's real
+     `virtio_mmio` driver's `request_irq()` resolve to, with no IOAPIC/PIC here" question — genuinely
+     separate research, not plumbing. `virtio_rng_reseed_is_deterministic` (the spec-named test) still
+     needs a *real Linux guest* (not this hand-assembled fixture) to actually negotiate and use the
+     device before it can pass — this iteration closes the mechanism's reachability, not that guest.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window
