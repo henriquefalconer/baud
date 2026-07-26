@@ -2015,13 +2015,93 @@ snapshot, not a duplicate of it.
      to exercise its real `drivers/virtio/virtio_mmio.c` + `drivers/char/hw_random/virtio-rng.c`
      drivers — that needs `CONFIG_VIRTIO=y`/`CONFIG_VIRTIO_MMIO=y`/`CONFIG_VIRTIO_MMIO_CMDLINE_
      DEVICES=y`/`CONFIG_HW_RANDOM_VIRTIO=y` added to the guest kernel config plus a real initramfs
-     with those drivers built in or loadable, and is still blocked on the same Buildroot/pinned-Nix
-     guest-image pipeline (§4.5) already blocking H8/H9 — so `virtio_rng_reseed_is_deterministic`
-     (the spec-named test) still cannot pass yet, but the previously-unknown "what vector" half of
-     that blocker is now closed: once a real Linux guest boots this far, `isa_irq_vector(5)` (or
-     whichever line the cmdline names) is exactly the value `service_virtio_rng_interrupt`/
-     `RunKvmBranchBody::virtio_rng`'s vector field should be given. H8 Mario is still blocked on the
-     FCEUX Qt5/SDL2/Xvfb packaging problem; H9 Ubuntu is still not started.
+     with those drivers built in or loadable, and is believed at this point to be blocked on the
+     same Buildroot/pinned-Nix guest-image pipeline (§4.5) already blocking H8/H9 **(this premise
+     turned out to be wrong for exactly this piece — see the "what this still does not do" gap
+     closed below; Buildroot/pinned-Nix remains genuinely needed only for H8/H9's full rootfs)** —
+     so `virtio_rng_reseed_is_deterministic` (the spec-named test) still cannot pass yet, but the
+     previously-unknown "what vector" half of that blocker is now closed: once a real Linux guest
+     boots this far, `isa_irq_vector(5)` (or whichever line the cmdline names) is exactly the value
+     `service_virtio_rng_interrupt`/`RunKvmBranchBody::virtio_rng`'s vector field should be given.
+     H8 Mario is still blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem; H9 Ubuntu is still not
+     started.
+     **This iteration: the premise above — that exercising the real kernel's own virtio_mmio/
+     virtio-rng drivers needs the Buildroot/pinned-Nix pipeline — turned out to be wrong.** Only the
+     full-rootfs half of that (H8's FCEUX dependency closure, H9's Ubuntu) actually needs Buildroot/
+     Nix; proving the *driver* half needed only a single-binary initramfs, the same pattern every
+     other fixture in `crates/baud-multiverse/tests/fixtures/linux-guest/` already uses. Rebuilt
+     that directory's existing from-scratch `make bzImage` pipeline (its `BUILD.md`-documented
+     process, no Buildroot/Nix involved) with `minimal.config` gaining `CONFIG_VIRTIO_MENU=y`,
+     `CONFIG_VIRTIO=y`, `CONFIG_VIRTIO_MMIO=y`, `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y`,
+     `CONFIG_HW_RANDOM=y`, `CONFIG_HW_RANDOM_VIRTIO=y`. Found a real Kconfig gotcha, documented in
+     `BUILD.md`: `CONFIG_VIRTIO_MENU` is a `menuconfig` in `drivers/virtio/Kconfig` gating the
+     entire virtio submenu, separate from and easy to miss alongside `VIRTIO_MMIO`'s own
+     `HAS_IOMEM`/`HAS_DMA` deps — omit it and the kernel silently builds with no virtio at all, no
+     error at either config or boot time.
+     Added a new `/init` variant, `virtio_rng_init.c`, packaged as `virtio_rng_initramfs.cpio.gz`
+     alongside the fixture's existing images, booted with cmdline
+     `virtio_mmio.device=0x200@0xd0000000:5` (base/len from `layout::VIRTIO_MMIO_RNG_BASE`/`_LEN`,
+     `crates/baud-multiverse/src/layout.rs`; IRQ 5 chosen so `pic8259::isa_irq_vector(5) = 0x35` —
+     above the "what vector" answer, previously validated only against the hand-assembled
+     `virtio-rng-guest` fixture — is now, for the first time, the value fed to a real, unmodified
+     kernel's own `drivers/virtio/virtio_mmio.c` + `drivers/char/hw_random/virtio-rng.c`, rather than
+     a hand-assembled guest that merely mimics one). The pre-existing
+     `tests/fixtures/virtio-rng-guest/` fixture stays as-is, unrelated.
+     Two real bugs surfaced getting this to boot (full diagnosis in `linux-guest/BUILD.md`'s new
+     "`virtio_rng_init.c` / `virtio_rng_initramfs.cpio.gz`" section): (1) `/dev/hwrng` never appeared
+     via devtmpfs despite the driver probing successfully (confirmed via
+     `/sys/class/misc/hw_random` and `/proc/interrupts` showing `virtio0` bound to IRQ 5) —
+     devtmpfs node creation for a device registered mid-`do_initcalls()` depends on the async
+     `devtmpfsd` kernel thread, which this single-vCPU deterministic machine gives no guaranteed
+     chance to run before `/init`'s first instruction; fixed by having `virtio_rng_init.c` read the
+     device's real major:minor from `/sys/class/misc/hw_random/dev` and `mknod()` the node itself —
+     deterministic, no timing race. (2) a subsequent real read then hung forever with no interrupt
+     ever delivered — the virtio-rng driver's `virtio_read()` blocks via
+     `wait_for_completion_killable()`, scheduling out to the idle loop's `safe_halt()`, a scenario no
+     prior fixture exercised (every one kept its vCPU busy while an interrupt was pending); `baud_
+     vcpu::boundary::inject_at` (`crates/baud-vcpu/src/boundary.rs`) returns `InjectOutcome::Halted`
+     before ever calling `PmuStepper::inject` when the vCPU is already halted at entry (by design —
+     a real triple-fault shutdown is observed the same way and must not be mistaken for "keep
+     going"), so `Multiverse::run_to_first_halt_with_periodic_timer_and_virtio_rng`'s `Halted` arm
+     (`crates/baud-multiverse/src/linux/mod.rs`) was returning immediately as terminal even when a
+     virtio-rng completion was the actual, resumable reason for the halt. Fixed with a new method,
+     `Multiverse::service_virtio_rng_interrupt_while_halted`, that stages the interrupt directly via
+     `KVM_SET_VCPU_EVENTS` and re-enters with one plain `step_exit()` — safe specifically because
+     `safe_halt()`'s `sti; hlt` idiom guarantees `RFLAGS.IF=1` at the exact halt instant. The
+     `Halted` arm now checks for a pending virtio-rng notification and wakes through this path
+     instead of returning; behavior is unchanged for every existing guest that never enables
+     virtio-rng (falls through to the original terminal-halt return exactly as before — zero
+     regression risk for every other test).
+     Two new tests, both real-hardware-verified on real `/dev/kvm`, in
+     `crates/baud-multiverse/src/linux/mod.rs`:
+     `guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng` (boots, confirms `/init`
+     reaches its marker, opens `/dev/hwrng` (`hwrng-open-ok`), and completes a real read
+     (`hwrng-bytes:` + hex)) and
+     `guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots` (same seed, two boots,
+     asserts the entire console output — including the real driver-sourced entropy bytes — is
+     byte-identical). `cargo build --workspace`, `cargo clippy --workspace --all-targets` (zero new
+     warnings — `linux/mod.rs` has zero clippy hits), and `cargo test --workspace` all clean;
+     `baud-multiverse` now 130 passed/8 ignored (up from 128); `drive/h0.sh`-`h7.sh` (8/8),
+     `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`, `drive/pkg-multifile-initramfs.sh`,
+     `drive/pkg-dynamic-link.sh` (all three boot the shared rebuilt `linux-guest` bzImage — no
+     regressions from the Kconfig change), `drive/pkg-build-cli.sh` (confirms the automated
+     from-source kernel-build pipeline still works with the new Kconfig fragment), and all four
+     `drive/pkg-virtio-rng-*-cli.sh` scripts (different fixture, shares `console.rs`/`Pic8259` code —
+     no regressions) all PASS on real `/dev/kvm`. `drive/pkg-image-build.sh` (the
+     two-independent-builds reproducibility check) was not re-run this iteration to save time — it
+     shares the exact same build path `pkg-build-cli.sh` already exercised successfully, so this is
+     a low-risk, documented gap, not a skipped requirement.
+     **Still open after this iteration**: the Buildroot/pinned-Nix guest-image pipeline (§4.5)
+     itself is still not implemented — still needed for H8 (FCEUX/Xvfb + its dependency closure) and
+     H9 (Ubuntu), which need a *rootfs*, not just a kernel driver proof; this iteration's virtio_rng
+     proof did not need Buildroot/Nix because it only needed a single-binary initramfs, same pattern
+     as every other fixture in that directory. `virtio_rng_reseed_is_deterministic` (§3.8) — this
+     iteration's two new tests are a real, meaningful step toward it (a real driver's *initial* read
+     is now proven deterministic across boots) but are not literally that spec-named test, which
+     implies continuous reseeding over a longer run (e.g. multiple reads/requests over time), not
+     yet exercised here — this test still cannot be marked passing. H8 Mario is still blocked on the
+     FCEUX Qt5/SDL2/Xvfb packaging problem, untouched this iteration; H9 Ubuntu is still not
+     started.
   3. **H8 — Super Mario Bros example (§11, rides on #1)** — rebuild `examples/mario/` under the new model: a
      real Linux image with FCEUX + the Lua harness + `/init` (the pre-KVM `nes_bridge.c` stdin stub is
      retired), `probes.toml` / `strategy.toml`, `drive/mario.sh` completion gate, the ~25% live window

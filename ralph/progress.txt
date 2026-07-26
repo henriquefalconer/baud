@@ -5935,3 +5935,54 @@ todo.md updated with this iteration's finding (the 'which vector' research quest
   - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings -- fixed one clippy identity_op my own new test introduced before commit); baud-multiverse 119->128 passed (8 ignored, unchanged); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), drive/pkg-boot-cli.sh (real Linux 6.18 kernel boot to /init, confirming no regression), drive/pkg-virtio-rng-cli.sh, drive/pkg-virtio-rng-replay-cli.sh, drive/pkg-virtio-rng-branch-resume-cli.sh, drive/pkg-virtio-rng-generate-cli.sh all PASS on real /dev/kvm, no regressions.
   - Still open: a real unmodified Linux guest boot far enough to exercise the real virtio_mmio.c/virtio-rng.c drivers (needs CONFIG_VIRTIO* + a real initramfs, blocked on the same Buildroot/pinned-Nix pipeline as H8/H9) -- so virtio_rng_reseed_is_deterministic still can't pass, but the vector half of that blocker is now closed; H8 Mario (FCEUX/Xvfb packaging) and H9 Ubuntu remain not started.
 ---
+
+Post-push verification: git push was a clean fast-forward (6fc52e3..dcb3a2a), working tree matches origin/main exactly at dcb3a2a. All verification (build/clippy/test --workspace, drive/h0.sh-h7.sh, drive/m9.sh-m13.sh, pkg-boot-cli.sh, pkg-virtio-rng-cli.sh, pkg-virtio-rng-replay-cli.sh, pkg-virtio-rng-branch-resume-cli.sh, pkg-virtio-rng-generate-cli.sh) was run against this exact commit before pushing.
+
+Iteration complete: answered the 'which vector' virtio_mmio IRQ research question with a real Pic8259 device stub + hardware-verified fixture extension, all verification green, pushed clean. todo.md still has pending items (a real unmodified Linux guest boot exercising the real virtio_mmio.c/virtio-rng.c drivers -- blocked on the Buildroot/pinned-Nix guest-image pipeline shared with H8/H9; H8 Mario FCEUX/Xvfb packaging; H9 Ubuntu not started) -- emitting NEXT.
+
+## 2026-07-26T20:37:00 UTC (39min) - Session usage — build-32 [sonnet]
+- cost $7.7082 (from claude -p)
+- context 208,157 tok peak of 1M (21%) across 88 inference calls, monotonic
+- models sonnet-5 $6.1347 (in 176 / out 59,425 / cache-read 13,786,804) · opus-5[1m] $1.5703 · haiku-4-5 $0.0032
+- subagents (1) opus-5 x1
+- transcript: ralph/.run/20260726T004845Z/032-build-32.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 33
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick up where iteration 32 left off.
+
+Chose: extend the real linux-guest kernel fixture with CONFIG_VIRTIO_MMIO/CONFIG_HW_RANDOM_VIRTIO support and a virtio_mmio.device= cmdline, to exercise a real unmodified Linux kernel's own virtio_mmio.c/virtio-rng.c drivers against baud's already-built VirtioMmioTransport + Pic8259 isa_irq_vector(5) plumbing -- this is the concrete next-actions item flagged at the end of iteration 32, and all the interrupt-delivery/queue machinery already exists; only the kernel config + cmdline + a new hwrng-reading /init variant are missing.
+
+Rebuilt the linux-guest kernel with CONFIG_VIRTIO_MENU/VIRTIO/VIRTIO_MMIO/VIRTIO_MMIO_CMDLINE_DEVICES/HW_RANDOM/HW_RANDOM_VIRTIO=y added to minimal.config (had to add VIRTIO_MENU too -- the whole virtio Kconfig submenu is gated behind it, a real dependency gotcha, not just VIRTIO_MMIO's own HAS_IOMEM/HAS_DMA deps). New bzImage built clean and copied into the fixture. Now writing a new /init variant that opens /dev/hwrng to prove the real virtio_rng driver actually completes a request through baud's VirtioMmioTransport + Pic8259 isa_irq_vector(5) interrupt delivery...
+
+New /init variant (virtio_rng_init.c) built and packaged into virtio_rng_initramfs.cpio.gz; new test guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng added in crates/baud-multiverse/src/linux/mod.rs, boots the real rebuilt linux-guest kernel with virtio_mmio.device=0x200@0xd0000000:5 and checks for hwrng-open-ok/hwrng-bytes markers. Building baud-multiverse now...
+
+Root-caused hwrng-open-failed via a debug /init variant: /sys/class/misc/hw_random and /proc/interrupts both confirmed the real virtio_mmio.c/virtio-rng.c drivers DID probe and bind IRQ5 (evidence: 'virtio-mmio: Registering device...IRQ 5' + /proc/interrupts row '5: 0 XT-PIC virtio0') -- the /dev/hwrng node itself was just missing because devtmpfs's node-creation for a device registered mid-initcalls is handled by an async kthread this single-vCPU deterministic machine gives no guaranteed run before /init's first instruction. Fixed deterministically: virtio_rng_init.c now mounts sysfs, reads the real major:minor from /sys/class/misc/hw_random/dev, and mknod()s /dev/hwrng itself instead of racing devtmpfs. Rebuilt the initramfs, re-running the test now...
+
+Found and fixed a real engineering gap this test is the first to hit: run_to_first_halt_with_periodic_timer_and_virtio_rng's Halted arm returned immediately as terminal without ever checking for a pending virtio_rng notification -- inject_at (crates/baud-vcpu/src/boundary.rs) returns Halted before ever calling PmuStepper::inject when the vCPU is ALREADY halted at entry, so a real Linux guest legitimately parked in safe_halt() waiting for its own virtio-rng read() completion was being treated as 'done' rather than woken. Added service_virtio_rng_interrupt_while_halted (direct KVM_SET_VCPU_EVENTS + one step_exit, safe because safe_halt's sti;hlt idiom guarantees IF=1 at the halt instant) and wired it into the Halted arm. Building and re-running the test now...
+
+Both new tests pass, including a double-boot reproducibility check for the real driver-sourced entropy bytes. Running full cargo build --workspace now...
+
+cargo build --workspace clean (only pre-existing documented aya::Bpf deprecation warnings). Running cargo clippy --workspace --all-targets now...
+
+clippy --workspace --all-targets: only pre-existing warnings, none in files I touched (confirmed linux/mod.rs has zero clippy hits). Running cargo test --workspace now (the long one)...
+
+cargo test --workspace: ALL GREEN, 0 failures (baud-multiverse 130 passed/8 ignored, up from 128 -- the 2 new virtio_mmio.c/virtio-rng.c real-driver tests). Running drive/h0.sh through h7.sh one at a time next...
+
+h0-h7 (8/8), m9-m13 (5/5), pkg-boot-cli.sh, pkg-multifile-initramfs.sh, pkg-dynamic-link.sh (all three boot the shared rebuilt linux-guest bzImage -- no regressions), and all four pkg-virtio-rng-*-cli.sh scripts (different fixture, shares console.rs/Pic8259) all PASS on real /dev/kvm. Running pkg-build-cli.sh next (exercises the automated kernel-build pipeline against the changed minimal.config, ~4-5 min)...
+
+todo.md updated via subagent, verified clean (no forbidden iteration-numbering text, premise correction + new closure paragraph landed correctly). Appending final progress block and committing now...
+
+## 2026-07-26T21:25:17 UTC - Changes committed.
+- Booted a real, unmodified Linux kernel's own virtio_mmio.c/virtio-rng.c drivers through baud-multiverse for the first time (previously only a hand-assembled fixture had exercised the virtio-mmio transport), and fixed a genuine engine gap this is the first test to hit: a virtio-rng completion arriving while the vCPU is legitimately halted (safe_halt()) was being misreported as terminal.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/linux-guest/{minimal.config,bzImage,BUILD.md,virtio_rng_init.c (new),virtio_rng_initramfs.cpio.gz (new)}, todo.md.
+- **Brief description of changes:**
+  - Rebuilt the linux-guest kernel fixture with CONFIG_VIRTIO_MENU/VIRTIO/VIRTIO_MMIO/VIRTIO_MMIO_CMDLINE_DEVICES/HW_RANDOM/HW_RANDOM_VIRTIO=y added to minimal.config -- found that CONFIG_VIRTIO_MENU (a menuconfig gating the whole virtio Kconfig submenu) is a separate, easy-to-miss dependency from VIRTIO_MMIO's own HAS_IOMEM/HAS_DMA deps; omitting it silently compiles virtio out entirely.
+  - New /init variant virtio_rng_init.c boots with `virtio_mmio.device=0x200@0xd0000000:5` (matching layout::VIRTIO_MMIO_RNG_BASE/LEN and pic8259::isa_irq_vector(5)=0x35) and reads /dev/hwrng, exercising the guest's real virtio_mmio.c + virtio-rng.c drivers against VirtioMmioTransport for the first time.
+  - Found and fixed two real bugs to get this booting (full diagnosis in tests/fixtures/linux-guest/BUILD.md): (1) /dev/hwrng never appears via devtmpfs despite a successful probe, because devtmpfs's node-creation kernel thread (devtmpfsd) has no guaranteed chance to run before /init's first instruction on this single-vCPU machine -- fixed by mknod()ing the node directly from the major:minor read out of /sys/class/misc/hw_random/dev; (2) a real /dev/hwrng read() hung forever because baud_vcpu::boundary::inject_at returns Halted before ever calling PmuStepper::inject when the vCPU is already halted at entry, so Multiverse::run_to_first_halt_with_periodic_timer_and_virtio_rng's Halted arm was treating a guest legitimately parked in safe_halt() waiting for the virtio-rng completion as a terminal shutdown -- fixed with a new Multiverse::service_virtio_rng_interrupt_while_halted that stages the interrupt via KVM_SET_VCPU_EVENTS and resumes with one step_exit(), safe because safe_halt()'s sti;hlt idiom guarantees RFLAGS.IF=1 at the halt instant; behavior is unchanged for every guest that never enables virtio-rng.
+  - Two new hardware-verified tests in crates/baud-multiverse/src/linux/mod.rs: guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng and guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots (byte-identical console output, including the real driver-sourced entropy bytes, across two boots of the same seed).
+  - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures, 0 new warnings; baud-multiverse 130 passed/8 ignored, up from 128); drive/h0.sh-h7.sh (8/8), drive/m9.sh-m13.sh (5/5), drive/pkg-boot-cli.sh, drive/pkg-multifile-initramfs.sh, drive/pkg-dynamic-link.sh (all three boot the shared rebuilt linux-guest bzImage, no regressions), drive/pkg-build-cli.sh (automated build pipeline still works with the new Kconfig fragment), and all four drive/pkg-virtio-rng-*-cli.sh scripts all PASS on real /dev/kvm.
+  - Still open: the Buildroot/pinned-Nix guest-image pipeline (§4.5) itself, needed for H8 (FCEUX/Xvfb rootfs) and H9 (Ubuntu) -- this iteration's proof did not need it, since it reused the existing single-binary initramfs pattern; virtio_rng_reseed_is_deterministic (the spec-named test, implying continuous reseeding) is not literally proven yet, only the initial-read case; H8/H9 status unchanged.
+---

@@ -203,6 +203,66 @@ Real-hardware result: **5/5 clean, no jitter** (`drive/pkg-dynamic-link.sh`) —
 dynamically-linked binary ever booted through baud-multiverse, and the first real (non-unit-test)
 exercise of `InitramfsEntry::symlink`.
 
+## `virtio_rng_init.c` / `virtio_rng_initramfs.cpio.gz` — a real, not hand-assembled, virtio-rng guest (todo.md §14 item 1)
+
+This `bzImage` gained `CONFIG_VIRTIO_MENU`/`VIRTIO`/`VIRTIO_MMIO`/`VIRTIO_MMIO_CMDLINE_DEVICES`/
+`HW_RANDOM`/`HW_RANDOM_VIRTIO=y` in `minimal.config` (regenerate per this file's "Regenerating the
+kernel" section above). **`CONFIG_VIRTIO_MENU` is the gotcha**: `drivers/virtio/Kconfig` gates its
+entire submenu — `VIRTIO_MMIO` and `HW_RANDOM_VIRTIO` included — behind `menuconfig VIRTIO_MENU`, a
+dependency separate from (and easy to miss alongside) `VIRTIO_MMIO`'s own `HAS_IOMEM`/`HAS_DMA`
+Kconfig deps; setting only the leaf symbols silently produces a kernel with neither compiled in.
+
+`virtio_rng_init.c`'s `/init` boots with `virtio_mmio.device=0x200@0xd0000000:5` on the cmdline
+(`VIRTIO_MMIO_RNG_BASE`/`VIRTIO_MMIO_RNG_LEN`, `crates/baud-multiverse/src/layout.rs`, IRQ 5 chosen
+to match `crate::pic8259::isa_irq_vector(5) = 0x35`, the vector iteration 32's `Pic8259` stub
+resolved for exactly this cmdline convention), then opens and reads `/dev/hwrng` — exercising the
+guest kernel's own real `drivers/virtio/virtio_mmio.c` + `drivers/char/hw_random/virtio-rng.c`
+drivers against baud's `VirtioMmioTransport`, not a hand-assembled payload
+(`tests/fixtures/virtio-rng-guest/`, a separate fixture, stays as-is for its own interrupt-delivery
+unit tests).
+
+**Two real bugs found getting this to boot, both fixed in `crates/baud-multiverse/src/linux/
+mod.rs`, not in this fixture:**
+
+1. **`/dev/hwrng` never appears via `devtmpfs`, even though the driver probes successfully.**
+   `/sys/class/misc/hw_random` and `/proc/interrupts` (`5: 0 XT-PIC virtio0`) both confirm a real
+   probe + IRQ bind, yet `stat("/dev/hwrng")` reliably fails. Root cause: `devtmpfs`'s actual node
+   creation for a device registered mid-`do_initcalls()` is handled by an async kernel worker thread
+   (`devtmpfsd`) this single-vCPU deterministic machine gives no guaranteed chance to run before
+   `/init`'s very first instruction — there is no other thread/interrupt activity to force a
+   scheduling opportunity. Waiting it out (`sleep`/`sched_yield` loop) would be a real, unbounded
+   race, so `virtio_rng_init.c` instead reads the device's real major:minor straight out of
+   `/sys/class/misc/hw_random/dev` (always present the instant `misc_register()` returns) and
+   `mknod()`s `/dev/hwrng` itself — deterministic, no timing dependency.
+2. **A real `/dev/hwrng` `read()` hung forever with no interrupt ever delivered.** The virtio-rng
+   driver's own `virtio_read()` (`drivers/char/hw_random/virtio-rng.c`) blocks on
+   `wait_for_completion_killable()`, which schedules out to the idle loop's `safe_halt()` (`sti;
+   hlt`) — a genuinely new run-loop scenario: every prior fixture kept its vCPU busy the whole time
+   an interrupt was pending (`tests/fixtures/virtio-rng-guest/payload.s`'s own busy-loop is
+   deliberately built that way), so `Multiverse::run_to_first_halt_with_periodic_timer_and_virtio_rng`
+   had never needed to wake an *already-halted* vCPU. `baud_vcpu::boundary::inject_at`
+   (`crates/baud-vcpu/src/boundary.rs`) returns `Halted` **before ever calling `PmuStepper::inject`**
+   when the vCPU is halted at entry — by design, since a real triple-fault-driven shutdown is also
+   observed this way and must not be mistaken for "keep going" — so the periodic-timer loop's
+   `Halted` arm was returning immediately as terminal even when a virtio-rng completion was the
+   actual, resumable reason for the halt. Fixed: `Multiverse::
+   service_virtio_rng_interrupt_while_halted` stages the interrupt directly via
+   `KVM_SET_VCPU_EVENTS` and re-enters with one plain `step_exit()`, safe specifically because
+   `safe_halt()`'s `sti; hlt` idiom guarantees `RFLAGS.IF=1` at the exact halt instant (unlike a
+   vCPU `inject_at` is still actively single-stepping toward a target, where injectability must be
+   checked first) — the `Halted` arm now checks for a pending virtio-rng notification and wakes
+   through this path instead of returning, falling back to the original terminal-halt behavior
+   (unchanged for every guest that never enables virtio-rng, since `notify_count` is then always
+   `None`/unchanged) only when there is truly nothing left to service.
+
+Real-hardware result: **`guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng`** and
+**`guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots`** (`crates/baud-multiverse/
+src/linux/mod.rs`) both pass — the real driver stack reads real, tape-seeded entropy bytes through
+`/dev/hwrng`, byte-identical across two boots. This is the first time an *unmodified* Linux guest's
+own virtio_mmio/virtio-rng drivers have exercised baud's virtio-mmio transport end to end; the
+still-open pieces are the Buildroot/pinned-Nix packaging pipeline itself (§4.5) and H8/H9, which need
+it for far larger rootfs images than this hand-built single-binary initramfs.
+
 ## Why `/init` uses raw port I/O, not `write(1, ...)`
 
 `init.c` writes its marker via `iopl(3)` + inline `outb` straight to COM1's data register (`0x3f8`)

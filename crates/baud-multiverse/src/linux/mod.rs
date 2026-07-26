@@ -1236,6 +1236,44 @@ impl Multiverse {
         Ok(processed)
     }
 
+    /// [`service_virtio_rng_interrupt`](Self::service_virtio_rng_interrupt)'s counterpart for a
+    /// vCPU a periodic-timer `inject_at` call has *already* reported
+    /// [`Halted`](baud_vcpu::boundary::InjectOutcome::Halted) — the case that method's own doc
+    /// says it "must not" be called in, because `inject_timer_tick`'s arm/single-step boundary
+    /// dance (`inject_at`) returns `Halted` *before ever calling `PmuStepper::inject`* when the
+    /// vCPU is already halted at entry (`crates/baud-vcpu/src/boundary.rs`), so routing through it
+    /// here would silently stage nothing.
+    ///
+    /// A real Linux guest legitimately reaches exactly this state: `wait_for_completion_killable`
+    /// (the virtio-rng driver's own read path, `drivers/char/hw_random/virtio-rng.c`) schedules
+    /// out to the idle loop's `safe_halt()` (`sti; hlt`, guaranteeing `RFLAGS.IF=1` at the exact
+    /// halt instant) while its own completion is still pending — discovered via this crate's first
+    /// real (not hand-assembled) virtio-rng guest,
+    /// `guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng`. Because `IF=1` is
+    /// guaranteed right there (unlike a vCPU an `inject_at` call is still actively single-stepping
+    /// through, where injectability must be checked via `ready_for_interrupt_injection`/
+    /// `request_interrupt_window`), staging the interrupt directly via `KVM_SET_VCPU_EVENTS` and
+    /// re-entering with one plain [`step_exit`](Self::step_exit) is safe and mirrors exactly how
+    /// real hardware wakes a halted core: the very next `KVM_RUN` delivers it and resumes.
+    fn service_virtio_rng_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+        let processed = self
+            .bus
+            .service_virtio_rng(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        if processed > 0 {
+            let mut events = self.guest.vcpu.get_vcpu_events().map_err(|e| DeterminismHole(e.to_string()))?;
+            events.interrupt.injected = 1;
+            events.interrupt.nr = vector;
+            events.interrupt.soft = 0;
+            self.guest
+                .vcpu
+                .set_vcpu_events(&events)
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            self.step_exit()?;
+        }
+        Ok(processed)
+    }
+
     /// Drive the guest to its first `Hlt`/`Shutdown` (like [`run_to_first_halt`]
     /// (Self::run_to_first_halt)), but poll [`virtio_rng`](Self::virtio_rng)'s `notify_count()`
     /// after every single exit and, whenever it changes, drain + deliver a real interrupt via
@@ -1322,6 +1360,19 @@ impl Multiverse {
                     }
                 }
                 baud_vcpu::boundary::InjectOutcome::Halted(_) => {
+                    // A real Linux guest can legitimately be sitting here waiting for exactly the
+                    // virtio-rng completion this run is meant to deliver (`wait_for_completion_
+                    // killable`'s own `safe_halt()`, todo.md §14) -- not just at its final
+                    // shutdown. Only when there is no pending virtio-rng notification to service
+                    // is a halt actually terminal; otherwise wake it (`service_virtio_rng_
+                    // interrupt_while_halted`, the halted-safe counterpart to the `Injected` arm's
+                    // own servicing above) and keep ticking.
+                    let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+                    if notify_count != last_notify_count {
+                        last_notify_count = notify_count;
+                        self.service_virtio_rng_interrupt_while_halted(virtio_rng_vector)?;
+                        continue;
+                    }
                     let halt = HaltOutcome {
                         console_output: self.bus.console.output().to_vec(),
                         ram_hash: self.ram_hash(),
@@ -2712,6 +2763,99 @@ mod tests {
             tick_counts[0], tick_counts[1],
             "the same image+tape must survive the same number of periodic ticks before its own \
              natural halt across two boots"
+        );
+    }
+
+    /// `tests/fixtures/linux-guest/virtio_rng_init.c`'s `/init`: opens `/dev/hwrng` and reads from
+    /// it, rather than printing a fixed marker -- the payload for the real, not hand-assembled,
+    /// counterpart to `virtio_rng_interrupt_reaches_the_guests_own_isr`.
+    fn linux_guest_virtio_rng_initramfs() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/linux-guest/virtio_rng_initramfs.cpio.gz");
+        std::fs::read(path).expect("read linux-guest virtio_rng initramfs fixture")
+    }
+
+    /// todo.md §14 next-actions item 1's last open piece of the virtio-rng gap: a real, unmodified
+    /// Linux kernel's own `drivers/virtio/virtio_mmio.c` + `drivers/char/hw_random/virtio-rng.c`
+    /// drivers, not a hand-assembled payload, actually probing baud's `VirtioMmioTransport` and
+    /// completing a real `/dev/hwrng` read. This needed three closed prerequisites this iteration
+    /// found were all already true or newly buildable: (1) `minimal.config` gained
+    /// `CONFIG_VIRTIO_MENU`/`VIRTIO`/`VIRTIO_MMIO`/`VIRTIO_MMIO_CMDLINE_DEVICES`/`HW_RANDOM`/
+    /// `HW_RANDOM_VIRTIO=y` (note `VIRTIO_MENU` — the entire virtio Kconfig submenu is gated behind
+    /// it, not just `VIRTIO_MMIO`'s own `HAS_IOMEM`/`HAS_DMA` deps, a real gotcha the first attempt
+    /// missed); (2) the `virtio_mmio.device=<size>@<base>:<irq>` cmdline parameter names IRQ 5,
+    /// resolving via `crate::pic8259::isa_irq_vector(5)` to the exact vector
+    /// [`Multiverse::run_to_first_halt_with_periodic_timer_and_virtio_rng`] delivers on, closing
+    /// the "which vector" research question iteration 32 answered only in the abstract; (3) a real
+    /// unmodified Linux boot's own `probe_8259A()`/`init_8259A()` sequence (not `payload.s`'s
+    /// hand-assembled mimicry) registers the legacy-IRQ domain against `crate::pic8259::Pic8259`
+    /// exactly like the hand-assembled fixture already proved, making `request_irq(5, ...)` succeed
+    /// for the first time in this project's history.
+    ///
+    /// Deliberately checks the guest's own `/dev/hwrng` read result via raw-`outb` markers, not
+    /// kernel `dmesg` text (`DETERMINISTIC_CMDLINE` carries `quiet loglevel=1`, so driver-probe
+    /// printk lines are not reliably in the console capture at all).
+    fn run_linux_guest_virtio_rng_once(seed: u64) -> String {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_virtio_rng_initramfs();
+        let cmdline = format!("{} virtio_mmio.device=0x200@0xd0000000:5", bootparams::DETERMINISTIC_CMDLINE);
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR
+        let virtio_rng_vector = crate::pic8259::isa_irq_vector(5);
+
+        let mut m = Multiverse::boot_with_rdseed_sites(
+            &kernel,
+            &cmdline,
+            0,
+            1,
+            vec![],
+            None,
+            Some(&initramfs),
+            [],
+        )
+        .expect("boot failed");
+        m.enable_virtio_rng();
+        m.seed_virtio_rng_entropy(seed);
+        let (_ticks, halt) = m
+            .run_to_first_halt_with_periodic_timer_and_virtio_rng(PERIOD_RCB, TIMER_VECTOR, virtio_rng_vector, MAX_TICKS)
+            .expect("periodic-timer + virtio-rng run failed");
+        String::from_utf8_lossy(&halt.console_output).to_string()
+    }
+
+    #[test]
+    fn guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng() {
+        let console = run_linux_guest_virtio_rng_once(99);
+        assert!(
+            console.contains(LINUX_GUEST_MARKER),
+            "guest must still reach /init and print its marker; got:\n{console}"
+        );
+        assert!(
+            console.contains("baud-guest: hwrng-open-ok"),
+            "the guest's own real virtio_mmio.c/virtio-rng.c drivers must probe the device and \
+             register /dev/hwrng; got:\n{console}"
+        );
+        assert!(
+            console.contains("baud-guest: hwrng-bytes:"),
+            "a real read() from /dev/hwrng must complete (via a real KVM-delivered interrupt at \
+             isa_irq_vector(5)), not hang or fail; got:\n{console}"
+        );
+    }
+
+    /// Same guarantee as `virtio_rng_interrupt_delivery_is_reproducible_across_two_boots`, but
+    /// through a real Linux guest's own driver stack end to end: the exact hex bytes its `/init`
+    /// reads from `/dev/hwrng` (via `drivers/char/hw_random/virtio-rng.c`'s real request/completion
+    /// path, not a hand-assembled payload) must be byte-identical across two boots of the same
+    /// image+tape+seed.
+    #[test]
+    fn guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots() {
+        let first = run_linux_guest_virtio_rng_once(7);
+        let second = run_linux_guest_virtio_rng_once(7);
+        assert!(first.contains("baud-guest: hwrng-bytes:"), "first boot must complete a real hwrng read; got:\n{first}");
+        assert_eq!(
+            first, second,
+            "two boots of the same image+tape+seed must produce byte-identical console output, \
+             including the real virtio_rng-sourced entropy bytes"
         );
     }
 
