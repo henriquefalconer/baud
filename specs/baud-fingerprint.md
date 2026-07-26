@@ -230,7 +230,9 @@ match compare(&f0, &f1) {
 `drive/h9.sh` wraps it: `baud host probe` (assert `rcb_deterministic`, else skip with a recorded reason) →
 `baud image build examples/ubuntu` → `baud verify fingerprint --events N` → assert exit `0` and that both
 rendered blocks carry the Ubuntu banner. The two VMs may be two L2 guests under one WSL2 host (separate
-processes/cores) or on two hosts (`specs/baud-ubuntu.md` §3, §10).
+processes/cores) or on two hosts (`specs/baud-ubuntu.md` §3, §10). Before trusting a nested host, run the
+fast userspace PMU pre-check `tools/pmucheck.c` (retired-branch counter availability + determinism); the
+authoritative guest-level gate remains H0's `rcb_is_deterministic_on_this_cpu`.
 
 ---
 
