@@ -204,6 +204,24 @@ fn run_and_convert(vcpu: &mut VcpuFd) -> Result<ConvertedExit<'_>, kvm_ioctls::E
     Ok(ConvertedExit::Exit(decode_baud_determinism_exit(payload)))
 }
 
+/// `run_and_convert`, bracketed with [`TimeSource::resume_rcb`]/[`TimeSource::pause_rcb`] so the
+/// RCB-backed work-clock counter (`baud_multiverse::timesource::WorkClock`, todo.md §14
+/// next-actions item 2) only accumulates branches retired during the actual `KVM_RUN` ioctl (guest
+/// execution + KVM's own in-kernel vmexit handling), never the surrounding userspace dispatch code
+/// — exactly the data-dependent, run-varying host code `arm_overflow`'s doc already flags as the
+/// thing a `target_rcb` computation must stay free of, applied here to the value actually served
+/// to the guest rather than just to injection-landing bookkeeping. Every one of this crate's real
+/// `KVM_RUN` call sites goes through this wrapper instead of calling `run_and_convert` directly.
+fn run_and_convert_rcb_bracketed<'a>(
+    vcpu: &'a mut VcpuFd,
+    time: &mut dyn TimeSource,
+) -> Result<ConvertedExit<'a>, kvm_ioctls::Error> {
+    time.resume_rcb();
+    let result = run_and_convert(vcpu);
+    time.pause_rcb();
+    result
+}
+
 /// Drive exactly one `KVM_RUN` call to completion (retrying on `EINTR`) and dispatch its exit.
 ///
 /// None of `DispatchOutcome::ServeEnforcedRdtsc`/`ServeEnforcedRdrand`/`ServeEnforcedRdseed`/
@@ -221,7 +239,7 @@ pub fn run_one_exit(
     time: &mut dyn TimeSource,
 ) -> Result<DispatchOutcome, DeterminismHole> {
     loop {
-        let exit = match run_and_convert(vcpu) {
+        let exit = match run_and_convert_rcb_bracketed(vcpu, time) {
             Ok(ConvertedExit::Exit(exit)) => Ok(exit),
             Ok(ConvertedExit::RdseedTrapNeedsRip) => {
                 // `converted` (a fieldless variant) borrows nothing further from `vcpu` past this

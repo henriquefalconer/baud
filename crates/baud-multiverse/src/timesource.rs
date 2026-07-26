@@ -36,6 +36,14 @@ pub use baud_snapshot::msr::{MSR_IA32_TSC, MSR_IA32_TSC_AUX, MSR_IA32_TSC_DEADLI
 /// unit tests here use a scripted sequence instead.
 pub trait BranchCounter {
     fn read(&mut self) -> u64;
+    /// Stop hardware accumulation (todo.md §14 next-actions item 2: the `os_entropy_is_
+    /// deterministic` flakiness investigation) — a no-op default so every scripted test double
+    /// here needs no change; the real `linux::LinuxBranchCounter` overrides this to
+    /// `PERF_EVENT_IOC_DISABLE` via `perf_event::Counter::disable`.
+    fn pause(&mut self) {}
+    /// Resume accumulation from wherever it left off — perf_event's own documented `enable`
+    /// semantics are additive, never a reset.
+    fn resume(&mut self) {}
 }
 
 /// `virtual_tsc = base + k * rcb` (todo.md §3.3), plus the two auxiliary TSC-family MSRs a
@@ -253,6 +261,14 @@ impl<C: BranchCounter> TimeSource for WorkClock<C> {
         // Same tape-seeded entropy sub-stream as RDRAND (todo.md §3.8: "the value comes from the
         // same tape-seeded entropy sub-stream as rdrand").
         self.entropy.next_u64()
+    }
+
+    fn resume_rcb(&mut self) {
+        self.counter.resume();
+    }
+
+    fn pause_rcb(&mut self) {
+        self.counter.pause();
     }
 }
 

@@ -26,8 +26,9 @@
 // `crates/baud-multiverse/tests/fixtures/timer-guest/BUILD.md`).
 
 use super::{
-    reinject_ud, run_and_convert, write_enforced_rdrand_result, write_enforced_rdseed_result,
-    write_enforced_rdtsc_result, write_enforced_rdtscp_result, ConvertedExit,
+    reinject_ud, run_and_convert_rcb_bracketed, write_enforced_rdrand_result,
+    write_enforced_rdseed_result, write_enforced_rdtsc_result, write_enforced_rdtscp_result,
+    ConvertedExit,
 };
 use crate::boundary::{ExecPoint, PmuStepper};
 use crate::{dispatch_exit, Bus, DispatchOutcome, Exit, TimeSource};
@@ -152,7 +153,7 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
             if self.current_rcb()? >= self.poll_target {
                 return Ok(());
             }
-            let exit = match run_and_convert(self.vcpu) {
+            let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
                 Ok(ConvertedExit::Exit(exit)) => Ok(exit),
                 // `converted` (a fieldless variant) borrows nothing further from `self.vcpu` past
                 // this match, so this fresh `get_regs()` is not competing with any live borrow —
@@ -225,7 +226,7 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     fn step(&mut self) -> io::Result<ExecPoint> {
         super::set_singlestep(self.vcpu, true, true)?;
         let result = loop {
-            let exit = match run_and_convert(self.vcpu) {
+            let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
                 Ok(ConvertedExit::Exit(exit)) => Ok(exit),
                 Ok(ConvertedExit::RdseedTrapNeedsRip) => {
                     self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
@@ -292,7 +293,7 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
 
     fn run_until_irq_window(&mut self) -> io::Result<()> {
         loop {
-            let exit = match run_and_convert(self.vcpu) {
+            let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
                 Ok(ConvertedExit::Exit(exit)) => Ok(exit),
                 Ok(ConvertedExit::RdseedTrapNeedsRip) => {
                     self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })

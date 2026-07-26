@@ -26,15 +26,18 @@
 # `handle_baud_rdtsc_exit` (kind 0), and `baud-vcpu` serves EDX:EAX from the same work-clock plus
 # ECX from `IA32_TSC_AUX` (`WorkClock::serve_enforced_tsc_aux`). That crash is gone for good.
 #
-# KNOWN FLAKINESS (todo.md §14 next-actions item 2, not yet root-caused with direct evidence): with
-# the crash fixed, this test still fails a real, non-trivial fraction of runs (observed ~50-75%
-# failure rate) — getrandom()/urandom output genuinely diverges between the two boots at the byte
-# level. Leading hypothesis: landing an interrupt at the identical RIP (H4's own guarantee) does not
-# guarantee an identical *served* TSC/work-clock value at that instant (add_interrupt_randomness
-# mixes both), and the served value is sensitive to the real ±RCB_HARDWARE_JITTER_TOLERANCE (8)
-# branch-counter read-precision jitter this project has documented elsewhere. This script reports
-# the test's real pass/fail honestly — a FAIL here is expected some fraction of the time until that
-# deeper issue is fixed or the test is redesigned to tolerate it, not a sign this script is broken.
+# KNOWN FLAKINESS, IMPROVED BUT NOT FULLY FIXED (todo.md §14 next-actions item 2): a prior iteration
+# root-caused and fixed the largest source of divergence — WorkClock's RCB perf_event counter
+# accumulated host-side dispatch branches between guest exits (exclude_host doesn't work on this
+# nested-virtualized dev host), not just guest branches. Fixed by pausing/resuming that counter
+# around each KVM_RUN ioctl (crates/baud-vcpu/src/linux/mod.rs's run_and_convert_rcb_bracketed).
+# Measured effect on real hardware: observed pass rate rose from ~25-50% to ~75% (15/20 across two
+# batches) — real, verified improvement, not a full fix. A FAIL here is still expected some fraction
+# of runs until the residual ~25% is root-caused (leading hypothesis: WorkClock's long-lived pinned
+# counter and LinuxPmuStepper's per-tick freshly-created pinned counter, both counting the same
+# hardware event on the same thread, may still interact at the physical-PMU-slot level even paused
+# — see os_entropy_is_deterministic's own doc comment for the full detail) — not a sign this script
+# is broken.
 #
 #   Reuses `tests/fixtures/linux-guest/` (H7's boot-to-userspace fixture) — `entropy_init.c` /
 #   `entropy_initramfs.cpio.gz` are a second `/init` for the *same* already-built kernel (no

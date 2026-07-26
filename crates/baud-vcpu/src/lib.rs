@@ -184,6 +184,21 @@ pub trait TimeSource {
     /// The enforced-regime value for a trapped, confirmed `rdseed` site (todo.md §3.8: "the value
     /// comes from the same tape-seeded entropy sub-stream as rdrand").
     fn serve_enforced_rdseed(&mut self) -> u64;
+
+    /// Resume RCB-counter accumulation for the imminent `KVM_RUN` call (todo.md §14 next-actions
+    /// item 2: the `os_entropy_is_deterministic` flakiness investigation). The real RCB-backed
+    /// implementation's underlying counter also accumulates host-side branches, since
+    /// `exclude_host` does not work on this project's own nested-virtualized dev host
+    /// (`baud_multiverse::linux::LinuxBranchCounter::new`'s doc) — so pausing it for every stretch
+    /// of userspace dispatch code between exits, and resuming it only for the actual
+    /// `KVM_RUN` ioctl window, keeps a served RCB/virtual-TSC value a function of guest-plus-
+    /// kernel-vmexit execution only, never of how much (data-dependent, run-varying) Rust dispatch
+    /// code happened to run since the previous exit. A no-op default: every `TimeSource`
+    /// implementor that is not RCB-backed (every test double) needs no change.
+    fn resume_rcb(&mut self) {}
+    /// The other half of [`resume_rcb`](Self::resume_rcb) — called the instant a `KVM_RUN` call
+    /// returns, before any dispatch/userspace code runs.
+    fn pause_rcb(&mut self) {}
 }
 
 /// Resolve one exit deterministically (specs/baud-vcpu.md §3's match). Exhaustive over `Exit` —

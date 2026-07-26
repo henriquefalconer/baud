@@ -995,9 +995,10 @@ snapshot, not a duplicate of it.
      cmdline string inline — see the bullet above for the exact diff) — either wire it as the fixture's
      cmdline or reconcile the difference. Tests `boot_params_seed_is_pinned`,
      `init_powers_off_deterministically`, `image_build_is_reproducible` remain unwritten.
-  2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed, but
-     `os_entropy_is_deterministic` is now FLAKY on real hardware, not reliably green — a real,
-     deeper issue, root-caused this iteration but not yet fixed.** `tests/fixtures/linux-guest/
+  2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed;
+     `os_entropy_is_deterministic`'s flakiness is root-caused and substantially (not fully) improved
+     this iteration — real hardware pass rate rose from ~25-50% to ~75%, residual ~25% still open,
+     see below.** `tests/fixtures/linux-guest/
      entropy_init.c` (+ `entropy_initramfs.cpio.gz`) is a second `/init` for the *already-built*
      `linux-guest` kernel that calls `getrandom()` ×4 and reads `/dev/urandom` ×4, hex-encoding each
      32-byte read out the same raw-`outb` COM1 endpoint `init.c` uses.
@@ -1021,9 +1022,9 @@ snapshot, not a duplicate of it.
        `TimeSource::serve_enforced_tsc_aux`. The crash itself is gone for good — confirmed across 15+
        real-hardware boots this iteration, zero recurrences — and `drive/h3-enforced-rdseed.sh`'s full
        regression (rdtsc/rdrand/rdseed all bit-exact) still passes with RDTSCP layered underneath.
-     - **New, deeper finding (still open): `getrandom()`/`/dev/urandom` output itself diverges between
-       the two boots at a real, non-trivial rate (~50-75% of runs) even with the crash fixed.** Two
-       distinct effects were conflated at first and had to be separated:
+     - **Deeper finding, root-caused and partially fixed this iteration: `getrandom()`/`/dev/urandom`
+       output itself diverges between the two boots at a real, non-trivial rate even with the crash
+       fixed.** Three distinct effects were conflated at first and had to be separated:
        (a) A **console-capture race**, fixed: `entropy_init.c` writes each hex line via raw `outb` (no
        interrupt-driven tty path exists on this machine — `BUILD.md`'s documented reason), so a
        periodic timer tick landing *mid-write* lets the kernel's own asynchronous "Spurious LAPIC timer
@@ -1034,25 +1035,52 @@ snapshot, not a duplicate of it.
        strips every occurrence of that exact string from the console capture before line-splitting
        (`crates/baud-multiverse/src/linux/mod.rs`'s `SPURIOUS_LAPIC_LINE`), reassembling the probe line
        exactly as the guest wrote it.
-       (b) **With (a) fixed, a real byte-level divergence remains** — the two boots' `getrandom()`/
-       `/dev/urandom` output genuinely differs, confirmed via `--nocapture` runs showing full-line
-       hex mismatches, not truncation. Leading hypothesis, not yet confirmed by direct instrumentation:
-       landing an injected interrupt at the *identical instruction* (`RIP`, what
-       `timer_tick_lands_at_identical_instruction`/H4 actually proves) is necessary but **not
-       sufficient** for CRNG-visible determinism, because `add_interrupt_randomness` also mixes in the
-       *served* work-clock/`RDTSC` value read at that moment (`random_get_entropy()`), and
-       `virtual_tsc = base + k × rcb` is sensitive to the real ±`RCB_HARDWARE_JITTER_TOLERANCE` (= 8,
-       `crates/baud-multiverse/src/linux/mod.rs:1884`) branch-counter read-precision jitter this
-       project has documented elsewhere as a genuine hardware limit — so two ticks can land on the
-       *same* `RIP` on both boots (satisfying H4's own guarantee) while still carrying a *different*
-       served TSC/work-clock reading into the entropy pool at that instant. **Needed next**:
-       instrument `add_interrupt_randomness`'s actual `random_get_entropy()` reads (or the served
-       `WorkClock` value at each tick) across a diverging pair of boots to confirm or refute this
-       hypothesis directly, before attempting a fix (candidates: tighten the RCB anchor used for the
-       *served* value independent of the injection-landing check, or design a jitter-insensitive
-       credit path). Do not re-claim `os_entropy_is_deterministic` as reliably green until this is
-       root-caused with direct evidence and fixed, or the test is redesigned to tolerate the jitter
-       the way `timer_tick_lands_at_identical_instruction` already does for its own assertion.
+       (b) **Confirmed and fixed this iteration: `WorkClock`'s RCB `perf_event` counter
+       (`LinuxBranchCounter`) accumulated host-side branches, not just guest branches.** Traced via
+       code inspection (no kernel rebuild needed — this is a pure userspace/Rust-side bug):
+       `exclude_host(true)` reads back `0` on this project's own nested-virtualized dev host
+       (`LinuxBranchCounter::new`'s own doc, already known), so the counter — a free-running
+       `perf_event_open` fd, read fresh on every `serve_enforced_rdtsc`/`serve_enforced_tsc_aux` call
+       — kept accumulating for the *entire* stretch of userspace Rust dispatch code between VM-exits
+       (allocations, ioctls, match arms, `LinuxPmuStepper`'s own per-tick counter setup/teardown during
+       arm-early-then-single-step), not just the guest's own branches. That host-side code is far more
+       extensive during the entropy test's ~2000 real interrupt-injection ticks than in the simple
+       direct-`rdtsc`-loop scenario `rdtsc_enforced_regime_is_bit_exact_across_boots` already passed
+       reliably — explaining why that simpler test was solid while this one wasn't. **Fix**: added
+       `BranchCounter::pause`/`resume` (`crates/baud-multiverse/src/timesource.rs`, default no-op) and
+       `TimeSource::pause_rcb`/`resume_rcb` (`crates/baud-vcpu/src/lib.rs`, default no-op), wired
+       `LinuxBranchCounter` to `perf_event::Counter::disable`/`enable` (starts paused now, not
+       enabled-at-construction), and added `run_and_convert_rcb_bracketed`
+       (`crates/baud-vcpu/src/linux/mod.rs`) — resumes the counter immediately before each real
+       `KVM_RUN` ioctl and pauses it immediately after, across all four real call sites (the plain
+       `run_one_exit` loop plus `LinuxPmuStepper`'s `run_until_exit`/`step`/`run_until_irq_window`) —
+       so the counter now only accumulates guest-execution-plus-kernel-vmexit time, never the
+       surrounding userspace dispatch code. **Measured effect on real hardware**: pass rate rose from
+       an estimated ~25-50% (the previously-observed ~50-75% failure rate) to **~75% (15/20 across two
+       batches of 8 and 12 real hardware boot-pairs)** — a real, verified, substantial improvement,
+       *not* a full fix. `cargo build`/`clippy`/`test --workspace` all clean (0 failures, 87 passed in
+       `baud-multiverse` alone); `rdtsc_enforced_regime_is_bit_exact_across_boots`,
+       `rdrand_enforced_regime_is_bit_exact_across_boots`, `rdseed_enforced_regime_is_bit_exact_across_
+       boots` all still pass (no regression); `drive/h4.sh`/`h5.sh`/`h7.sh` all still pass clean on the
+       stock module (including the 1000-branch and snapshot-restore real-hardware proofs).
+       (c) **Residual ~25% divergence, not yet root-caused — leading hypothesis for the next
+       iteration**: `WorkClock`'s long-lived pinned counter and `LinuxPmuStepper`'s own *separate*
+       pinned counter (freshly created and destroyed once per tick, up to `MAX_TICKS` times per boot)
+       both count the identical hardware event (`PERF_COUNT_HW_BRANCH_INSTRUCTIONS`) on the identical
+       thread simultaneously — even with `WorkClock`'s counter paused during the stepper's setup/
+       teardown, opening/closing a second *pinned* counter that often may still perturb the physical
+       PMU's limited counter-slot scheduling in a way `pause`/`resume` alone doesn't address (this is
+       distinct from the already-acknowledged `RCB_HARDWARE_JITTER_TOLERANCE`-class hardware-read
+       imprecision, §3.7, though the two could be compounding). **Needed next**: direct
+       instrumentation of the served RCB/virtual-TSC value at each tick across a diverging pair of
+       boots (still nothing logs this — confirmed absent this iteration), to determine whether the
+       residual divergence correlates with ticks (implicating cross-counter PMU contention) or is
+       spread uniformly (implicating pure hardware jitter); if the former, consider reconciling
+       `LinuxPmuStepper`'s counter and `WorkClock`'s counter into one shared, single pinned fd (the
+       existing doc at `WorkClock::current_rcb` already flags this reconciliation as deferred work).
+       Do not re-claim `os_entropy_is_deterministic` as reliably green until the residual is root-
+       caused with direct evidence and fixed, or shown to be pure hardware jitter the test should
+       instead be redesigned to tolerate.
      `double_boot_ram_hash_identical` still needs a **guest-driven checkpoint** design (an explicit
      `outb`/hypercall the workload issues), not raw console/RAM comparison across full boots — a first
      attempt at the latter found the two boots differ in exactly one kernel-internal diagnostic line,

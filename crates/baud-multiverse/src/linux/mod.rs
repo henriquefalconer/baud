@@ -413,10 +413,11 @@ impl LinuxBranchCounter {
         // it set, the counter reads back `0` for the whole run (perf's guest/host execution-mode
         // discrimination needs the KVM module to register `perf_guest_cbs`, which this host
         // apparently does not do under nested virtualization — the same family of limitation as
-        // `LinuxPmuStepper`'s already-documented PMI-in-guest-mode signal gap). Left off; the
-        // caller side (every consumer of this counter) must not execute data-dependent host code
-        // between reads if it wants reproducible RCB deltas across runs — see
-        // `crates/baud-vcpu/src/linux/pmu.rs`'s `arm_overflow`, which has the identical caveat.
+        // `LinuxPmuStepper`'s already-documented PMI-in-guest-mode signal gap). Left off; instead
+        // (todo.md §14 next-actions item 2, the `os_entropy_is_deterministic` flakiness root
+        // cause) the caller side pauses/resumes this counter around every `KVM_RUN` ioctl
+        // (`run_and_convert_rcb_bracketed`), which achieves the same "guest-plus-vmexit time
+        // only" property manually, without needing `exclude_host` to work at all.
         let mut builder = Builder::new().kind(Hardware::BRANCH_INSTRUCTIONS);
         // `pinned(true)`: same fix as `crates/baud-host/src/linux.rs`'s
         // `measure_fixed_loop_branches` (todo.md §14/H3) — keeps this counter resident on the PMU
@@ -424,7 +425,13 @@ impl LinuxBranchCounter {
         // nested-virtualized dev host, which otherwise undercounts by a small, run-varying amount.
         builder.pinned(true);
         let mut counter = builder.build()?;
-        counter.enable()?;
+        // Start paused (todo.md §14 next-actions item 2): the real `KVM_RUN` loop
+        // (`run_and_convert_rcb_bracketed`, `crates/baud-vcpu/src/linux/mod.rs`) resumes this
+        // counter for exactly the ioctl window and pauses it the instant that call returns, so it
+        // never accumulates the userspace dispatch code between exits — see this struct's own doc
+        // and `TimeSource::resume_rcb`'s doc for why. `disable()` on an already-disabled counter
+        // (perf_event's own construction default) is a harmless no-op, so this is safe either way.
+        counter.disable()?;
         Ok(LinuxBranchCounter { counter, last: 0 })
     }
 }
@@ -438,6 +445,14 @@ impl BranchCounter for LinuxBranchCounter {
             }
             Err(_) => self.last,
         }
+    }
+
+    fn pause(&mut self) {
+        let _ = self.counter.disable();
+    }
+
+    fn resume(&mut self) {
+        let _ = self.counter.enable();
     }
 }
 
@@ -2142,6 +2157,29 @@ mod tests {
     /// pinned seed already credited the pool. Only with RDTSC hardware-trapped and served from the
     /// work-clock (a pure function of the branch counter, not wall time) does that `ktime_get_real()`
     /// read become reproducible too.
+    ///
+    /// **Still flaky, improved but not fully fixed (todo.md §14 next-actions item 2).** A prior
+    /// iteration root-caused and fixed the largest source of divergence: `WorkClock`'s RCB-backed
+    /// `perf_event` counter (`LinuxBranchCounter`) could not use `exclude_host` on this project's
+    /// own nested-virtualized dev host (that flag reads back `0` here), so it accumulated *host*
+    /// userspace dispatch branches (allocations, ioctls, match arms) between guest exits, not just
+    /// guest branches — contaminating the served RCB/virtual-TSC value with data-dependent,
+    /// run-varying host noise. Fixed by pausing that counter (`BranchCounter::pause`/`resume`,
+    /// `TimeSource::pause_rcb`/`resume_rcb`) for every stretch of userspace code between exits and
+    /// resuming it only for the actual `KVM_RUN` ioctl window (`run_and_convert_rcb_bracketed`,
+    /// `crates/baud-vcpu/src/linux/mod.rs`), across all four real `KVM_RUN` call sites (the plain
+    /// run loop plus `LinuxPmuStepper`'s three). Measured effect on real hardware: the observed pass
+    /// rate rose from an estimated ~25-50% (the ~50-75% failure rate this doc previously described)
+    /// to ~75% (15/20 across two batches) — a real, verified improvement, not a full fix. Leading
+    /// hypothesis for the residual ~25%: `WorkClock`'s long-lived pinned counter and
+    /// `LinuxPmuStepper`'s per-tick freshly-created pinned counter both count the identical
+    /// hardware event on the identical thread simultaneously (up to `MAX_TICKS` times per boot) —
+    /// even paused/disabled, opening/closing the stepper's own counter that often could still
+    /// perturb physical-PMU-counter scheduling for `WorkClock`'s counter in a way this fix doesn't
+    /// address. Not yet confirmed by direct instrumentation. Do not re-claim this test as reliably
+    /// green until that hypothesis is checked and either fixed or the residual is shown to be the
+    /// already-acknowledged `RCB_HARDWARE_JITTER_TOLERANCE`-class hardware-read imprecision (§3.7)
+    /// rather than a further contamination source.
     #[test]
     #[ignore]
     fn os_entropy_is_deterministic() {
