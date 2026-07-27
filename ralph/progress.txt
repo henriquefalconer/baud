@@ -7047,3 +7047,7 @@ todo.md updated cleanly (2901->2973 lines): new item 8 under section 14's Next a
   - cargo build/clippy --workspace --all-targets/test --workspace all clean (0 new warnings -- held at the exact pre-existing 26-warning baud-multiverse / 74-warning workspace baseline); full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (the already-documented rdtsc_guest_reproduces_high_bits_across_boots load-flake, confirmed passing in isolation per CLAUDE.md's standing note), 1 skipped, 3m24s
   - Still open for H9: the actual baud-fingerprint crate (report/compare/FpError), baud verify fingerprint CLI, drive/h9.sh, the two-VM cross-process orchestration, and the real Ubuntu 18.04.1 cloud-image acquisition/boot remain not started; H8 Mario remains blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
 ---
+
+Post-push verification: origin/main now at 2333852, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked/confirmed-in-isolation, 1 skipped, 3m24s) before this push.
+
+todo.md still has pending items: the full baud-fingerprint crate/CLI/drive/h9.sh/cross-VM orchestration and the real Ubuntu 18.04.1 cloud-image boot (H9 (d)/(e)); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the newly-documented single-step overshoot bug in LinuxPmuStepper::step; the Buildroot/pinned-Nix guest-image pipeline (§4.5) -- emitting NEXT.
