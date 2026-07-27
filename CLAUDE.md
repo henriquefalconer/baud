@@ -153,3 +153,11 @@ locally-spawned `baud-server` on an ephemeral port and a temp SQLite file — se
 (spawn server, health-poll, `trap cleanup EXIT`/`INT`/`TERM`, run `baud <cmd> --json`, assert on the JSON).
 The `drive/manual/*` scripts swap the live `kvm_intel` module, so they are excluded from the gate and must
 be run by hand, one at a time.
+
+When starting a `baud-server`/`baud` CLI pair by hand (not via a drive script): the server binds via
+`BAUD_ADDR` (e.g. `127.0.0.1:17734`) and needs `BAUD_DB="sqlite://<path>?mode=rwc"` (a bare path 404s
+with "unable to open database file") plus `BAUD_SNAPSHOT_STORE=<dir>`; the **CLI** then needs
+`BAUD_SERVER=http://127.0.0.1:17734` to find it — `BAUD_ADDR` is the server's own bind var, the CLI
+never reads it, and defaults to `http://127.0.0.1:7734` if unset. `examples/ubuntu/BUILD.md` has the
+full real-Ubuntu-boot recipe (needs `bash examples/ubuntu/fetch.sh` first, artifacts land outside the
+repo in `~/.baud-tmp/ubuntu-1804` per the same convention as `~/wsl-kernel-src`).

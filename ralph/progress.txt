@@ -7327,3 +7327,103 @@ Chose to continue H9's real-Ubuntu-boot blocker (todo.md §14 item 13's 'next co
 Pulled Ubuntu's real v4.15 kernel source (arch/x86/include/asm/irq_vectors.h) from github.com/torvalds/linux tag v4.15 to check the vector layout directly, instead of assuming this project's own modern ~/wsl-kernel-src tree's layout applies. Found LOCAL_TIMER_VECTOR=0xee (238) in v4.15, NOT 0xec (236) -- the vector-number reorg that made 0xec the timer vector happened later, after Ubuntu 18.04's 4.15 kernel shipped. This project's own tests/fixtures (tests/fixtures/linux-guest/, a real compiled Linux 6.18 kernel) correctly use 0xec because 6.18 really does define LOCAL_TIMER_VECTOR=0xec -- but the real Ubuntu 18.04.1 kernel does not. do_IRQ's 'No irq handler for vector 236' is not a bug in this project's APIC/MADT bring-up at all: vector 236 (0xec) is a perfectly ordinary unclaimed device-IRQ vector in a 4.15 kernel's layout, and the real timer vector 0xee was never being injected. Continuing: re-running the real Ubuntu boot attempt with --periodic-timer-vector 238 instead of the default 0xec.
 
 Kicking off the real Ubuntu boot re-attempt with the corrected timer vector (--periodic-timer-vector 238 i.e. 0xee, not the default 0xec) against the already-fetched ~/.baud-tmp/ubuntu-1804 artifacts and a fresh baud-server. This call can take several minutes (30,000 ticks budget); running with a longer tool timeout.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address: reading todo.md and ralph/progress.txt to establish current state...
+
+Chose to continue H9's real-Ubuntu-boot blocker: iteration 17's session was killed by WSL termination before it could commit or update todo.md, but its progress.txt entry recorded a real finding -- Ubuntu 18.04's actual v4.15 kernel defines LOCAL_TIMER_VECTOR=0xee (238), not the 0xec (236) this project injects by default (correct only for the newer 6.18 fixture kernel). The --periodic-timer-vector CLI flag already exists, so this is a verification task: re-attempt the real Ubuntu boot with --periodic-timer-vector 238 to see if it clears the do_IRQ dead-loop. Reading examples/ubuntu/BUILD.md for the exact invocation.
+
+~/.baud-tmp/ubuntu-1804 doesn't exist on this fresh host -- previous session's downloaded artifacts didn't persist. Running examples/ubuntu/fetch.sh now (~5min, mostly the 2.2GiB qcow2->raw convert).
+
+Ubuntu artifacts ready in ~/.baud-tmp/ubuntu-1804. Building workspace, then starting baud-server to attempt the boot with --periodic-timer-vector 238 (0xee, the real v4.15 LOCAL_TIMER_VECTOR).
+
+Server up on port 17734. Attempting real Ubuntu boot with --periodic-timer-vector 238 (0xee) instead of default 236 (0xec), using the resume-past-idle-halt primitive hunting for 'ubuntu login:'. This can take several minutes.
+
+CLI needs BAUD_SERVER env var (not BAUD_ADDR, that's the server's own bind var) -- retrying with the right env var.
+
+Using target/debug/baud binary directly (package baud-cli, bin name 'baud') to avoid cargo-run overhead. Launching the boot attempt in the background with a long timeout, polling via progress checks.
+
+Boot attempt still running after 60s...
+
+Boot attempt still running after 120s...
+
+Boot attempt still running after 180s...
+
+Boot attempt still running after 240s...
+
+Boot attempt still running after 300s...
+
+Boot attempt still running after 360s...
+
+Boot attempt still running after 420s...
+
+Boot attempt still running after 480s...
+
+Boot attempt still running after 540s...
+
+9.5min in, boot attempt (pid 59579) still running, 0% CPU (blocked on the sync HTTP call) while baud-server is pegged at 92.7% CPU -- real work is happening. Sanity check: the OLD buggy vector's 8M-tick spin-loop attempt took ~7m50s total (~59us/tick, cheap do_IRQ spin), so 30K ticks at that rate would finish in ~1.8s -- we've already waited 300x longer, strongly suggesting real per-tick work (disk I/O, real boot processing) is now happening with the vector fix, not the old dead spin. Continuing to wait.
+
+Boot attempt still running, total wait now 630s...
+
+Boot attempt still running, total wait now 690s...
+
+Boot attempt still running, total wait now 750s...
+
+Boot attempt still running, total wait now 810s...
+
+Boot attempt still running, total wait now 870s...
+
+Boot attempt still running, total wait now 930s...
+
+Boot attempt still running, total wait now 990s...
+
+Boot attempt still running, total wait now 1050s...
+
+Boot attempt still running, total wait now 1110s...
+
+Killed the 30K-tick attempt after 19.5min with no result (client-disconnect cancellation confirmed working server-side). Retrying with a much smaller --periodic-timer-max-ticks 3000 (same as the very first BUILD.md baseline) to get a fast console_tail diagnostic instead of waiting minutes -- want to see whether the do_IRQ spin message is gone with vector 238.
+
+Console tail came back completely EMPTY at 3000 ticks with vector 238 -- suspicious, since prior iterations (with vector 236, the OLD non-pattern primitive) definitely saw real ACPI/kernel boot text by that point. Testing whether this is a vector-238 effect or a bug in the newer pattern-dispatch primitive itself: re-running with the DEFAULT vector 236 through the same halt-console-pattern code path, small tick budget, to isolate.
+
+Confirmed via github.com/torvalds/linux v4.15 arch/x86/include/asm/irq_vectors.h: LOCAL_TIMER_VECTOR really is 0xee (238) for the real Ubuntu 4.15 kernel (0xec/236 is only correct for the newer 6.18 fixture kernel) -- the vector-number hypothesis is confirmed correct. But delivering it at the very first tick (RCB=500000, vector 238) produced a COMPLETELY EMPTY console after 3000 ticks/1.5B RCB, vs. vector 236's do_IRQ spam appearing by 200 ticks. New hypothesis: 236 is a generic device IRQ (routed through do_IRQ's graceful no-handler dispatch), but 238 (LOCAL_TIMER_VECTOR) is a *system* vector whose IDT gate goes DIRECTLY to apic_timer_interrupt -> local_apic_timer_interrupt(), which likely dereferences a clockevent device that setup_boot_APIC_clock() hasn't registered yet this early in boot -- delivering it before that setup crashes the kernel silently, before console_init(). Testing with a much larger initial period_rcb to delay the first injected tick well past early kernel init.
+
+Still empty even with the first tick delayed to 20M RCB. Natural (uninterrupted) boot reaches 'Freeing unused kernel memory' at roughly 100M RCB cumulative in old vector-236 sessions -- 20M RCB is still well before that milestone. Pushing the first tick delay past that point (period_rcb=150M) to test whether vector 238 is safe once real APIC/clockevent setup has actually happened.
+
+Still empty even at 150M RCB delay -- ruling out '\''too early'\'' entirely for vector 238. Isolating whether this is a bug in the newer pattern-dispatch primitive itself vs. vector 238 genuinely crashing the guest: re-testing with vector 238 through the OLD, well-established single-halt engine (no pattern, stops at first real Hlt) at the original default period_rcb=500000, matching the exact baseline recipe that worked cleanly with vector 236.
+
+CRITICAL REALIZATION: my '\''delay'\'' experiments (20M/150M period_rcb) never actually tested later injection -- the pattern-search code path injects the timer vector immediately upon ANY halt (natural or not), bypassing period_rcb for that first injection. So all 3 delay tests were really the same experiment. Re-verifying ground truth in THIS session: running the exact BUILD.md baseline (vector 236 default, no pattern, 200 ticks) and decoding the FULL console output (not just the 200-byte tail) to confirm what a known-working run actually shows before drawing further conclusions about vector 238.
+
+Ground truth with vector 236 in THIS session: only 448 bytes of do_IRQ spam total, no ACPI/kernel text at all -- 'quiet loglevel=1' suppresses nearly everything. This changes the analysis: vector 238 (a real system vector) would NEVER print do_IRQ messages even on success (it's not generically dispatched), so 'empty console' with vector 238 may not indicate a crash at all -- it could just mean the guest reached ITS OWN first natural halt silently, same as vector 236 would minus the spurious do_IRQ noise. Decisive control test: run the SAME old engine+virtio-blk config with vector 236 to see if it ALSO returns ok:true with a near-instant, near-empty-console halt -- if so, both vectors reach the same early natural halt point and the crash theory is wrong.
+
+DISPROVEN: vector 236 through the SAME old engine+virtio-blk config ALSO returns ok:true with the identical 448-byte do_IRQ-only console -- this is a natural early halt point independent of vector choice, not a vector-238-specific crash. Final decisive control: run the NEW pattern-based resume-past-halt engine (the one that showed empty console for vector 238) with vector 236 instead, to isolate whether the emptiness is a bug in that newer primitive itself (never tested against a real distro before iteration 16) vs. something genuinely different about vector 238.
+
+Control experiment with vector 236+pattern-engine (3000 ticks): do_IRQ messages appear but stuck at jiffies~1.7s the whole time (jiffies never legitimately advances) -- reproduces item 13's original finding exactly. But vector 238's silence isn't proven to be a crash: decoded the FULL console output of the vector-236 baseline byte-for-byte and it's ONLY 448 bytes of do_IRQ spam, nothing else -- meaning 'quiet loglevel=1' suppresses essentially all kernel boot text in this session (contrary to what earlier progress.txt narrative describes seeing), so silence alone can't distinguish 'vector 238 crashed' from 'vector 238 works but prints nothing under this suppressed loglevel'. Final test: drop quiet/loglevel=1 entirely to get real diagnostic signal, small tick budget, vector 238.
+
+BREAKTHROUGH: with quiet/loglevel=1 dropped, vector 238 boots cleanly through full verbose kernel log to 'Freeing unused kernel memory' at 1.48s guest time with ZERO do_IRQ errors (vs vector 236's endless do_IRQ spam under the same verbose cmdline) -- the vector fix is real and correct, my earlier 'empty console' scare was just quiet+loglevel=1 suppressing all output for that boot phase regardless of vector. Now testing the real question: does vector 238 let the resume-past-idle-halt engine actually progress past this first halt toward 'ubuntu login:', where vector 236 was permanently stuck.
+
+20000-tick pattern-engine attempt timed out at 280s with no result. Reducing to 3000 ticks (matching the scale that returned instantly for the non-pattern engine) to get a bounded diagnostic signal -- either the login pattern or a console_tail showing real progress.
+
+Wrote up the full finding: examples/ubuntu/BUILD.md updated with the verified vector-238 fix + corrected recipe, todo.md §14 item 14 documents the root-cause confirmation (real v4.15 source lookup + hardware verification of clean vs error-spamming boot), CLAUDE.md got a brief BAUD_SERVER/BAUD_ADDR gotcha note. No Rust code changed this iteration (pure investigation + docs). Running the full pre-push gate now.
+
+Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m26s. Appending the final progress block and committing.
+
+## 2026-07-27T21:31:00 UTC - Changes committed.
+- Root-caused and hardware-verified the fix for H9's `do_IRQ: No irq handler for vector 236` blocker: the default `--periodic-timer-vector` (0xec/236) is correct only for the newer ~6.18 fixture kernel, not the real Ubuntu 18.04.1 image's stock 4.15 kernel, whose real `LOCAL_TIMER_VECTOR` is 0xee/238 (confirmed against the actual v4.15 kernel source)
+- Files changed: examples/ubuntu/BUILD.md, todo.md, CLAUDE.md, ralph/progress.txt (no Rust code changed this iteration)
+- **Brief description of changes:**
+  - Recovered a real, previously-uncommitted finding from a prior session's progress.txt entry (killed mid-work by a host WSL termination before it could commit) hypothesizing vector 0xee for the real kernel; independently re-verified it end to end against real /dev/kvm this iteration
+  - Confirmed LOCAL_TIMER_VECTOR=0xee (238) for Linux v4.15 directly against github.com/torvalds/linux's own arch/x86/include/asm/irq_vectors.h at tag v4.15
+  - Hardware-verified: with `--periodic-timer-vector 238` and a temporarily-verbose cmdline (quiet/loglevel=1 removed), the real Ubuntu image boots cleanly through the full kernel-init log to "Freeing unused kernel memory" with zero do_IRQ errors, vs. vector 236's endless "do_IRQ: No irq handler for vector 236" loop with guest jiffies visibly stuck — reproducing item 13's original diagnosis under full visibility and confirming the real apic_timer_interrupt ISR is now dispatched correctly
+  - Ruled out a false alarm along the way: an early test that saw zero console output for vector 238 turned out to be `quiet loglevel=1` suppressing nearly all boot text for both vectors, not a crash — confirmed by getting the identical empty-modulo-do_IRQ result from vector 236 under the same suppressed cmdline
+  - examples/ubuntu/BUILD.md rewritten with the vector fix, the corrected recipe (adds --periodic-timer-vector 238 and the now-current --halt-console-pattern-hex/--halt-max-exits-per-burst flags item 13 introduced but the doc never mentioned), and a note on the suppressed-output trap
+  - todo.md §14 gained item 14 with the full narrative; CLAUDE.md gained a brief note on BAUD_SERVER (CLI) vs BAUD_ADDR (server bind) and the BAUD_DB sqlite:// URL format, both of which cost real time to rediscover this iteration
+  - Still open: reaching the actual "ubuntu login:" banner. With the correct vector the resume-past-halt engine does real, CPU-heavy per-tick work (unlike vector 236's cheap infinite spin) but a 20000-tick attempt didn't finish inside this session's interactive budget (killed after ~280s; a 30000-tick attempt in this same session separately ran ~19.5 minutes pegged near 100% CPU before being killed) — next step is `run_in_background: true` with a much longer budget, per BUILD.md's updated "still open" note
+  - Verified: `bash drive/gate.sh` — 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m26s, clean, no flakes
+---

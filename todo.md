@@ -2959,18 +2959,51 @@ snapshot, not a duplicate of it.
      mismatch must be in *how/when* the interrupt is delivered relative to this real Ubuntu 4.15 kernel's own
      IDT/LAPIC initialization (e.g., possibly this guest runs in a legacy-PIC-only or no-LAPIC-detected mode
      given the minimal one-LAPIC-only MADT and `nosmp`/`maxcpus=1`, so vector `0xec` was never actually wired to
-     the dedicated `apic_timer_interrupt` gate at all), not simply "pick a different vector." **Still open, the
-     next concrete step**: determine why this real kernel's IDT does not have vector `0xec` bound to a real
-     LAPIC timer handler in this environment — check whether the guest actually enables/detects a local APIC at
-     all (dmesg for "Not using local APIC timer" or similar, which needs raising `loglevel`/dropping `quiet`
-     from the cmdline to see, currently suppressed), whether ACPI's MADT needs an IOAPIC entry too (this
-     project's `write_acpi_tables` writes only RSDP→XSDT→FADT+DSDT+MADT-with-one-LAPIC — no IOAPIC — per §4
-     above), or whether the kernel needs `lapic`/`no_ioapic`-style cmdline hints to accept this minimal topology
-     instead of falling back to legacy do_IRQ-routed vector dispatch. The resume-past-idle-halt primitive
-     itself is proven correct and complete on its own terms (idle-halt-guest fixture, both directions); this is
-     a distinct, deeper gap in the real distro's interrupt/APIC bring-up, not a flaw in the new run-loop
-     combinator. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem, untouched by
-     this iteration.
+     the dedicated `apic_timer_interrupt` gate at all), not simply "pick a different vector." The resume-past-idle-halt
+     primitive itself is proven correct and complete on its own terms (idle-halt-guest fixture, both directions); this
+     is a distinct, deeper gap in the real distro's interrupt/APIC bring-up, not a flaw in the new run-loop combinator.
+     H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem.
+
+  14. **H9 — root-caused item 13's `do_IRQ: No irq handler for vector 236` blocker: `0xec` is simply the wrong**
+     **vector for this kernel, confirmed against the real v4.15 source, and hardware-verified fixed.** A prior
+     session (killed mid-work by a host WSL termination before it could commit — its `ralph/progress.txt` entry
+     survived, this entry is that finding, independently re-verified end to end) hypothesized that Ubuntu
+     18.04.1's stock 4.15 kernel defines `LOCAL_TIMER_VECTOR` differently from the ~6.18 kernel this project's own
+     `tests/fixtures/linux-guest/` fixture uses (whose `0xec`/236 is where the default `--periodic-timer-vector`
+     comes from). Confirmed directly against `github.com/torvalds/linux` tag `v4.15`'s own
+     `arch/x86/include/asm/irq_vectors.h`: `LOCAL_TIMER_VECTOR` is `0xee` (238) in that tree, not `0xec` — the
+     vector-number reorganization that made `0xec` the timer vector happened in a later kernel. `0xec` (236) is
+     simply an ordinary, unclaimed device-IRQ vector in 4.15's layout, hence `do_IRQ`'s graceful "no handler"
+     fallback rather than a crash.
+     **Hardware-verified with the real image**: booting with `--periodic-timer-vector 238` instead of the `236`
+     default, and temporarily dropping `quiet loglevel=1` from the cmdline for full visibility (the default
+     `quiet loglevel=1` recipe suppresses nearly all kernel boot text regardless of vector — an early same-session
+     test that saw *zero* console output for vector `238` was this suppression, not a crash, confirmed by
+     re-running the identical config with vector `236` and getting the identical empty-modulo-`do_IRQ`-spam
+     result; the two vectors only diverge once boot text is actually visible). With vector `238` and full
+     verbosity, the boot reaches `Freeing unused kernel memory` (the full kernel-init log, ACPI/PCI/e820/RCU/etc.)
+     with **zero** `do_IRQ` errors — vs. vector `236`'s endless `do_IRQ: 0.236 No irq handler for vector` loop
+     with guest jiffies visibly stuck at the same ~1.7s timestamp across a 3000-tick/1.5B-RCB resume-past-halt
+     attempt (reproduced this session, matching item 13's original diagnosis exactly). This confirms the real
+     `apic_timer_interrupt` ISR is now being dispatched, not merely that the vector number is unclaimed.
+     `examples/ubuntu/BUILD.md` updated with the finding, the corrected recipe (includes
+     `--periodic-timer-vector 238` and the now-current `--halt-console-pattern-hex`/`--halt-max-exits-per-burst`
+     flags item 13 added, which the doc had not been updated to mention), and a note on the suppressed-output
+     trap for the next person to hit it.
+     **Still open, the next concrete step**: reaching the `ubuntu login:` banner itself. With the correct vector,
+     `run_until_console_pattern_with_periodic_timer_and_devices` visibly does *real* per-resume work — each
+     resumption costs far more wall-clock than vector `236`'s cheap infinite spin (consistent with genuine disk
+     I/O / systemd activity, not a dead loop) — but a 20000-tick attempt did not finish inside an interactive
+     session's budget (killed after ~280s with no result the first try, ~200s on a smaller 3000-tick retry); an
+     earlier 30000-tick attempt with the *original* iteration also ran ~19.5 minutes with the server pegged near
+     100% CPU before being killed for the same reason. This is a real, hardware-confirmed CPU-bound run (unlike
+     the old bug's cheap infinite spin), so the fix is: run this recipe with `run_in_background: true` and a
+     multi-tens-of-minutes budget, watching server-side CPU/`console_output` length rather than only the
+     synchronous HTTP response (which returns nothing until the whole run finishes or times out). This iteration
+     also reconfirmed, as a useful side-effect of killing an abandoned attempt mid-run, that the `baud-server`
+     client-disconnect cancellation (`c1836d5`, "bound a KVM run to the client that asked for it") works cleanly
+     on this exact code path: the server log showed `KVM run cancelled: the client abandoned the request` and
+     released everything within seconds of the CLI process being killed, both times.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

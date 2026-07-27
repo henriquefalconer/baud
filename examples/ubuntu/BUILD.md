@@ -41,6 +41,24 @@ function's own doc comment for the full mechanism (the fixed 32 MiB `INITRAMFS_A
 this kernel's own `init_size`-driven self-decompression scratch space) and todo.md §14 for the
 iteration-by-iteration narrative.
 
+## Real-hardware finding: `--periodic-timer-vector` must be `238` (`0xee`), not the `236` default
+
+The default `--periodic-timer-vector` (`0xec`) is `LOCAL_TIMER_VECTOR` for the newer ~6.18 kernel
+this project's other fixtures (`tests/fixtures/linux-guest/`) use — **not** for the real Ubuntu
+18.04.1 image's stock 4.15 kernel. Direct source lookup (`arch/x86/include/asm/irq_vectors.h` at
+`github.com/torvalds/linux` tag `v4.15`) confirms 4.15's `LOCAL_TIMER_VECTOR` is `0xee` (238); `0xec`
+is an ordinary unclaimed device-IRQ vector in that layout. Booting with the `236` default produces an
+endless `do_IRQ: 0.236 No irq handler for vector` loop with guest jiffies visibly stuck (confirmed by
+temporarily dropping `quiet loglevel=1` for full verbose boot output) — every injected tick lands on
+the generic do-nothing IRQ dispatch, never the real `apic_timer_interrupt` ISR, so the guest never
+legitimately reschedules. With `--periodic-timer-vector 238`, the same verbose boot reaches `Freeing
+unused kernel memory` with **zero** `do_IRQ` errors, confirming the real timer ISR is now being
+dispatched correctly. (An earlier same-session test that *seemed* to show vector `238` producing zero
+console output at all, even after resuming past many idle halts, turned out to be a red herring: with
+`quiet loglevel=1` still on the cmdline, boot output is suppressed for *both* vectors up to the first
+halt — the emptiness said nothing about vector correctness by itself. Always verify a vector change
+against a verbose (no `quiet`, no `loglevel=1`) boot first.)
+
 ## Manually attempting a boot
 
 ```bash
@@ -53,6 +71,8 @@ UBUNTU_CMDLINE="console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliab
   cloud-init=disabled root=/dev/vda1 ro rootwait net.ifnames=0 biosdevname=0 scsi_mod.scan=sync \
   udev.children_max=1 fsck.mode=skip systemd.mask=systemd-timesyncd.service"
 
+PATTERN_HEX=$(echo -n "ubuntu login:" | xxd -p | tr -d '\n')
+
 baud run kvm \
   --kernel ~/.baud-tmp/ubuntu-1804/vmlinuz-generic \
   --initramfs ~/.baud-tmp/ubuntu-1804/initrd-generic \
@@ -60,22 +80,28 @@ baud run kvm \
   --acpi \
   --cmdline "$UBUNTU_CMDLINE" \
   --periodic-timer-period-rcb 500000 \
-  --periodic-timer-max-ticks 3000 \
+  --periodic-timer-vector 238 \
+  --periodic-timer-max-ticks 20000 \
+  --halt-console-pattern-hex "$PATTERN_HEX" \
+  --halt-max-exits-per-burst 200000 \
   --tape-hex "" \
   --json
 ```
 
-**Confirmed so far** (real `/dev/kvm`, this iteration): ACPI tables parse cleanly (`ACPI: Core
-revision ...`), PCI enumerates via the legacy `0xCF8/0xCFC` mechanism, the initramfs unpacks
-successfully (the bug above, fixed), and the boot reaches `Freeing unused kernel memory` — the very
-end of kernel init, immediately before handing off to `/init`.
+**Confirmed so far** (real `/dev/kvm`): ACPI tables parse cleanly (`ACPI: Core revision ...`), PCI
+enumerates via the legacy `0xCF8/0xCFC` mechanism, the initramfs unpacks successfully (the bug above,
+fixed), and — with the correct `--periodic-timer-vector 238` — the boot reaches `Freeing unused kernel
+memory` with a clean, error-free kernel log, the very end of kernel init, immediately before handing
+off to `/init`. `Multiverse::run_until_console_pattern_with_periodic_timer_and_devices` (the
+resume-past-idle-halt primitive `--halt-console-pattern-hex` selects, todo.md §14 item 13) is wired to
+carry the boot past that first halt.
 
-**Still open, the next thing to attempt**: the run stops there because
-`Multiverse::run_to_first_halt_with_periodic_timer` (the primitive `boot_run_and_drain` uses) returns
-on the *first* guest-issued `Hlt`, and a real multi-tasking kernel's idle loop calls `hlt` the moment
-nothing is runnable — which happens almost immediately once `/init` blocks on its first disk read,
-long before systemd, `agetty`, or the `ubuntu login:` banner. Raising `--periodic-timer-max-ticks`
-from 200 to 3000 produced **byte-identical console output** in this iteration, confirming this is a
-real halt, not a truncation — reaching login needs a different run-loop primitive (survive/resume
-past an idle halt, or "run until console contains `ubuntu login:`"), not a bigger tick budget on the
-existing one.
+**Still open, the next thing to attempt**: reaching the `ubuntu login:` banner itself. With the
+correct vector, the resume-past-halt engine visibly does *real* per-tick work (each resumption costs
+much more wall-clock than vector `236`'s cheap infinite `do_IRQ` spin — consistent with genuine
+disk I/O / systemd activity rather than a dead loop), but a 20000-tick attempt did not finish within an
+interactive session's time budget. The next iteration should run this recipe with `run_in_background:
+true` and a long budget (many minutes), watching server-side CPU (`ps`) rather than only the
+synchronous HTTP response, and/or add a progress log (e.g. periodic `console_output().len()` polling
+via a second endpoint) so a long-running attempt is observable without waiting for it to fully
+complete or time out.
