@@ -2231,9 +2231,57 @@ snapshot, not a duplicate of it.
      itself can be found via the legacy mechanism without it; (d) the actual Ubuntu 18.04.1 cloud
      image (`cloud-images-archive.ubuntu.com`, qcow2→raw) served as the virtio-blk backing store;
      (e) the full boot-to-login-prompt drive script (`drive/h9.sh`) and the cross-VM fingerprint
-     comparison (`specs/baud-fingerprint.md`'s `cross_vm_fingerprint_matches`). None of (a)-(e) are
-     started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
-     (item 3 above), unrelated to this PCI work.
+     comparison (`specs/baud-fingerprint.md`'s `cross_vm_fingerprint_matches`). **(a) is now done**:
+     new `crates/baud-multiverse/src/virtio_pci.rs` (~495 lines) implements the virtio-pci *legacy*
+     transport (virtio spec 1.0/1.1 Appendix "Legacy Interface" — the pre-1.0, MSI-X-less register
+     layout every `virtio_pci_legacy` Linux driver still speaks, which the stock Ubuntu 18.04.1
+     initrd actually needs since it carries `virtio_pci`/`virtio_blk`, never `virtio_mmio.device=`).
+     `VirtioPciTransport` is a second, device-agnostic on-ramp to the same device model
+     `virtio_mmio.rs` already exposes over MMIO, reachable instead over one packed I/O-port window
+     (Host/Guest Features, a single `Queue Address` register holding a page-frame-number rather than
+     three separate ring addresses, a fixed-width read-only `Queue Size`, one shared `Device Status`
+     byte, and an ISR-status byte that clears itself on read) — genuinely different from, not just a
+     relocation of, the MMIO transport's per-queue explicit-address register set. Below the register
+     layer both transports share everything: `ring_layout_from_pfn` derives the same
+     `virtio_mmio::QueueRingConfig` (three ring addresses + a size) from the legacy interface's one
+     PFN using the standard split-ring layout every `vring_init(..., VIRTIO_PCI_VRING_ALIGN)` call
+     assumes (desc table, then avail ring immediately after it, then used ring at the next
+     4096-byte boundary), so `virtio_queue::SplitVirtqueue` drives a live legacy queue exactly as it
+     already drives an mmio one. `crates/baud-multiverse/src/pci.rs` gained the config-space half:
+     `PciVirtioFunction`, a configuration-space header for a virtio-pci legacy function at 00:01.0
+     (vendor ID `0x1AF4` — virtio's own PCI-SIG ID, never the host bridge's `0x1B36`; device ID
+     `0x1000 + <virtio device type>`; class code `0x00FF0000`, "does not fit any defined class",
+     the real convention virtio-rng hardware uses; interrupt line/pin, pin fixed at `INTA#`) plus a
+     real BAR0 implementing the PCI BAR-sizing protocol (PCI Local Bus spec §6.2.5.1: an all-ones
+     write latches a "sizing" flag and the next read returns a size mask in the high bits rather
+     than echoing the write; any other write clears the flag and assigns a real base — tracked via
+     an explicit `bar0_sizing` bool rather than misreading an all-ones write as a literal
+     nonsensical base). `PciHostBridge::attach_virtio_rng` installs the function opt-in (device 1
+     still reads back all-ones for every caller that never calls it, so existing fixtures are
+     unaffected), and `PciHostBridge::virtio_io_base` exposes the guest-assigned base without the
+     bridge ever touching the transport directly. `console.rs`'s `DeviceBus` wires the two halves
+     together as a new `virtio_pci_rng` field, opt-in via `enable_virtio_pci_rng()` mirroring
+     `enable_virtio_rng`'s pattern for the MMIO transport: `DeviceBus::pio_write` re-reads
+     `pci.virtio_io_base()` and calls `VirtioPciTransport::set_io_base` after every PCI
+     configuration-space write, keeping the transport's dispatch window synchronized with whatever
+     BAR0 value the guest's PCI core currently has live — the same "a BAR with no valid base decodes
+     no bus cycles" behavior real hardware has. 21 new tests (14 in `virtio_pci.rs` covering the
+     ring-layout formula, unassigned-I/O-base open-bus behavior, read-only host-features, a full
+     driver enumeration/queue-setup sequence, out-of-range queue-index handling, notify bookkeeping,
+     ISR-clear-on-read, status-reset-preserves-device-identity, and window-boundary open-bus
+     behavior; 6 in `pci.rs` covering device-1-absent-until-attached, vendor/device-ID content, the
+     full BAR0 sizing/assignment protocol, interrupt-line round-trip with fixed INTA# pin,
+     subsystem-ID content, and the host bridge at 00:00.0 staying unaffected; 1 end-to-end
+     `DeviceBus` test, `device_bus_routes_virtio_pci_bar0_once_the_guest_assigns_it`, driving the
+     real BAR0 sizing/assignment protocol through `DeviceBus` and confirming PIO reaches the
+     transport only after assignment). `cargo test -p baud-multiverse --lib` → 161 passed, 0 failed,
+     10 ignored (up from the previously-recorded 149/152 baseline). `cargo clippy -p baud-multiverse
+     --all-targets` → 26 warnings, matching the exact pre-existing baseline — zero new warnings,
+     none in `virtio_pci.rs`. Full `bash drive/gate.sh` ran clean except the already-documented
+     `rdtsc_guest_reproduces_high_bits_across_boots` load-flake (failed under the 8-wide fan-out,
+     passed in isolation in phase 6 — the documented case that still counts as a passing gate).
+     (b)-(e) remain not started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb
+     packaging problem (item 3 above), unrelated to this PCI work.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

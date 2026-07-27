@@ -38,6 +38,7 @@ pub mod pic8259;
 pub mod tape_bus;
 pub mod timesource;
 pub mod virtio_mmio;
+pub mod virtio_pci;
 
 // Uses `vm-memory`, which is a Linux-gated dependency (see this crate's Cargo.toml — same reason
 // `linux/` below is gated): unlike `virtio_mmio.rs`'s pure register bookkeeping, this module

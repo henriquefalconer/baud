@@ -6390,3 +6390,83 @@ Gate green: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input), 2m5
   - `todo.md` §14 item 5: documented this increment and the still-open remainder toward H9 in rough dependency order (virtio-pci transport, virtio-blk device, minimal ACPI, the actual Ubuntu cloud image, drive/h9.sh) — none of which are started yet.
 - Verification: `cargo test -p baud-multiverse` 140 passed / 0 failed / 10 ignored; `cargo clippy -p baud-multiverse --all-targets` 26 warnings, identical count to before this change and none in pci.rs (zero new warnings); `cargo build --workspace` clean; full `bash drive/gate.sh`: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input), 2m56s — fully green, no flake this run.
 ---
+
+Post-push verification: origin/main now at f6ea587, identical to local HEAD; working tree clean. Pre-push gate (§15) was already fully green (23 passed, 0 failed, 1 skipped, no flake this run) before this push. todo.md still has many pending items (H8 Mario blocked on Qt5/SDL2/Xvfb FCEUX packaging, H9 Ubuntu — still far from complete even after this PCI increment, plus numerous other still-open items throughout the file) — emitting NEXT.
+
+## 2026-07-27T06:50:34 UTC (13min) - Session usage — build-4 [sonnet]
+- cost $0.9229 (from claude -p)
+- context 81,198 tok peak of 1M (8%) across 26 inference calls, monotonic
+- models sonnet-5 $0.9198 (in 52 / out 6,474 / cache-read 1,736,738) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/006-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and progress history first.
+
+Chose to continue H9 (§4.7/§14 item 5): implement the virtio-pci transport device, the next sub-step (a) in the dependency order the last iteration laid out after the legacy PCI host bridge (0xCF8/0xCFC) landed. Studying existing virtio-mmio pattern, PCI host bridge, and spec requirements via parallel subagents before writing code.
+
+Wrote crates/baud-multiverse/src/virtio_pci.rs (legacy virtio-pci transport: register block + PFN-based ring-layout math reusing SplitVirtqueue) and extended pci.rs with PciVirtioFunction (config-space header + real BAR0 sizing/assignment protocol at 00:01.0), wired into DeviceBus in console.rs. cargo build -p baud-multiverse clean. Running full test suite for this crate next.
+
+All 12 new tests (7 virtio_pci.rs, 6 pci.rs, 1 console.rs end-to-end BAR-sizing test) pass; rdtsc_guest_reproduces_high_bits_across_boots failed under parallel load but passed clean in isolation (documented flake per CLAUDE.md). Running full workspace build/clippy/test next.
+
+cargo build --workspace and cargo clippy -p baud-multiverse --all-targets both clean (26 pre-existing warnings, zero new, none in touched files). Launching bash drive/gate.sh (full pre-push gate) in background.
+
+Gate running in background (bash drive/gate.sh, full build+clippy+test+drive-scripts+flake-rerun phase, ~3-6min). Standing by for completion notification.
+
+Gate phase 0 (warm-up build) in progress as of this check. Waiting for background completion notification rather than polling further.
+
+## 2026-07-27T07:06:35 UTC (16min) - Session usage — build-5 [sonnet]
+- cost $6.3607 (from claude -p)
+- context 249,662 tok peak of 1M (25%) across 59 inference calls, monotonic
+- models sonnet-5 $6.3575 (in 140 / out 79,468 / cache-read 11,575,487) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T053631Z/007-build-5.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and checking git status/diff for in-progress work.
+
+Reviewed the uncommitted virtio-pci diff left by the previous session (virtio_pci.rs legacy transport + PciVirtioFunction config-space header + DeviceBus wiring) — matches todo.md §14 item 5(a) exactly. No gate process is currently running (previous session's background gate was lost when it ended). Re-verifying crate tests before running the full gate.
+
+All 161 tests in baud-multiverse pass (12 new ones for virtio-pci included). Launching bash drive/gate.sh (full pre-push gate) in background.
+
+Restarted the gate via the harness-tracked background mechanism (previous manual & backgrounding wasn't reliably tracked). Standing by for completion notification — full build+clippy+test+drive-scripts, typically several minutes.
+
+## 2026-07-27T07:08:35 UTC (2min) - Session usage — build-5 [sonnet]
+- cost $0.8252 (from claude -p)
+- context 85,820 tok peak of 1M (9%) across 19 inference calls, monotonic
+- models sonnet-5 $0.8220 (in 38 / out 5,612 / cache-read 1,216,509) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/008-build-5.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and checking git status/diff for in-progress work from previous session.
+
+Confirmed the uncommitted diff (virtio_pci.rs new file + pci.rs/console.rs/lib.rs wiring) matches todo.md item 5(a) — the virtio-pci legacy transport device. Previous session reported 161/161 baud-multiverse tests passing and had started the gate but it wasn't tracked to completion. Re-verifying the crate build/test before launching the full gate.
+
+baud-multiverse lib tests: 161 passed, 0 failed. Running clippy on the workspace to catch warnings before the full gate.
+
+Clippy: 26 warnings on baud-multiverse, matching the documented pre-existing baseline exactly — zero new warnings, none in virtio_pci.rs. Launching the full pre-push gate (bash drive/gate.sh) in the background now.
+
+Gate result: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots — failed under the 8-wide fan-out, passed in isolation per phase 6), 1 skipped (pkg-build-cli, fingerprint unchanged). Per CLAUDE.md this is the documented sole-flake case — gate counts as passing. Committing now.
+
+Dispatched a subagent to update todo.md §14 item 5 recording sub-item (a) — the virtio-pci transport — as done, citing the real test counts and files. Waiting for it before committing.
+
+todo.md §14 item 5 updated to record sub-item (a) done. Appending the changes-committed progress block, then committing and pushing.
+
+## 2026-07-27T07:14:17 UTC - Changes committed.
+- Implemented the virtio-pci legacy transport device (todo.md section 14 item 5(a))
+- Files changed: crates/baud-multiverse/src/virtio_pci.rs (new), pci.rs, console.rs, lib.rs, todo.md, ralph/progress.txt
+- Brief description of changes:
+  - New VirtioPciTransport: legacy virtio-pci I/O-port register block (Host/Guest Features, PFN-based Queue Address, Queue Size, Device Status, self-clearing ISR status), sharing ring_layout_from_pfn -> virtio_mmio::QueueRingConfig with the existing MMIO transport so virtio_queue::SplitVirtqueue drives both identically
+  - New PciVirtioFunction in pci.rs: config-space header for a virtio-pci legacy function at 00:01.0 (vendor 0x1AF4, device 0x1000+kind, class 0x00FF0000, INTA# pin) with a real PCI BAR0 sizing/assignment protocol
+  - DeviceBus wiring in console.rs: opt-in enable_virtio_pci_rng(), keeps the transport io_base synchronized with the guest-assigned BAR0 on every PCI config write, plus an end-to-end test driving the real sizing/assignment sequence
+  - 21 new tests (14 virtio_pci.rs + 6 pci.rs + 1 console.rs); cargo test -p baud-multiverse --lib: 161 passed/0 failed/10 ignored; clippy: 26 warnings (unchanged baseline, none new)
+  - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, documented load-flake, passed in isolation), 1 skipped (pkg-build-cli fingerprint unchanged) - counts as green per CLAUDE.md
+---

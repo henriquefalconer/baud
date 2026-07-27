@@ -24,12 +24,19 @@
 // probing entirely, so this device sits dormant, exactly like `Pic8259` sits dormant for a guest
 // with no ISA IRQs to request.
 //
-// Deliberately out of scope here (future H9 work, not this module): MCFG/ECAM (the memory-mapped
-// mechanism #2 for full 4096-byte extended config space), any device other than the host bridge
-// (a virtio-pci block device needs its own BAR-backed MMIO/PIO window plus a `DeviceBus` slot to
-// answer it, same pattern as `virtio_mmio.rs`), and ACPI (a real Ubuntu boot also wants a minimal
-// RSDP/RSDT/FADT/DSDT/MADT, `specs/baud-ubuntu.md`'s "machine additions" list — unrelated to
-// config-space access itself).
+// A second device now exists beyond the host bridge: [`PciVirtioFunction`] models the
+// configuration-space header (vendor/device ID, class code, one I/O-space BAR0 with the real BAR
+// sizing/assignment protocol, interrupt line/pin) for a virtio-pci *legacy* function at 00:01.0 —
+// the config-space half of `crate::virtio_pci`'s transport, which owns the actual I/O-port
+// register block BAR0 ends up pointing at (`todo.md` §14 item 5(a)). `PciHostBridge` itself still
+// answers only the enumeration/config-space side; it never touches the transport directly, only
+// exposing [`PciHostBridge::virtio_io_base`] so a caller (`console.rs`'s `DeviceBus`) can keep the
+// transport's own idea of its I/O window synchronized with whatever base the guest has assigned.
+//
+// Deliberately still out of scope here (future H9 work): MCFG/ECAM (the memory-mapped mechanism
+// #2 for full 4096-byte extended config space), a virtio-blk device on top of this same
+// machinery, and ACPI (a real Ubuntu boot also wants a minimal RSDP/RSDT/FADT/DSDT/MADT,
+// `specs/baud-ubuntu.md`'s "machine additions" list — unrelated to config-space access itself).
 
 use baud_vcpu::{Bus, OPEN_BUS_BYTE};
 
@@ -88,6 +95,137 @@ const HOST_BRIDGE_CLASS_CODE: u32 = 0x0006_0000;
 /// cache-line-size byte is exactly what a single-function, non-bridge-capable device reports).
 const REG_VENDOR_DEVICE: u8 = 0x00; // vendor ID (bits 15:0), device ID (bits 31:16)
 const REG_CLASS_REVISION: u8 = 0x08; // revision ID (bits 7:0), class code (bits 31:8)
+const REG_HEADER_BIST: u8 = 0x0C; // cache-line-size/latency-timer/header-type/BIST
+const REG_BAR0: u8 = 0x10;
+const REG_SUBSYSTEM: u8 = 0x2C; // subsystem vendor ID (bits 15:0), subsystem ID (bits 31:16)
+const REG_INTERRUPT: u8 = 0x3C; // interrupt line (bits 7:0), interrupt pin (bits 15:8)
+
+/// virtio's own PCI-SIG-assigned vendor ID (never Red Hat's QEMU-project ID the host bridge above
+/// uses) — real virtio-pci hardware and every virtio guest driver's `pci_device_id` table key off
+/// this exact value.
+const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
+/// Legacy transitional virtio-pci device IDs are `0x1000 + <virtio device type>` (virtio spec,
+/// Legacy Interface: A Note on Virtio Device Discovery).
+const VIRTIO_LEGACY_DEVICE_ID_BASE: u16 = 0x1000;
+/// PCI class code `0xFF` ("device does not fit any defined class", PCI Local Bus spec Appendix D)
+/// — virtio's entropy device has no PCI-defined class of its own, and real virtio-pci-legacy
+/// hardware uses exactly this catch-all for devices without a better match.
+const VIRTIO_UNCLASSIFIED_CODE: u32 = 0x00FF_0000;
+/// The I/O-space BAR indicator (bit 0 of a BAR register) plus the size this bridge advertises for
+/// [`PciVirtioFunction::bar0_size`] — matches `crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN`
+/// exactly, so the transport's own dispatch window and what the guest's PCI core believes it
+/// sized never disagree.
+const BAR_IO_SPACE_BIT: u32 = 0x1;
+/// `Interrupt Pin` value `1` = `INTA#` (PCI Local Bus spec §6.2.4) — baud's virtio functions each
+/// claim exactly one interrupt pin, never sharing a line with anything else in this model.
+const INTERRUPT_PIN_INTA: u32 = 1;
+
+/// One PCI function's configuration-space header for a virtio-pci *legacy* device — the
+/// enumeration-and-BAR-assignment half of `crate::virtio_pci::VirtioPciTransport`; see this
+/// module's own doc for why the two are split. Lives at 00:01.0, the first slot past the host
+/// bridge.
+#[derive(Debug, Clone, Copy)]
+pub struct PciVirtioFunction {
+    /// The virtio device-type id (spec §5's device id table, e.g. `4` for entropy) — determines
+    /// this function's PCI Device ID and Subsystem ID per the legacy convention.
+    device_kind: u32,
+    /// A fixed class-code dword (see [`VIRTIO_UNCLASSIFIED_CODE`]'s doc for why entropy uses it);
+    /// a future device on this same machinery (e.g. virtio-blk) would pass its own real class.
+    class_code: u32,
+    /// BAR0's advertised size in bytes — must be a power of two (PCI BAR sizing depends on it)
+    /// and must match the transport's own window length or the guest will address bytes the
+    /// transport never answers.
+    bar0_size: u32,
+    /// The guest-assigned I/O base, or `0` before any guest write (real hardware: an unassigned
+    /// BAR decodes no bus cycles, matching `0` here never being treated as a valid base by
+    /// [`Self::io_base`]).
+    bar0_base: u32,
+    /// Set for exactly as long as the guest is mid-way through the BAR-sizing protocol (having
+    /// just written all-ones and not yet written a real value back) — real hardware has no
+    /// separate flag for this; a raw register can't distinguish "the guest wants the size" from
+    /// "the guest wants to point the BAR at address `0xFFFF_FFFC`", so this bridge tracks it
+    /// explicitly instead of misinterpreting an all-ones write as a real (nonsensical) base.
+    bar0_sizing: bool,
+    /// `Interrupt Line` (PCI Local Bus spec §6.2.4) — purely guest-writable bookkeeping; baud
+    /// never reads it back to decide anything, matching real hardware (the field only tells
+    /// *software*, never other hardware, which line was routed).
+    interrupt_line: u8,
+}
+
+impl PciVirtioFunction {
+    fn new(device_kind: u32, class_code: u32, bar0_size: u32) -> Self {
+        PciVirtioFunction {
+            device_kind,
+            class_code,
+            bar0_size,
+            bar0_base: 0,
+            bar0_sizing: false,
+            interrupt_line: 0,
+        }
+    }
+
+    fn device_id(&self) -> u16 {
+        VIRTIO_LEGACY_DEVICE_ID_BASE + self.device_kind as u16
+    }
+
+    fn bar0_read(&self) -> u32 {
+        if self.bar0_sizing {
+            // PCI BAR sizing protocol (PCI Local Bus spec §6.2.5.1): a device reports its region
+            // size by answering an all-ones write with the size mask in the high bits rather than
+            // echoing the all-ones value back — bit 0 is always 1 here (I/O-space indicator), bit
+            // 1 stays reserved-0, and the size mask occupies bits 31:2.
+            (!(self.bar0_size - 1) & 0xFFFF_FFFC) | BAR_IO_SPACE_BIT
+        } else {
+            self.bar0_base | BAR_IO_SPACE_BIT
+        }
+    }
+
+    fn bar0_write(&mut self, value: u32) {
+        if value == 0xFFFF_FFFF {
+            self.bar0_sizing = true;
+        } else {
+            self.bar0_sizing = false;
+            self.bar0_base = value & !0x3; // clear the fixed I/O-space bit / reserved bit
+        }
+    }
+
+    /// The guest-assigned I/O base, or `None` while unassigned or mid-sizing-protocol — the value
+    /// `crate::virtio_pci::VirtioPciTransport::set_io_base` needs to start decoding real bus
+    /// cycles.
+    pub fn io_base(&self) -> Option<u16> {
+        if self.bar0_sizing || self.bar0_base == 0 {
+            None
+        } else {
+            Some(self.bar0_base as u16)
+        }
+    }
+
+    fn config_read_dword(&self, register: u8) -> u32 {
+        match register {
+            REG_VENDOR_DEVICE => (VIRTIO_VENDOR_ID as u32) | ((self.device_id() as u32) << 16),
+            REG_CLASS_REVISION => self.class_code,
+            REG_HEADER_BIST => 0, // header type 0 (single-function), no BIST capability
+            REG_BAR0 => self.bar0_read(),
+            REG_SUBSYSTEM => {
+                // Legacy convention: subsystem ID mirrors the virtio device type, subsystem
+                // vendor ID mirrors the real virtio vendor ID (virtio spec, Legacy Interface).
+                (VIRTIO_VENDOR_ID as u32) | (self.device_kind << 16)
+            }
+            REG_INTERRUPT => (self.interrupt_line as u32) | (INTERRUPT_PIN_INTA << 8),
+            _ => 0,
+        }
+    }
+
+    fn config_write_dword(&mut self, register: u8, value: u32) {
+        match register {
+            REG_BAR0 => self.bar0_write(value),
+            REG_INTERRUPT => self.interrupt_line = (value & 0xFF) as u8,
+            // Vendor/device/class/subsystem are read-only; anything else this header doesn't
+            // model (Command/Status, Cache Line Size, other BARs) is silently absorbed.
+            _ => {}
+        }
+    }
+}
 
 /// Configuration mechanism #1: a `CONFIG_ADDRESS` latch plus a `CONFIG_DATA` window onto whichever
 /// function that latch currently names.
@@ -96,6 +234,11 @@ pub struct PciHostBridge {
     /// The last value written to `CONFIG_ADDRESS` — real hardware also just latches this
     /// unconditionally, decoding it fresh on every `CONFIG_DATA` access rather than at write time.
     config_address: u32,
+    /// The virtio-pci legacy function at 00:01.0, `None` until [`Self::attach_virtio_rng`] is
+    /// called — every existing constructor leaves this unset, so bus 0's enumeration is unchanged
+    /// for any caller that never opts in (device 1 still reads back all-ones, exactly as before
+    /// this type existed).
+    virtio: Option<PciVirtioFunction>,
 }
 
 impl PciHostBridge {
@@ -104,17 +247,54 @@ impl PciHostBridge {
             || (PCI_CONFIG_DATA..PCI_CONFIG_DATA + 4).contains(&port)
     }
 
-    /// The dword this bridge's one modeled device (00:00.0) presents at `register`, or
-    /// `0xFFFF_FFFF` for any other `bus`/`device`/`function` — the value a real absent device
-    /// reads back as (PCI Local Bus spec §6.1).
-    fn config_read_dword(addr: ConfigAddress) -> u32 {
-        if addr.bus != 0 || addr.device != 0 || addr.function != 0 {
+    /// Installs a virtio-pci legacy entropy-device function at 00:01.0 with a `bar0_size`-byte
+    /// I/O BAR — opt-in, mirroring `console.rs::DeviceBus::enable_virtio_rng`'s own convention for
+    /// the MMIO transport. `bar0_size` must match `crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN`
+    /// (the caller's responsibility — this module has no dependency on `virtio_pci.rs` to check it
+    /// itself, keeping config-space bookkeeping and the transport register block independent).
+    pub fn attach_virtio_rng(&mut self, bar0_size: u32) {
+        self.virtio =
+            Some(PciVirtioFunction::new(crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG, VIRTIO_UNCLASSIFIED_CODE, bar0_size));
+    }
+
+    /// The virtio function's guest-assigned I/O base, if attached and assigned — `DeviceBus` reads
+    /// this after every configuration-space write to keep `VirtioPciTransport::set_io_base`
+    /// synchronized with whatever BAR0 the guest's PCI core has settled on.
+    pub fn virtio_io_base(&self) -> Option<u16> {
+        self.virtio.as_ref().and_then(PciVirtioFunction::io_base)
+    }
+
+    /// The dword this bridge presents at `addr`, or `0xFFFF_FFFF` for any unmodeled
+    /// `bus`/`device`/`function` — the value a real absent device reads back as (PCI Local Bus
+    /// spec §6.1).
+    fn config_read_dword(&self, addr: ConfigAddress) -> u32 {
+        if addr.bus != 0 {
             return 0xFFFF_FFFF;
         }
-        match addr.register {
-            REG_VENDOR_DEVICE => (HOST_BRIDGE_VENDOR_ID as u32) | ((HOST_BRIDGE_DEVICE_ID as u32) << 16),
-            REG_CLASS_REVISION => HOST_BRIDGE_CLASS_CODE, // revision ID 0 in the low byte
-            _ => 0,
+        if addr.device == 0 && addr.function == 0 {
+            return match addr.register {
+                REG_VENDOR_DEVICE => (HOST_BRIDGE_VENDOR_ID as u32) | ((HOST_BRIDGE_DEVICE_ID as u32) << 16),
+                REG_CLASS_REVISION => HOST_BRIDGE_CLASS_CODE, // revision ID 0 in the low byte
+                _ => 0,
+            };
+        }
+        if addr.device == 1 && addr.function == 0 {
+            if let Some(virtio) = &self.virtio {
+                return virtio.config_read_dword(addr.register);
+            }
+        }
+        0xFFFF_FFFF
+    }
+
+    /// The write-side counterpart of [`Self::config_read_dword`] — a no-op for any device this
+    /// bridge either doesn't model or hasn't attached, matching real hardware's own behavior for a
+    /// write to an absent function.
+    fn config_write_dword(&mut self, addr: ConfigAddress, value: u32) {
+        if addr.bus != 0 || addr.device != 1 || addr.function != 0 {
+            return; // the host bridge itself (0/0/0) has no writable register either
+        }
+        if let Some(virtio) = self.virtio.as_mut() {
+            virtio.config_write_dword(addr.register, value);
         }
     }
 }
@@ -148,7 +328,7 @@ impl Bus for PciHostBridge {
             copy_window(&bytes, (port - PCI_CONFIG_ADDRESS) as usize, data);
         } else {
             let addr = ConfigAddress::decode(self.config_address & !CONFIG_ENABLE);
-            let bytes = Self::config_read_dword(addr).to_le_bytes();
+            let bytes = self.config_read_dword(addr).to_le_bytes();
             copy_window(&bytes, (port - PCI_CONFIG_DATA) as usize, data);
         }
     }
@@ -159,10 +339,17 @@ impl Bus for PciHostBridge {
             let mut bytes = self.config_address.to_le_bytes();
             write_window(&mut bytes, (port - PCI_CONFIG_ADDRESS) as usize, data);
             self.config_address = u32::from_le_bytes(bytes);
+        } else {
+            // CONFIG_DATA write: read-modify-write the targeted register (narrower-than-dword
+            // accesses merge onto the current value, same convention CONFIG_ADDRESS itself uses
+            // above), then hand the merged dword to config_write_dword. For the host bridge
+            // (00:00.0), which has no writable register, this is a no-op — real hardware returns
+            // the same behavior for a write to a read-only register.
+            let addr = ConfigAddress::decode(self.config_address & !CONFIG_ENABLE);
+            let mut bytes = self.config_read_dword(addr).to_le_bytes();
+            write_window(&mut bytes, (port - PCI_CONFIG_DATA) as usize, data);
+            self.config_write_dword(addr, u32::from_le_bytes(bytes));
         }
-        // CONFIG_DATA writes: baud models no writable register on its one device (a host bridge
-        // has none a guest needs to change), so they are silently absorbed — real hardware
-        // returns the same behavior for a read-only register.
     }
 
     fn mmio_read(&mut self, _addr: u64, data: &mut [u8]) {
@@ -280,5 +467,80 @@ mod tests {
         }
         assert!(!PciHostBridge::in_range(PCI_CONFIG_ADDRESS - 1));
         assert!(!PciHostBridge::in_range(PCI_CONFIG_DATA + 4));
+    }
+
+    /// `CONFIG_ADDRESS` selecting bus 0 / device 1 / function 0 — where [`PciHostBridge::
+    /// attach_virtio_rng`] places the virtio-pci legacy entropy function.
+    fn select_virtio(register: u8) -> u32 {
+        CONFIG_ENABLE | (1u32 << 11) | ((register as u32) & 0xFC)
+    }
+
+    #[test]
+    fn device_1_reads_absent_until_attached() {
+        let mut bus = PciHostBridge::default();
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_VENDOR_DEVICE));
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xFFFF_FFFF, "no virtio function attached yet");
+    }
+
+    #[test]
+    fn attached_virtio_function_reports_virtio_vendor_and_legacy_rng_device_id() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_rng(0x20);
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_VENDOR_DEVICE));
+        let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
+        assert_eq!(dword & 0xFFFF, VIRTIO_VENDOR_ID as u32, "virtio's real PCI-SIG vendor ID, not 0x1B36");
+        assert_eq!(
+            dword >> 16,
+            VIRTIO_LEGACY_DEVICE_ID_BASE as u32 + crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG,
+            "legacy device ID = 0x1000 + virtio device type"
+        );
+        assert_ne!(dword & 0xFFFF, 0xFFFF, "a present device must never report vendor ID 0xFFFF");
+    }
+
+    #[test]
+    fn bar0_sizing_protocol_reports_the_advertised_window_size() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_rng(0x20);
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_BAR0));
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), BAR_IO_SPACE_BIT, "unassigned BAR0 starts at 0, I/O bit set");
+
+        write_u32(&mut bus, PCI_CONFIG_DATA, 0xFFFF_FFFF); // enter the sizing protocol
+        let size_mask = read_u32(&mut bus, PCI_CONFIG_DATA);
+        assert_eq!(size_mask, !(0x20u32 - 1) | BAR_IO_SPACE_BIT, "size mask for a 0x20-byte I/O BAR");
+        assert!(bus.virtio_io_base().is_none(), "still sizing: no valid base yet");
+
+        write_u32(&mut bus, PCI_CONFIG_DATA, 0xC000); // guest assigns a real base
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xC000 | BAR_IO_SPACE_BIT);
+        assert_eq!(bus.virtio_io_base(), Some(0xC000));
+    }
+
+    #[test]
+    fn interrupt_line_round_trips_and_pin_is_fixed_at_inta() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_rng(0x20);
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_INTERRUPT));
+        write_u32(&mut bus, PCI_CONFIG_DATA, 11); // guest assigns IRQ line 11
+        let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
+        assert_eq!(dword & 0xFF, 11, "interrupt line round-trips");
+        assert_eq!((dword >> 8) & 0xFF, 1, "interrupt pin is fixed at INTA#");
+    }
+
+    #[test]
+    fn subsystem_id_mirrors_the_virtio_device_type() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_rng(0x20);
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_SUBSYSTEM));
+        let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
+        assert_eq!(dword & 0xFFFF, VIRTIO_VENDOR_ID as u32, "subsystem vendor ID");
+        assert_eq!(dword >> 16, crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG, "subsystem ID = virtio device type");
+    }
+
+    #[test]
+    fn host_bridge_at_00_0_is_unaffected_by_an_attached_virtio_function() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_rng(0x20);
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_VENDOR_DEVICE));
+        let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
+        assert_eq!(dword & 0xFFFF, HOST_BRIDGE_VENDOR_ID as u32, "00:00.0 is still the host bridge");
     }
 }

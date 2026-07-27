@@ -25,6 +25,7 @@ use crate::pci::PciHostBridge;
 use crate::pic8259::Pic8259;
 use crate::tape_bus::TapeBus;
 use crate::virtio_mmio::VirtioMmioTransport;
+use crate::virtio_pci::VirtioPciTransport;
 use baud_vcpu::{Bus, OpenBusFallback, OPEN_BUS_BYTE};
 use std::cell::Cell;
 use std::convert::Infallible;
@@ -255,6 +256,15 @@ pub struct DeviceBus {
     /// guest-memory access to do so, see `virtio_mmio.rs`'s doc), and real interrupt delivery is
     /// still unimplemented.
     virtio_rng: Option<VirtioMmioTransport>,
+    /// The virtio-pci legacy transport register block (`crate::virtio_pci`), `None` until
+    /// [`Self::enable_virtio_pci_rng`] is called — the second on-ramp to the same entropy device
+    /// `virtio_rng` already exposes over MMIO, this one reachable through PCI enumeration
+    /// (`self.pci`'s attached function at 00:01.0) instead of a fixed MMIO address, the way a
+    /// stock distro's `virtio_pci` driver actually finds it (todo.md §4.7/§14 item 5). Its I/O
+    /// window is dynamic (guest-assigned via BAR0), unlike `virtio_rng`'s fixed MMIO base, so
+    /// `Self::pio_write` re-synchronizes it against `self.pci.virtio_io_base()` after every PCI
+    /// configuration-space write.
+    virtio_pci_rng: Option<VirtioPciTransport>,
     /// The live ring-walking cursor for `virtio_rng`'s sole queue, lazily built (and rebuilt on
     /// driver re-negotiation) by [`Self::service_virtio_rng`] — `None` until the queue is both
     /// enabled and marked ready. Linux-only: it borrows real `vm-memory`, unlike every other field
@@ -307,6 +317,23 @@ impl DeviceBus {
     /// against real guest memory (`self.virtio_rng` is otherwise private to this module).
     pub fn virtio_rng(&self) -> Option<&VirtioMmioTransport> {
         self.virtio_rng.as_ref()
+    }
+
+    /// Attaches a virtio-pci legacy entropy-device function at 00:01.0 (`self.pci.attach_virtio_
+    /// rng`) and stands up its I/O-port transport, unassigned until the guest's own PCI core walks
+    /// the BAR0 sizing/assignment protocol (`Self::pio_write` keeps the transport's window
+    /// synchronized from then on). Opt-in like [`Self::enable_virtio_rng`] — no existing
+    /// constructor calls this, so bus 0's enumeration is unchanged for any caller that never opts
+    /// in.
+    pub fn enable_virtio_pci_rng(&mut self) {
+        self.pci.attach_virtio_rng(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
+        self.virtio_pci_rng = Some(VirtioPciTransport::new_rng());
+    }
+
+    /// The virtio-pci transport, if [`Self::enable_virtio_pci_rng`] has been called — mirrors
+    /// [`Self::virtio_rng`]'s read-access convention for the MMIO transport.
+    pub fn virtio_pci_rng(&self) -> Option<&VirtioPciTransport> {
+        self.virtio_pci_rng.as_ref()
     }
 
     /// Reseed the virtio-rng device's byte stream — call once, right after
@@ -382,6 +409,7 @@ impl DeviceBus {
             pic: Pic8259::default(),
             pci: PciHostBridge::default(),
             virtio_rng: None,
+            virtio_pci_rng: None,
             #[cfg(target_os = "linux")]
             virtio_rng_queue: None,
             #[cfg(target_os = "linux")]
@@ -403,6 +431,8 @@ impl Bus for DeviceBus {
             self.pic.pio_read(port, data);
         } else if PciHostBridge::in_range(port) {
             self.pci.pio_read(port, data);
+        } else if self.virtio_pci_rng.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
+            self.virtio_pci_rng.as_mut().expect("checked Some above").pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -419,6 +449,14 @@ impl Bus for DeviceBus {
             self.pic.pio_write(port, data);
         } else if PciHostBridge::in_range(port) {
             self.pci.pio_write(port, data);
+            // A CONFIG_DATA write may have just moved (or sized-probe'd) the virtio function's
+            // BAR0 — keep the transport's own idea of its I/O window synchronized, same as real
+            // hardware re-decoding whichever address range its BAR currently names.
+            if let Some(transport) = self.virtio_pci_rng.as_mut() {
+                transport.set_io_base(self.pci.virtio_io_base());
+            }
+        } else if self.virtio_pci_rng.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
+            self.virtio_pci_rng.as_mut().expect("checked Some above").pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }
@@ -556,6 +594,51 @@ mod tests {
 
         bus.pio_write(TAPE_DEVICE_BASE + reg::CONTROL, &[ControlOp::MarkBranch as u8]);
         assert_eq!(bus.tape.device_mut().drain_records().len(), 1);
+    }
+
+    /// End-to-end through `DeviceBus`: attach the virtio-pci function, drive the real BAR0
+    /// sizing/assignment protocol a guest's PCI core performs, then confirm PIO at the
+    /// guest-assigned address reaches the transport (not open bus) while the same port range
+    /// reads open bus *before* a base is assigned.
+    #[test]
+    fn device_bus_routes_virtio_pci_bar0_once_the_guest_assigns_it() {
+        use crate::pci::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
+        use crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN;
+
+        const ASSIGNED_BASE: u16 = 0xC000;
+        // CONFIG_ADDRESS for bus 0 / device 1 / function 0 / register 0x10 (BAR0), enable bit set.
+        let select_bar0 = (1u32 << 31) | (1u32 << 11) | 0x10;
+
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_rng();
+
+        // Before any guest write, the transport's window is not yet live.
+        let mut probe = [0u8; 4];
+        bus.pio_read(ASSIGNED_BASE, &mut probe);
+        assert_eq!(probe, [OPEN_BUS_BYTE; 4], "unassigned BAR0: nothing should decode yet");
+
+        // A real guest's __pci_read_base: size the BAR, then assign a real base.
+        bus.pio_write(PCI_CONFIG_ADDRESS, &select_bar0.to_le_bytes());
+        bus.pio_write(PCI_CONFIG_DATA, &0xFFFF_FFFFu32.to_le_bytes());
+        let mut size_probe = [0u8; 4];
+        bus.pio_read(PCI_CONFIG_DATA, &mut size_probe);
+        assert_ne!(u32::from_le_bytes(size_probe), 0, "a real device must answer the sizing probe");
+
+        bus.pio_write(PCI_CONFIG_DATA, &(ASSIGNED_BASE as u32).to_le_bytes());
+
+        // Now the transport's own window at the assigned base is live.
+        let mut data = [0u8; 4];
+        bus.pio_read(ASSIGNED_BASE, &mut data); // REG_HOST_FEATURES: virtio-rng offers none
+        assert_eq!(u32::from_le_bytes(data), 0, "the real transport now answers, not open bus");
+        assert_eq!(
+            bus.virtio_pci_rng().and_then(|t| t.io_base()),
+            Some(ASSIGNED_BASE),
+            "the transport's own io_base must match what the guest assigned"
+        );
+
+        // Just past the BAR's advertised window still falls through to open bus.
+        bus.pio_read(ASSIGNED_BASE + VIRTIO_PCI_IO_WINDOW_LEN, &mut data);
+        assert_eq!(data, [OPEN_BUS_BYTE; 4]);
     }
 
     #[test]
