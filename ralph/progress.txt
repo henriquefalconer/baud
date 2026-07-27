@@ -7306,3 +7306,24 @@ Attempted the real Ubuntu boot using the new resume-past-idle-halt primitive (--
   - Fixed examples/ubuntu/fetch.sh: checksum grep compared local vs remote basenames, causing a silent set -e death on any re-run.
   - Added console_tail diagnostic to the primitive's timeout errors; used it to find the real Ubuntu boot is stuck spinning on do_IRQ: no irq handler for vector 236 (0xec) -- a distinct APIC/interrupt-routing gap, documented as todo.md item 13's next concrete step.
 ---
+
+Post-push verification: git fetch confirms origin/main == local HEAD (b30783e), working tree clean. todo.md still has pending items (H9's new do_IRQ/vector-0xec APIC blocker just documented as item 13's next step, plus H8 Mario's FCEUX/Xvfb packaging block and other older 'still open' items) -- emitting NEXT.
+
+## 2026-07-27T17:32:52 UTC (55min) - Session usage — build-16 [sonnet]
+- cost $15.9602 (from claude -p)
+- context 307,546 tok peak of 1M (31%) across 177 inference calls, monotonic
+- models sonnet-5 $15.9569 (in 410 / out 146,552 / cache-read 38,024,774) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T104433Z/017-build-16.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 17
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and specs/*...
+
+Chose to continue H9's real-Ubuntu-boot blocker (todo.md §14 item 13's 'next concrete step': why vector 0xec never reaches a real LAPIC timer ISR) -- it is the most important open item and has a precisely-diagnosed next step to chase.
+
+Pulled Ubuntu's real v4.15 kernel source (arch/x86/include/asm/irq_vectors.h) from github.com/torvalds/linux tag v4.15 to check the vector layout directly, instead of assuming this project's own modern ~/wsl-kernel-src tree's layout applies. Found LOCAL_TIMER_VECTOR=0xee (238) in v4.15, NOT 0xec (236) -- the vector-number reorg that made 0xec the timer vector happened later, after Ubuntu 18.04's 4.15 kernel shipped. This project's own tests/fixtures (tests/fixtures/linux-guest/, a real compiled Linux 6.18 kernel) correctly use 0xec because 6.18 really does define LOCAL_TIMER_VECTOR=0xec -- but the real Ubuntu 18.04.1 kernel does not. do_IRQ's 'No irq handler for vector 236' is not a bug in this project's APIC/MADT bring-up at all: vector 236 (0xec) is a perfectly ordinary unclaimed device-IRQ vector in a 4.15 kernel's layout, and the real timer vector 0xee was never being injected. Continuing: re-running the real Ubuntu boot attempt with --periodic-timer-vector 238 instead of the default 0xec.
+
+Kicking off the real Ubuntu boot re-attempt with the corrected timer vector (--periodic-timer-vector 238 i.e. 0xee, not the default 0xec) against the already-fetched ~/.baud-tmp/ubuntu-1804 artifacts and a fresh baud-server. This call can take several minutes (30,000 ticks budget); running with a longer tool timeout.
