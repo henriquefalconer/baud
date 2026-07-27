@@ -2363,22 +2363,34 @@ were made to assert something.
    inflating `--idle-timeout-ms`; M10.4's error-path call (no restore involved) keeps both timeouts tight at
    1000ms. Verified: `cargo build -p baud-cli` and `cargo clippy -p baud-cli --all-targets` clean (no new
    warnings), `bash drive/m/m10.sh` passes M10.1-M10.4 end to end against real `/dev/kvm`.
-
-**Still open, in priority order.** Where a fix contradicts a spec, amend the spec in the same commit rather
-than quietly diverging from it; where it contradicts a claim in `ralph/progress.txt`, say so plainly in the
-new entry instead of leaving the old claim standing.
-
-1. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
-   `KVM_CREATE_VM`/vCPU/256 MiB/`perf_event` lifecycles (next largest anywhere is 6), but asserts nothing
-   about resource growth — a leak surfaces only as an `Err` or an OOM kill. Its `NUM_BRANCHES = 1000` is a
-   literal spec figure (`specs/baud-snapshot.md:191-193`, `todo.md` §5), not a tuned number, and its own
-   comment wrongly claims it was "chosen to keep this test's real run time … in the tens-of-seconds range".
-   Across 51 mentions in `ralph/progress.txt` it has caught **0** defects and flaked **0** times.
-2. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
-   `baud-keys`, whose `age_encrypt`/`age_decrypt` do the same job in-process. Switching would make the
-   encrypted-journal path work and be testable on hosts without `age` (caveat: `baud_keys::age_encrypt`
-   emits binary age, not the ASCII armor the journal writes today). Note `open_encrypted` has no callers
-   outside tests.
+4. **`thousand_branches`' resource-growth coverage was recorded as "still open" but was already fixed —
+   stale record, same pattern as the `fleet_of_vms` entry above.** The test (`crates/baud-multiverse/src/
+   linux/mod.rs::thousand_branches_are_independent_and_deterministic`) already asserts both open-fd count
+   (`fds_after <= fds_before + FD_SLACK`) and `VmRSS` growth (`rss_after_kib <= rss_warm_kib +
+   RSS_GROWTH_LIMIT_KIB`, a 128 MiB bound sized to catch even one leaked 256 MiB guest-RAM region) across
+   its ~1008 sequential `KVM_CREATE_VM`/vCPU/perf_event lifecycles — added by commit `2c0919a` (the same
+   commit that fixed the `fleet_of_vms` flake above), predating this record. No code changed for this entry
+   beyond correcting the record.
+5. **`crates/baud-journal`'s encrypted path shelled out to the `age` binary — fixed.** `age_encrypt`/
+   `age_decrypt` in `crates/baud-journal/src/lib.rs` were removed; `append`/`read_chunk` now call
+   `baud_keys::age_encrypt`/`baud_keys::age_decrypt` directly (the pure-Rust `age` crate, already a
+   dependency), so the encrypted-journal path needs no `age` binary on PATH and is fully testable on this
+   dev host. `read_chunk` resolves the identity file via `baud_keys::age_key_path()` (unchanged resolution
+   order: `$SOPS_AGE_KEY_FILE` → OS-standard `sops`/`age` locations) and fails with a descriptive
+   `JournalError::Io` if none is found. The caveat this entry predicted held: `baud_keys::age_encrypt` emits
+   binary (non-armored) age format, not the ASCII armor the old shell-out wrote — harmless, since decrypt
+   goes through the same in-process path and no encrypted journal has ever been persisted outside tests
+   (`open_encrypted` still has no callers outside this crate's own tests). The binary format still begins
+   with the format's own ASCII magic line (`age-encryption.org/v1`), which
+   `requesting_encryption_never_leaves_plaintext_on_disk` already checked for as a fallback alongside the
+   armor header, so it needed no change. The `#[ignore]`d `chunk_bodies_are_ciphertext` (needs the real
+   `age` binary, absent on this host) was rewritten to match: it now generates its test identity in-process
+   via `baud_keys::generate_identity_file` (no `age-keygen` binary needed either), asserts the on-disk chunk
+   starts with the binary magic, and its only remaining use of the real `age` CLI is decrypting that
+   in-process-encrypted chunk — an interop check that baud_keys's ciphertext is standard age format, not
+   self-consistency with its own decrypt. Verified: `cargo build -p baud-journal -p baud-keys` and `cargo
+   clippy -p baud-journal -p baud-keys --all-targets` clean (no new warnings); `cargo test -p baud-journal`
+   8 passed / 1 ignored (the CLI-interop test, `age` not installed on this host per `CLAUDE.md`) / 0 failed.
 
 ## 15. Pre-push validation protocol
 

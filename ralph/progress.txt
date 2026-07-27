@@ -6271,3 +6271,37 @@ Gate green: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input) in 2
   - Renumbered todo.md's remaining still-open items (thousand_branches' implicit value, baud-journal's age binary shell-out) down to 1-2.
 - Verification: cargo build -p baud-cli and cargo clippy -p baud-cli --all-targets clean (no new warnings — pre-existing warnings in net.rs/tape.rs untouched); bash drive/m/m10.sh passes M10.1-M10.4 end to end against real /dev/kvm; full bash drive/gate.sh: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input), no flake, 2m41s wall-clock.
 ---
+
+Post-push verification: origin/main now at c790111, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green before this push (23 passed, 0 failed, 1 skipped, no flake). todo.md still has pending items (§14.1 items 1-2: thousand_branches' implicit value, baud-journal age-binary shell-out; plus H8 Mario/FCEUX packaging and H9 Ubuntu, both still not started) — emitting NEXT.
+
+## 2026-07-27T06:14:02 UTC (8min) - Session usage — build-2 [sonnet]
+- cost $1.5363 (from claude -p)
+- context 96,860 tok peak of 1M (10%) across 38 inference calls, monotonic
+- models sonnet-5 $1.5331 (in 76 / out 15,642 / cache-read 2,864,261) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/002-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address from todo.md...
+
+Chose §14.1: correcting a stale todo.md record (thousand_branches resource-leak assertions were already added in commit 2c0919a, same as last iteration's fleet_of_vms staleness) — the real remaining work item is baud-journal's encrypted path shelling out to the age binary instead of using baud-keys' in-process age_encrypt/age_decrypt.
+
+Rewrote baud-journal's age encrypt/decrypt path to call baud_keys::age_encrypt/age_decrypt in-process instead of shelling out to the age binary; updated the two related tests. Building and testing baud-journal now...
+
+Verified baud-journal changes: cargo build/clippy/test all clean (8 passed, 1 ignored — age binary absent per CLAUDE.md). Updated todo.md §14.1: corrected the thousand_branches stale record (already fixed in 2c0919a) and recorded the baud-journal age-binary fix as resolved — §14.1's still-open list is now empty; H8 (Mario, blocked on Qt5/SDL2/Xvfb packaging) and H9 (Ubuntu, not started) remain as separate large future-work items. Running the full pre-push gate (bash drive/gate.sh) now.
+
+Gate green per CLAUDE.md's flake exception: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots — confirmed passing in isolation in phase 6), 1 skipped (pkg-build-cli, unchanged input), 2m31s. Committing and pushing.
+
+## 2026-07-27T06:24:17 UTC - Changes committed.
+- Switched baud-journal's age encryption from shelling out to the `age` binary to calling baud-keys' in-process age_encrypt/age_decrypt; corrected a stale todo.md record
+- Files changed: crates/baud-journal/src/lib.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - `crates/baud-journal/src/lib.rs`'s private `age_encrypt`/`age_decrypt` (both shelled out to the `age` binary) were removed; `Journal::append`/`read_chunk` now call `baud_keys::age_encrypt`/`baud_keys::age_decrypt` directly — the pure-Rust `age` crate already a dependency — so the encrypted-journal path needs no external binary and is fully testable on this dev host (which has neither `age` nor `sops`, per CLAUDE.md).
+  - `read_chunk` resolves the identity file via `baud_keys::age_key_path()` (same resolution order as before: `$SOPS_AGE_KEY_FILE` then OS-standard `sops`/`age` locations), returning a descriptive `JournalError::Io` if none is found.
+  - The predicted caveat held (binary/non-armored age output instead of ASCII armor) but is harmless: no encrypted journal is ever persisted outside tests, and the binary format still starts with the format's own ASCII magic (`age-encryption.org/v1`), which the always-run `requesting_encryption_never_leaves_plaintext_on_disk` test already checked for.
+  - Rewrote the `#[ignore]`d `chunk_bodies_are_ciphertext` (needs the real `age` binary, absent here) to generate its test identity in-process via `baud_keys::generate_identity_file` (no `age-keygen` binary needed either) and to use the real `age` CLI only for an interop decrypt of baud_keys-produced ciphertext, proving standard-format compatibility rather than self-consistency.
+  - `todo.md` §14.1: moved the `baud-journal` shell-out item to resolved, and corrected a second stale "still open" entry — `thousand_branches_are_independent_and_deterministic`'s fd/RSS resource-growth assertions were already added in commit `2c0919a`, same staleness pattern as the `fleet_of_vms` entry the prior iteration fixed. §14.1's "still open" list is now empty; H8 (Mario, blocked on FCEUX's Qt5/SDL2/Xvfb packaging) and H9 (Ubuntu, not started) remain as separate large future-work items.
+- Verification: `cargo build -p baud-journal -p baud-keys` and `cargo clippy -p baud-journal -p baud-keys --all-targets` clean (no new warnings); `cargo test -p baud-journal` 8 passed / 1 ignored (CLI-interop test, `age` absent) / 0 failed; full `bash drive/gate.sh`: 22 passed, 0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, confirmed passing in isolation in phase 6 — the documented load-flake CLAUDE.md says counts as green), 1 skipped (`pkg-build-cli`, unchanged input), 2m31s.
+---
