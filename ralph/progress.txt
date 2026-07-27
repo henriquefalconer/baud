@@ -7467,3 +7467,5 @@ Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged
   - Concluded that further blind escalation (bigger tick budgets, longer waits) is not the productive next step: every attempt is a black box (the HTTP response is silent until the run finishes, times out, or is killed), so todo.md item 15 names the real next step as adding intermediate observability (a periodic `tracing::info!` of ticks-consumed/`console_output().len()` in the resume loop, and/or a live-progress HTTP endpoint) before further escalation attempts
   - Verified: `bash drive/gate.sh` -- 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m34s, clean, no flakes
 ---
+
+Post-push verification: origin/main == local HEAD (d5cfa16) exactly, working tree clean. Gate was already green (25 passed, 0 failed, 1 skipped, 2m34s) at this commit's tree before pushing. todo.md still has pending items (item 15's observability gap is the freshest, plus H8 Mario's FCEUX/Xvfb block and others already recorded) -- emitting NEXT.
