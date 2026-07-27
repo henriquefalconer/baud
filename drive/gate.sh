@@ -309,7 +309,7 @@ FANOUT=(
     h/h7 pkg/pkg-multifile-initramfs pkg/pkg-dynamic-link h/h2 h/h3
     m/m9 pkg/pkg-virtio-rng-branch-resume-cli pkg/pkg-boot-cli h/h4
     m/m10 m/m11 m/m12 m/m13 pkg/pkg-virtio-rng-replay-cli pkg/pkg-virtio-rng-generate-cli
-    h/h1 h/h0 pkg/pkg-virtio-rng-cli
+    h/h1 h/h0 pkg/pkg-virtio-rng-cli h/h9
 )
 
 # h5 runs ALONE first, ahead of everything else, and this is the default.

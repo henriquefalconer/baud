@@ -33,7 +33,7 @@ setup() {
 # The scripts that spawn a baud-server and therefore must be concurrency-safe.
 server_scripts() {
     echo drive/h/h0.sh drive/h/h1.sh drive/h/h2.sh drive/h/h3.sh drive/h/h4.sh drive/h/h5.sh \
-         drive/h/h6.sh drive/h/h7.sh drive/m/m9.sh drive/m/m10.sh drive/m/m11.sh drive/m/m12.sh \
+         drive/h/h6.sh drive/h/h7.sh drive/h/h9.sh drive/m/m9.sh drive/m/m10.sh drive/m/m11.sh drive/m/m12.sh \
          drive/m/m13.sh drive/pkg/pkg-boot-cli.sh drive/pkg/pkg-virtio-rng-cli.sh \
          drive/pkg/pkg-virtio-rng-replay-cli.sh drive/pkg/pkg-virtio-rng-branch-resume-cli.sh \
          drive/pkg/pkg-virtio-rng-generate-cli.sh

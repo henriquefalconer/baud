@@ -2742,16 +2742,54 @@ snapshot, not a duplicate of it.
      → 212 passed, 1 failed (`rdtsc_guest_reproduces_high_bits_across_boots`, the documented load-flake,
      confirmed passing in isolation, 1/1, before concluding it's not a regression), 10 ignored; full `bash
      drive/gate.sh` → 24 passed, 0 failed, 0 skipped, 5m20s, clean, no flakes this run. **Still open for
-     H9**: `baud verify fingerprint` CLI (needs a new `baud-server` HTTP route, since `baud-cli` is
-     HTTP-only and has no direct `baud-multiverse` dependency — confirmed by inspection of
-     `crates/baud-cli/Cargo.toml`/`src/client.rs`), `drive/h9.sh`, the true two-separate-OS-process (not
-     same-process-sequential like this iteration's test) cross-VM orchestration (the closest existing
-     primitive is `baud_multiverse::linux::run_fleet`, which does same-process per-thread core-pinning via
-     `baud_host::Host::place`, not separate processes — still needs wiring into an HTTP route, none exists
-     today), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)). This iteration closes
-     only the "the full `baud-fingerprint` crate... does not [exist]" half of item 8's own "still open"
-     note — the report/comparator layer now exists and is real-hardware-tested; CLI/orchestration/
-     actual-Ubuntu remain.
+     H9** (at the time this item was written): `baud verify fingerprint` CLI (needs a new `baud-server`
+     HTTP route, since `baud-cli` is HTTP-only and has no direct `baud-multiverse` dependency — confirmed by
+     inspection of `crates/baud-cli/Cargo.toml`/`src/client.rs`), `drive/h9.sh`, the true two-separate-OS-
+     process (not same-process-sequential like this iteration's test) cross-VM orchestration (the closest
+     existing primitive is `baud_multiverse::linux::run_fleet`, which does same-process per-thread core-
+     pinning via `baud_host::Host::place`, not separate processes — still needs wiring into an HTTP route,
+     none exists today), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)). This
+     iteration closes only the "the full `baud-fingerprint` crate... does not [exist]" half of item 8's own
+     "still open" note — the report/comparator layer now exists and is real-hardware-tested. **The CLI/
+     HTTP-route half is now closed too — see item 10 below.** True cross-process orchestration and the
+     actual Ubuntu image remain open.
+  10. **H9 — `baud verify fingerprint` CLI/HTTP route and `drive/h9.sh` now exist on top of items 8-9's
+     capture/report/comparator layers.** New `POST /verify/fingerprint`
+     (`crates/baud-server/src/routes/verify_fingerprint.rs`, registered in `add_run_kvm_route` alongside
+     `/run/kvm*` since it needs the same real `baud_multiverse::linux::Multiverse` — `#[cfg(target_os =
+     "linux")]`, same as every other route in that group): boots `(kernel_path, cmdline, tape_hex)` `times`
+     times (default 2, same convention as `/verify/determinism`), sequentially in this one server process,
+     captures a `Fingerprint` from each at `target_rcb` (`baud_fingerprint::capture`, threading the same
+     `rdseed_sites` sidecar lookup `/run/kvm` already does via `crate::rdseed_sites::load_rdseed_sites`, so
+     a real rdseed-rewritten image's sites are honored here too), and compares every later fingerprint
+     against the first (`baud_fingerprint::compare`), reporting the first divergence field-by-field or
+     `verified: true`. Response includes every captured fingerprint's rendered report
+     (`Fingerprint::render()`) plus its raw fields (hex-encoded banner, `0x`-formatted RIP/GPA, `mem_hash`).
+     New `baud-cli` subcommand `baud verify fingerprint --kernel <path> --target-rcb <u64> [--cmdline]
+     [--tape-hex] [--banner-tail-len] [--expected-banner <text>] [--times] [--initramfs]`
+     (`crates/baud-cli/src/cmds/verify.rs`, `VerifyAction::Fingerprint`) POSTs the request (hex-encoding
+     `--expected-banner`'s raw text before sending), exits 0 when `ok=true`, 1 otherwise — same convention
+     as `verify determinism`. New drive script `drive/h/h9.sh` (H9.1 host-probe sanity check, H9.2 two
+     independent `timer-guest` boots produce matching fingerprints through the real CLI/server path, H9.3 an
+     expected banner the guest never prints fails the whole call loud rather than a silent false pass) —
+     added to `drive/gate.sh`'s `FANOUT` (cheap: 2s, reuses the already-built `timer-guest` fixture, no new
+     kernel builds) and `drive/gate.test.bats`'s `server_scripts()` concurrency-safety list. 2 new
+     server-route-level unit tests in `verify_fingerprint.rs`
+     (`boot_and_compare_fingerprints_reports_no_divergence_across_two_boots`,
+     `boot_and_compare_fingerprints_propagates_a_missing_banner_as_an_error`), both **passed on real
+     `/dev/kvm`** — the route-level analogue of `baud-fingerprint`'s own crate-level tests, proving the
+     server wrapper (including its `rdseed_sites` lookup) carries the same whole-machine determinism
+     property through to an HTTP-shaped response. Verified: `cargo build --workspace` clean; `cargo clippy
+     --workspace --all-targets` → one new warning introduced and fixed immediately
+     (`clippy::clone_on_copy` on `EnforcedRdseedSite`, which is `Copy` — dereference instead), then 0
+     warnings touching the new code, same pre-existing baseline otherwise; `bash drive/gate.sh` → 24 passed,
+     0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, confirmed passing in isolation in
+     phase 6 — the documented load-flake, not a regression), 0 skipped, 5m53s, `drive/h/h9.sh` itself PASSED
+     in 2s. **Still open for H9**: the true two-separate-OS-process cross-VM orchestration (this iteration's
+     route and drive script are still same-process-sequential, the same stand-in item 9's own test used —
+     `run_fleet` remains the closest existing per-process-style primitive, still per-thread not per-process
+     and still not wired to any route) and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e),
+     unstarted). H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

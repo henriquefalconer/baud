@@ -23,3 +23,5 @@ pub mod stream;
 pub mod tapes;
 pub mod tracing;
 pub mod verify;
+#[cfg(target_os = "linux")]
+pub mod verify_fingerprint;

@@ -135,6 +135,9 @@ fn add_run_kvm_route(router: Router<AppState>) -> Router<AppState> {
         .route("/run/kvm/branch", axum::routing::post(routes::run_kvm::branch))
         .route("/run/kvm/resume", axum::routing::post(routes::run_kvm::resume))
         .route("/shell-into/{run_id}/{node_id}", axum::routing::get(routes::shell_into::shell_into))
+        // Verify — fingerprint (H9, todo.md §14 item 9): needs the real KVM Multiverse, like
+        // every other route in this Linux-only group.
+        .route("/verify/fingerprint", axum::routing::post(routes::verify_fingerprint::fingerprint))
 }
 
 #[cfg(not(target_os = "linux"))]

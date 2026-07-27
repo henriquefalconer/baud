@@ -551,6 +551,7 @@ dependencies = [
  "axum",
  "base64",
  "baud-driver",
+ "baud-fingerprint",
  "baud-host",
  "baud-identity",
  "baud-init",

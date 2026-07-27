@@ -7127,3 +7127,51 @@ todo.md updated cleanly (2998->3057 lines): item 8's closing note narrowed to re
   - Verified: cargo build/test -p baud-fingerprint clean (8 passed, 0 failed); cargo clippy -p baud-fingerprint --all-targets 0 new warnings; cargo build/clippy --workspace --all-targets clean (74 warnings, exact pre-existing baseline, grep confirms none touch baud-fingerprint); cargo test --workspace 212 passed, 1 failed (rdtsc_guest_reproduces_high_bits_across_boots, confirmed passing in isolation 1/1 -- the documented load-flake, not a regression), 10 ignored; full bash drive/gate.sh: 24 passed, 0 failed, 0 skipped, 5m20s, clean, no flakes this run
   - Still open for H9: baud verify fingerprint CLI (needs a new baud-server HTTP route -- baud-cli is HTTP-only, no direct baud-multiverse dependency), drive/h9.sh, the true two-separate-OS-process cross-VM orchestration (closest existing primitive is run_fleet, which pins per-thread not per-process), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)); H8 Mario remains blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
 ---
+
+Post-push verification: origin/main now at eb89e98, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (24 passed, 0 failed, 0 skipped, 5m20s) before this push, at this exact commit's tree.
+
+todo.md still has pending items: H9's baud verify fingerprint CLI/HTTP route + drive/h9.sh + true cross-process orchestration + the real Ubuntu 18.04.1 cloud image all remain not started; H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline (§4.5); the narrow enforced-regime RDTSC/singlestep interaction finding -- emitting NEXT.
+
+## 2026-07-27T15:23:16 UTC (19min) - Session usage — build-12 [sonnet]
+- cost $4.9722 (from claude -p)
+- context 181,325 tok peak of 1M (18%) across 67 inference calls, monotonic
+- models sonnet-5 $4.9690 (in 176 / out 54,519 / cache-read 9,525,329) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T104433Z/013-build-12.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 13
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick the next step.
+
+todo.md is 3057 lines / 275KB (too large for one Read); grepping for pending markers. Item 8/9 (H9 fingerprint work, most recent) list what remains: baud verify fingerprint CLI/HTTP route, drive/h9.sh, true cross-process orchestration, real Ubuntu 18.04.1 image. H8 Mario is separately blocked on FCEUX Qt5/SDL2/Xvfb packaging. Dispatching a subagent to map the exact CLI/server wiring needed before choosing the step.
+
+Chose implementing H9's 'baud verify fingerprint' CLI + baud-server HTTP route + drive/h9.sh (using the existing same-process-sequential capture()/compare() primitives from baud-fingerprint, matching the stand-in orchestration item 9 already validated) -- it's the smallest well-scoped remaining H9 slice; the real Ubuntu image and true cross-process orchestration are separate, larger, blocked pieces. Investigating server/CLI wiring patterns now.
+
+New /verify/fingerprint route lands: crates/baud-server/src/routes/verify_fingerprint.rs, boots N times sequentially and compares via baud-fingerprint's compare(). Both new server-level tests (boot_and_compare_fingerprints_reports_no_divergence_across_two_boots, ..._propagates_a_missing_banner_as_an_error) PASSED on real /dev/kvm. Now wiring the CLI side (baud verify fingerprint).
+
+CLI wired: baud-cli/src/cmds/verify.rs gained VerifyAction::Fingerprint (--kernel/--target-rcb/--times/etc), POSTs /verify/fingerprint. Both crates build clean. Now writing drive/h/h9.sh following the pkg-virtio-rng-cli.sh concurrency-safe template (own port/DB/snapshot-store, trap INT/TERM, health-poll).
+
+drive/h/h9.sh created and PASSED standalone on real /dev/kvm; wired into gate.sh's FANOUT and gate.test.bats's server_scripts() list; all 28 static (non-slow) bats checks green. Running cargo clippy --workspace --all-targets next.
+
+Fixed one clippy::clone_on_copy in verify_fingerprint.rs (Copy type, use deref instead). Clippy clean on baud-server/baud-cli/baud-fingerprint, no warnings touch new code. Running full workspace build+clippy+test baseline before the gate.
+
+Workspace builds clean. Running bash drive/gate.sh (full pre-push gate) now — timeout 600s.
+
+Gate result: 24 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, confirmed passing in isolation in phase 6 — the documented load-flake per CLAUDE.md, not a regression), 0 skipped, 5m53s. drive/h/h9.sh (new) PASSED in 2s. This counts as gate-green per CLAUDE.md's standing exception. Updating todo.md now.
+
+todo.md updated: item 9's closing note now points to new item 10 (this iteration's CLI/HTTP route + drive/h9.sh work); item 10 documents it in full. Appending the final Changes-committed block and committing.
+
+## 2026-07-27T15:41:10 UTC - Changes committed.
+- Implemented H9's `baud verify fingerprint` CLI + `baud-server` HTTP route + `drive/h9.sh`, the piece todo.md §14 items 8/9 named as still open on top of the already-hardware-tested `baud-fingerprint` crate and its `run_to_events`/`capture_fingerprint` primitives
+- Files changed: crates/baud-server/Cargo.toml, crates/baud-server/src/main.rs, crates/baud-server/src/routes/mod.rs, crates/baud-server/src/routes/verify_fingerprint.rs (new), crates/baud-cli/src/cmds/verify.rs, drive/h/h9.sh (new), drive/gate.sh, drive/gate.test.bats, todo.md
+- **Brief description of changes:**
+  - New `POST /verify/fingerprint` (`crates/baud-server/src/routes/verify_fingerprint.rs`, `#[cfg(target_os = "linux")]`, registered alongside `/run/kvm*`): boots `(kernel_path, cmdline, tape_hex)` `times` times (default 2) sequentially in-process, captures a `Fingerprint` from each at `target_rcb` via `baud_fingerprint::capture` (threading the same `rdseed_sites` sidecar lookup `/run/kvm` already uses), and compares every later fingerprint against the first via `baud_fingerprint::compare`, reporting the first divergence or `verified: true` plus every fingerprint's rendered report
+  - New `baud verify fingerprint --kernel <path> --target-rcb <u64> [--cmdline] [--tape-hex] [--banner-tail-len] [--expected-banner <text>] [--times] [--initramfs]` CLI subcommand (`crates/baud-cli/src/cmds/verify.rs`), exit 0 on `ok=true`, 1 otherwise, same convention as `verify determinism`
+  - New `drive/h/h9.sh`: H9.1 host-probe sanity check, H9.2 two independent `timer-guest` boots produce matching fingerprints through the real CLI/server path, H9.3 an expected banner the guest never prints fails the whole call loud (not a silent false pass) — added to `drive/gate.sh`'s `FANOUT` and `drive/gate.test.bats`'s `server_scripts()` concurrency-safety list
+  - 2 new server-route-level unit tests in `verify_fingerprint.rs`, both **passed on real `/dev/kvm`**: `boot_and_compare_fingerprints_reports_no_divergence_across_two_boots`, `boot_and_compare_fingerprints_propagates_a_missing_banner_as_an_error` — the route-level analogue of `baud-fingerprint`'s own crate-level tests
+  - Fixed one clippy::clone_on_copy introduced by my own new code (`EnforcedRdseedSite` is `Copy`) before it could land
+  - Verified: `cargo build --workspace` clean; `cargo clippy --workspace --all-targets` clean (pre-existing baseline only, nothing touching new code); all 28 static (non-slow) `bats drive/gate.test.bats` checks pass; full `bash drive/gate.sh` → 24 passed, 0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, confirmed passing in isolation in phase 6 — the documented load-flake, not a regression), 0 skipped, 5m53s; `drive/h/h9.sh` itself PASSED in 2s
+  - Still open for full H9 (todo.md §14 item 10): the true two-separate-OS-process cross-VM orchestration (this iteration's route/script are still same-process-sequential, the same stand-in item 9's own test used) and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)); H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
+---

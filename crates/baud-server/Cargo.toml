@@ -24,6 +24,7 @@ baud-tracing = { path = "../baud-tracing" }
 baud-stream = { path = "../baud-stream" }
 baud-multiverse = { path = "../baud-multiverse" }
 baud-vcpu = { path = "../baud-vcpu" }
+baud-fingerprint = { path = "../baud-fingerprint" }
 baud-snapshot = { path = "../baud-snapshot" }
 baud-snapshot-store = { path = "../baud-snapshot-store" }
 baud-raftlet = { path = "../baud-raftlet" }
