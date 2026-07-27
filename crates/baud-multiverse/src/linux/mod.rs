@@ -574,8 +574,21 @@ pub struct Multiverse {
     /// initialized to [`DEFAULT_WATCHDOG_BUDGET`] by [`boot`](Self::boot)/[`restore`]
     /// (Self::restore) and overridable via [`set_watchdog_budget`](Self::set_watchdog_budget).
     /// Every other `run_to_first_halt_with_*` entry point already carries its own deterministic
-    /// `max_exits`/`max_ticks` bound and does not consult this field at all.
+    /// `max_exits`/`max_ticks` bound and does not consult this field at all — except
+    /// [`run_to_first_halt_with_periodic_timer_and_devices`](Self::run_to_first_halt_with_periodic_timer_and_devices),
+    /// which consults [`periodic_tick_watchdog_budget`](Self::periodic_tick_watchdog_budget)
+    /// instead (a distinct, per-*tick* budget, not this whole-run one).
     watchdog_budget: Duration,
+    /// The real wall-clock budget [`run_to_first_halt_with_periodic_timer_and_devices`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_devices) gives *each individual tick's*
+    /// `inject_at` call (todo.md §14 item 15/16 follow-up, see [`PERIODIC_TICK_WATCHDOG_BUDGET`]'s
+    /// doc for why a tick — not just the whole run — needs its own watchdog). Initialized to
+    /// [`PERIODIC_TICK_WATCHDOG_BUDGET`] by [`boot`](Self::boot)/[`restore`](Self::restore) and
+    /// overridable via
+    /// [`set_periodic_tick_watchdog_budget`](Self::set_periodic_tick_watchdog_budget) — deliberately
+    /// a separate field from `watchdog_budget` above: the two guard different call paths with very
+    /// different natural budgets (a whole run vs. one 500000-RCB-ish tick within it).
+    periodic_tick_watchdog_budget: Duration,
     /// The supervisor's cancellation flag, if one was installed via
     /// [`set_cancel_flag`](Self::set_cancel_flag) — `None` for every caller that never installs
     /// one, which is every existing caller. Modelled on `baud_vcpu::linux::watchdog`'s own
@@ -604,6 +617,31 @@ pub const DEFAULT_WATCHDOG_BUDGET: Duration = Duration::from_secs(30);
 /// log readable while still giving a live "how far in / is it stuck" signal via `tail -f` on the
 /// server's own log output.
 const RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS: u32 = 100;
+
+/// Wall-clock budget for a *single* periodic-timer tick's `inject_at` call, inside
+/// [`Multiverse::run_to_first_halt_with_periodic_timer_and_devices`] — todo.md §14 item 15/16
+/// follow-up, the observability gap the item above only half-closed. That item found the run loop
+/// had zero intermediate observability; this closes the sharper gap underneath it, found by
+/// actually watching a real H9 attempt with the new progress logging: `run_until_exit`'s coarse
+/// phase (`crates/baud-vcpu/src/linux/pmu.rs`) blocks inside one `KVM_RUN` until the guest itself
+/// naturally vmexits, with nothing else bounding that wait — a guest running a long native
+/// stretch with no I/O/HLT/MMIO activity can therefore park a single tick for however long that
+/// stretch takes, same "tight `jmp $` never traps" hazard [`watchdog::Watchdog`]'s own header
+/// documents for [`run_until_halted`](baud_vcpu::linux::run_until_halted), here scoped to one tick
+/// instead of the whole run. `CancelKicker`'s own doc already measured one real periodic-timer
+/// tick against Ubuntu 18.04.1 taking >120s in a handful of `KVM_RUN` calls; a real detached H9
+/// attempt this iteration observed a single tick still not landing after 11+ minutes at ~95% host
+/// CPU. This budget gives roughly 5x that measured-but-still-progressing 120s case before treating
+/// a tick as stuck rather than merely slow — long enough that legitimate heavy guest work (disk
+/// I/O, systemd activity) should not false-positive, short enough that a genuinely wedged tick
+/// fails fast with a diagnosable [`RunLoopError::WatchdogKilled`] instead of hanging the whole
+/// multi-tens-of-minutes boot indefinitely with zero signal. Not user-configurable yet (unlike
+/// [`Multiverse::watchdog_budget`], which guards a different call path entirely and stays at its
+/// own tighter [`DEFAULT_WATCHDOG_BUDGET`]) — a CLI/HTTP knob can follow once real H9 attempts
+/// show whether 600s is the right number.
+///
+/// [`watchdog::Watchdog`]: baud_vcpu::linux::Watchdog
+const PERIODIC_TICK_WATCHDOG_BUDGET: Duration = Duration::from_secs(600);
 
 /// Where an injected interrupt actually landed (H4, specs/baud-vcpu.md §5): the instruction
 /// pointer and cumulative work-clock RCB at the moment `Multiverse::inject_timer_tick` delivered
@@ -842,7 +880,7 @@ impl Multiverse {
         let time = WorkClock::new(base, k, counter)
             .with_entropy_seed(entropy_seed)
             .with_rdseed_sites(rdseed_sites);
-        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, cancel: None })
+        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET, cancel: None })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -955,7 +993,7 @@ impl Multiverse {
             universe.clock.entropy_state,
             counter,
         );
-        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, cancel: None })
+        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET, cancel: None })
     }
 
     /// Fork a new, independent continuation from a captured [`Universe`] on its own tape suffix
@@ -1050,6 +1088,18 @@ impl Multiverse {
     /// disable it outright (`watchdog::Watchdog::arm`'s doc).
     pub fn set_watchdog_budget(&mut self, budget: Duration) {
         self.watchdog_budget = budget;
+    }
+
+    /// Override the real wall-clock budget
+    /// [`run_to_first_halt_with_periodic_timer_and_devices`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_devices) gives *each tick's* `inject_at`
+    /// call — distinct from [`set_watchdog_budget`](Self::set_watchdog_budget), which guards the
+    /// whole-run path instead. [`boot`](Self::boot)/[`restore`](Self::restore) already set
+    /// [`PERIODIC_TICK_WATCHDOG_BUDGET`], so callers only need this to tighten it (a test proving
+    /// a wedged tick is actually reclaimed without waiting the real 600s default) or pass
+    /// `Duration::ZERO` to disable it outright (`watchdog::Watchdog::arm`'s doc).
+    pub fn set_periodic_tick_watchdog_budget(&mut self, budget: Duration) {
+        self.periodic_tick_watchdog_budget = budget;
     }
 
     /// Install the supervisor's cancellation flag: once some other thread stores `true` into
@@ -1922,9 +1972,30 @@ impl Multiverse {
             }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
-            let mut stepper = self.cancellable_stepper();
+            // See `PERIODIC_TICK_WATCHDOG_BUDGET`'s doc: `inject_at`'s coarse phase can block one
+            // `KVM_RUN` for as long as the guest runs natively with no vmexit, so this tick gets
+            // its own bounded watchdog rather than inheriting only the whole-run cancellation flag
+            // `cancellable_stepper` already wires in. Always disarmed before this iteration acts
+            // on `result`, on every path (`Watchdog`'s own doc: a late-firing signal must never
+            // land in unrelated future work on this thread).
+            let tick_watchdog_budget = self.periodic_tick_watchdog_budget;
+            let tick_watchdog = baud_vcpu::linux::Watchdog::arm(tick_watchdog_budget);
+            let mut stepper = self
+                .cancellable_stepper()
+                .with_watchdog(Some(std::sync::Arc::clone(&tick_watchdog.fired)));
             let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector);
-            let outcome = result.map_err(|e| self.stepper_error(e))?;
+            let tick_timed_out = tick_watchdog.fired.load(std::sync::atomic::Ordering::SeqCst);
+            tick_watchdog.disarm();
+            let outcome = result.map_err(|e| {
+                // A real supervisor cancellation takes priority even if this tick's watchdog also
+                // happened to fire in the same window — `stepper_error` already makes that same
+                // cancel-first check via `is_cancelled_error`/`self.is_cancelled()`.
+                if tick_timed_out && !self.is_cancelled() {
+                    RunLoopError::WatchdogKilled { budget_ms: tick_watchdog_budget.as_millis() as u64 }
+                } else {
+                    self.stepper_error(e)
+                }
+            })?;
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
                     ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
@@ -2692,6 +2763,51 @@ mod tests {
 
         let outcome = mv.run_to_first_halt().expect("a guest that halts well within its budget must succeed");
         assert_eq!(String::from_utf8_lossy(&outcome.console_output), HELLO_GUEST_MARKER);
+    }
+
+    /// The per-*tick* sibling of [`wall_clock_watchdog_kills_a_truly_spinning_guest`]: proves
+    /// `run_to_first_halt_with_periodic_timer_and_devices`'s own watchdog
+    /// (`PERIODIC_TICK_WATCHDOG_BUDGET`/`set_periodic_tick_watchdog_budget`), not the whole-run
+    /// one `set_watchdog_budget` guards above, actually reclaims a wedged tick. `spin-guest`
+    /// retires no conditional branches and causes no VM exit ever, so the very first tick's
+    /// `inject_at` call blocks inside `run_until_exit`'s `KVM_RUN` with nothing else to reclaim
+    /// it — exactly the gap a real, 11-minutes-and-still-climbing stuck H9 boot attempt exposed
+    /// this iteration (todo.md §14 item 15's follow-up).
+    #[test]
+    fn periodic_tick_watchdog_kills_a_stuck_tick() {
+        let kernel = spin_guest_kernel_path();
+        let budget = std::time::Duration::from_millis(300);
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_periodic_tick_watchdog_budget(budget);
+
+        let start = std::time::Instant::now();
+        let result =
+            mv.run_to_first_halt_with_periodic_timer_and_devices(500_000, TIMER_VECTOR, &[], 20_000, None, 0);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the per-tick watchdog must reclaim a wedged tick promptly, not merely eventually (took {elapsed:?})"
+        );
+        match result {
+            Err(RunLoopError::WatchdogKilled { budget_ms }) => {
+                assert_eq!(budget_ms, budget.as_millis() as u64);
+            }
+            other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
+        }
+    }
+
+    /// The negative case alongside [`periodic_tick_watchdog_kills_a_stuck_tick`]: a guest whose
+    /// tick completes well within its per-tick budget must succeed normally, proving the new
+    /// watchdog is not a source of false-positive kills on an ordinary, fast periodic-timer run.
+    #[test]
+    fn periodic_tick_watchdog_does_not_fire_on_a_normal_tick() {
+        let kernel = timer_guest_kernel_path();
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(5));
+
+        mv.run_to_first_halt_with_periodic_timer_and_devices(200_000, TIMER_VECTOR, &[], 20, None, 0)
+            .expect("a tick that completes well within its budget must succeed");
     }
 
     /// Set `flag` from another thread after `delay`, the way `baud-server`'s `CancelGuard` does

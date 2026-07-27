@@ -23,8 +23,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-pub use watchdog::CancelKicker;
-use watchdog::Watchdog;
+pub use watchdog::{CancelKicker, Watchdog};
 
 /// The `io::Error` every `KVM_RUN` loop in this module reports when it stopped because the
 /// supervisor's cancellation flag was observed set, rather than because anything went wrong

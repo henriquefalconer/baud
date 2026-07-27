@@ -97,11 +97,24 @@ pub struct LinuxPmuStepper<'vcpu, 'io> {
     /// single-step iteration of the boundary walk) and after an `EINTR` from `KVM_RUN`; never
     /// inside an exit's dispatch, so it cannot perturb what the guest observes.
     cancel: Option<Arc<AtomicBool>>,
+    /// A per-call wall-clock watchdog's `fired` flag, if [`with_watchdog`](Self::with_watchdog)
+    /// installed one — checked at exactly the same points as `cancel` (todo.md §14 item 15/16
+    /// follow-up: `run_until_exit`'s coarse phase blocks inside one `KVM_RUN` until the guest
+    /// itself naturally vmexits, with nothing else bounding that wait, so a guest that runs a long
+    /// native stretch with zero I/O/HLT/MMIO activity can park it indefinitely — the same "tight
+    /// `jmp $` never traps" hazard `watchdog::Watchdog`'s own header documents for
+    /// `run_until_halted`, here scoped to one tick instead of the whole run). Deliberately a
+    /// second field rather than folded into `cancel`: the caller needs to tell a real supervisor
+    /// cancellation apart from a tick timing out, and it can only do that by reading whichever of
+    /// the two `Arc<AtomicBool>`s it still owns after this stepper returns an error — this field
+    /// makes `EINTR` from the watchdog's own `pthread_kill` stop the retry loop the same way
+    /// `cancel` does, without this crate needing to know which reason a caller will report it as.
+    timed_out: Option<Arc<AtomicBool>>,
 }
 
 impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
     pub fn new(vcpu: &'vcpu mut VcpuFd, bus: &'io mut dyn Bus, time: &'io mut dyn TimeSource) -> Self {
-        LinuxPmuStepper { vcpu, bus, time, poll_target: 0, halted: false, cancel: None }
+        LinuxPmuStepper { vcpu, bus, time, poll_target: 0, halted: false, cancel: None, timed_out: None }
     }
 
     /// Install the supervisor's cancellation flag on this stepper (builder style, so the five-odd
@@ -115,9 +128,18 @@ impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
         self
     }
 
-    /// Whether a flag is installed *and* set. `None` short-circuits with no atomic access at all.
-    fn is_cancelled(&self) -> bool {
-        flag_is_set(&self.cancel)
+    /// Install a per-call watchdog's `fired` flag on this stepper (builder style, mirroring
+    /// [`with_cancel`](Self::with_cancel)). `None` restores exactly the no-watchdog behaviour.
+    pub fn with_watchdog(mut self, timed_out: Option<Arc<AtomicBool>>) -> Self {
+        self.timed_out = timed_out;
+        self
+    }
+
+    /// Whether either the supervisor's cancellation flag or a per-call watchdog's `fired` flag is
+    /// installed *and* set — the one check every `EINTR`-handling arm below uses to decide whether
+    /// to stop retrying `KVM_RUN` or treat the interrupt as spurious.
+    fn should_stop(&self) -> bool {
+        flag_is_set(&self.cancel) || flag_is_set(&self.timed_out)
     }
 
     fn current_rcb(&mut self) -> u64 {
@@ -153,12 +175,13 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     /// `tests/fixtures/timer-guest/`'s payload periodically performs a harmless forced VM exit
     /// (`out 0x80, al`, absorbed by `OpenBusFallback`) so this poll always gets a chance to run.
     fn run_until_exit(&mut self) -> io::Result<()> {
-        // See `flag_is_set`: hoisted into a local because the `EINTR` arm below sits inside a live
+        // See `flag_is_set`: hoisted into locals because the `EINTR` arm below sits inside a live
         // `&mut self.vcpu` reborrow. Free (a discriminant copy) in the overwhelmingly common
         // no-flag case.
         let cancel = self.cancel.clone();
+        let timed_out = self.timed_out.clone();
         loop {
-            if flag_is_set(&cancel) {
+            if flag_is_set(&cancel) || flag_is_set(&timed_out) {
                 return Err(cancelled_error());
             }
             if self.current_rcb() >= self.poll_target {
@@ -214,12 +237,13 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     }
                     Err(hole) => return Err(io::Error::other(hole.to_string())),
                 },
-                // Any `KVM_RUN` failure observed while this run is cancelled — the `EINTR` its own
-                // `CancelKicker`'s signal produces, or the `EAGAIN` a signal-interrupted entry can
-                // also surface as — ends the run as cancelled, rather than retrying the very ioctl
-                // that kick was sent to escape (and never as a determinism hole, which an
-                // abandoned run is not). Unreachable unless a flag was installed *and* set.
-                Err(_) if flag_is_set(&cancel) => return Err(cancelled_error()),
+                // Any `KVM_RUN` failure observed while this run is cancelled or its per-call
+                // watchdog fired — the `EINTR` its own `CancelKicker`/`Watchdog`'s signal produces,
+                // or the `EAGAIN` a signal-interrupted entry can also surface as — ends the run
+                // rather than retrying the very ioctl that kick was sent to escape (and never as a
+                // determinism hole, which an abandoned or timed-out run is not). Unreachable unless
+                // a flag was installed *and* set.
+                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => return Err(cancelled_error()),
                 Err(e) if e.errno() == libc::EINTR => continue,
                 Err(e) => return Err(e.into()),
             }
@@ -271,6 +295,7 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
     fn step(&mut self) -> io::Result<ExecPoint> {
         super::set_singlestep(self.vcpu, true, true)?;
         let cancel = self.cancel.clone(); // see `run_until_exit`
+        let timed_out = self.timed_out.clone();
         let result = loop {
             let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
                 Ok(ConvertedExit::Exit(exit)) => Ok(exit),
@@ -320,9 +345,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     Err(hole) => break Err(io::Error::other(hole.to_string())),
                 },
                 // See `run_until_exit`'s identical arm. `break` (not `return`) so this method's own
-                // `set_singlestep(false)` still runs on the way out — a cancelled run must leave
-                // the vCPU in the same state every other exit path leaves it in.
-                Err(_) if flag_is_set(&cancel) => break Err(cancelled_error()),
+                // `set_singlestep(false)` still runs on the way out — a cancelled or timed-out run
+                // must leave the vCPU in the same state every other exit path leaves it in.
+                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => break Err(cancelled_error()),
                 Err(e) if e.errno() == libc::EINTR => continue,
                 Err(e) => break Err(e.into()),
             }
@@ -343,8 +368,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
 
     fn run_until_irq_window(&mut self) -> io::Result<()> {
         let cancel = self.cancel.clone(); // see `run_until_exit`
+        let timed_out = self.timed_out.clone();
         loop {
-            if flag_is_set(&cancel) {
+            if flag_is_set(&cancel) || flag_is_set(&timed_out) {
                 return Err(cancelled_error());
             }
             let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
@@ -409,7 +435,7 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     Err(hole) => return Err(io::Error::other(hole.to_string())),
                 },
                 // See `run_until_exit`'s identical arm.
-                Err(_) if flag_is_set(&cancel) => return Err(cancelled_error()),
+                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => return Err(cancelled_error()),
                 Err(e) if e.errno() == libc::EINTR => continue,
                 Err(e) => return Err(e.into()),
             }
@@ -428,11 +454,12 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
         self.halted
     }
 
-    /// [`PmuStepper::check_cancelled`]'s real implementation: report the supervisor's flag to
-    /// `boundary::inject_at`/`run_to_events`' single-step walk, so a cancelled run stops between
-    /// two steps even if no signal ever had to be delivered.
+    /// [`PmuStepper::check_cancelled`]'s real implementation: report the supervisor's flag or a
+    /// per-call watchdog's `fired` flag to `boundary::inject_at`/`run_to_events`' single-step
+    /// walk, so a cancelled or timed-out run stops between two steps even if no signal ever had to
+    /// be delivered.
     fn check_cancelled(&self) -> io::Result<()> {
-        if self.is_cancelled() {
+        if self.should_stop() {
             return Err(cancelled_error());
         }
         Ok(())

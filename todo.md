@@ -3076,6 +3076,71 @@ snapshot, not a duplicate of it.
      file shows periodic tick/console-length lines climbing) as the immediate next observability data
      point before deciding whether the HTTP endpoint is still needed.
 
+  16. **H9 — used item 15's new progress logging on a real detached attempt as instructed, and it found**
+     **a sharper, previously-undiagnosed bug underneath the observability gap: a single periodic-timer**
+     **tick has no wall-clock bound at all — fixed, hardware-verified.** Launched the exact
+     `examples/ubuntu/BUILD.md` recipe (vector `238`, 20000 max ticks) as genuinely detached OS processes
+     (`setsid nohup ... & disown` for both `baud-server` and the `baud run kvm` client, per item 15's own
+     "re-attach by PID, never rely on a harness-tracked background task" lesson) and watched the server
+     log with `tail -f`. The new progress lines proved themselves immediately useful: ticks climbed to
+     `17100/20000` within 3s of wall clock (cheap early ticks, no console output yet under `quiet
+     loglevel=1`), then went completely silent — zero new lines for 11+ minutes while the server process
+     stayed pinned at 95-97% CPU (`ps`) and a 6s `strace -c -f` sample showed almost no ioctls at all
+     (1143 `futex` calls from idle tokio threads, 2 `ioctl`s total) — consistent with the vCPU thread
+     parked deep inside one still-blocked `KVM_RUN`.
+     Root-caused by reading code, not waiting longer (the boot was killed once diagnosed, to keep this
+     iteration boundable): `crates/baud-vcpu/src/linux/pmu.rs`'s `LinuxPmuStepper::run_until_exit` —
+     `boundary::inject_at`'s "coarse phase", called once per tick — deliberately does not use any
+     interrupt/signal to detect a crossed RCB target (its own module doc explains why: an earlier
+     PMU-overflow-signal approach was found unreliable on this project's nested-virtualized WSL2-on-
+     Hyper-V host). It only polls `current_rcb()` after the guest's own natural VM exits. A guest running
+     a long native stretch with zero I/O/HLT/MMIO activity can therefore block that one `KVM_RUN` for as
+     long as that stretch takes, with **nothing else bounding it** — the identical "a tight `jmp $` loop
+     never traps" hazard `crates/baud-vcpu/src/linux/watchdog.rs`'s `Watchdog` already exists to solve for
+     `run_until_halted`, but `run_to_first_halt_with_periodic_timer_and_devices` (the function H9's real
+     boot route delegates to) had never been wired to use it: only `run_to_first_halt_without_ram_hash`
+     consulted `self.watchdog_budget` at all. `watchdog.rs`'s own `CancelKicker` doc had already recorded
+     this class of slow tick once before ("one periodic-timer tick against a real kernel was measured
+     taking longer than 120s of wall clock"), just never given a bound.
+     Fixed with a new, separate per-tick watchdog (distinct from the existing whole-run `watchdog_budget`/
+     `DEFAULT_WATCHDOG_BUDGET`, which guards a different call path). `baud_vcpu::linux::Watchdog` changed
+     from `pub(super)` to `pub` and is now re-exported from `baud_vcpu::linux`. `LinuxPmuStepper` gained a
+     second optional flag (`timed_out`, installed via a new `with_watchdog(...)` builder mirroring
+     `with_cancel`) checked everywhere `cancel` already was (`run_until_exit`, `step`,
+     `run_until_irq_window`, `check_cancelled`, via a new `should_stop()` helper), so a `pthread_kill`-
+     delivered `SIGUSR1` from a per-tick watchdog now actually stops the `EINTR`-retry loop instead of
+     being silently swallowed as spurious. `crates/baud-multiverse/src/linux/mod.rs` gained
+     `PERIODIC_TICK_WATCHDOG_BUDGET: Duration = Duration::from_secs(600)` (~5x the already-measured 120s
+     legitimate-tick case, generous enough to avoid false-positiving on real slow disk/systemd-bound
+     ticks, but finite), a new `Multiverse::periodic_tick_watchdog_budget` field (defaulted to that
+     constant by `boot`/`restore`) with override `set_periodic_tick_watchdog_budget`, and the tick loop
+     inside `run_to_first_halt_with_periodic_timer_and_devices` now arms a fresh per-tick `Watchdog`
+     around each `inject_at` call, disarms it on every path, and classifies a fired-but-not-cancelled
+     result as `RunLoopError::WatchdogKilled { budget_ms }` (real supervisor cancellation still wins if
+     both happen to be true in the same window).
+     New hardware-verified tests in `crates/baud-multiverse/src/linux/mod.rs`:
+     `periodic_tick_watchdog_kills_a_stuck_tick` (the `spin-guest` fixture — zero conditional branches,
+     zero VM exits, ever — with a tight 300ms budget, proves the first tick is reclaimed with
+     `WatchdogKilled { budget_ms: 300 }` rather than hanging) and
+     `periodic_tick_watchdog_does_not_fire_on_a_normal_tick` (negative case, `timer-guest`, 5s budget,
+     must succeed normally). Verified: `cargo build`/`cargo test -p baud-vcpu -p baud-multiverse` → 226 +
+     40 passed, 0 failed (including both new tests, on real `/dev/kvm`); `cargo clippy -p baud-vcpu -p
+     baud-multiverse --all-targets` → 26 warnings, confirmed via a `git stash` re-run to be the identical
+     pre-existing baseline in unrelated files, zero new warnings; full `bash drive/gate.sh` → 24 passed, 0
+     failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, the documented load-flake,
+     confirmed passing in isolation by gate phase 6 — counts as green per CLAUDE.md), 1 skipped
+     (`pkg-build-cli`, fingerprint unchanged), 2m42s.
+     **Still open for H9, the real next step**: actually re-attempting the real Ubuntu boot with this
+     per-tick watchdog in place, to learn whether the tick that stalled 11+ minutes in this iteration's
+     attempt was genuine (if extreme) legitimate guest work that would eventually have completed — in
+     which case `600s` may need raising, or a CLI/HTTP knob added so an operator can tune it per attempt —
+     or a case the watchdog now correctly kills as truly wedged. Launch a fresh detached H9 attempt
+     exactly as this iteration did (`setsid nohup ... & disown` for both `baud-server` and the CLI client,
+     `tail -f` the server log) and observe whether the run now either reaches `ubuntu login:`, or fails
+     fast with a diagnosable `WatchdogKilled` error at some specific tick (whose `console_output` tail and
+     elapsed time become the next concrete clue) — either outcome is real forward progress over the old
+     "hang with no signal either way" state.
+
 ### 14.1 Defects found in the test suite and the drive scripts
 
 Latent defects, each of which let a test or script report success it had not earned. The pre-push gate is

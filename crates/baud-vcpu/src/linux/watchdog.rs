@@ -65,20 +65,24 @@ fn ensure_handler_installed() {
 
 /// A companion thread that kills a spinning vCPU thread after `budget` of real wall-clock time —
 /// exactly the "supervisor's wall-clock watchdog (outside the deterministic boundary)"
-/// `docs/determinism.md`'s "Known limits" §4 promises. Armed for the duration of one
-/// `run_until_halted` call and always [`disarm`](Self::disarm)d before that call returns, on
+/// `docs/determinism.md`'s "Known limits" §4 promises. `run_until_halted` arms one for the
+/// duration of a whole run; `baud_multiverse::linux::Multiverse::run_to_first_halt_with_periodic_
+/// timer_and_devices` (todo.md §14 item 15/16 follow-up) arms a fresh one per periodic-timer tick
+/// instead, via `pmu::LinuxPmuStepper::with_watchdog`, since `run_until_exit`'s coarse phase can
+/// block inside one `KVM_RUN` for as long as the guest itself keeps running natively with no
+/// vmexit. Either way, always [`disarm`](Self::disarm)d before the call that armed it returns, on
 /// every path (halted, a real `DeterminismHole`, or the watchdog's own kill) — a late-firing
 /// signal must never land in whatever unrelated work the vCPU thread does next. This is a real
 /// hazard, not a hypothetical one: `baud-server` runs boots on `tokio::task::spawn_blocking`'s
 /// reusable thread pool, so a stray pending signal on an OS thread that outlives this call could
 /// interrupt a totally unrelated future task scheduled onto the same thread.
-pub(super) struct Watchdog {
+pub struct Watchdog {
     done: Arc<(Mutex<bool>, Condvar)>,
     /// Set by the watchdog thread itself, strictly before it calls `pthread_kill` — the vCPU
     /// thread only ever reads this after observing `EINTR`, and signal delivery is asynchronous
     /// but never *reordered before* the syscall that sends it, so by the time that `EINTR` is
     /// observable this is guaranteed to already be `true` if it was this watchdog that caused it.
-    pub(super) fired: Arc<AtomicBool>,
+    pub fired: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -88,7 +92,7 @@ impl Watchdog {
     /// disables the watchdog entirely (no thread spawned, `fired` can never become `true`) — the
     /// same "0 disables" convention `crates/baud-multiverse/src/lib.rs`'s simulated
     /// `quantum_limit_ms` already uses.
-    pub(super) fn arm(budget: Duration) -> Self {
+    pub fn arm(budget: Duration) -> Self {
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let fired = Arc::new(AtomicBool::new(false));
         if budget.is_zero() {
@@ -140,7 +144,7 @@ impl Watchdog {
     /// unconditionally by `run_until_halted` right before it returns, on every path, so no
     /// watchdog thread ever outlives the call that armed it (see this struct's own doc for why
     /// that matters on a reused thread pool).
-    pub(super) fn disarm(self) {
+    pub fn disarm(self) {
         {
             let (lock, cvar) = &*self.done;
             *lock.lock().expect("watchdog mutex poisoned") = true;
