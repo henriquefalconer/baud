@@ -3231,6 +3231,42 @@ enforced-regime patch is applied, since neither is visible to any `git diff`.
    `drive/pkg/pkg-boot-cli.sh` all PASS; full `bash drive/gate.sh` — 23 passed, 0 failed, 1 skipped
    (pkg-build-cli, fingerprint unchanged), 2m54s, clean, no flakes, no new clippy warnings.
 
+### 14.2 Server-side run lifetime, cancellation and host memory
+
+Measured properties of `POST /run/kvm` and the run loops underneath it.
+
+- **Disk-image load cost is 2.02× the image size.** `std::fs::read` of `--virtio-blk-image` produces one
+  `Vec<u8>`, and `enable_virtio_pci_blk(base_image.to_vec())` copies it again; both live for the whole
+  boot. Measured: a 1 GiB image drives server RSS from 20 MiB to 2085 MiB. A 2.36 GB Ubuntu rootfs
+  therefore needs ~4.7 GB on a 7.98 GB WSL2 VM, before the 256 MiB guest RAM and the file's page cache.
+- **`tokio::task::spawn_blocking` is not cancellable.** Dropping its `JoinHandle` detaches rather than
+  cancels, and `abort()` is a documented no-op once a blocking task has started. A run therefore survives
+  its HTTP client: with the client SIGTERMed and reaped, server RSS stayed pinned at 4676 MiB and the run
+  went on to make its second copy — RSS grew 537 → 1068 MiB *after* the client was gone.
+- **Two such runs exhaust the host.** An abandoned run plus a retry against the same server drove
+  `MemAvailable` from 6886 MiB to 349 MiB in ~4 s, ending in `Wsl/Service/E_UNEXPECTED` and a VM that
+  needed a Windows restart. The Linux OOM killer takes the largest other process first, so the supervising
+  tooling dies a few seconds before the VM does.
+- **Client disconnect is observable, and prompt.** axum/hyper drops the handler future when the peer goes
+  away: a guard held across the `.await` fires 4 ms after the client dies, with the server-side socket
+  gone from `/proc/net/tcp` in the same instant. No liveness polling or `shell_into`-style channel probe
+  is required to detect it.
+- **A flag polled once per periodic tick is not enough to stop a run.** One tick is unbounded — with a
+  guest that retires no conditional branches, `--periodic-timer-max-ticks 4` completes in 0.31 s while
+  `8` does not complete in 120 s, and `strace -c` shows 8 ioctls in 5 s at 100% CPU. The vCPU parks inside
+  a single long `KVM_RUN`, so the useful poll sites are the per-exit burst loop and the boundary walk.
+- **Only a signal breaks a vCPU out of `KVM_RUN`.** The `SIGUSR1` handler `baud-vcpu`'s watchdog already
+  installs is the mechanism; a kick must be re-sent periodically, because one landing while the vCPU is in
+  userspace is swallowed by the no-op handler and the next `KVM_RUN` blocks again.
+- **`baud-fingerprint` pins `run_to_events`/`capture_fingerprint` to `DeterminismHole`,** so those two
+  cannot surface a typed cancellation without changing that crate's error type.
+- **`stream.rs`'s restore path has no image and reaches only `run_until_branch_or_halt*` loops**, and
+  `run_kvm.rs`'s `"branch {i} determinism hole: {e}"` wording would mislabel a cancellation on the
+  branch/resume routes.
+- **`perf_event_paranoid` resets to `2` on every WSL boot.** Until it is `-1` every KVM run fails with
+  `failed to create the work-clock's perf_event branch counter: Permission denied`, which looks like a
+  code fault rather than host configuration.
+
 ## 15. Pre-push validation protocol
 
 Run **`bash drive/gate.sh`** — one Bash call, `timeout: 600000`. That is the whole pre-push gate.
