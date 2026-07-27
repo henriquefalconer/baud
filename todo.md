@@ -2358,6 +2358,37 @@ snapshot, not a duplicate of it.
      (unlike virtio-rng's `tests/fixtures/virtio-rng-guest/` real-hardware proof in `linux/mod.rs`)
      — this sub-step's tests are all in-memory (`vm_memory::GuestMemoryMmap` anonymous mmap, no
      `/dev/kvm`), the same scope boundary the (a) transport sub-step drew for itself.
+     **The "needs a design change" run-loop gap above is now closed.** New private
+     `TickPolledDevice` struct + `Multiverse::run_to_first_halt_with_periodic_timer_and_devices`
+     (`crates/baud-multiverse/src/linux/mod.rs`) generalize the per-tick "poll a device's
+     `notify_count`, service it if changed, route running-vs-halted differently" shape every
+     hand-written combinator repeated, into one device-agnostic tick loop driven by a `&[
+     TickPolledDevice]` of plain `fn`-pointer triples (`notify_count`/`service_running`/
+     `service_halted` — no capturing closures, so each device is a declarative row, not a
+     hand-inlined branch). `run_to_first_halt_with_periodic_timer_and_virtio_rng` is now a one-line,
+     one-device wrapper over it (behaviorally identical by construction — a one-element device slice
+     reduces to exactly the old hand-written loop — so every pre-existing rng+timer test is a
+     regression check on the refactor itself). New public
+     `run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk` is the three-way
+     combinator this item asked for: the same generic loop with two `TickPolledDevice` rows (rng,
+     blk), reusing `service_virtio_rng_interrupt[_while_halted]`/`service_virtio_blk_interrupt[
+     _while_halted]` unchanged — no new device-servicing logic, only the generic dispatch. New
+     real-hardware test
+     `periodic_timer_virtio_rng_and_virtio_pci_blk_combinator_does_not_perturb_an_unused_third_device`
+     (`linux/mod.rs`) boots the existing `virtio_rng_initramfs` fixture through the new three-way
+     combinator with `enable_virtio_pci_blk` also on, and proves: (1) console output is byte-
+     identical to the plain timer+rng path (an enabled-but-guest-unused third device changes
+     nothing), (2) the block device's `notify_count` stays `0` (this fixture's kernel has no
+     `CONFIG_VIRTIO_BLK`/`CONFIG_VIRTIO_PCI_LEGACY`, so nothing ever probes it — a real driver-
+     exercising fixture is separately-scoped future work, see below), and (3) two boots with all
+     three devices enabled stay fully deterministic. `cargo test -p baud-multiverse --lib` → 208
+     passed, 0 failed, 10 ignored (up from 207 by exactly this test). `cargo clippy -p
+     baud-multiverse --all-targets` → 26 warnings, the exact pre-existing baseline, zero new.
+     **Still open, unchanged from above**: no real-KVM fixture actually exercises virtio-blk end to
+     end (needs `CONFIG_VIRTIO_BLK`/`CONFIG_VIRTIO_PCI_LEGACY` enabled in `minimal.config`, a kernel
+     rebuild, and a new hand-written `virtio_blk_init.c` analogous to `virtio_rng_init.c` that reads/
+     writes real sectors); H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` +
+     the cross-VM fingerprint) remain not started.
      **(c) is now done, as a table-construction library, not yet wired into any real boot path.**
      New `crates/baud-multiverse/src/acpi.rs` (`#[cfg(target_os = "linux")]`, same gating as
      `virtio_queue`/`virtio_blk` — it dereferences guest memory via `vm-memory`): pure,

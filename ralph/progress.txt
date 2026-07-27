@@ -6775,3 +6775,43 @@ Gate result: 22 passed, 0 failed, 1 flaked, 1 skipped (2m55s). The sole failure 
   - cargo build --workspace / clippy -p baud-server -p baud-cli --all-targets clean (0 new warnings); cargo test -p baud-server --bin baud-server run_kvm:: -> 25 passed (up from 24); cargo test -p baud-cli -> 1 passed
   - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation by gate.sh's own phase 6 -- the documented load-flake), 1 skipped (pkg-build-cli, fingerprint unchanged) -- counts as a passing gate per todo.md §15
 ---
+
+Post-push verification: origin/main now at 84e4bff, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked (documented rdtsc load-flake, reconfirmed in isolation), 1 skipped, 2m55s) before this push.
+
+todo.md still has pending items (H9 (d)/(e): actual Ubuntu 18.04.1 cloud image + drive/h9.sh/cross-VM fingerprint, both not started; H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline §4.5 itself; RunKvmBranchBody/RunKvmResumeBody still lack an acpi field) -- emitting NEXT.
+
+## 2026-07-27T12:13:37 UTC (20min) - Session usage — build-4 [sonnet]
+- cost $8.5458 (from claude -p)
+- context 211,213 tok peak of 1M (21%) across 135 inference calls, monotonic
+- models sonnet-5 $8.5426 (in 294 / out 61,631 / cache-read 20,845,254) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T104433Z/005-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md, studying specs and progress history first...
+
+Chose H9's next sub-step: the run-loop combinator design gap. todo.md flags that a real Ubuntu boot needs periodic-timer+virtio-rng+virtio-blk serviced simultaneously, but the current code has one hand-written combinator per device combination and explicitly says this needs a generic 'poll N devices' design change before a three-way combinator can be added. Implementing that now.
+
+Implemented the generic multi-device tick-poll combinator (TickPolledDevice + run_to_first_halt_with_periodic_timer_and_devices) in crates/baud-multiverse/src/linux/mod.rs, refactored the existing timer+virtio-rng combinator onto it, and added the new three-way timer+virtio-rng+virtio-blk combinator todo.md flagged as needed for a real Ubuntu boot. Build clean, running the new real-hardware test now...
+
+New test passes real-hardware (1/1) and full baud-multiverse suite is 208 passed / 0 failed / 10 ignored (up from 207), clippy still exactly the documented 26-warning baseline. Updating todo.md, then running the full pre-push gate.
+
+todo.md updated with the resolution note. Running the full pre-push gate (bash drive/gate.sh) now -- this can take several minutes.
+
+Gate result: 22 passed, 0 failed, 1 flaked, 1 skipped (2m29s). The sole failure was rdtsc_guest_reproduces_high_bits_across_boots inside cargo test --workspace, reconfirmed passing in isolation by gate.sh's own phase 6 (3s) -- the documented load-flake CLAUDE.md/todo.md §15 say counts as a passing gate. pkg-build-cli skipped (fingerprint unchanged). Proceeding to commit.
+
+## 2026-07-27T12:28:57 UTC - Changes committed.
+- Generalized the periodic-timer run-loop combinator to poll any number of virtio devices, and added the timer+virtio-rng+virtio-blk three-way combinator todo.md flagged as needed for a real Ubuntu boot
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, todo.md
+- **Brief description of changes:**
+  - New private TickPolledDevice struct (fn-pointer triple: notify_count/service_running/service_halted) + Multiverse::run_to_first_halt_with_periodic_timer_and_devices generic tick loop replace the one-hand-written-combinator-per-device-combination pattern
+  - run_to_first_halt_with_periodic_timer_and_virtio_rng is now a one-line, one-device wrapper over the generic loop (behaviorally identical by construction; every pre-existing rng+timer test is a regression check on the refactor)
+  - New public run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk combinator: the three-way timer+rng+blk combination, built on the same generic loop with two device rows, no new device-servicing logic
+  - New real-hardware test periodic_timer_virtio_rng_and_virtio_pci_blk_combinator_does_not_perturb_an_unused_third_device: boots the existing virtio_rng_initramfs fixture with virtio-blk also enabled, proves console output is byte-identical to the plain timer+rng path, the (guest-unused) block device's notify_count stays 0, and two boots stay deterministic
+  - cargo build/test -p baud-multiverse --lib: 208 passed, 0 failed, 10 ignored (up from 207 by exactly this test); cargo clippy -p baud-multiverse --all-targets: 26 warnings, the exact pre-existing baseline, zero new
+  - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation -- the documented load-flake), 1 skipped (pkg-build-cli, fingerprint unchanged) -- counts as a passing gate per todo.md §15
+  - Still open: no real-KVM fixture exercises virtio-blk end to end yet (needs CONFIG_VIRTIO_BLK/CONFIG_VIRTIO_PCI_LEGACY in minimal.config + a new virtio_blk_init.c); H9 (d) actual Ubuntu cloud image and (e) drive/h9.sh/cross-VM fingerprint remain not started
+---

@@ -700,6 +700,22 @@ mod rng_seed_from_tape_tests {
     }
 }
 
+/// One virtio device serviceable from inside
+/// [`Multiverse::run_to_first_halt_with_periodic_timer_and_devices`]'s tick loop — the "poll N
+/// devices" abstraction todo.md §14 item 5(b)'s note on `run_to_first_halt_with_virtio_pci_blk`
+/// asked for once a real boot needs more than one device serviced alongside the timer (a real
+/// Ubuntu guest needs periodic ticks, virtio-rng, *and* virtio-blk simultaneously). Every field is
+/// a plain `fn` pointer (not a capturing closure), so each device is described declaratively and
+/// the tick loop itself stays device-agnostic; `notify_count`/`service_running`/`service_halted`
+/// are exactly the three per-device pieces `run_to_first_halt_with_virtio_rng` and
+/// `run_to_first_halt_with_virtio_pci_blk` each already hand-wrote inline.
+struct TickPolledDevice {
+    vector: u8,
+    notify_count: fn(&Multiverse) -> Option<u64>,
+    service_running: fn(&mut Multiverse, u8) -> Result<u32, DeterminismHole>,
+    service_halted: fn(&mut Multiverse, u8) -> Result<u32, DeterminismHole>,
+}
+
 impl Multiverse {
     /// Run [`boot_guest`] and wire up the work-clock (`base + k * rcb`, specs/baud-multiverse.md
     /// §4), console, and tape (specs/baud-tape-device.md) devices the run loop needs. `base` is
@@ -1629,23 +1645,25 @@ impl Multiverse {
     }
 
     /// [`run_to_first_halt_with_periodic_timer`](Self::run_to_first_halt_with_periodic_timer)'s
-    /// open-ended periodic-timer engine, combined with [`run_to_first_halt_with_virtio_rng`]
-    /// (Self::run_to_first_halt_with_virtio_rng)'s notify-and-service polling — the entry point a
-    /// real Linux guest needs when it requires periodic timer ticks for `calibrate_delay` **and**
-    /// talks to virtio-rng, since the two open-ended loops above are each exhaustive on their own
-    /// (a real kernel needs the periodic-timer engine regardless of virtio-rng). The `notify_count`
-    /// check happens once per delivered tick (not once per host-side exit, unlike the plain
-    /// virtio-rng loop above) — coarser-grained, since a real kernel guest's own ticks are already
-    /// frequent relative to how often `getrandom()`/hwrng reseeds actually run.
-    pub fn run_to_first_halt_with_periodic_timer_and_virtio_rng(
+    /// open-ended periodic-timer engine, generalized to poll-and-service any number of
+    /// [`TickPolledDevice`]s once per delivered tick (not once per host-side exit — coarser-
+    /// grained, since a real kernel guest's own ticks are already frequent relative to how often a
+    /// device actually needs draining). `devices` is empty for the plain single-device wrappers'
+    /// bare periodic-timer case and has one or more entries for every combined variant below; the
+    /// per-device notify-count-changed check and the running/halted routing are unchanged from the
+    /// single-device (virtio-rng-only) loop this replaces — with exactly one device in the slice
+    /// this is behaviorally identical to that hand-written loop, so every existing caller/test is a
+    /// regression check on the refactor itself, not just on the new multi-device case.
+    fn run_to_first_halt_with_periodic_timer_and_devices(
         &mut self,
         period_rcb: u64,
         timer_vector: u8,
-        virtio_rng_vector: u8,
+        devices: &[TickPolledDevice],
         max_ticks: u32,
     ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
         let mut ticks = Vec::new();
-        let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
+        let mut last_notify: Vec<u64> =
+            devices.iter().map(|d| (d.notify_count)(self).unwrap_or(0)).collect();
         for _ in 0..max_ticks {
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
@@ -1656,24 +1674,32 @@ impl Multiverse {
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
                     ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
-                    let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
-                    if notify_count != last_notify_count {
-                        last_notify_count = notify_count;
-                        self.service_virtio_rng_interrupt(virtio_rng_vector)?;
+                    for (i, dev) in devices.iter().enumerate() {
+                        let notify_count = (dev.notify_count)(self).unwrap_or(0);
+                        if notify_count != last_notify[i] {
+                            last_notify[i] = notify_count;
+                            (dev.service_running)(self, dev.vector)?;
+                        }
                     }
                 }
                 baud_vcpu::boundary::InjectOutcome::Halted(_) => {
                     // A real Linux guest can legitimately be sitting here waiting for exactly the
-                    // virtio-rng completion this run is meant to deliver (`wait_for_completion_
-                    // killable`'s own `safe_halt()`, todo.md §14) -- not just at its final
-                    // shutdown. Only when there is no pending virtio-rng notification to service
-                    // is a halt actually terminal; otherwise wake it (`service_virtio_rng_
-                    // interrupt_while_halted`, the halted-safe counterpart to the `Injected` arm's
-                    // own servicing above) and keep ticking.
-                    let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
-                    if notify_count != last_notify_count {
-                        last_notify_count = notify_count;
-                        self.service_virtio_rng_interrupt_while_halted(virtio_rng_vector)?;
+                    // completion one of these devices is meant to deliver (`wait_for_completion_
+                    // killable`/`wait_for_completion_io`'s own `safe_halt()`, todo.md §14) -- not
+                    // just at its final shutdown. Only when *no* device has a pending notification
+                    // is a halt actually terminal; otherwise wake it via whichever device(s) do
+                    // (`service_halted`, the halted-safe counterpart to `service_running` above)
+                    // and keep ticking so a still-pending device on a later tick gets its turn too.
+                    let mut serviced_any = false;
+                    for (i, dev) in devices.iter().enumerate() {
+                        let notify_count = (dev.notify_count)(self).unwrap_or(0);
+                        if notify_count != last_notify[i] {
+                            last_notify[i] = notify_count;
+                            (dev.service_halted)(self, dev.vector)?;
+                            serviced_any = true;
+                        }
+                    }
+                    if serviced_any {
                         continue;
                     }
                     let halt = HaltOutcome {
@@ -1686,9 +1712,82 @@ impl Multiverse {
             }
         }
         Err(DeterminismHole(format!(
-            "run_to_first_halt_with_periodic_timer_and_virtio_rng: guest did not halt within \
+            "run_to_first_halt_with_periodic_timer_and_devices: guest did not halt within \
              {max_ticks} periodic ticks"
         )))
+    }
+
+    /// [`run_to_first_halt_with_periodic_timer`](Self::run_to_first_halt_with_periodic_timer)'s
+    /// open-ended periodic-timer engine, combined with [`run_to_first_halt_with_virtio_rng`]
+    /// (Self::run_to_first_halt_with_virtio_rng)'s notify-and-service polling — the entry point a
+    /// real Linux guest needs when it requires periodic timer ticks for `calibrate_delay` **and**
+    /// talks to virtio-rng, since the two open-ended loops above are each exhaustive on their own
+    /// (a real kernel needs the periodic-timer engine regardless of virtio-rng). Now a thin
+    /// one-device wrapper over [`run_to_first_halt_with_periodic_timer_and_devices`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_devices); see
+    /// [`run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk) for the
+    /// three-device sibling this generalization exists to make possible.
+    pub fn run_to_first_halt_with_periodic_timer_and_virtio_rng(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        virtio_rng_vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        self.run_to_first_halt_with_periodic_timer_and_devices(
+            period_rcb,
+            timer_vector,
+            &[TickPolledDevice {
+                vector: virtio_rng_vector,
+                notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
+                service_running: Multiverse::service_virtio_rng_interrupt,
+                service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
+            }],
+            max_ticks,
+        )
+    }
+
+    /// The three-way combination `todo.md` §14 item 5(b)'s note on
+    /// [`run_to_first_halt_with_virtio_pci_blk`](Self::run_to_first_halt_with_virtio_pci_blk) named
+    /// as not yet implemented: periodic timer ticks, virtio-rng, and virtio-blk all serviced within
+    /// one run loop — the combination a real Ubuntu 18.04.1 boot (`specs/baud-ubuntu.md`) needs,
+    /// since that guest requires the periodic-timer engine for `calibrate_delay` regardless, reads
+    /// entropy from virtio-rng, and mounts its root filesystem from virtio-blk. Built entirely on
+    /// [`run_to_first_halt_with_periodic_timer_and_devices`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_devices) — no new run-loop logic, only a
+    /// second [`TickPolledDevice`] describing virtio-blk the same way the rng-only wrapper above
+    /// describes virtio-rng. Requires [`enable_virtio_rng`](Self::enable_virtio_rng) and
+    /// [`enable_virtio_pci_blk`](Self::enable_virtio_pci_blk) to already have been called; either
+    /// one left unenabled behaves exactly like the two-device wrapper above (its `notify_count`
+    /// poll is always `None`, so it is never serviced).
+    pub fn run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        virtio_rng_vector: u8,
+        virtio_blk_vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        self.run_to_first_halt_with_periodic_timer_and_devices(
+            period_rcb,
+            timer_vector,
+            &[
+                TickPolledDevice {
+                    vector: virtio_rng_vector,
+                    notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
+                    service_running: Multiverse::service_virtio_rng_interrupt,
+                    service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
+                },
+                TickPolledDevice {
+                    vector: virtio_blk_vector,
+                    notify_count: |mv| mv.virtio_pci_blk().map(|t| t.notify_count()),
+                    service_running: Multiverse::service_virtio_blk_interrupt,
+                    service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,
+                },
+            ],
+            max_ticks,
+        )
     }
 
     /// [`run_until_branch_or_halt`](Self::run_until_branch_or_halt)'s per-exit "stop at
@@ -3361,6 +3460,77 @@ mod tests {
             "two boots of the same image+tape+seed must produce byte-identical console output, \
              including the real virtio_rng-sourced entropy bytes"
         );
+    }
+
+    /// todo.md §14 item 5(b)'s "needs a design change, e.g. a generic 'poll N devices' abstraction"
+    /// note on `run_to_first_halt_with_virtio_pci_blk` -- the three-way
+    /// `run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk` combinator this
+    /// refactor introduced, real-hardware-verified via the existing `virtio_rng_initramfs` fixture
+    /// (this kernel's `minimal.config` has no `CONFIG_VIRTIO_BLK`/`CONFIG_VIRTIO_PCI_LEGACY`, so the
+    /// guest never actually probes the block device -- building a guest that does is the next,
+    /// separately-scoped H9 sub-step). Proves two things a rng-only run can't: (1) enabling a third
+    /// device the guest never touches does not perturb the already-working timer+rng boot at all
+    /// (byte-identical console vs. the plain `run_linux_guest_virtio_rng_once` path), and (2) the
+    /// combined run stays fully deterministic across two boots with the third device present.
+    #[test]
+    fn periodic_timer_virtio_rng_and_virtio_pci_blk_combinator_does_not_perturb_an_unused_third_device() {
+        fn run_once(seed: u64) -> (String, u64) {
+            let kernel = linux_guest_kernel_path();
+            let initramfs = linux_guest_virtio_rng_initramfs();
+            let cmdline = format!("{} virtio_mmio.device=0x200@0xd0000000:5", bootparams::DETERMINISTIC_CMDLINE);
+            const PERIOD_RCB: u64 = 500_000;
+            const MAX_TICKS: u32 = 2000;
+            const TIMER_VECTOR: u8 = 0xec;
+            let virtio_rng_vector = crate::pic8259::isa_irq_vector(5);
+            const VIRTIO_BLK_VECTOR: u8 = 0xed;
+
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                &cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .expect("boot failed");
+            m.enable_virtio_rng();
+            m.seed_virtio_rng_entropy(seed);
+            m.enable_virtio_pci_blk(vec![0u8; 512 * 4]);
+            let (_ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk(
+                    PERIOD_RCB,
+                    TIMER_VECTOR,
+                    virtio_rng_vector,
+                    VIRTIO_BLK_VECTOR,
+                    MAX_TICKS,
+                )
+                .expect("periodic-timer + virtio-rng + virtio-blk run failed");
+            let notify_count = m.virtio_pci_blk().map(|t| t.notify_count()).unwrap_or(u64::MAX);
+            (String::from_utf8_lossy(&halt.console_output).to_string(), notify_count)
+        }
+
+        let (first, first_blk_notify) = run_once(99);
+        let (second, second_blk_notify) = run_once(99);
+        let rng_only = run_linux_guest_virtio_rng_once(99);
+
+        assert_eq!(
+            first, rng_only,
+            "adding an unenabled-in-the-guest virtio-blk device to the run loop must not change a \
+             single byte of console output versus the plain timer+rng path; got:\n{first}"
+        );
+        assert_eq!(
+            first_blk_notify, 0,
+            "this fixture's guest has no virtio-blk driver compiled in, so the device must never \
+             be notified at all"
+        );
+        assert_eq!(
+            first, second,
+            "two boots of the same image+tape+seed with all three devices enabled must still \
+             produce byte-identical console output"
+        );
+        assert_eq!(first_blk_notify, second_blk_notify, "the untouched device's notify count must match across boots too");
     }
 
     /// specs/baud-multiverse.md §4.3's `init_powers_off_deterministically`: "a clean VMM-detected
