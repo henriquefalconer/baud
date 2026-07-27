@@ -6470,3 +6470,53 @@ todo.md §14 item 5 updated to record sub-item (a) done. Appending the changes-c
   - 21 new tests (14 virtio_pci.rs + 6 pci.rs + 1 console.rs); cargo test -p baud-multiverse --lib: 161 passed/0 failed/10 ignored; clippy: 26 warnings (unchanged baseline, none new)
   - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, documented load-flake, passed in isolation), 1 skipped (pkg-build-cli fingerprint unchanged) - counts as green per CLAUDE.md
 ---
+
+Committed 5edff95. Pushing to origin/main.
+
+Post-push verification: origin/main now at 5edff95, matching local HEAD exactly — push landed cleanly. todo.md still has pending items (H9 sub-items b-e, H7 OS-entropy leg, H8 Mario packaging block, others) so this iteration ends with NEXT.
+
+## 2026-07-27T07:15:06 UTC (7min) - Session usage — build-5 [sonnet]
+- cost $1.6308 (from claude -p)
+- context 99,972 tok peak of 1M (10%) across 30 inference calls, monotonic
+- models sonnet-5 $1.6276 (in 78 / out 18,470 / cache-read 2,761,807) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T053631Z/009-build-5.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 6
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and progress.txt to pick up context.
+
+Chose to continue H9 (§4.7/§14 item 5(b)): implement a deterministic virtio-blk device on top of the virtio-pci legacy transport landed last iteration — the next sub-step in the documented dependency order (transport -> blk device -> ACPI -> Ubuntu image -> drive/h9.sh). Studying existing virtio-mmio/virtio-rng device pattern, virtio_queue::SplitVirtqueue, and the interrupt-injection engine via parallel subagents before writing code.
+
+Dispatched a research subagent to map the existing virtio-rng/virtio-pci/virtio_queue/console.rs DeviceBus patterns and the interrupt-injection engine's call path, plus search for any existing virtio-blk/blkreplay design notes in specs/ and code, before designing the virtio-blk device. Waiting for its report.
+
+Waiting on the research subagent's report before designing virtio_blk.rs.
+
+PCI/transport layer for virtio-blk is done and builds clean: pci.rs now attaches a second virtio function (blk) at 00:02.0, virtio_pci.rs exposes device-specific config space (capacity) for a new_blk() constructor, and virtio_queue.rs gained process_available_chains (lets a caller read read-only descriptor bytes, needed to parse a virtio_blk_req header — process_available's fill-only closure couldn't). Now writing the actual virtio_blk.rs device model (backing store + request servicing).
+
+virtio_blk.rs device model done: BlockBackingStore (base image + sector-granularity CoW overlay) + service_request parsing virtio_blk_req chains (IN/OUT/FLUSH, out-of-range/unsupported handling). 11 new unit tests all pass. Now wiring it into console.rs's DeviceBus (enable_virtio_pci_blk, service_virtio_blk, Bus routing).
+
+console.rs wiring done: enable_virtio_pci_blk/service_virtio_blk/Bus routing all pass (24/24 console tests green, including a full real-PCI-BAR0-assignment + driver-negotiation + read/write/out-of-range request cycle). Now wiring interrupt delivery into linux/mod.rs (service_virtio_blk_interrupt + _while_halted + a run_to_first_halt_with_virtio_pci_blk combinator), mirroring virtio-rng's existing exact-boundary engine usage exactly.
+
+All wiring done: cargo test -p baud-multiverse --lib -> 182 passed, 0 failed, 10 ignored (up from 161, +21 new tests across virtio_queue/virtio_pci/pci/virtio_blk/console). Running clippy on baud-multiverse next.
+
+clippy on baud-multiverse: 26 warnings, matching the documented pre-existing baseline exactly, zero new (none in any touched file). cargo build --workspace clean too. Running the full pre-push gate (bash drive/gate.sh) now via harness-tracked background.
+
+todo.md §14 item 5 updated to record sub-item (b) done (virtio-blk device), with accurate test/clippy counts and honest follow-up notes. Full gate: 22 passed, 0 failed, 1 flaked (documented rdtsc load-flake, confirmed passing in isolation), 1 skipped, 2m29s -- green per CLAUDE.md. Committing and pushing.
+
+## 2026-07-27T07:40:08 UTC - Changes committed.
+- Implemented the deterministic virtio-blk device (todo.md §14 item 5(b)), the next H9 sub-step after the virtio-pci legacy transport (5(a))
+- Files changed: crates/baud-multiverse/src/virtio_blk.rs (new), virtio_queue.rs, virtio_pci.rs, pci.rs, console.rs, linux/mod.rs, lib.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New `virtio_blk.rs`: `BlockBackingStore` (read-only content-addressed base image + in-memory sector-granularity copy-on-write overlay; writes only ever touch the overlay, base stays pristine) and `service_request` (parses a virtio_blk_req chain, services IN/OUT/FLUSH, reports IOERR/UNSUPP via the status byte, never a Rust error for a malformed request)
+  - `virtio_queue.rs`: added `SplitVirtqueue::process_available_chains`, a lower-level primitive exposing whole descriptor chains (including read-only bytes) since virtio-blk must read its request header, not just fill writable buffers; `process_available` refactored to build on it (verified byte-identical, all existing tests unchanged)
+  - `virtio_pci.rs`: `VirtioPciTransport` gained device-specific config space (`device_config: Vec<u8>`, answered read-only from offset 0x14) and a `new_blk(capacity_sectors)` constructor
+  - `pci.rs`: `PciHostBridge` now attaches a second virtio function, `virtio_blk` at 00:02.0 (alongside `virtio_rng` at 00:01.0, renamed from the old single `virtio` field), via a new `attach_virtio_blk`
+  - `console.rs`: `DeviceBus` wired up `virtio_pci_blk`/`enable_virtio_pci_blk`/`service_virtio_blk`, mirroring the existing virtio-rng plumbing exactly
+  - `linux/mod.rs`: `Multiverse` gained `service_virtio_blk_interrupt`(`_while_halted`) reusing the exact-boundary interrupt-injection engine (`inject_timer_tick(0, vector)`) already used for virtio-rng and the periodic timer — the concrete meaning of specs/baud-ubuntu.md's "block completion at a fixed work-clock boundary, blkreplay-style, never on host-I/O return" — plus a new `run_to_first_halt_with_virtio_pci_blk` combinator
+  - 21 new tests across the six touched files; `cargo test -p baud-multiverse --lib` 182/0/10 clean in isolation; `cargo clippy -p baud-multiverse --all-targets` 26 warnings, unchanged baseline, none in touched files
+  - Full `bash drive/gate.sh`: 22 passed, 0 failed, 1 flaked (documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in isolation), 1 skipped — green per CLAUDE.md's documented exception
+  - Left open (documented in todo.md): a combined periodic-timer+virtio-rng+virtio-blk run-loop combinator (needs a design change, not just another hand-written combinator), and a real-KVM guest-fixture test for virtio-blk (this sub-step's tests are all in-memory, same scope boundary (a) drew for itself)
+---

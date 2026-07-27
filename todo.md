@@ -2231,7 +2231,8 @@ snapshot, not a duplicate of it.
      itself can be found via the legacy mechanism without it; (d) the actual Ubuntu 18.04.1 cloud
      image (`cloud-images-archive.ubuntu.com`, qcow2→raw) served as the virtio-blk backing store;
      (e) the full boot-to-login-prompt drive script (`drive/h9.sh`) and the cross-VM fingerprint
-     comparison (`specs/baud-fingerprint.md`'s `cross_vm_fingerprint_matches`). **(a) is now done**:
+     comparison (`specs/baud-fingerprint.md`'s `cross_vm_fingerprint_matches`). **(a) and (b) are now
+     done**:
      new `crates/baud-multiverse/src/virtio_pci.rs` (~495 lines) implements the virtio-pci *legacy*
      transport (virtio spec 1.0/1.1 Appendix "Legacy Interface" — the pre-1.0, MSI-X-less register
      layout every `virtio_pci_legacy` Linux driver still speaks, which the stock Ubuntu 18.04.1
@@ -2280,7 +2281,84 @@ snapshot, not a duplicate of it.
      none in `virtio_pci.rs`. Full `bash drive/gate.sh` ran clean except the already-documented
      `rdtsc_guest_reproduces_high_bits_across_boots` load-flake (failed under the 8-wide fan-out,
      passed in isolation in phase 6 — the documented case that still counts as a passing gate).
-     (b)-(e) remain not started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb
+     **(b) is now done**: new `crates/baud-multiverse/src/virtio_blk.rs` (354 lines including tests)
+     implements the deterministic virtio-blk device model (virtio spec 1.1 §5.2) on top of (a)'s
+     transport. `BlockBackingStore` is a read-only, content-addressed `base: Vec<u8>` disk image plus
+     a sector-granularity in-memory copy-on-write `overlay: HashMap<u64, [u8; 512]>` — every guest
+     write only ever inserts into `overlay`, `base` is never mutated, matching
+     `specs/baud-ubuntu.md` §4's "the base stays pristine." The free function `service_request`
+     parses one drained `virtio_blk_req` descriptor chain (`[header (16-byte, read-only: le32 type,
+     le32 reserved, le64 sector), 0+ data descriptors, status (1-byte, writable)]`, spec §5.2.6),
+     servicing `VIRTIO_BLK_T_IN`/`VIRTIO_BLK_T_OUT`/`VIRTIO_BLK_T_FLUSH`, reporting
+     `VIRTIO_BLK_S_IOERR` for an out-of-range or misaligned request and `VIRTIO_BLK_S_UNSUPP` for
+     anything else (e.g. `VIRTIO_BLK_T_GET_ID`) — a malformed *request* is never a Rust-level error,
+     only a malformed *chain* is (the pre-existing `VirtqueueError` convention, unchanged).
+     `virtio_queue.rs` gained the lower-level primitive this needed, `SplitVirtqueue::
+     process_available_chains`: the existing `process_available`'s `fill`-only closure can only ever
+     *write* into writable descriptors, with no way for a caller to *read* a read-only descriptor's
+     bytes — which virtio-blk's request header (and an OUT-request's write-data) requires.
+     `process_available` was refactored to be implemented on top of `process_available_chains`
+     (verified byte-identical: all of its existing tests still pass unchanged), so this was an
+     additive refactor, not a rewrite. `virtio_pci.rs`'s `VirtioPciTransport` gained a
+     `device_config: Vec<u8>` field and a `with_device_config` constructor (`new` now delegates to it
+     with an empty vec, preserving virtio-rng's existing behavior exactly), answered read-only
+     starting at the legacy offset `0x14` (`REG_DEVICE_CONFIG_START`) — previously open-bus there for
+     every device including rng, now open-bus only when `device_config` is empty. A new `new_blk
+     (capacity_sectors: u64)` constructor publishes `virtio_blk_config`'s `capacity` field (spec
+     §5.2.4) there, little-endian, the value every `virtio_blk_probe` reads to size the disk.
+     `pci.rs`'s `PciHostBridge` had its single `virtio: Option<PciVirtioFunction>` field renamed
+     `virtio_rng` and gained a second field, `virtio_blk: Option<PciVirtioFunction>`, attached via a
+     new `attach_virtio_blk(bar0_size)` at PCI slot 00:02.0 (rng stays at 00:01.0) — a new
+     `VIRTIO_BLK_CLASS_CODE = 0x0180_0000` (mass storage, subclass "other," the real PCI-defined
+     class, unlike rng's catch-all `VIRTIO_UNCLASSIFIED_CODE`). A new `virtio_blk_io_base()` accessor
+     mirrors the existing `virtio_io_base()`. `console.rs`'s `DeviceBus` gained
+     `virtio_pci_blk: Option<VirtioPciTransport>` (unconditional) plus `virtio_blk_queue`/
+     `virtio_blk_store` (both `#[cfg(target_os = "linux")]`, mirroring the rng fields' gating
+     exactly), a new `enable_virtio_pci_blk(base_image: Vec<u8>)` (deriving `capacity_sectors` from
+     `base_image.len()`), a `virtio_pci_blk()` accessor, and `service_virtio_blk(&mem)` mirroring
+     `service_virtio_rng`'s lazy-queue-build/rebuild-on-renegotiation/raise-ISR-on-drain shape
+     exactly, but calling `virtio_blk::service_request` per chain instead of a `fill` closure. `Bus
+     for DeviceBus`'s PIO dispatch and the BAR0-resync-after-PCI-config-write logic were extended for
+     the new `virtio_pci_blk` slot, same pattern as `virtio_pci_rng`. `linux/mod.rs`'s `Multiverse`
+     gained `enable_virtio_pci_blk`/`virtio_pci_blk()` wrappers, `service_virtio_blk_interrupt`/
+     `service_virtio_blk_interrupt_while_halted` (verbatim mirrors of the rng equivalents — same
+     `inject_timer_tick(0, vector)` "next reachable work-clock boundary" idiom, no new low-level
+     primitive needed; this is the concrete meaning of `specs/baud-ubuntu.md` §4's "block completion
+     is delivered at a fixed work-clock boundary via the interrupt-injection engine (blkreplay-style,
+     never on host-I/O return)" — the backing store is already-resident host memory, so servicing a
+     request is a synchronous memcpy with no real I/O latency to be deterministic about), and one new
+     run-loop combinator, `run_to_first_halt_with_virtio_pci_blk(vector, max_exits)`, mirroring
+     `run_to_first_halt_with_virtio_rng`. 21 new tests (9 in `virtio_blk.rs` covering plain-read,
+     write-updates-overlay-not-base, read-after-write-observes-overlay, out-of-range-reports-ioerr-
+     untouched-memory, unsupported-type-reports-unsupp, flush-is-a-no-op, a multi-descriptor request
+     spanning two data buffers, capacity-from-image-length, and a too-short chain being a harmless
+     no-op; 1 in `virtio_queue.rs`,
+     `process_available_chains_exposes_read_only_descriptor_bytes_unlike_process_available`; 3 in
+     `virtio_pci.rs` covering `new_blk`'s capacity placement, device-config being read-only, and an
+     empty-device-config transport staying open-bus past the fixed registers (rng unaffected); 3 in
+     `pci.rs` covering device-2-absent-until-`attach_virtio_blk`, the attached function's vendor/
+     device-ID and mass-storage class code, and rng/blk being attached independently of each other;
+     5 end-to-end in `console.rs` covering BAR0 sizing/assignment routing to `virtio_pci_blk`,
+     `service_virtio_blk` being a harmless no-op before enable/ready/notify, a real read request
+     returning sector data and raising the ISR, a real write request persisting into the overlay
+     with a later read observing it, and an out-of-range request reporting `IOERR` through the full
+     `DeviceBus` path). `cargo test -p baud-multiverse --lib` → 181 passed, 1 failed, 10 ignored (192
+     collected, up from the previously-recorded 161/171 (a) baseline by exactly the 21 new tests
+     above); the 1 failure was the already-documented `rdtsc_guest_reproduces_high_bits_across_boots`
+     load-flake, reconfirmed passing in isolation (`cargo test -p baud-multiverse --lib
+     rdtsc_guest_reproduces_high_bits_across_boots` → 1 passed) — the same documented case that still
+     counts as passing. `cargo clippy -p baud-multiverse --all-targets` → 26 warnings, matching the
+     exact pre-existing baseline — zero new warnings, none in `virtio_blk.rs` or any of the other
+     touched files. Explicitly not done in this sub-step, left as open follow-up: a combined
+     periodic-timer + virtio-rng + virtio-blk run-loop combinator (the existing
+     one-combinator-per-combination approach in `linux/mod.rs` does not scale to three devices at
+     once; a real Ubuntu boot needs periodic ticks, virtio-rng, and virtio-blk simultaneously — this
+     needs a design change, e.g. a generic "poll N devices" abstraction, not just another
+     hand-written combinator); also no real-KVM hand-assembled-guest-fixture test for virtio-blk
+     (unlike virtio-rng's `tests/fixtures/virtio-rng-guest/` real-hardware proof in `linux/mod.rs`)
+     — this sub-step's tests are all in-memory (`vm_memory::GuestMemoryMmap` anonymous mmap, no
+     `/dev/kvm`), the same scope boundary the (a) transport sub-step drew for itself.
+     (c)-(e) remain not started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb
      packaging problem (item 3 above), unrelated to this PCI work.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /

@@ -159,10 +159,43 @@ impl SplitVirtqueue {
     /// publishing one used-ring entry per chain recording the head descriptor index and the total
     /// bytes written across all its writable descriptors (spec 1.1 §2.6.8). Returns the number of
     /// chains processed (`0` if the driver has posted nothing new since the last call).
+    ///
+    /// A thin device-model built on [`Self::process_available_chains`] for devices (virtio-rng)
+    /// that only ever synthesize output and never need to read a read-only descriptor's own bytes.
     pub fn process_available<M: GuestMemoryBackend>(
         &mut self,
         mem: &M,
         mut fill: impl FnMut(&mut [u8]),
+    ) -> Result<u32, VirtqueueError> {
+        self.process_available_chains(mem, |mem, chain| {
+            let mut total_written: u32 = 0;
+            for descriptor in chain {
+                if !descriptor.write || descriptor.len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u8; descriptor.len as usize];
+                fill(&mut buf);
+                mem.write_slice(&buf, GuestAddress(descriptor.addr)).map_err(VirtqueueError::GuestMemory)?;
+                total_written += descriptor.len;
+            }
+            Ok(total_written)
+        })
+    }
+
+    /// The lower-level primitive [`Self::process_available`] is built on: drain every descriptor
+    /// chain the driver has posted since the last call, handing each *whole* chain (every
+    /// descriptor's `addr`/`len`/`write`, not just the writable ones) to `handle`, which reads/
+    /// writes guest memory itself via `mem` and returns the total bytes it wrote (for the used-ring
+    /// entry's length field). Exists because a request-shaped device — virtio-blk's `virtio_blk_req`
+    /// header + data + status chain — must *read* read-only descriptor bytes (the request header,
+    /// or write-data on a `VIRTIO_BLK_T_OUT`) to know what to do, something `process_available`'s
+    /// write-only `fill` closure has no way to express (`crate::virtio_blk`'s `service_request`).
+    /// Publishes exactly the same used-ring bookkeeping `process_available` does — the two methods
+    /// share every byte of that logic, only the per-chain body differs.
+    pub fn process_available_chains<M: GuestMemoryBackend>(
+        &mut self,
+        mem: &M,
+        mut handle: impl FnMut(&M, &[Descriptor]) -> Result<u32, VirtqueueError>,
     ) -> Result<u32, VirtqueueError> {
         if self.config.num == 0 {
             return Ok(0); // an unconfigured/zero-size queue has nothing to process, ever.
@@ -175,16 +208,7 @@ impl SplitVirtqueue {
             let head = self.read_u16(mem, ring_entry_addr)?;
             let chain = self.read_chain(mem, head)?;
 
-            let mut total_written: u32 = 0;
-            for descriptor in &chain {
-                if !descriptor.write || descriptor.len == 0 {
-                    continue;
-                }
-                let mut buf = vec![0u8; descriptor.len as usize];
-                fill(&mut buf);
-                mem.write_slice(&buf, GuestAddress(descriptor.addr)).map_err(VirtqueueError::GuestMemory)?;
-                total_written += descriptor.len;
-            }
+            let total_written = handle(mem, &chain)?;
 
             let used_slot = u32::from(self.next_used_idx) % self.config.num;
             let used_elem_addr = self.config.device + USED_HEADER_LEN + u64::from(used_slot) * USED_ELEM_SIZE;
@@ -400,6 +424,37 @@ mod tests {
         let mut vq = SplitVirtqueue::new(config(256));
         let err = vq.process_available(&mem, |_| {}).unwrap_err();
         assert!(matches!(err, VirtqueueError::IndirectUnsupported));
+    }
+
+    #[test]
+    fn process_available_chains_exposes_read_only_descriptor_bytes_unlike_process_available() {
+        let mem = test_guest_mem();
+        // desc[0]: read-only header --NEXT--> desc[1]: writable response.
+        write_descriptor(&mem, 0, BUF_BASE, 4, VIRTQ_DESC_F_NEXT, 1);
+        write_descriptor(&mem, 1, BUF_BASE + 0x100, 4, VIRTQ_DESC_F_WRITE, 0);
+        mem.write_slice(&[0xAA, 0xBB, 0xCC, 0xDD], GuestAddress(BUF_BASE)).unwrap();
+        set_avail(&mem, 1, &[0]);
+
+        let mut seen_header = None;
+        let mut vq = SplitVirtqueue::new(config(256));
+        let processed = vq
+            .process_available_chains(&mem, |mem, chain| {
+                assert_eq!(chain.len(), 2);
+                assert!(!chain[0].write, "the header descriptor is read-only");
+                let mut header = [0u8; 4];
+                mem.read_slice(&mut header, GuestAddress(chain[0].addr)).unwrap();
+                seen_header = Some(header);
+                mem.write_slice(&[1, 2, 3, 4], GuestAddress(chain[1].addr)).unwrap();
+                Ok(chain[1].len)
+            })
+            .unwrap();
+
+        assert_eq!(processed, 1);
+        assert_eq!(seen_header, Some([0xAA, 0xBB, 0xCC, 0xDD]), "handle can read the read-only descriptor");
+        let mut response = [0u8; 4];
+        mem.read_slice(&mut response, GuestAddress(BUF_BASE + 0x100)).unwrap();
+        assert_eq!(response, [1, 2, 3, 4]);
+        assert_eq!(used_elem(&mem, 0), (0, 4), "used length is whatever handle reports");
     }
 
     /// End-to-end: a real `VirtioMmioTransport` walked through the actual driver enumeration

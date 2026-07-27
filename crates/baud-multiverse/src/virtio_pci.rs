@@ -77,6 +77,13 @@ const REG_QUEUE_NOTIFY: u16 = 0x10; // 2 bytes, effectively write-only (reads ba
 const REG_DEVICE_STATUS: u16 = 0x12; // 1 byte, RW; 0 triggers reset
 const REG_ISR_STATUS: u16 = 0x13; // 1 byte, RO — reading clears it
 
+/// Where device-specific configuration space starts under the legacy interface (virtio spec,
+/// Legacy Interface register table) — right past [`REG_ISR_STATUS`]. Undefined for virtio-rng (no
+/// device-specific fields exist), but virtio-blk's `struct virtio_blk_config` (spec §5.2.4) starts
+/// here: this transport answers it from [`VirtioPciTransport::device_config`], read-only, byte for
+/// byte, rather than routing it through the fixed-register `match` below.
+const REG_DEVICE_CONFIG_START: u16 = 0x14;
+
 /// The I/O-port window size this transport claims — matches `crate::pci::VIRTIO_PCI_IO_BAR_LEN`,
 /// the BAR0 size `PciVirtioFunction` advertises during PCI BAR sizing, so a probed device's
 /// window and this transport's own dispatch range never disagree. Deliberately wider than the
@@ -125,6 +132,10 @@ pub struct VirtioPciTransport {
     isr_status: u8,
     notify_count: u64,
     last_notified_queue: Option<u16>,
+    /// Device-specific configuration space, answered read-only starting at
+    /// [`REG_DEVICE_CONFIG_START`] — empty for virtio-rng (which defines no config fields at all);
+    /// virtio-blk's `new_blk` populates this with `capacity`'s little-endian bytes (spec §5.2.4).
+    device_config: Vec<u8>,
 }
 
 impl VirtioPciTransport {
@@ -132,8 +143,25 @@ impl VirtioPciTransport {
     /// same value `crate::pci::PciVirtioFunction` derives `0x1000 + device_kind` from), offering
     /// `host_features` (a 32-bit bitmap only — the legacy interface predates the 64-bit feature
     /// negotiation `VIRTIO_F_VERSION_1` gates) across `queue_count` identically-sized queues, each
-    /// `queue_num_max` descriptors.
+    /// `queue_num_max` descriptors. No device-specific config space (see [`Self::with_device_config`]
+    /// for a device that has one).
     pub fn new(device_kind: u32, host_features: u32, queue_count: usize, queue_num_max: u16) -> Self {
+        Self::with_device_config(device_kind, host_features, queue_count, queue_num_max, Vec::new())
+    }
+
+    /// [`Self::new`] plus a device-specific configuration-space byte buffer, answered read-only at
+    /// [`REG_DEVICE_CONFIG_START`] onward (virtio spec, Legacy Interface: device config immediately
+    /// follows the fixed register block). `device_config.len()` must fit within
+    /// [`VIRTIO_PCI_IO_WINDOW_LEN`]`- `[`REG_DEVICE_CONFIG_START`] (the caller's responsibility, same
+    /// as every other size/window invariant this module leaves to its caller — `pci.rs`'s BAR0 size
+    /// and this transport's window length already must agree the same way).
+    pub fn with_device_config(
+        device_kind: u32,
+        host_features: u32,
+        queue_count: usize,
+        queue_num_max: u16,
+        device_config: Vec<u8>,
+    ) -> Self {
         VirtioPciTransport {
             io_base: None,
             device_kind,
@@ -146,6 +174,7 @@ impl VirtioPciTransport {
             isr_status: 0,
             notify_count: 0,
             last_notified_queue: None,
+            device_config,
         }
     }
 
@@ -155,6 +184,25 @@ impl VirtioPciTransport {
     /// two transports expose an identical device even though their wire formats differ.
     pub fn new_rng() -> Self {
         Self::new(crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG, 0, 1, 256)
+    }
+
+    /// A virtio-blk transport: one queue (the block device's sole `requestq`, spec §5.2.2), no
+    /// device-specific feature bits offered (a minimal implementation needs none — notably not
+    /// `VIRTIO_BLK_F_RO`: baud's guest-visible disk is writable, backed by an in-memory copy-on-
+    /// write overlay, `specs/baud-ubuntu.md` §4), a max queue size of 128 descriptors (deep queuing
+    /// is not needed — every request is serviced synchronously against already-resident host
+    /// memory, never real async I/O), and `capacity_sectors` (spec §5.2.4 `struct virtio_blk_config`
+    /// `capacity`, in 512-byte sectors — the only config field this legacy implementation exposes)
+    /// published at [`REG_DEVICE_CONFIG_START`], little-endian, matching what every
+    /// `virtio_blk_probe` reads to size the block device.
+    pub fn new_blk(capacity_sectors: u64) -> Self {
+        Self::with_device_config(
+            crate::virtio_mmio::VIRTIO_DEVICE_ID_BLK,
+            0,
+            1,
+            128,
+            capacity_sectors.to_le_bytes().to_vec(),
+        )
     }
 
     /// The virtio device-type id this transport was constructed for — exposed so a caller wiring
@@ -255,6 +303,16 @@ impl Bus for VirtioPciTransport {
             data.fill(OPEN_BUS_BYTE);
             return;
         };
+        if offset >= REG_DEVICE_CONFIG_START {
+            // Device-specific config space: a plain read-only byte window, not one of the fixed
+            // registers below (real hardware's own config-space fields vary in width per device —
+            // virtio-blk's `capacity` is a `le64`, read as two 32-bit halves by every real driver).
+            let start = (offset - REG_DEVICE_CONFIG_START) as usize;
+            for (i, b) in data.iter_mut().enumerate() {
+                *b = self.device_config.get(start + i).copied().unwrap_or(OPEN_BUS_BYTE);
+            }
+            return;
+        }
         let word: [u8; 4] = match offset {
             REG_HOST_FEATURES => self.host_features.to_le_bytes(),
             REG_GUEST_FEATURES => self.guest_features.to_le_bytes(),
@@ -481,6 +539,36 @@ mod tests {
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
         t.pio_read(BASE + VIRTIO_PCI_IO_WINDOW_LEN, &mut data);
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
+    }
+
+    #[test]
+    fn new_blk_publishes_capacity_at_the_device_config_offset() {
+        let mut t = VirtioPciTransport::new_blk(12345);
+        t.set_io_base(Some(BASE));
+        let mut low = [0u8; 4];
+        let mut high = [0u8; 4];
+        t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut low);
+        t.pio_read(BASE + REG_DEVICE_CONFIG_START + 4, &mut high);
+        let capacity = u64::from(u32::from_le_bytes(low)) | (u64::from(u32::from_le_bytes(high)) << 32);
+        assert_eq!(capacity, 12345, "capacity round-trips as two little-endian 32-bit halves");
+    }
+
+    #[test]
+    fn device_config_is_read_only() {
+        let mut t = VirtioPciTransport::new_blk(1);
+        t.set_io_base(Some(BASE));
+        t.pio_write(BASE + REG_DEVICE_CONFIG_START, &0xFFFF_FFFFu32.to_le_bytes());
+        let mut low = [0u8; 4];
+        t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut low);
+        assert_eq!(u32::from_le_bytes(low), 1, "a write to device config must be absorbed, not stored");
+    }
+
+    #[test]
+    fn a_transport_with_no_device_config_reads_open_bus_past_the_fixed_registers() {
+        let mut t = transport(); // new_rng: empty device_config
+        let mut data = [0u8; 4];
+        t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut data);
+        assert_eq!(data, [OPEN_BUS_BYTE; 4], "virtio-rng defines no device-specific config fields");
     }
 
     #[test]

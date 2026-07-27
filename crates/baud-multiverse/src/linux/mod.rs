@@ -1338,6 +1338,123 @@ impl Multiverse {
         self.bus.pic()
     }
 
+    /// Enable the virtio-blk device on this guest's device bus
+    /// ([`DeviceBus::enable_virtio_pci_blk`]) — call before any guest code that probes for it
+    /// runs. `base_image` becomes the disk's read-only, content-addressed base (todo.md §14 item
+    /// 5(b)); every guest write only ever lands in an in-memory copy-on-write overlay layered on
+    /// top (`crate::virtio_blk::BlockBackingStore`). Every existing `boot`/`restore` call leaves
+    /// this disabled by default, so nothing changes for a caller that never calls this.
+    pub fn enable_virtio_pci_blk(&mut self, base_image: Vec<u8>) {
+        self.bus.enable_virtio_pci_blk(base_image);
+    }
+
+    /// The virtio-pci block-device transport's own state, if
+    /// [`enable_virtio_pci_blk`](Self::enable_virtio_pci_blk) has been called — mirrors
+    /// [`virtio_rng`](Self::virtio_rng)'s read-access convention.
+    pub fn virtio_pci_blk(&self) -> Option<&crate::virtio_pci::VirtioPciTransport> {
+        self.bus.virtio_pci_blk()
+    }
+
+    /// [`service_virtio_rng_interrupt`](Self::service_virtio_rng_interrupt)'s counterpart for the
+    /// block device: drain any virtio-blk `QueueNotify`s since the last call
+    /// ([`DeviceBus::service_virtio_blk`], servicing each request against the backing store) and,
+    /// if at least one chain was actually drained, deliver a real interrupt at `vector` right now
+    /// via the same exact-boundary engine ([`inject_timer_tick`](Self::inject_timer_tick),
+    /// `period_rcb = 0`) — this is exactly what `specs/baud-ubuntu.md` §4's "block completion is
+    /// delivered at a fixed work-clock boundary via the interrupt-injection engine (blkreplay-
+    /// style), never on host-I/O return" means concretely: the backing store is already-resident
+    /// host memory, so servicing a request is a synchronous memcpy with no real I/O latency to be
+    /// deterministic *about* in the first place — completion timing is purely a function of when
+    /// the next reachable work-clock boundary falls, the same "no new low-level primitive needed"
+    /// reuse `service_virtio_rng_interrupt`'s own doc explains.
+    ///
+    /// Same "must not be called on an already-halted vCPU" caveat as
+    /// [`service_virtio_rng_interrupt`](Self::service_virtio_rng_interrupt) —
+    /// [`service_virtio_blk_interrupt_while_halted`](Self::service_virtio_blk_interrupt_while_halted)
+    /// is that counterpart.
+    pub fn service_virtio_blk_interrupt(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+        let processed = self
+            .bus
+            .service_virtio_blk(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        if processed > 0 {
+            self.inject_timer_tick(0, vector)?;
+        }
+        Ok(processed)
+    }
+
+    /// [`service_virtio_blk_interrupt`](Self::service_virtio_blk_interrupt)'s counterpart for a
+    /// vCPU already sitting at a halted exit — mirrors
+    /// [`service_virtio_rng_interrupt_while_halted`](Self::service_virtio_rng_interrupt_while_halted)
+    /// exactly (see that method's doc for why a direct `KVM_SET_VCPU_EVENTS` + one
+    /// [`step_exit`](Self::step_exit) is safe here: a real block-request completion wait
+    /// (`wait_for_completion_io`) reaches the idle loop's `safe_halt()`, `RFLAGS.IF=1` guaranteed,
+    /// the same as virtio-rng's `wait_for_completion_killable`).
+    fn service_virtio_blk_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+        let processed = self
+            .bus
+            .service_virtio_blk(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        if processed > 0 {
+            let mut events = self.guest.vcpu.get_vcpu_events().map_err(|e| DeterminismHole(e.to_string()))?;
+            events.interrupt.injected = 1;
+            events.interrupt.nr = vector;
+            events.interrupt.soft = 0;
+            self.guest
+                .vcpu
+                .set_vcpu_events(&events)
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            self.step_exit()?;
+        }
+        Ok(processed)
+    }
+
+    /// [`run_to_first_halt_with_virtio_rng`](Self::run_to_first_halt_with_virtio_rng)'s counterpart
+    /// for the block device: drive the guest to its first `Hlt`/`Shutdown`, polling
+    /// [`virtio_pci_blk`](Self::virtio_pci_blk)'s `notify_count()` after every exit and, whenever
+    /// it changes, drain + deliver a real interrupt via
+    /// [`service_virtio_blk_interrupt`](Self::service_virtio_blk_interrupt). Requires
+    /// [`enable_virtio_pci_blk`](Self::enable_virtio_pci_blk) to already have been called; with
+    /// virtio-blk never enabled this behaves exactly like `run_to_first_halt` (the `notify_count`
+    /// poll is always `None`, so nothing is ever serviced). `max_exits` bounds a guest that never
+    /// halts, same convention as every other run loop here.
+    ///
+    /// Combining this with the periodic-timer engine and/or virtio-rng (the way
+    /// `run_to_first_halt_with_periodic_timer_and_virtio_rng` combines those two) is not yet
+    /// implemented — a real Ubuntu boot will need periodic ticks, virtio-rng, *and* virtio-blk all
+    /// at once, which the current one-combinator-per-combination approach does not scale to
+    /// (todo.md §14 item 5(b)'s own note on this). Left as a follow-up once that combined boot is
+    /// actually being driven, rather than speculatively generalized here.
+    pub fn run_to_first_halt_with_virtio_pci_blk(
+        &mut self,
+        vector: u8,
+        max_exits: u32,
+    ) -> Result<HaltOutcome, DeterminismHole> {
+        let mut exits = 0u32;
+        let mut last_notify_count = self.virtio_pci_blk().map(|t| t.notify_count()).unwrap_or(0);
+        loop {
+            if exits >= max_exits {
+                return Err(DeterminismHole(format!(
+                    "run_to_first_halt_with_virtio_pci_blk: guest did not halt within {max_exits} exits"
+                )));
+            }
+            let outcome = self.step_exit()?;
+            exits += 1;
+            if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
+                return Ok(HaltOutcome {
+                    console_output: self.bus.console.output().to_vec(),
+                    ram_hash: self.ram_hash(),
+                    exit_pc: self.current_rip()?,
+                });
+            }
+            let notify_count = self.virtio_pci_blk().map(|t| t.notify_count()).unwrap_or(0);
+            if notify_count != last_notify_count {
+                last_notify_count = notify_count;
+                self.service_virtio_blk_interrupt(vector)?;
+            }
+        }
+    }
+
     /// Drain any virtio-rng `QueueNotify`s since the last call ([`DeviceBus::service_virtio_rng`],
     /// given this guest's real memory) and, if at least one chain was actually drained, deliver a
     /// real interrupt at `vector` to this guest's vCPU right now — H4's exact-boundary engine

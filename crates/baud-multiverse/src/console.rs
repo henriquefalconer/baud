@@ -277,6 +277,18 @@ pub struct DeviceBus {
     /// [`Self::seed_virtio_rng_entropy`].
     #[cfg(target_os = "linux")]
     virtio_rng_entropy: SplitMix64,
+    /// The virtio-pci legacy block-device transport register block (`crate::virtio_pci`), `None`
+    /// until [`Self::enable_virtio_pci_blk`] is called — the same opt-in convention as
+    /// [`Self::virtio_pci_rng`], attached at 00:02.0 instead of 00:01.0 (todo.md §14 item 5(b)).
+    virtio_pci_blk: Option<VirtioPciTransport>,
+    /// The live ring-walking cursor for `virtio_pci_blk`'s sole queue — mirrors
+    /// [`Self::virtio_rng_queue`]'s lazy-build/rebuild-on-renegotiation convention exactly.
+    #[cfg(target_os = "linux")]
+    virtio_blk_queue: Option<SplitVirtqueue>,
+    /// The block device's backing store (`crate::virtio_blk::BlockBackingStore`) — installed
+    /// alongside the transport by [`Self::enable_virtio_pci_blk`], `None` until then.
+    #[cfg(target_os = "linux")]
+    virtio_blk_store: Option<crate::virtio_blk::BlockBackingStore>,
     fallback: OpenBusFallback,
 }
 
@@ -392,6 +404,65 @@ impl DeviceBus {
         Ok(processed)
     }
 
+    /// Attaches a virtio-pci legacy block-device function at 00:02.0 (`self.pci.attach_virtio_
+    /// blk`) and stands up its I/O-port transport plus its backing store (`base_image`'s bytes,
+    /// read-only, plus a fresh empty copy-on-write overlay — `crate::virtio_blk::
+    /// BlockBackingStore`) — opt-in like [`Self::enable_virtio_pci_rng`], todo.md §14 item 5(b).
+    /// The transport's advertised `capacity` (spec §5.2.4) is derived from `base_image.len()`, so
+    /// the guest always sees a disk exactly as large as the image handed to it.
+    pub fn enable_virtio_pci_blk(&mut self, base_image: Vec<u8>) {
+        let capacity_sectors = base_image.len() as u64 / crate::virtio_blk::SECTOR_SIZE;
+        self.pci.attach_virtio_blk(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
+        self.virtio_pci_blk = Some(VirtioPciTransport::new_blk(capacity_sectors));
+        #[cfg(target_os = "linux")]
+        {
+            self.virtio_blk_queue = None;
+            self.virtio_blk_store = Some(crate::virtio_blk::BlockBackingStore::new(base_image));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = base_image; // the backing store is Linux-only, see the fields' own doc
+        }
+    }
+
+    /// The virtio-pci block-device transport, if [`Self::enable_virtio_pci_blk`] has been called —
+    /// mirrors [`Self::virtio_pci_rng`]'s read-access convention.
+    pub fn virtio_pci_blk(&self) -> Option<&VirtioPciTransport> {
+        self.virtio_pci_blk.as_ref()
+    }
+
+    /// [`Self::service_virtio_rng`]'s counterpart for the block device: drain every virtio_blk_req
+    /// chain posted to `virtio_pci_blk`'s sole queue since the last call, servicing each against
+    /// the backing store (`crate::virtio_blk::service_request`) — read/write sector data, an
+    /// out-of-range or misaligned request reported as `VIRTIO_BLK_S_IOERR`, an unrecognized
+    /// request type as `VIRTIO_BLK_S_UNSUPP`, never a Rust-level error (a malformed *chain* is
+    /// still `VirtqueueError`; a malformed *request* is the device's own concern, spec-defined and
+    /// always reported through the status byte instead). A no-op (`Ok(0)`) if virtio-blk was never
+    /// enabled or its queue is not yet negotiated/ready. Whenever at least one chain is drained,
+    /// also raises the transport's ISR "used buffer" bit, same convention as
+    /// [`Self::service_virtio_rng`].
+    #[cfg(target_os = "linux")]
+    pub fn service_virtio_blk<M: GuestMemoryBackend>(&mut self, mem: &M) -> Result<u32, VirtqueueError> {
+        let Some(transport) = self.virtio_pci_blk.as_ref() else { return Ok(0) };
+        let Some(config) = transport.queue_ring_config(0) else {
+            self.virtio_blk_queue = None; // not ready (e.g. just reset): drop any stale cursor
+            return Ok(0);
+        };
+        if self.virtio_blk_queue.as_ref().map(SplitVirtqueue::config) != Some(config) {
+            self.virtio_blk_queue = Some(SplitVirtqueue::new(config));
+        }
+        let queue = self.virtio_blk_queue.as_mut().expect("just set above");
+        let store = self.virtio_blk_store.as_mut().expect("installed alongside the transport by enable_virtio_pci_blk");
+        let processed = queue.process_available_chains(mem, |mem, chain| crate::virtio_blk::service_request(mem, chain, store))?;
+        if processed > 0 {
+            self.virtio_pci_blk
+                .as_mut()
+                .expect("checked Some at the top of this function")
+                .raise_used_buffer_notification();
+        }
+        Ok(processed)
+    }
+
     /// A [`DeviceBus`] reconstructed from a `Universe` snapshot's device row
     /// (`baud-snapshot::universe::DeviceState`, `RestoreStep::RestoreDevice` — deliberately left to
     /// the caller by `baud-snapshot::linux::restore`, since that crate does not know this device
@@ -414,6 +485,11 @@ impl DeviceBus {
             virtio_rng_queue: None,
             #[cfg(target_os = "linux")]
             virtio_rng_entropy: SplitMix64::new(0),
+            virtio_pci_blk: None,
+            #[cfg(target_os = "linux")]
+            virtio_blk_queue: None,
+            #[cfg(target_os = "linux")]
+            virtio_blk_store: None,
             fallback: OpenBusFallback,
         }
     }
@@ -433,6 +509,8 @@ impl Bus for DeviceBus {
             self.pci.pio_read(port, data);
         } else if self.virtio_pci_rng.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
             self.virtio_pci_rng.as_mut().expect("checked Some above").pio_read(port, data);
+        } else if self.virtio_pci_blk.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
+            self.virtio_pci_blk.as_mut().expect("checked Some above").pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -449,14 +527,19 @@ impl Bus for DeviceBus {
             self.pic.pio_write(port, data);
         } else if PciHostBridge::in_range(port) {
             self.pci.pio_write(port, data);
-            // A CONFIG_DATA write may have just moved (or sized-probe'd) the virtio function's
-            // BAR0 — keep the transport's own idea of its I/O window synchronized, same as real
+            // A CONFIG_DATA write may have just moved (or sized-probe'd) either virtio function's
+            // BAR0 — keep each transport's own idea of its I/O window synchronized, same as real
             // hardware re-decoding whichever address range its BAR currently names.
             if let Some(transport) = self.virtio_pci_rng.as_mut() {
                 transport.set_io_base(self.pci.virtio_io_base());
             }
+            if let Some(transport) = self.virtio_pci_blk.as_mut() {
+                transport.set_io_base(self.pci.virtio_blk_io_base());
+            }
         } else if self.virtio_pci_rng.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
             self.virtio_pci_rng.as_mut().expect("checked Some above").pio_write(port, data);
+        } else if self.virtio_pci_blk.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
+            self.virtio_pci_blk.as_mut().expect("checked Some above").pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }
@@ -639,6 +722,44 @@ mod tests {
         // Just past the BAR's advertised window still falls through to open bus.
         bus.pio_read(ASSIGNED_BASE + VIRTIO_PCI_IO_WINDOW_LEN, &mut data);
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
+    }
+
+    /// The virtio-blk counterpart of `device_bus_routes_virtio_pci_bar0_once_the_guest_assigns_it`
+    /// — same real BAR0 sizing/assignment protocol, this time against the block function at
+    /// 00:02.0, and confirming rng's own BAR0 (00:01.0) is unaffected by blk's separate assignment.
+    #[test]
+    fn device_bus_routes_virtio_pci_blk_bar0_once_the_guest_assigns_it() {
+        use crate::pci::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
+
+        const ASSIGNED_BASE: u16 = 0xD000;
+        // CONFIG_ADDRESS for bus 0 / device 2 / function 0 / register 0x10 (BAR0), enable bit set.
+        let select_bar0 = (1u32 << 31) | (2u32 << 11) | 0x10;
+
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_blk(vec![0u8; 4096]);
+
+        let mut probe = [0u8; 4];
+        bus.pio_read(ASSIGNED_BASE, &mut probe);
+        assert_eq!(probe, [OPEN_BUS_BYTE; 4], "unassigned BAR0: nothing should decode yet");
+
+        bus.pio_write(PCI_CONFIG_ADDRESS, &select_bar0.to_le_bytes());
+        bus.pio_write(PCI_CONFIG_DATA, &0xFFFF_FFFFu32.to_le_bytes());
+        let mut size_probe = [0u8; 4];
+        bus.pio_read(PCI_CONFIG_DATA, &mut size_probe);
+        assert_ne!(u32::from_le_bytes(size_probe), 0, "a real device must answer the sizing probe");
+
+        bus.pio_write(PCI_CONFIG_DATA, &(ASSIGNED_BASE as u32).to_le_bytes());
+
+        assert_eq!(
+            bus.virtio_pci_blk().and_then(|t| t.io_base()),
+            Some(ASSIGNED_BASE),
+            "the transport's own io_base must match what the guest assigned"
+        );
+        // The 4096-byte image is 8 sectors; capacity is published at device-config offset 0x14
+        // (the legacy interface's fixed register block ends there, virtio spec's own layout).
+        let mut low = [0u8; 4];
+        bus.pio_read(ASSIGNED_BASE + 0x14, &mut low);
+        assert_eq!(u32::from_le_bytes(low), 8, "capacity_sectors for a 4096-byte image");
     }
 
     #[test]
@@ -915,5 +1036,199 @@ mod virtio_rng_service_tests {
         let mut written = [0u8; 8];
         mem.read_slice(&mut written, GuestAddress(NEW_BUF_BASE)).unwrap();
         assert_ne!(written, [0u8; 8]);
+    }
+}
+
+/// `DeviceBus::service_virtio_blk` — the same real driver enumeration/negotiation/request cycle
+/// `virtio_rng_service_tests` proves for virtio-rng, this time through the virtio-pci legacy
+/// transport (todo.md §14 item 5(b)): attach + assign BAR0 via the real PCI config-space sizing
+/// protocol, negotiate the legacy register set, post a real `virtio_blk_req` chain, notify, then
+/// confirm `service_virtio_blk` actually performs the sector I/O and raises the ISR bit.
+#[cfg(all(test, target_os = "linux"))]
+mod virtio_blk_service_tests {
+    use super::*;
+    use crate::pci::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
+    use crate::virtio_blk::SECTOR_SIZE;
+    use crate::virtio_pci::ring_layout_from_pfn;
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+
+    type GuestMemory = GuestMemoryMmap<()>;
+
+    const IO_BASE: u16 = 0xC000;
+    const PFN: u32 = 0x100;
+    const QUEUE_NUM_MAX: u32 = 128;
+
+    // Legacy I/O-window register offsets (mirrors virtio_pci.rs's own private constants — this
+    // module drives the transport purely through DeviceBus's real PIO surface, the same
+    // arm's-length convention virtio_rng_service_tests uses for the MMIO transport).
+    const REG_QUEUE_ADDRESS: u16 = 0x08;
+    const REG_QUEUE_SELECT: u16 = 0x0E;
+    const REG_QUEUE_NOTIFY: u16 = 0x10;
+    const REG_DEVICE_STATUS: u16 = 0x12;
+    const REG_ISR_STATUS: u16 = 0x13;
+
+    fn test_guest_mem() -> GuestMemory {
+        GuestMemory::from_ranges(&[(GuestAddress(0), crate::layout::GUEST_RAM_SIZE)])
+            .expect("anonymous-mmap guest memory for a unit test")
+    }
+
+    fn base_image(sectors: u64) -> Vec<u8> {
+        let mut image = vec![0u8; (sectors * SECTOR_SIZE) as usize];
+        for (i, byte) in image.iter_mut().enumerate() {
+            *byte = (i % 256) as u8;
+        }
+        image
+    }
+
+    /// Assigns device 2's (virtio-blk) BAR0 to `IO_BASE` via the real PCI config-space sizing
+    /// protocol — the same sequence `device_bus_routes_virtio_pci_blk_bar0_once_the_guest_assigns_
+    /// it` drives, factored out since every test below needs it before it can touch the transport.
+    fn assign_bar0(bus: &mut DeviceBus) {
+        let select_bar0 = (1u32 << 31) | (2u32 << 11) | 0x10;
+        bus.pio_write(PCI_CONFIG_ADDRESS, &select_bar0.to_le_bytes());
+        bus.pio_write(PCI_CONFIG_DATA, &0xFFFF_FFFFu32.to_le_bytes());
+        bus.pio_write(PCI_CONFIG_DATA, &(IO_BASE as u32).to_le_bytes());
+    }
+
+    /// Drives the real legacy driver-enumeration sequence (ACKNOWLEDGE -> DRIVER -> FEATURES_OK ->
+    /// queue setup -> DRIVER_OK), then posts one `[header, data, status]` chain and notifies — the
+    /// full sequence a real `virtio_blk_probe` + one block-layer request would perform.
+    /// `call_number` (0-based) is this test's own bookkeeping for which posting this is: the ring's
+    /// `avail.idx`/`used.idx` are free-running counters the driver/device never reset between
+    /// requests on a live queue (only a full device reset does, spec §2.6.6/§2.6.8), so a second
+    /// request in the same test must advance `avail.idx` to `call_number + 1` and land in ring
+    /// slot `call_number`, not overwrite slot 0 again.
+    fn negotiate_and_post_request(
+        bus: &mut DeviceBus,
+        mem: &GuestMemory,
+        call_number: u16,
+        request_type: u32,
+        sector: u64,
+        data_len: u32,
+        data_write: bool,
+    ) {
+        bus.pio_write(IO_BASE + REG_DEVICE_STATUS, &[1]); // ACKNOWLEDGE
+        bus.pio_write(IO_BASE + REG_DEVICE_STATUS, &[1 | 2]); // + DRIVER
+        bus.pio_write(IO_BASE + REG_DEVICE_STATUS, &[1 | 2 | 8]); // + FEATURES_OK
+        bus.pio_write(IO_BASE + REG_QUEUE_SELECT, &0u16.to_le_bytes());
+        bus.pio_write(IO_BASE + REG_QUEUE_ADDRESS, &PFN.to_le_bytes());
+        bus.pio_write(IO_BASE + REG_DEVICE_STATUS, &[1 | 2 | 8 | 4]); // + DRIVER_OK
+
+        let layout = ring_layout_from_pfn(PFN, QUEUE_NUM_MAX);
+        const HEADER_BASE: u64 = 0x200_000;
+        const DATA_BASE: u64 = 0x201_000;
+        const STATUS_BASE: u64 = 0x202_000;
+
+        let mut header = [0u8; 16];
+        header[0..4].copy_from_slice(&request_type.to_le_bytes());
+        header[8..16].copy_from_slice(&sector.to_le_bytes());
+        mem.write_slice(&header, GuestAddress(HEADER_BASE)).unwrap();
+
+        let write_descriptor = |index: u16, addr: u64, len: u32, write: bool, next_flag: bool, next: u16| {
+            let mut raw = [0u8; 16];
+            raw[0..8].copy_from_slice(&addr.to_le_bytes());
+            raw[8..12].copy_from_slice(&len.to_le_bytes());
+            let mut flags = 0u16;
+            if write {
+                flags |= 2; // VIRTQ_DESC_F_WRITE
+            }
+            if next_flag {
+                flags |= 1; // VIRTQ_DESC_F_NEXT
+            }
+            raw[12..14].copy_from_slice(&flags.to_le_bytes());
+            raw[14..16].copy_from_slice(&next.to_le_bytes());
+            mem.write_slice(&raw, GuestAddress(layout.desc + u64::from(index) * 16)).unwrap();
+        };
+        write_descriptor(0, HEADER_BASE, 16, false, true, 1);
+        write_descriptor(1, DATA_BASE, data_len, data_write, true, 2);
+        write_descriptor(2, STATUS_BASE, 1, true, false, 0);
+
+        let ring_slot = call_number % QUEUE_NUM_MAX as u16;
+        mem.write_slice(&(call_number + 1).to_le_bytes(), GuestAddress(layout.driver + 2)).unwrap(); // avail.idx
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(layout.driver + 4 + u64::from(ring_slot) * 2)).unwrap(); // ring[slot] = head 0
+
+        bus.pio_write(IO_BASE + REG_QUEUE_NOTIFY, &0u16.to_le_bytes());
+    }
+
+    #[test]
+    fn service_virtio_blk_is_a_harmless_no_op_before_enable_ready_or_notify() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 0, "virtio-blk was never enabled");
+
+        bus.enable_virtio_pci_blk(base_image(16));
+        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 0, "queue never negotiated/ready");
+    }
+
+    #[test]
+    fn a_read_request_through_device_bus_returns_real_sector_data_and_raises_the_isr() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_blk(base_image(16));
+        assign_bar0(&mut bus);
+
+        negotiate_and_post_request(&mut bus, &mem, 0, 0 /* VIRTIO_BLK_T_IN */, 2, SECTOR_SIZE as u32, true);
+
+        let mut isr = [0u8; 1];
+        bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
+        assert_eq!(isr, [0], "nothing raised before servicing");
+
+        let processed = bus.service_virtio_blk(&mem).unwrap();
+        assert_eq!(processed, 1);
+
+        let mut data = vec![0u8; SECTOR_SIZE as usize];
+        mem.read_slice(&mut data, GuestAddress(0x201_000)).unwrap();
+        let expected: Vec<u8> = (2 * SECTOR_SIZE..3 * SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
+        assert_eq!(data, expected, "sector 2's real content from the base image");
+
+        let mut status = [0u8; 1];
+        mem.read_slice(&mut status, GuestAddress(0x202_000)).unwrap();
+        assert_eq!(status, [0], "VIRTIO_BLK_S_OK");
+
+        bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
+        assert_ne!(isr, [0], "draining a chain raises the ISR queue bit");
+        bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
+        assert_eq!(isr, [0], "reading the ISR register clears it");
+
+        // A second call with no further driver activity drains nothing new.
+        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_write_request_through_device_bus_persists_into_the_overlay_and_a_later_read_observes_it() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_blk(base_image(16));
+        assign_bar0(&mut bus);
+
+        mem.write_slice(&[0x77; SECTOR_SIZE as usize], GuestAddress(0x201_000)).unwrap();
+        negotiate_and_post_request(&mut bus, &mem, 0, 1 /* VIRTIO_BLK_T_OUT */, 4, SECTOR_SIZE as u32, false);
+        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 1);
+        let mut status = [0u8; 1];
+        mem.read_slice(&mut status, GuestAddress(0x202_000)).unwrap();
+        assert_eq!(status, [0], "VIRTIO_BLK_S_OK");
+
+        // Overwrite the guest buffer, then issue a read of the same sector: it must observe the
+        // just-written overlay content, not the pristine base image.
+        mem.write_slice(&[0u8; SECTOR_SIZE as usize], GuestAddress(0x201_000)).unwrap();
+        negotiate_and_post_request(&mut bus, &mem, 1, 0 /* VIRTIO_BLK_T_IN */, 4, SECTOR_SIZE as u32, true);
+        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 1);
+        let mut data = vec![0u8; SECTOR_SIZE as usize];
+        mem.read_slice(&mut data, GuestAddress(0x201_000)).unwrap();
+        assert_eq!(data, vec![0x77; SECTOR_SIZE as usize], "the read observes the overlay written above");
+    }
+
+    #[test]
+    fn an_out_of_range_request_reports_ioerr_through_device_bus() {
+        let mem = test_guest_mem();
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_blk(base_image(4)); // only 4 sectors exist
+        assign_bar0(&mut bus);
+
+        negotiate_and_post_request(&mut bus, &mem, 0, 0, 100, SECTOR_SIZE as u32, true);
+        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 1);
+        let mut status = [0u8; 1];
+        mem.read_slice(&mut status, GuestAddress(0x202_000)).unwrap();
+        assert_eq!(status, [1], "VIRTIO_BLK_S_IOERR");
     }
 }

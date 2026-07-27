@@ -62,6 +62,13 @@ pub const VIRTIO_VENDOR_ID_BAUD: u32 = 0x0000_ba0d;
 /// exposes at offset `0x008` so an unmodified guest's `virtio_rng` driver binds to it.
 pub const VIRTIO_DEVICE_ID_RNG: u32 = 4;
 
+/// The block-device id (virtio spec 1.1 §5, device id table) — `crate::virtio_pci::VirtioPciTransport
+/// ::new_blk`/`crate::pci::PciHostBridge::attach_virtio_blk` use this so an unmodified guest's
+/// `virtio_blk` driver binds to it (todo.md §14 item 5(b)). Defined here, not in `virtio_pci.rs`,
+/// for the same reason `VIRTIO_DEVICE_ID_RNG` lives here: it is a virtio-wide identity constant,
+/// not specific to either transport.
+pub const VIRTIO_DEVICE_ID_BLK: u32 = 2;
+
 /// `VIRTIO_F_VERSION_1` (spec 1.1 §6): bit 32 of the full 64-bit feature bitmap, offered by every
 /// non-legacy virtio-mmio device. A real virtio-rng device offers no device-specific feature bits
 /// (the entropy device has none defined), so this is the whole feature set `new_rng` offers.

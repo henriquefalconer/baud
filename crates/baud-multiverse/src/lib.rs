@@ -46,6 +46,11 @@ pub mod virtio_pci;
 #[cfg(target_os = "linux")]
 pub mod virtio_queue;
 
+// The virtio-blk device model (todo.md §14 item 5(b)) — built on `virtio_queue`'s
+// `process_available_chains`, so it is gated identically.
+#[cfg(target_os = "linux")]
+pub mod virtio_blk;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
