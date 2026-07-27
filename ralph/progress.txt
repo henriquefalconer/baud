@@ -6905,3 +6905,46 @@ Gate green: 23 passed, 0 failed, 1 skipped (pkg-build-cli fingerprint-skip, unre
   - Full bash drive/gate.sh: 23 passed, 0 failed, 1 skipped (pkg-build-cli fingerprint-skip, unrelated), 2m43s
   - Not hardware-confirmed against a real driver (no virtio-rng-over-PCI driver test exists yet, only virtio-mmio's rng path is real-driver-tested) -- fix is reasoned from the PCI spec / Linux header value alone, documented as such in todo.md
 ---
+
+Post-push verification: origin/main now at cb6d71c, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green before this push. Checking todo.md for remaining pending items to pick NEXT vs COMPLETE...
+
+todo.md still has pending items: H9 (d)/(e) actual Ubuntu 18.04.1 cloud image + drive/h9.sh cross-VM fingerprint (not started); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on; RunKvmBranchBody/RunKvmResumeBody still lack an acpi field -- emitting NEXT.
+
+## 2026-07-27T13:10:40 UTC (7min) - Session usage — build-7 [sonnet]
+- cost $1.5125 (from claude -p)
+- context 95,798 tok peak of 1M (10%) across 38 inference calls, monotonic
+- models sonnet-5 $1.5093 (in 76 / out 12,438 / cache-read 2,966,222) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T104433Z/008-build-7.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 8
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md §14 build-status tail and ralph/progress.txt history for the current frontier.
+
+Chose the RunKvmBranchBody/RunKvmResumeBody ACPI gap: RunKvmBody already has a working acpi:bool field wired end-to-end (write_acpi_tables called, persisted, replayed), but /run/kvm/branch and /run/kvm/resume both hardcode acpi: false into KvmBootParams with an explicit comment marking it as not-yet-done. This is the smallest well-scoped remaining item versus H9 Ubuntu (multi-day) and H8 Mario (blocked on FCEUX packaging).
+
+Threaded acpi:bool through RunKvmBranchBody -> boot_and_snapshot (calls write_acpi_tables before the branch-point snapshot, so every forked branch inherits the tables via COW) -> boot_snapshot_and_branch/boot_snapshot_and_generate; fixed the two acpi:false placeholders in branch()'s persisted KvmBootParams to use the real body.acpi so a real-replay reboot of a persisted branch's frames matches how it actually booted. Left RunKvmResumeBody without an acpi field on purpose (documented why: its persisted rows are always restore-based, and stream::render's restore path never reads kvm_run_meta.acpi at all -- the field would be dead code). Building now.
+
+Build clean. Running the new run_kvm_branch_boots_a_real_linux_guest_with_acpi_enabled test plus the full run_kvm test module on real /dev/kvm now...
+
+26 tests passed (up from 25 by exactly the new test), real /dev/kvm. Running full cargo build/clippy/test --workspace now before the pre-push gate...
+
+cargo clippy --workspace --all-targets clean of new warnings (grep for run_kvm.rs finds none; remaining warnings are the documented pre-existing baseline in other crates). Running cargo test --workspace now...
+
+cargo test --workspace: all green, no FAILED entries. todo.md updated recording this fix (item 7, plus a pointer from item 5's earlier note). Running the full pre-push gate (bash drive/gate.sh) now -- this can take several minutes.
+
+Gate result: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation by phase 6 in 3s -- the documented load-flake), 1 skipped (pkg-build-cli, no input changed since last pass), 2m44s. Counts as a passing gate per todo.md CLAUDE.md policy. Committing now.
+
+## 2026-07-27T13:24:45 UTC - Changes committed.
+- Closed todo.md §14's "RunKvmBranchBody/RunKvmResumeBody still lack an acpi field" gap
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, todo.md
+- **Brief description of changes:**
+  - RunKvmBranchBody gained an acpi: bool field (#[serde(default)], false preserves prior behavior); threaded through a new acpi: bool parameter on boot_and_snapshot (calls write_acpi_tables() on the booted guest before the branch point is snapshotted, so every branch forked from that point inherits the tables via Multiverse::branch's copy-on-write RAM) and on boot_snapshot_and_branch/boot_snapshot_and_generate
+  - Fixed a real latent bug this surfaced: branch()'s two frame_run_ids/frame_run_id_prefix persistence call sites hardcoded acpi: false into KvmBootParams — harmless while the field did not exist, but would have silently replayed a persisted ACPI-enabled branch's frames without ACPI once the field existed (stream::render's real-replay path reads that column back). Both sites now pass the request's real body.acpi
+  - RunKvmResumeBody deliberately did NOT get an acpi field: confirmed by reading stream.rs that its persisted rows are always restore-based (store_run_id/snapshot_node_id set) and routed to render_frames_from_real_restore, which never reads kvm_run_meta.acpi at all — an acpi field there would be dead code, not a real gap. Its existing acpi: false placeholders are now commented explaining why
+  - New real-hardware test run_kvm_branch_boots_a_real_linux_guest_with_acpi_enabled (mirrors run_kvm_boots_a_real_linux_guest_with_acpi_enabled but through boot_snapshot_and_branch): forks a single empty-suffix branch from an ACPI-enabled branch point twice, asserts both reach /init's marker, halt (no MARK_BRANCH), and produce byte-identical console output
+  - cargo test -p baud-server --bin baud-server run_kvm:: -> 26 passed, 0 failed (up from 25 by exactly this test), real /dev/kvm; cargo build/clippy --workspace --all-targets/test --workspace all clean (0 new warnings, confirmed by grep that no clippy warning touches run_kvm.rs)
+  - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation), 1 skipped (pkg-build-cli, no input changed), 2m44s -- counts as a passing gate per CLAUDE.md/todo.md §15
+  - Still open: H9 (d)/(e) actual Ubuntu 18.04.1 cloud image + drive/h9.sh cross-VM fingerprint (not started); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on
+---

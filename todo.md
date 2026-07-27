@@ -2480,9 +2480,11 @@ snapshot, not a duplicate of it.
      proves the route-level wiring boots cleanly and reproducibly with ACPI tables written, 2/2
      identical console output across two boots; `cargo test -p baud-server --bin baud-server
      run_kvm::` → 25 passed, 0 failed (up from 24 by exactly this test). Deliberately not extended to
-     `RunKvmBranchBody`/`RunKvmResumeBody` — the branch/resume/generate routes still can't turn ACPI
-     on at all, still pass `acpi: false` literally into `KvmBootParams` — scoped to the plain path
-     per this item's own wording. **Still open**: (d) (the actual Ubuntu 18.04.1 cloud image) and (e)
+     `RunKvmBranchBody`/`RunKvmResumeBody` at the time — the branch/resume/generate routes could not
+     turn ACPI on at all, still passed `acpi: false` literally into `KvmBootParams` — scoped to the
+     plain path per this item's own wording. **`RunKvmBranchBody`'s half of this gap is now closed
+     (item 7 below); `RunKvmResumeBody`'s is closed by a documented non-fix, see that same item.**
+     **Still open**: (d) (the actual Ubuntu 18.04.1 cloud image) and (e)
      (`drive/h9.sh` + the cross-VM fingerprint) remain not started. H8 Mario remains separately
      blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem (item 3 above), unrelated to this PCI/ACPI
      work.
@@ -2560,6 +2562,38 @@ snapshot, not a duplicate of it.
      -p baud-multiverse --lib` → 211 passed, 0 failed, 10 ignored (up from 210 by exactly this test);
      `cargo clippy -p baud-multiverse --all-targets` → 26 warnings, the exact pre-existing baseline,
      zero new.
+  7. **`RunKvmBranchBody`'s "still lack an acpi field" gap (flagged in item 5(c) above) is now
+     closed; `RunKvmResumeBody`'s counterpart is closed by a documented non-fix.** `RunKvmBranchBody`
+     gained an `acpi: bool` field (`#[serde(default)]`, `false` preserves prior behavior,
+     `crates/baud-server/src/routes/run_kvm.rs`), threaded through a new `acpi: bool` parameter on
+     `boot_and_snapshot` — when `true`, `write_acpi_tables()` runs on the booted guest *before* the
+     branch point is snapshotted, so the tables land in the captured RAM and every branch forked
+     from that point (`Multiverse::branch`'s copy-on-write semantics) inherits them for free, with
+     no separate per-branch wiring needed. `boot_snapshot_and_branch`/`boot_snapshot_and_generate`
+     both gained the same trailing `acpi: bool` parameter, forwarded from `branch()`'s handler (both
+     the fixed-tape and `generate` modes). Also fixed a real bug this surfaced: `branch()`'s two
+     `frame_run_ids`/`frame_run_id_prefix` persistence call sites built a `KvmBootParams` with
+     `acpi: false` hardcoded — harmless while the field didn't exist, but a genuine latent bug once
+     it does, since `stream::render`'s real-replay path (`render_frames_from_real_replay`, used for
+     every reboot-based `kvm_run_meta` row, which is what a persisted branch's frames are — see
+     `RunKvmBranchBody::frame_run_ids`'s own doc) reads that column back to decide whether to call
+     `write_acpi_tables` on replay; both sites now pass the request's real `body.acpi`, so a
+     persisted ACPI-enabled branch's frames replay with ACPI enabled too, not silently without it.
+     `RunKvmResumeBody` deliberately did **not** get the same field: its persisted rows are always
+     restore-based (`store_run_id`/`snapshot_node_id` set), which `stream::render` routes to
+     `render_frames_from_real_restore` — a path that reconstructs the `Universe` from
+     `SnapshotStore` and never reads `kvm_run_meta.acpi` at all (confirmed by reading `stream.rs`
+     before adding anything) — so an `acpi` field on `RunKvmResumeBody` would be genuinely dead code,
+     not a real gap; its own two `acpi: false` placeholders are now commented explaining why, instead
+     of describing a field that was never coming. New real-hardware test
+     `run_kvm_branch_boots_a_real_linux_guest_with_acpi_enabled` (`crates/baud-server/src/routes/
+     run_kvm.rs`, mirrors `run_kvm_boots_a_real_linux_guest_with_acpi_enabled`'s own pattern but
+     through `boot_snapshot_and_branch`) forks a single empty-suffix branch from an ACPI-enabled
+     branch point twice and asserts both reach `/init`'s marker and halt (no `MARK_BRANCH`) with
+     byte-identical console output. Verified: `cargo test -p baud-server --bin baud-server run_kvm::`
+     → 26 passed, 0 failed (up from 25 by exactly this test), real `/dev/kvm`; `cargo build`/`clippy
+     --workspace --all-targets`/`test --workspace` all clean (0 new warnings — `grep` confirms none
+     of clippy's remaining pre-existing warnings touch `run_kvm.rs`).
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

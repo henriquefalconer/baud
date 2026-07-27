@@ -549,6 +549,15 @@ pub struct RunKvmBranchBody {
     /// `None` (the default) preserves this route's exact prior behavior.
     #[serde(default)]
     pub virtio_rng: Option<VirtioRngSpec>,
+    /// Same field as [`RunKvmBody::acpi`], applied to the boot that establishes this call's shared
+    /// branch point (`boot_and_snapshot`, before the snapshot is taken) — every forked branch then
+    /// inherits the written tables through the branch point's copy-on-write RAM, exactly like it
+    /// inherits everything else `boot_and_snapshot` set up. Closes todo.md §14's "RunKvmBranchBody
+    /// ... still lack an acpi field" gap. `false` (the default) preserves this route's exact prior
+    /// behavior — no ACPI tables, exactly like every existing `boot_and_snapshot` call site before
+    /// this field existed.
+    #[serde(default)]
+    pub acpi: bool,
     /// One optional run id per entry in `branch_tapes_hex` (same length, or omitted entirely) —
     /// when `Some`, that branch's replay inputs and every `Msg::Frame` record it produced are
     /// persisted into `kvm_run_meta`/`frame_records` under this run id via the same
@@ -652,6 +661,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
     };
     let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
     let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
+    let acpi = body.acpi;
 
     if let Some(spec) = body.generate {
         if spec.count == 0 {
@@ -677,6 +687,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                 periodic_timer,
                 virtio_rng,
                 true, // HTTP response always includes ram_hash
+                acpi,
             )
         })
         .await
@@ -696,7 +707,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                             initramfs_path: body.initramfs_path.as_deref(),
                             periodic_timer,
                             virtio_rng,
-                            acpi: false, // RunKvmBranchBody has no `acpi` field yet — see RunKvmBody::acpi's doc
+                            acpi,
                             store_run_id: None,
                             snapshot_node_id: None,
                         };
@@ -776,6 +787,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
             periodic_timer,
             virtio_rng,
             true, // HTTP response always includes ram_hash
+            acpi,
         )
     })
     .await
@@ -794,7 +806,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         initramfs_path: body.initramfs_path.as_deref(),
                         periodic_timer,
                         virtio_rng,
-                        acpi: false, // RunKvmBranchBody has no `acpi` field yet — see RunKvmBody::acpi's doc
+                        acpi,
                         store_run_id: None,
                         snapshot_node_id: None,
                     };
@@ -832,11 +844,16 @@ fn branch_outcome_to_json((console_output, ram_hash, mark_branch_step, node_id):
 
 /// Boot + snapshot the shared branch point, shared by every `/run/kvm/branch` flavor (fixed-tape
 /// and driver-generated alike). `initramfs` mirrors `RunKvmBody::initramfs_path` — a real Linux
-/// kernel guest needs it to reach `/init` before there is anything meaningful to snapshot.
+/// kernel guest needs it to reach `/init` before there is anything meaningful to snapshot. `acpi`
+/// mirrors `RunKvmBody::acpi`: when `true`, `write_acpi_tables` runs on the booted guest *before*
+/// the snapshot is taken, so the tables land in the branch point's captured RAM and every branch
+/// forked from it (`Multiverse::branch`'s copy-on-write semantics) inherits them for free, exactly
+/// like it inherits the initramfs-loaded rootfs or any other pre-snapshot guest-RAM state.
 fn boot_and_snapshot(
     kernel_path: &Path,
     cmdline: &str,
     initramfs: Option<&[u8]>,
+    acpi: bool,
 ) -> Result<baud_snapshot::Universe, String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut boot = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
@@ -850,6 +867,9 @@ fn boot_and_snapshot(
         rdseed_sites,
     )
     .map_err(|e| format!("boot error: {e}"))?;
+    if acpi {
+        boot.write_acpi_tables().map_err(|e| format!("write_acpi_tables error: {e}"))?;
+    }
     let mut page_store = baud_snapshot::PageStore::new();
     boot.snapshot(&mut page_store).map_err(|e| format!("snapshot error: {e}"))
 }
@@ -990,8 +1010,9 @@ fn boot_snapshot_and_branch(
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
     compute_ram_hash: bool,
+    acpi: bool,
 ) -> Result<(Vec<BranchOutcome>, BranchRecords, Option<PersistedRef>), String> {
-    let universe = boot_and_snapshot(kernel_path, cmdline, initramfs)?;
+    let universe = boot_and_snapshot(kernel_path, cmdline, initramfs, acpi)?;
     let persisted = match persist {
         Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
         None => None,
@@ -1071,8 +1092,9 @@ fn boot_snapshot_and_generate(
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
     compute_ram_hash: bool,
+    acpi: bool,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary, Option<PersistedRef>), String> {
-    let universe = boot_and_snapshot(kernel_path, cmdline, initramfs)?;
+    let universe = boot_and_snapshot(kernel_path, cmdline, initramfs, acpi)?;
     let persisted = match persist {
         Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
         None => None,
@@ -1481,7 +1503,17 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                             initramfs_path: None,
                             periodic_timer,
                             virtio_rng,
-                            acpi: false, // RunKvmResumeBody has no `acpi` field yet — see RunKvmBody::acpi's doc
+                            // Always false, and deliberately not a `RunKvmResumeBody` field at all:
+                            // this call's persisted row is always restore-based (`store_run_id`/
+                            // `snapshot_node_id` set, never `kernel_path`/`cmdline`), so
+                            // `stream::render` routes it to `render_frames_from_real_restore`, which
+                            // never reads `kvm_run_meta.acpi` at all (unlike `RunKvmBranchBody`'s
+                            // reboot-based rows, `render_frames_from_real_replay`'s own read of that
+                            // column) — any ACPI tables the resumed point needed were already written
+                            // (or not) at the original `boot_and_snapshot` call this point descends
+                            // from, and `Multiverse::branch`'s copy-on-write RAM carries them forward
+                            // regardless of what this placeholder says.
+                            acpi: false,
                             store_run_id: Some(&run_id),
                             snapshot_node_id: Some(&node_id_hex),
                         };
@@ -1835,7 +1867,7 @@ mod tests {
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
         let (outcomes, _records, _persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![]], None, None, None, virtio_rng, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![]], None, None, None, virtio_rng, false, false)
                 .expect("boot_snapshot_and_branch with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 1);
@@ -1880,7 +1912,7 @@ mod tests {
         };
 
         let (outcomes, _summary, _persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, None, None, None, virtio_rng, false)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, None, None, None, virtio_rng, false, false)
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
@@ -2062,6 +2094,7 @@ mod tests {
             Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
             None,
             false,
+            false,
         )
         .expect("boot_snapshot_and_branch with a real linux-guest initramfs+periodic_timer failed");
 
@@ -2071,6 +2104,61 @@ mod tests {
             mark_branch_step.is_some(),
             "the checkpoint fixture's /init must stop this branch at its MARK_BRANCH checkpoint, \
              not halt or hang"
+        );
+    }
+
+    /// Closes todo.md §14's "RunKvmBranchBody ... still lack an acpi field" gap: proves
+    /// `boot_and_snapshot`'s new `acpi` parameter actually calls `write_acpi_tables` on the shared
+    /// branch point *before* it is snapshotted, and that every branch forked from that point (here,
+    /// a single empty-suffix fork, mirroring
+    /// `run_kvm_branch_boots_a_real_linux_guest_with_initramfs_and_periodic_timer`'s own pattern)
+    /// still reaches `/init` and halts cleanly with the tables present — same "nothing broke, stays
+    /// reproducible" bar `run_kvm_boots_a_real_linux_guest_with_acpi_enabled` sets for the plain
+    /// `/run/kvm` path, applied to `/run/kvm/branch` instead.
+    #[test]
+    fn run_kvm_branch_boots_a_real_linux_guest_with_acpi_enabled() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_initramfs();
+        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
+        assert_ne!(
+            cmdline,
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE,
+            "the replace must actually have matched"
+        );
+        const PERIOD_RCB: u64 = 500_000;
+        const TIMER_VECTOR: u8 = 0xec;
+        const MAX_TICKS: u32 = 2000;
+
+        let mut consoles = Vec::new();
+        for i in 0..2 {
+            let (outcomes, _records, _persisted) = boot_snapshot_and_branch(
+                &kernel,
+                &cmdline,
+                vec![vec![]],
+                None,
+                Some(&initramfs),
+                Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+                None,
+                false,
+                true, // acpi
+            )
+            .unwrap_or_else(|e| panic!("run {i}: acpi-enabled branch through boot_snapshot_and_branch failed: {e}"));
+            assert_eq!(outcomes.len(), 1);
+            let (console_output, _ram_hash, mark_branch_step, _node_id) = &outcomes[0];
+            let console = String::from_utf8_lossy(console_output).to_string();
+            assert!(
+                console.contains("baud-guest: minimal kernel reached /init"),
+                "run {i}: branch must still reach /init and print its marker with acpi enabled; got:\n{console}"
+            );
+            assert!(
+                mark_branch_step.is_none(),
+                "run {i}: this fixture's /init has no MARK_BRANCH checkpoint, so the branch must halt"
+            );
+            consoles.push(console);
+        }
+        assert_eq!(
+            consoles[0], consoles[1],
+            "an acpi-enabled branch point must stay exactly as reproducible as every other guest here"
         );
     }
 
@@ -2086,7 +2174,7 @@ mod tests {
         let suffixes: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i, 0xAA, 0xBB, 0xCC]).collect();
 
         let (first_run, _records, _) =
-            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None, None, true)
+            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None, None, true, false)
                 .expect("boot_snapshot_and_branch failed");
         assert_eq!(first_run.len(), suffixes.len());
         for (i, (console_output, _ram_hash, mark_branch_step, _node_id)) in first_run.iter().enumerate() {
@@ -2099,7 +2187,7 @@ mod tests {
 
         // Re-forking from a fresh branch point with the same suffixes must be byte-identical —
         // both across branches (no cross-branch bleed) and across this whole re-run (determinism).
-        let (second_run, _records, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None, None, true)
+        let (second_run, _records, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None, None, true, false)
             .expect("second boot_snapshot_and_branch failed");
         assert_eq!(first_run, second_run, "re-forking the same suffixes must reproduce byte-identically");
     }
@@ -2129,7 +2217,7 @@ mod tests {
         let run_id = "persist-test-run";
 
         let (direct_outcomes, _direct_records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), Some((&store, run_id)), None, None, None, true)
+            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), Some((&store, run_id)), None, None, None, true, false)
                 .expect("boot_snapshot_and_branch with persist failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2160,7 +2248,7 @@ mod tests {
         let run_id = "restore-replay-test";
 
         let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false, false)
                 .expect("persist-only boot_snapshot_and_branch failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2228,7 +2316,7 @@ mod tests {
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
         let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false, false)
                 .expect("persist-only boot_snapshot_and_branch failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2286,7 +2374,7 @@ mod tests {
         };
 
         let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false, false)
                 .expect("persist-only boot_snapshot_and_branch failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2372,11 +2460,11 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        let universe1 = boot_and_snapshot(&kernel, cmdline, None).expect("boot 1");
+        let universe1 = boot_and_snapshot(&kernel, cmdline, None, false).expect("boot 1");
         let (outcomes1, summary1) =
             run_driver_generated_branches(&universe1, make_spec()).expect("generate 1");
 
-        let universe2 = boot_and_snapshot(&kernel, cmdline, None).expect("boot 2");
+        let universe2 = boot_and_snapshot(&kernel, cmdline, None, false).expect("boot 2");
         let (outcomes2, summary2) =
             run_driver_generated_branches(&universe2, make_spec()).expect("generate 2");
 
@@ -2419,7 +2507,7 @@ mod tests {
             frame_run_id_prefix: None,
         };
         let (_outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false, false)
                 .expect("boot_snapshot_and_generate with persist failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2452,7 +2540,7 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        let universe = boot_and_snapshot(&kernel, cmdline, None).expect("boot");
+        let universe = boot_and_snapshot(&kernel, cmdline, None, false).expect("boot");
         let persisted = persist_universe(&store, run_id, &universe).expect("persist");
         let (direct_outcomes, direct_summary) =
             run_driver_generated_branches(&universe, spec()).expect("direct generate");
@@ -2510,7 +2598,7 @@ mod tests {
         };
 
         let (outcomes, summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false, false)
                 .expect("boot_snapshot_and_generate failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2587,7 +2675,7 @@ mod tests {
         };
 
         let (outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false, false)
                 .expect("boot_snapshot_and_generate failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2649,7 +2737,7 @@ mod tests {
         // run_until_branch_or_halt stops right there, same one-byte suffix the generate-mode
         // sibling test above uses (tape_len_bytes: 1).
         let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false, false)
                 .expect("boot_snapshot_and_branch failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2728,7 +2816,7 @@ mod tests {
         // First branch point: boot + persist (no generate here — just get a root node to resume
         // from), mirroring boot_snapshot_and_branch's own root-then-children shape.
         let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false, false)
                 .expect("boot_snapshot_and_branch failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2782,7 +2870,7 @@ mod tests {
         let run_id = "driver-state-resume-test";
 
         let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false, false)
                 .expect("boot_snapshot_and_branch failed");
         let (_root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         let (_console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
