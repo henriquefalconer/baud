@@ -132,6 +132,27 @@ pub fn build_flat_gdt() -> [u64; 3] {
     [NULL_DESCRIPTOR, CODE_DESCRIPTOR, DATA_DESCRIPTOR]
 }
 
+/// The ACPI Root System Description Pointer (ACPI spec §5.2.5) must sit somewhere inside the
+/// conventional BIOS-area scan window `0xE0000..0x100000` — ACPICA's `acpi_find_root_pointer`
+/// (called unconditionally by `acpi_boot_table_init`, with no cmdline/e820/boot_params hint route
+/// on x86_64 Linux) byte-scans exactly that fixed physical range, on 16-byte boundaries, for the
+/// 8-byte `"RSD PTR "` signature — real hardware or not, a direct-boot VMM with no BIOS still has
+/// to land the RSDP there or the guest's ACPI subsystem will never find it at all. This is the one
+/// ACPI-table address that is not free-choice, unlike every other table below (reached only via
+/// the RSDP's own pointers). Nothing else in this file claims any address in `0xE0000..0x100000`
+/// today (the next lower claim is [`GDT_ADDR`] at `0xD000`, the next higher is [`HIMEM_START`]
+/// itself), so the whole window is free.
+pub const ACPI_RSDP_ADDR: u64 = 0x000E_0000;
+/// XSDT/FADT/DSDT/MADT (todo.md §14 item 5(c), "minimal ACPI: RSDP -> RSDT/XSDT -> FADT + DSDT +
+/// MADT with one LAPIC") have no fixed-address requirement of their own — only the RSDP's own
+/// `XsdtAddress`/`Dsdt`/table-pointer fields need to name them, so they are packed one per page
+/// right after the RSDP, comfortably inside the same free BIOS-area window above, with room to
+/// grow if any one of them needs more than a page.
+pub const ACPI_XSDT_ADDR: u64 = ACPI_RSDP_ADDR + 0x1000;
+pub const ACPI_FADT_ADDR: u64 = ACPI_XSDT_ADDR + 0x1000;
+pub const ACPI_DSDT_ADDR: u64 = ACPI_FADT_ADDR + 0x1000;
+pub const ACPI_MADT_ADDR: u64 = ACPI_DSDT_ADDR + 0x1000;
+
 /// MMIO device windows — deliberately **outside** [`GUEST_RAM_SIZE`], since any address KVM has a
 /// registered memory region for is served straight from guest RAM and never reaches a VM exit at
 /// all; a device window must sit somewhere `KVM_SET_USER_MEMORY_REGION` never claims so a guest
@@ -155,6 +176,8 @@ const _STATIC_LAYOUT_INVARIANTS: () = {
     assert!(INITRAMFS_ADDR > KERNEL_LOAD_ADDR);
     assert!((INITRAMFS_ADDR as usize) < GUEST_RAM_SIZE);
     assert!(VIRTIO_MMIO_RNG_BASE >= GUEST_RAM_SIZE as u64);
+    assert!(ACPI_RSDP_ADDR >= 0x000E_0000 && ACPI_RSDP_ADDR + 0x1000 <= HIMEM_START);
+    assert!(ACPI_MADT_ADDR + 0x1000 <= HIMEM_START);
 };
 
 const PAGE_TABLE_ENTRY_COUNT: usize = 512;
@@ -381,6 +404,9 @@ mod tests {
             ("pde", PDE_ADDR, 0x2000),
             ("zero_page", ZERO_PAGE_ADDR, 0x1000),
             ("gdt", GDT_ADDR, 0x1000),
+            // The 5 ACPI tables (RSDP..MADT) are packed one page apart, so one combined region
+            // spanning all of them is enough to confirm they don't collide with anything above.
+            ("acpi_tables", ACPI_RSDP_ADDR, ACPI_MADT_ADDR + 0x1000 - ACPI_RSDP_ADDR),
         ];
         for (i, &(name_a, start_a, len_a)) in regions.iter().enumerate() {
             for &(name_b, start_b, len_b) in &regions[i + 1..] {

@@ -51,6 +51,11 @@ pub mod virtio_queue;
 #[cfg(target_os = "linux")]
 pub mod virtio_blk;
 
+// Minimal ACPI tables (todo.md §14 item 5(c)) — `write_acpi_tables` dereferences guest-physical
+// addresses through `vm-memory`, same gating reason as `virtio_queue`/`virtio_blk` above.
+#[cfg(target_os = "linux")]
+pub mod acpi;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

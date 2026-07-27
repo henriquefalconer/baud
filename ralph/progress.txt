@@ -6592,3 +6592,36 @@ Continuing to wait for the gate.sh background run (bb2k102s5) to finish; will co
 - context 90,721 tok peak of 1M (9%) across 20 inference calls, monotonic
 - models sonnet-5 $0.7398 (in 40 / out 4,682 / cache-read 1,339,539) · haiku-4-5 $0.0032
 - transcript: ralph/.run/20260727T053631Z/013-build-7.json
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — model=sonnet max-iter=0 verify-rounds=10 watchdog=2700s
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 1
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md, ralph/progress.txt, and current uncommitted diff (layout.rs, lib.rs, acpi.rs) to understand in-progress work before picking a step.
+
+Chose to finish and land the already-implemented but uncommitted work: todo.md item 5(c) minimal ACPI table builders (acpi.rs), the next H9 sub-step after virtio-pci (5a) and virtio-blk (5b). Prior session wrote the code and todo.md entry but never got a completed gate run before ending. Re-verifying tests now, then running the full gate before committing.
+
+cargo test -p baud-multiverse --lib reconfirmed: 193 passed, 0 failed, 10 ignored -- exact match to todo.md's recorded count. Running clippy now.
+
+clippy -p baud-multiverse --all-targets: 26 warnings, matching the documented baseline exactly -- zero new. Running cargo build --workspace, then the full pre-push gate (bash drive/gate.sh) per CLAUDE.md/todo.md section 15.
+
+cargo build --workspace clean. Launching bash drive/gate.sh now, foreground with generous timeout per CLAUDE.md's explicit instruction not to background it under claude -p.
+
+Full gate: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots -- confirmed passing in isolation in phase 6), 1 skipped, 2m33s -- green per CLAUDE.md's documented exception. Committing and pushing item 5(c) now.
+
+## 2026-07-27T10:48:57 UTC - Changes committed.
+- Landed todo.md §14 item 5(c) — minimal ACPI table builders (RSDP→XSDT→FADT+DSDT+MADT with one LAPIC), the next H9 sub-step after virtio-pci transport (5a) and virtio-blk (5b); code and todo.md entry were written by a prior session but never got a completed gate run or commit before that session ended
+- Files changed: crates/baud-multiverse/src/acpi.rs (new), layout.rs, lib.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New `acpi.rs` (`#[cfg(target_os = "linux")]`): pure, deterministic builders `build_rsdp`/`build_xsdt`/`build_fadt`/`build_dsdt`/`build_madt` plus `write_acpi_tables`, placing all five tables at fixed addresses in guest memory
+  - `layout.rs`: added `ACPI_RSDP_ADDR` (0xE0000, inside the BIOS-area window a real Linux kernel's `acpi_find_root_pointer` always byte-scans) and `ACPI_XSDT_ADDR`/`ACPI_FADT_ADDR`/`ACPI_DSDT_ADDR`/`ACPI_MADT_ADDR`
+  - FADT sets `HW_REDUCED_ACPI` with all fixed PM register blocks zeroed, so Linux skips its `acpi_hw_*` fixed-register path entirely; MADT declares `PCAT_COMPAT` plus exactly one enabled LAPIC entry, no I/O APIC; DSDT is a legal empty definition block; RSDP publishes only `XsdtAddress` (no RSDT built)
+  - 11 new tests (per-table checksum correctness, pointer chain correctness, HW_REDUCED_ACPI/SMI_CMD content, MADT LAPIC entry content, end-to-end write-then-read-back against real `GuestMemoryMmap`); re-verified this session: `cargo test -p baud-multiverse --lib` 193/0/10, exact match to the prior session's recorded count
+  - `cargo clippy -p baud-multiverse --all-targets`: 26 warnings, matching the documented pre-existing baseline exactly, zero new
+  - Full `bash drive/gate.sh`: 22 passed, 0 failed, 1 flaked (documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in isolation in phase 6), 1 skipped, 2m33s — green per CLAUDE.md's documented exception
+  - This is a table-construction library only, not yet wired into any boot path (every fixture still boots with `acpi=off`) — todo.md already documents the two explicit open follow-ups (wiring `write_acpi_tables` into a real boot, and the LAPIC MMIO shim a real `CONFIG_ACPI=y` guest will need) plus the still-unstarted 5(d)/(e) sub-items
+---
