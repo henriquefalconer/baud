@@ -318,6 +318,59 @@ runs on each injected tick — logged as `Spurious LAPIC timer interrupt on cpu 
 "correct" response to a LOCAL_TIMER_VECTOR interrupt when it does not believe it owns a LAPIC), which
 is harmless: it does not need to *believe* the tick is real, only to keep taking the vCPU off `HLT`
 periodically so timekeeping (`jiffies`/`calibrate_delay`) and the scheduler make forward progress.
+This whole section describes the *default* `acpi=off` boot every fixture in this directory still
+uses — see the next section for what changed once a real `CONFIG_ACPI=y`/`acpi=on` guest was
+actually booted against a real `crate::lapic::LocalApic` MMIO shim.
+
+## `CONFIG_ACPI=y` + `crate::lapic::LocalApic` — todo.md §14 item 5(c)'s two flagged gaps, closed
+
+`minimal.config` gained `CONFIG_ACPI=y` (this directory's shared kernel was rebuilt once more) —
+compiled-in-but-inert for every existing fixture here, all of which keep booting with `acpi=off`,
+the same precedent this file already documents for `HPET_TIMER`. Getting a *real* `acpi=on` boot to
+actually use it (new test `guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic`,
+`linux/mod.rs`) surfaced two real bugs unrelated to `crate::acpi`'s own table construction (which
+turned out to be correct on the first real ACPICA parse):
+
+1. **`CONFIG_PCI=n` breaks ACPI's own subsystem init, independent of PCI being used at all.**
+   `acpi_load_tables()` failed outright with `ACPI Error: AE_BAD_PARAMETER, During Region
+   initialization` — traced to `acpi_ev_install_region_handlers()` (`drivers/acpi/acpica/
+   evhandler.c`) looping over four default address spaces (`SYSTEM_MEMORY`, `SYSTEM_IO`,
+   `PCI_CONFIG`, `DATA_TABLE`) and hitting an *undefined* `switch` arm for `PCI_CONFIG`, because
+   `ACPI_PCI_CONFIGURED` (`include/acpi/platform/aclinux.h`) is only `#ifdef CONFIG_PCI` — nothing
+   to do with our tables at all, purely a stock-kernel ACPICA/Kconfig interaction. Fixed by also
+   flipping `CONFIG_PCI=n` -> `y` (harmless here too: `pci=off` on the cmdline still disables actual
+   PCI bus scanning at runtime, independent of this compile-time macro; confirmed by the boot log's
+   own `PCI: System does not support PCI` line once fixed).
+2. **`IA32_APIC_BASE`'s default value left the x2APIC-enable bit set, even though this crate's
+   CPUID already clears the x2APIC *feature* bit.** With no in-kernel LAPIC here at all
+   (`KVM_CREATE_IRQCHIP` is never called), this MSR is never routed through baud's own trap (unlike
+   the `IA32_TSC*` family) — it is answered by KVM's own bare bookkeeping for the register, and a
+   real guest's own `rdmsr(IA32_APIC_BASE)` read back with bit 10 (x2APIC enable) already set.
+   `check_x2apic()`'s `CONFIG_X86_X2APIC`-unset fallback (`arch/x86/kernel/apic/apic.c` — enabling
+   `CONFIG_X86_X2APIC` itself was a dead end: it `depends on ... (IRQ_REMAP || HYPERVISOR_GUEST)`,
+   and `HYPERVISOR_GUEST`/`PARAVIRT` are deliberately `n` here, §3.8's "no guest cooperation"
+   philosophy) trusts that MSR bit *directly*, independent of CPUID, and unconditionally clears
+   `X86_FEATURE_APIC` the instant it reads set — which made every real guest conclude "No local
+   APIC present" regardless of a correct MADT or `LocalApic`, since neither is ever consulted once
+   the kernel has already given up on that feature bit. Fixed with a new `linux::
+   pin_apic_base_msr` (`linux/mod.rs`, called from `boot_guest` right alongside the existing
+   `pin_tsc_value`): pins `IA32_APIC_BASE` to the real-hardware-reset-equivalent value (BSP bit +
+   Global Enable set, x2APIC bit clear, base address = `layout::LAPIC_MMIO_BASE`) explicitly, the
+   same "don't trust whatever KVM's default happens to leave in place" reasoning `pin_tsc_value`
+   already established for the TSC.
+
+With both fixed, the boot log shows `ACPI: Using ACPI for processor (LAPIC) configuration
+information` and `APIC: Switch to symmetric I/O mode setup` — no more `No local APIC present` —
+and the guest's own `setup_local_APIC()`/`setup_APIC_timer()` write real values into `LocalApic`'s
+`SPIV`/`LVT_TIMER` registers, confirmed via `Multiverse::lapic()` in the new test (not console
+text: `DETERMINISTIC_CMDLINE`'s own `quiet loglevel=1` suppresses virtually every printk line, so
+register content is the only direct proof available). 5/5 clean across repeated real-hardware
+re-runs, byte-identical console across two boots — the same "not a functioning timer, stub just
+enough to satisfy the probe" precedent `Pic8259` already established, now proven against a real
+`CONFIG_ACPI=y` kernel rather than only unit-tested against the ACPI specification's own byte
+layout. `write_acpi_tables` is still opt-in (a caller must call it after `boot`/
+`boot_with_rdseed_sites`, before the first run) — not yet the production default for `baud run
+kvm`'s plain path, which stays `acpi=off` exactly as before.
 
 ## Two real bugs this fixture's first real boot caught (beyond the two above)
 

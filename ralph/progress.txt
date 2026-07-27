@@ -6663,3 +6663,74 @@ Full gate: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_acros
   - todo.md: folded the now-fully-resolved VR2-M7/VR2-M3 section into the single Resolved list (renumbered items 1-7)
   - cargo build/clippy -p baud-keys -p baud-cli -p baud-server clean (no new warnings); cargo test -p baud-keys: 12 passed/1 ignored (sops/age-keygen absent on this host); full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (documented rdtsc load-flake), 1 skipped
 ---
+
+Post-push verification: origin/main now at 5b70aa6, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked as documented, 1 skipped) before this push.
+
+todo.md still has pending items (H9 (d) actual Ubuntu cloud image + (e) drive/h9.sh/cross-VM fingerprint; the ACPI wiring + LAPIC MMIO shim flagged in item 5(c); H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging; virtio-rng boot/cmdline/CLI wiring) -- emitting NEXT.
+
+## 2026-07-27T11:04:04 UTC (14min) - Session usage — build-2 [sonnet]
+- cost $4.3482 (from claude -p)
+- context 152,075 tok peak of 1M (15%) across 68 inference calls, monotonic, resumed 1x
+- models sonnet-5 $4.3450 (in 888 / out 38,033 / cache-read 7,637,720) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T104433Z/003-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Chose H9 item 5(c)'s flagged LAPIC MMIO shim + boot wiring, it's the next concrete sub-step of the H9 Ubuntu milestone (ACPI table builders landed last commit but are unwired; the two flagged gaps are exactly this).
+
+Dispatching an Opus research subagent to determine whether the guest kernel's boot path needs a functioning LAPIC timer countdown or just register bookkeeping (Pic8259-style stub), before writing any device code...
+
+Gathered surrounding context (DeviceBus dispatch pattern, Pic8259 precedent, layout.rs MMIO identity-mapping, CPUID TSC_DEADLINE bit status, existing 0xec LOCAL_TIMER_VECTOR injection convention) while the Opus research agent investigates the real kernel source for LAPIC boot-path requirements. Waiting for its findings before writing any device code.
+
+Waiting on the Opus research agent's findings on LAPIC boot-path requirements before writing device code; meanwhile confirmed pure-bookkeeping modules (Pic8259, virtio_mmio) stay ungated vs vm-memory-touching ones (acpi, virtio_blk) being cfg(target_os="linux")-gated, informing which pattern a LAPIC stub should follow.
+
+Research back: a pure bookkeeping LAPIC MMIO stub is sufficient (TMCCT/timer countdown is never read on this boot path; TSC-deadline mode plus baud's existing MSR absorption already covers timer arming). The one real hang hazard identified is APIC_ICR's busy bit (bit 12) -- must always read 0 or apic_mem_wait_icr_idle() spins forever even on a single vCPU. Also ISR/IRR/ESR must read 0, ID must read 0 (matches MADT), LAPIC's own register list is now fully scoped. Implementing the device model now.
+
+LocalApic device model implemented (lapic.rs), wired into layout.rs's identity-map (shares the virtio-mmio window's PDPTE region) and console.rs's DeviceBus, plus a Multiverse::write_acpi_tables() method. Compiles clean; running unit tests now.
+
+All hardware-independent unit tests pass (lapic, layout, console, acpi -- 14+12+25+11). Running clippy to confirm no new warnings before moving to the real-hardware CONFIG_ACPI=y fixture build.
+
+Clippy clean: 26 warnings total (matches documented pre-existing baseline), zero new ones in the touched files after fixing one identity_op hit in my own new test. Running the full baud-multiverse test suite next.
+
+Full cargo test -p baud-multiverse --lib: 1 failure (rdtsc_guest_reproduces_high_bits_across_boots), reconfirmed passing in isolation -- the documented pre-existing load-flake from prior iterations, not a regression. Now building the real CONFIG_ACPI=y kernel fixture for a hardware-verified boot test.
+
+Flipped CONFIG_ACPI=n -> y in minimal.config (compiled-in-but-inert for every other existing fixture, which all still boot with acpi=off -- matches the project's existing HPET_TIMER precedent). Copying the kernel source tree to a scratch dir and rebuilding bzImage now (~65s expected per BUILD.md).
+
+Kernel rebuilt clean with CONFIG_ACPI=y (plus its Kconfig-default sub-options: AC/battery/button/fan/thermal/processor idle -- all harmless, no such devices exist). Copying bzImage into the fixture and writing the new hardware-verified test next.
+
+New real-hardware test written: guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic. Building and running it now against the rebuilt CONFIG_ACPI=y bzImage.
+
+SPIV never got written by the guest -- ACPI setup_local_APIC() apparently didn't run. Building a temporary verbose-cmdline diagnostic (no quiet/loglevel=1) to see the real boot log before concluding why.
+
+Root-caused via real ACPICA source (drivers/acpi/acpica/evhandler.c + include/acpi/platform/aclinux.h): AE_BAD_PARAMETER during Region initialization happens because ACPI_PCI_CONFIGURED is only #ifdef CONFIG_PCI, and our config has CONFIG_PCI=n -- the default-address-space-handler loop's PCI_CONFIG case falls through to an undefined switch arm. Fix: flip CONFIG_PCI=n -> y too (matches H9's own eventual PCI need); pci=off cmdline still keeps runtime PCI bus scanning disabled. Rebuilding kernel.
+
+Root-caused via direct kernel source read (arch/x86/kernel/apic/apic.c check_x2apic()): with CONFIG_X86_X2APIC unset, its #else branch unconditionally clears X86_FEATURE_APIC whenever apic_is_x2apic_enabled() is true, regardless of our own CPUID/MADT correctness -- confirmed our CPUID leaf1 EDX bit9 (APIC) really is set via a temporary debug print, ruling out a CPUID masking bug. Trying CONFIG_X86_X2APIC=y (our CPUID already clears the x2APIC feature bit for determinism, so the kernel won't actually use x2apic mode, just compile the non-clearing code path).
+
+Root cause #2 found and fixed: KVM's IA32_APIC_BASE MSR default (no in-kernel LAPIC exists here) left the x2APIC-enable bit set even though our CPUID masks the x2APIC feature bit -- check_x2apic()'s CONFIG_X86_X2APIC-unset fallback trusts that MSR bit directly and unconditionally clears X86_FEATURE_APIC when it reads set, independent of CPUID/MADT/our LAPIC stub correctness. Fixed with a new pin_apic_base_msr() (mirrors the existing pin_tsc_value pattern) setting BSP+Enable, x2APIC clear, base=LAPIC_MMIO_BASE. Verbose boot now shows 'ACPI: Using ACPI for processor (LAPIC) configuration information' and 'APIC: Switch to symmetric I/O mode setup' -- no more 'No local APIC present'. Cleaning up debug instrumentation and re-running the real test.
+
+Test guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic passes: SPIV/LVT_TIMER both written by the real kernel, byte-identical console across two boots. Re-running several times to check for real-hardware jitter before treating it as stable.
+
+5/5 clean re-runs, no jitter. Running the full baud-multiverse test suite plus clippy to check for regressions from the CONFIG_ACPI/CONFIG_PCI kernel rebuild and the new pin_apic_base_msr call (which now runs for every boot, not just ACPI ones).
+
+baud-multiverse: 207 passed, 0 failed (rdtsc flake test ran clean this round), clippy 26 warnings matching baseline, none new. Running full cargo build/test/clippy --workspace next, then the full pre-push gate (drive/gate.sh) since the shared linux-guest bzImage fixture used by many other tests was rebuilt.
+
+cargo build --workspace clean. Running bash drive/gate.sh now (foreground, 600s timeout per CLAUDE.md) as the pre-push verification protocol.
+
+Full drive/gate.sh: 24 passed, 0 failed, 0 skipped in 5m43s. Updating documentation (acpi.rs module doc, linux-guest/BUILD.md) to reflect the closed gaps before committing.
+
+## 2026-07-27T11:53:11 UTC - Changes committed.
+- Implemented the LAPIC MMIO shim and CONFIG_ACPI=y real-hardware boot, closing both gaps todo.md §14 item 5(c) flagged after the ACPI table builders landed
+- Files changed: crates/baud-multiverse/src/lapic.rs (new), src/layout.rs, src/console.rs, src/lib.rs, src/linux/mod.rs, src/acpi.rs, tests/fixtures/linux-guest/{minimal.config,bzImage,BUILD.md}, todo.md
+- **Brief description of changes:**
+  - New `LocalApic` device model (`crates/baud-multiverse/src/lapic.rs`): a pure-bookkeeping xAPIC MMIO stub at `layout::LAPIC_MMIO_BASE`, scoped by an Opus research pass against the real Linux 6.18.33 source confirming a functioning timer countdown is never needed on this crate's boot path, and that `APIC_ICR`'s busy bit is the one real hang hazard (always cleared here)
+  - Wired unconditionally into `console.rs`'s `DeviceBus` (mirrors `Pic8259`) and into `layout.rs`'s identity-map (shares the virtio-mmio window's PDPTE region, same paging-must-be-present fix that window already needed)
+  - New `Multiverse::write_acpi_tables()` (`linux/mod.rs`): the real, opt-in boot-path wiring for `crate::acpi`'s previously-unwired table builders
+  - `tests/fixtures/linux-guest/minimal.config` gained `CONFIG_ACPI=y` and `CONFIG_PCI=y` (kernel rebuilt); two real bugs found and fixed getting a real `acpi=on` boot to work: `CONFIG_PCI=n` broke ACPICA's own subsystem init independent of PCI use (`ACPI_PCI_CONFIGURED` is `#ifdef CONFIG_PCI`), and KVM's default `IA32_APIC_BASE` value left the x2APIC-enable bit set with no in-kernel LAPIC to correct it, spuriously clearing `X86_FEATURE_APIC` — fixed with a new `pin_apic_base_msr` (mirrors the existing `pin_tsc_value` pattern)
+  - New real-hardware test `guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic`: confirms the guest's own `setup_local_APIC()` writes real `SPIV`/`LVT_TIMER` values and the boot stays byte-identical across two runs; 5/5 clean on repeated real-hardware re-runs
+  - `cargo build`/`clippy --workspace --all-targets`/`test --workspace` clean (0 new warnings, 26 pre-existing baseline unchanged); full `bash drive/gate.sh`: 24 passed, 0 failed, 0 skipped, 5m43s — confirms the shared rebuilt `linux-guest` bzImage caused no regression in any other fixture/drive script
+  - Updated `crates/baud-multiverse/src/acpi.rs`'s module doc and `tests/fixtures/linux-guest/BUILD.md` (new "`CONFIG_ACPI=y` + `LocalApic`" section) plus `todo.md` §14 item 5(c) to record both gaps closed
+---

@@ -2398,31 +2398,48 @@ snapshot, not a duplicate of it.
      zero new warnings (two `assertions_on_constants`/`manual_is_multiple_of` hits were found and
      fixed by moving the RSDP-scan-window bound checks into a compile-time `const _: () = { ... }`
      assertion, `layout.rs`'s own established convention, rather than a runtime test on values that
-     can never change without recompiling). Full `bash drive/gate.sh` unaffected (this module is
-     not called from any boot path yet, see below). **Explicitly not attempted, two real gaps
-     flagged for whoever picks this up next**: (1) **nothing wires `write_acpi_tables` into
-     `boot_guest`/`load_kernel_and_write_boot_params` or any cmdline yet** — every existing fixture
-     still boots with `acpi=off`, unaffected; wiring it in is (d)/(e)'s job once there is an actual
-     ACPI-aware kernel to test against, not this table-writing sub-step's (mirrors how
-     `baud_packages::kernel_build`/`initramfs` shipped "neither yet wired into any CLI/server
-     route"). (2) **a real LAPIC MMIO shim is very likely needed before any of this is usable**:
-     every existing fixture boots with no MADT at all, so an unmodified kernel's LAPIC-ID probe at
-     the fixed MMIO base `0xFEE0_0000` falls through to `OpenBusFallback` and reads back
-     `0xFFFF_FFFF`, which the kernel today correctly reads as "no LAPIC present"
-     (`tests/fixtures/linux-guest/BUILD.md`'s own finding) and falls back to `Using NULL legacy
-     PIC`. Once a guest's MADT actually advertises a LAPIC, the kernel's apic driver will read/write
-     *real* LAPIC registers (ID, version, LVT entries, the timer's initial/current-count pair)
-     expecting real hardware semantics — `0xFFFF_FFFF` is not a valid "absent device" signal for
-     MMIO the way it is for PCI config space, and a write-then-poll-for-completion loop against an
-     always-absorbed write can spin forever. This needs its own deterministic device model
-     (`Pic8259`'s "stub just enough to satisfy the probe" precedent, not a functioning timer),
-     designed and hardware-verified against a real `CONFIG_ACPI=y` guest — no such fixture exists in
-     this repo yet (`tests/fixtures/linux-guest/minimal.config` has `CONFIG_ACPI=n`), so none of
-     `acpi.rs`'s tables have been validated against a real ACPICA/Linux parse, only against the ACPI
-     specification's own byte-layout rules by direct construction. (d) (the actual Ubuntu 18.04.1
-     cloud image) and (e) (`drive/h9.sh` + the cross-VM fingerprint) remain not started. H8 Mario
-     remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem (item 3 above),
-     unrelated to this PCI/ACPI work.
+     can never change without recompiling).
+
+     **Both gaps flagged here are now closed.** New `crates/baud-multiverse/src/lapic.rs`
+     implements `LocalApic`, a pure-bookkeeping xAPIC MMIO stub at `layout::LAPIC_MMIO_BASE`
+     (`Pic8259`'s "stub just enough to satisfy the probe, not a functioning timer" precedent) —
+     scoped by an Opus research pass against the real Linux 6.18.33 source (`~/wsl-kernel-src/src`):
+     `APIC_TMCCT`'s live countdown is never read on this crate's boot configuration (TSC-deadline
+     mode short-circuits `calibrate_APIC_clock()`, and even without that `native_calibrate_tsc()`
+     derives the timer period arithmetically from the already-synthesized CPUID leaf 15H), so every
+     register is either a fixed read-only constant (ID=0, a plausible LVR) or plain read/write
+     bookkeeping — except `APIC_ICR`'s busy bit (bit 12), the one real hang hazard identified
+     (`apic_mem_wait_icr_idle()` polls it unbounded even on a single vCPU via
+     `arch_irq_work_raise()`), which this stub always clears on write. Wired into `console.rs`'s
+     `DeviceBus` unconditionally (same pattern as `Pic8259`) and into `layout.rs`'s identity-map
+     (shares the virtio-mmio window's PDPTE region — same "paging is mandatory in long mode" fix
+     `VIRTIO_MMIO_RNG_BASE` already needed). `Multiverse::write_acpi_tables` (`linux/mod.rs`) is
+     the real, opt-in boot-path wiring (call after `boot`/`boot_with_rdseed_sites`, before the first
+     run). `tests/fixtures/linux-guest/minimal.config` gained `CONFIG_ACPI=y` (kernel rebuilt,
+     compiled-in-but-inert for every fixture still booting `acpi=off`). Two real bugs, unrelated to
+     `acpi.rs`'s own table construction (which parsed correctly on the first real attempt), were
+     found and fixed getting a real `acpi=on` boot to actually use it — full diagnosis in
+     `tests/fixtures/linux-guest/BUILD.md`'s new "`CONFIG_ACPI=y` + `LocalApic`" section: (1)
+     `CONFIG_PCI=n` breaks ACPICA's own subsystem init (`AE_BAD_PARAMETER` in
+     `acpi_ev_install_region_handlers`, since `ACPI_PCI_CONFIGURED` is only `#ifdef CONFIG_PCI`) —
+     fixed by flipping `CONFIG_PCI=n` -> `y` too (`pci=off` on the cmdline still disables runtime
+     PCI bus scanning); (2) `IA32_APIC_BASE`'s KVM-default value left the x2APIC-enable bit set
+     (there is no in-kernel LAPIC here, so this MSR is never routed through baud's own trap), which
+     `check_x2apic()`'s `CONFIG_X86_X2APIC`-unset fallback trusts directly and used to
+     unconditionally clear `X86_FEATURE_APIC` — fixed with a new `linux::pin_apic_base_msr`
+     (mirrors the existing `pin_tsc_value` MSR-pinning pattern). New real-hardware test
+     `guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic` (`linux/mod.rs`) confirms the
+     guest's own `setup_local_APIC()` writes real values into `LocalApic`'s `SPIV`/`LVT_TIMER`
+     registers (not console text — `quiet loglevel=1` suppresses virtually all of it) and that the
+     boot stays byte-identical across two runs; 5/5 clean on repeated real-hardware re-runs. `cargo
+     build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 new warnings; 26
+     baseline unchanged); full `bash drive/gate.sh` (24/24, 5m43s) confirms the shared rebuilt
+     `linux-guest` bzImage introduced no regression in any of the other fixtures/drive scripts that
+     boot it. **Still open**: `write_acpi_tables` is not yet the production default for `baud run
+     kvm`'s plain path (opt-in only, exercised so far by this one dedicated test); (d) (the actual
+     Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` + the cross-VM fingerprint) remain not
+     started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
+     (item 3 above), unrelated to this PCI/ACPI work.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

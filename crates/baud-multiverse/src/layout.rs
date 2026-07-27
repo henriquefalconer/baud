@@ -81,9 +81,10 @@ pub const INITRAMFS_ADDR: u64 = 0x0200_0000;
 /// below) — one PML4 page, one PDPTE page, and enough PDE pages to cover `GUEST_RAM_SIZE` via
 /// 2 MiB pages (never any 4 KiB leaf, so the table is small and construction stays O(RAM/2MiB)),
 /// plus one more PDE page `build_identity_page_tables` always appends after the RAM-covering ones
-/// to identity-map the virtio-mmio device window ([`VIRTIO_MMIO_RNG_BASE`]) — paging is mandatory
-/// in long mode, so a guest can only *reach* a GPA outside registered RAM at all if its own page
-/// tables have a present translation for it; without this, a guest touching that window takes a
+/// to identity-map both MMIO device windows ([`VIRTIO_MMIO_RNG_BASE`] and [`LAPIC_MMIO_BASE`] —
+/// they share one PDPTE region, so both leaves fit in this same page) — paging is mandatory in
+/// long mode, so a guest can only *reach* a GPA outside registered RAM at all if its own page
+/// tables have a present translation for it; without this, a guest touching either window takes a
 /// genuine `#PF` long before the access could ever become the intended VM exit. [`GDT_ADDR`]
 /// starts one page later than it otherwise would, to leave room for it.
 pub const PML4_ADDR: u64 = 0x0000_9000;
@@ -165,6 +166,14 @@ pub const ACPI_MADT_ADDR: u64 = ACPI_DSDT_ADDR + 0x1000;
 pub const VIRTIO_MMIO_RNG_BASE: u64 = 0xd000_0000;
 pub const VIRTIO_MMIO_RNG_LEN: u64 = 0x200;
 
+/// The conventional Local APIC MMIO base (Intel SDM Vol. 3A §10.4.3, absent an `IA32_APIC_BASE`
+/// MSR override this crate never installs) -- also the value [`crate::acpi::build_madt`] publishes
+/// as the MADT's own "Local Interrupt Controller Address" field, so [`crate::lapic::LocalApic`]
+/// (todo.md §14 item 5(c)'s second flagged gap) answers exactly the address a real kernel's
+/// LAPIC-ID probe reads. One 4 KiB window (`LocalApic::WINDOW_LEN`), the standard xAPIC MMIO size.
+pub const LAPIC_MMIO_BASE: u64 = 0xFEE0_0000;
+pub const LAPIC_MMIO_LEN: u64 = 0x1000;
+
 /// The command line must fit before the kernel load address, and the kernel must load at or above
 /// high memory — both sides of each comparison are `const`, so this is checked once at compile
 /// time rather than as a runtime assertion on values that can never change without recompiling
@@ -178,6 +187,12 @@ const _STATIC_LAYOUT_INVARIANTS: () = {
     assert!(VIRTIO_MMIO_RNG_BASE >= GUEST_RAM_SIZE as u64);
     assert!(ACPI_RSDP_ADDR >= 0x000E_0000 && ACPI_RSDP_ADDR + 0x1000 <= HIMEM_START);
     assert!(ACPI_MADT_ADDR + 0x1000 <= HIMEM_START);
+    assert!(LAPIC_MMIO_BASE >= GUEST_RAM_SIZE as u64);
+    // Both device windows must share one PDPTE entry (`build_identity_page_tables` only ever
+    // allocates one dedicated PDE page for both leaves) -- true today (both fall in the top 1 GiB
+    // of 32-bit address space) but re-checked here so a future address change fails loudly at
+    // compile time instead of silently mis-mapping one window.
+    assert!(LAPIC_MMIO_BASE / (1u64 << 30) == VIRTIO_MMIO_RNG_BASE / (1u64 << 30));
 };
 
 const PAGE_TABLE_ENTRY_COUNT: usize = 512;
@@ -270,6 +285,17 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
     );
     let mut mmio_pde = [0u64; PAGE_TABLE_ENTRY_COUNT];
     mmio_pde[mmio_pde_index] = VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
+
+    // The LAPIC MMIO window ([`LAPIC_MMIO_BASE`], `crate::lapic`) shares this same 1 GiB PDPTE
+    // region with the virtio-mmio window (`_STATIC_LAYOUT_INVARIANTS` above asserts this), so its
+    // leaf goes into this same PDE page rather than needing a whole new PDPTE entry/PDE page --
+    // paging is mandatory in long mode, so without this a guest whose MADT advertises a LAPIC
+    // would take a genuine `#PF` reaching it, exactly the bug this same treatment already fixed
+    // for the virtio-mmio window (`virtio-rng-guest`'s first boot attempt).
+    let lapic_pde_index = ((LAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+    assert!(lapic_pde_index != mmio_pde_index, "the two device windows must not alias one leaf");
+    mmio_pde[lapic_pde_index] = LAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
+
     let mmio_pde_page_index = pde_pages.len();
     pdpte[mmio_pdpte_index] =
         (PDE_ADDR + (mmio_pde_page_index as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE;
@@ -353,12 +379,35 @@ mod tests {
             mmio_pde_page[mmio_pde_index],
             VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
         );
-        // Every other entry in this page stays not-present -- only the one window leaf is mapped.
+        // Every other entry in this page stays not-present, except the LAPIC window's own leaf
+        // (`identity_map_also_covers_the_lapic_window` below) -- only these two are ever mapped.
+        let lapic_pde_index = ((LAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
         for (i, &entry) in mmio_pde_page.iter().enumerate() {
-            if i != mmio_pde_index {
-                assert_eq!(entry, 0, "no fabricated mapping outside the virtio-mmio window itself");
+            if i != mmio_pde_index && i != lapic_pde_index {
+                assert_eq!(entry, 0, "no fabricated mapping outside the two device windows");
             }
         }
+    }
+
+    /// [`LAPIC_MMIO_BASE`]'s leaf, added alongside the virtio-mmio window's in the very same PDE
+    /// page (both share one PDPTE region) -- see `build_identity_page_tables`'s own comment on why
+    /// a real `CONFIG_ACPI=y` guest whose MADT advertises a LAPIC needs this exactly like
+    /// `identity_map_also_covers_the_virtio_mmio_window` above.
+    #[test]
+    fn identity_map_also_covers_the_lapic_window() {
+        let tables = build_identity_page_tables(GUEST_RAM_SIZE);
+        let lapic_pdpte_index = (LAPIC_MMIO_BASE / (1u64 << 30)) as usize;
+        let lapic_pde_index = ((LAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+        assert_eq!(
+            lapic_pdpte_index,
+            (VIRTIO_MMIO_RNG_BASE / (1u64 << 30)) as usize,
+            "both device windows share one PDPTE entry"
+        );
+        let mmio_pde_page = tables.pde_pages.last().expect("at least one PDE page always exists");
+        assert_eq!(
+            mmio_pde_page[lapic_pde_index],
+            LAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
+        );
     }
 
     #[test]

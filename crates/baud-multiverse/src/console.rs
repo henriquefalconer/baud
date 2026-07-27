@@ -21,6 +21,7 @@
 // hardware-independent and runs on this Windows dev machine with no KVM/perf, the same pattern
 // `cpuid.rs`/`layout.rs`/`baud-vcpu`'s `boundary.rs` use.
 
+use crate::lapic::LocalApic;
 use crate::pci::PciHostBridge;
 use crate::pic8259::Pic8259;
 use crate::tape_bus::TapeBus;
@@ -241,6 +242,16 @@ pub struct DeviceBus {
     /// gate this on) since it is pure guest-write-derived bookkeeping with no side effects on any
     /// other device.
     pic: Pic8259,
+    /// The Local APIC MMIO bookkeeping stub (`crate::lapic`), the window at
+    /// [`crate::layout::LAPIC_MMIO_BASE`] — makes an unmodified Linux guest's real LAPIC-ID probe
+    /// (reached once a guest's MADT advertises a LAPIC, `crate::acpi::build_madt`) succeed instead
+    /// of falling through to `OpenBusFallback`'s fixed `0xFFFFFFFF`/absorbed writes, which the
+    /// kernel would otherwise (correctly, for an MMIO device) never treat as "absent" the way it
+    /// does for `PciHostBridge`'s all-ones PCI config-space convention. Present unconditionally
+    /// like [`Pic8259`]/[`PciHostBridge`] above — pure guest-write-derived bookkeeping with no side
+    /// effects on any other device, and dormant for any guest whose cmdline sets `acpi=off` (every
+    /// existing fixture up to this point, none of which ever touches this address).
+    lapic: LocalApic,
     /// The legacy PCI configuration-mechanism-#1 host bridge (`crate::pci`), present
     /// unconditionally like [`Pic8259`] above — pure guest-write-derived bookkeeping with no side
     /// effects on any other device, and dormant for any guest whose cmdline sets `pci=off` (every
@@ -307,6 +318,14 @@ impl DeviceBus {
     /// to poke `Bus::pio_read` directly.
     pub fn pic(&self) -> &Pic8259 {
         &self.pic
+    }
+
+    /// The Local APIC's current bookkeeping state — exposed so a caller/test can confirm a real
+    /// guest's own `setup_local_APIC()`/`setup_APIC_timer()` sequence, issued through real MMIO
+    /// exits, took effect (`LocalApic::spurious_interrupt_vector`/`lvt_timer`) without needing to
+    /// poke [`Bus::mmio_read`] directly — mirrors [`Self::pic`]'s convention.
+    pub fn lapic(&self) -> &LocalApic {
+        &self.lapic
     }
 
     /// Installs a virtio-rng transport at [`crate::layout::VIRTIO_MMIO_RNG_BASE`] — opt-in (no
@@ -478,6 +497,7 @@ impl DeviceBus {
             tape: tape_bus,
             cmos: Cmos,
             pic: Pic8259::default(),
+            lapic: LocalApic::default(),
             pci: PciHostBridge::default(),
             virtio_rng: None,
             virtio_pci_rng: None,
@@ -552,6 +572,10 @@ impl Bus for DeviceBus {
                 return;
             }
         }
+        if LocalApic::in_range(addr).is_some() {
+            self.lapic.mmio_read(addr, data);
+            return;
+        }
         self.fallback.mmio_read(addr, data);
     }
 
@@ -561,6 +585,10 @@ impl Bus for DeviceBus {
                 virtio_rng.mmio_write(addr, data);
                 return;
             }
+        }
+        if LocalApic::in_range(addr).is_some() {
+            self.lapic.mmio_write(addr, data);
+            return;
         }
         self.fallback.mmio_write(addr, data);
     }
@@ -778,6 +806,25 @@ mod tests {
         );
         // An address just past the device's window still falls through to open bus.
         bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE + crate::layout::VIRTIO_MMIO_RNG_LEN, &mut data);
+        assert_eq!(data, [OPEN_BUS_BYTE; 4]);
+    }
+
+    /// Unlike `virtio_rng`, [`LocalApic`] is present unconditionally (same convention as
+    /// [`Pic8259`]/[`PciHostBridge`]) — no `DeviceBus::default()` caller needs to opt in for the
+    /// window to route to the real device instead of open bus.
+    #[test]
+    fn device_bus_routes_lapic_mmio_unconditionally() {
+        let mut bus = DeviceBus::default();
+        let mut data = [0u8; 4];
+        bus.mmio_read(crate::layout::LAPIC_MMIO_BASE + 0x30, &mut data); // LVR
+        assert_ne!(data, [OPEN_BUS_BYTE; 4], "the LAPIC version register must not be open bus");
+
+        let vector = 0x2ecu32;
+        bus.mmio_write(crate::layout::LAPIC_MMIO_BASE + 0x320, &vector.to_le_bytes()); // LVT Timer
+        assert_eq!(bus.lapic().lvt_timer(), vector);
+
+        // Just past the 4 KiB window still falls through to open bus.
+        bus.mmio_read(crate::layout::LAPIC_MMIO_BASE + LocalApic::WINDOW_LEN, &mut data);
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
     }
 

@@ -12,40 +12,48 @@
 // of nothing but this module's own constants (specs/baud-multiverse.md's "no nondeterministic
 // table content" constraint: guest RAM is included in the fingerprint hash, so these tables must
 // be byte-identical across every boot). [`write_acpi_tables`] places them at fixed guest-physical
-// addresses (`crate::layout`'s `ACPI_*` constants); nothing in this module is wired into any real
-// boot path yet (`linux::boot_guest`/`load_kernel_and_write_boot_params` still never call it,
-// mirroring how `baud_packages::kernel_build`/`initramfs` shipped "neither yet wired into any
-// CLI/server route" — todo.md §14). Two things explicitly remain open, deliberately not attempted
-// here, and must be resolved before an ACPI-enabled guest can actually be booted against this:
+// addresses (`crate::layout`'s `ACPI_*` constants).
 //
-// 1. **A real LAPIC MMIO shim.** Every existing fixture boots with no MADT at all, so an
-//    unmodified kernel's LAPIC-ID probe at the fixed MMIO base `0xFEE0_0000` falls through to
-//    `console::OpenBusFallback` and reads back `0xFFFF_FFFF`, which the kernel correctly reads as
-//    "no LAPIC present" (`tests/fixtures/linux-guest/BUILD.md`'s own finding) and falls back to
-//    `Using NULL legacy PIC`. Once [`build_madt`]'s "one LAPIC" entry is actually consulted by a
-//    guest with `acpi=on`, the kernel's apic driver will read/write *real* LAPIC registers (ID,
-//    version, LVT entries, the timer's initial/current-count pair) expecting real hardware
-//    semantics, not an open-bus stub — `0xFFFF_FFFF` is no longer a valid "absent" signal for
-//    MMIO the way it is for PCI config space, and a write-then-poll-for-completion loop against an
-//    always-absorbed write can spin forever. This needs its own deterministic device model
-//    (`Pic8259`'s stub-just-enough-to-satisfy-the-probe precedent, not a functioning timer), built
-//    and hardware-verified against a real `CONFIG_ACPI=y` guest — out of scope for this table-
-//    writing sub-step, exactly as `pci.rs`'s own doc flagged "a real Ubuntu boot also wants a
-//    minimal RSDP/RSDT/FADT/DSDT/MADT ... unrelated to config-space access itself" as future work
-//    when it was written.
-// 2. **No `CONFIG_ACPI=y` guest fixture exists yet to boot this against.** `tests/fixtures/
-//    linux-guest/minimal.config` disables ACPI entirely; every table below is therefore only
-//    unit-tested for internal structural correctness (checksums, pointers, flags) against the
-//    ACPI specification's own byte layout, never against a real ACPICA/Linux parse. That real
-//    acid test is H9 sub-step (d)/(e)'s job (the actual Ubuntu 18.04.1 image + `drive/h9.sh`).
+// **Real-hardware-verified, wired, and closed**: the two gaps this doc used to name here —
+// (1) a real LAPIC MMIO shim, and (2) a `CONFIG_ACPI=y` guest fixture to prove this module's
+// tables against a real ACPICA/Linux parse, not just their own byte layout — are both done.
+// [`crate::lapic::LocalApic`] is the shim (`Pic8259`'s "stub just enough to satisfy the probe, not
+// a functioning device" precedent — research against the real kernel source found `APIC_TMCCT`'s
+// live countdown is never read on this crate's planned boot configuration, and the one real hang
+// hazard is `APIC_ICR`'s busy bit, which this stub always clears). `Multiverse::write_acpi_tables`
+// (`linux/mod.rs`) is the real boot-path wiring (opt-in — call it after `boot`/
+// `boot_with_rdseed_sites` and before the first run, on a guest whose cmdline enables ACPI).
+// `tests/fixtures/linux-guest/minimal.config` now carries `CONFIG_ACPI=y` (compiled-in-but-inert
+// for every fixture that still boots with `acpi=off`, the same precedent this file's `BUILD.md`
+// already documents for `HPET_TIMER`) and, real bugs found getting a real kernel to actually use
+// it: `CONFIG_PCI=y` is also required (`ACPI_PCI_CONFIGURED`, `include/acpi/platform/aclinux.h`,
+// is only `#ifdef CONFIG_PCI` — without it, ACPICA's default-address-space-handler loop hits an
+// undefined switch arm for `ACPI_ADR_SPACE_PCI_CONFIG` and `acpi_load_tables()` fails outright with
+// `AE_BAD_PARAMETER`, independent of anything this module builds); and `linux::pin_apic_base_msr`
+// (`linux/mod.rs`) must pin `IA32_APIC_BASE` explicitly, because KVM's own default value for that
+// MSR (there is no in-kernel LAPIC here at all, so it is never routed through baud's own MSR
+// trap) left the x2APIC-enable bit set even though this crate's CPUID clears the x2APIC *feature*
+// bit — `check_x2apic()`'s `CONFIG_X86_X2APIC`-unset fallback trusts that MSR bit directly and
+// unconditionally clears `X86_FEATURE_APIC` the instant it reads set, which made every real guest
+// conclude "No local APIC present" regardless of a correct MADT or [`LocalApic`] — neither was
+// ever consulted once the kernel had already given up on that feature bit. New real-hardware test
+// `guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic` (`linux/mod.rs`) boots the real
+// `linux-guest` fixture with ACPI on and confirms the kernel's own `setup_local_APIC()` wrote real
+// values into [`LocalApic`]'s `SPIV`/`LVT_TIMER` registers (not console text — `DETERMINISTIC_
+// CMDLINE`'s `quiet loglevel=1` suppresses virtually every printk line, so register content is the
+// only direct proof), 5/5 clean across repeated real-hardware re-runs, byte-identical console
+// across two boots. `acpi_boot_table_init()`/ACPICA's full `acpi_load_tables()` both find, validate,
+// and accept every one of this module's tables on real hardware — proving out every checksum,
+// pointer, and flag choice this file makes, not just their own internal byte-layout rules.
 
 use crate::layout;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend};
 
 /// The conventional LAPIC MMIO base every x86 Linux kernel's apic driver assumes absent an
 /// `IA32_APIC_BASE` MSR override (Intel SDM Vol. 3A §10.4.3) — also the value [`build_madt`]
-/// publishes as the MADT's own "Local Interrupt Controller Address" field.
-const LOCAL_APIC_MMIO_BASE: u32 = 0xFEE0_0000;
+/// publishes as the MADT's own "Local Interrupt Controller Address" field. Single source of truth
+/// with [`crate::lapic::LocalApic`]'s own MMIO window: both read this same `layout` constant.
+const LOCAL_APIC_MMIO_BASE: u32 = layout::LAPIC_MMIO_BASE as u32;
 
 const OEM_ID: [u8; 6] = *b"BAUD  ";
 const CREATOR_ID: [u8; 4] = *b"BAUD";

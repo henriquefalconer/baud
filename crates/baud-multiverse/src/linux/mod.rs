@@ -156,6 +156,35 @@ fn pin_tsc_value(vcpu: &VcpuFd, value: u64) -> Result<(), BootError> {
     Ok(())
 }
 
+/// `IA32_APIC_BASE` (Intel SDM Vol. 3A §10.4.4) — a real bug this crate's ACPI/LAPIC work
+/// (`crate::lapic`, todo.md §14 item 5(c)) found on real hardware: KVM has no in-kernel LAPIC
+/// device at all here (`KVM_CREATE_IRQCHIP` is never called, `lapic_in_kernel(vcpu)` is false), so
+/// this MSR is never routed through baud's own `KVM_X86_SET_MSR_FILTER` trap (unlike the
+/// `IA32_TSC*` family, §3.3) — it is answered by KVM's own bare bookkeeping for the register, which
+/// this project's real boot found does **not** default to a sane xAPIC-enabled, x2APIC-disabled
+/// reset state: a real guest's own `rdmsr(IA32_APIC_BASE)` read back with the x2APIC-enable bit
+/// (bit 10) already set, even though this crate's CPUID mask clears the x2APIC *feature* bit
+/// (`cpuid.rs`'s `ECX_X2APIC_BIT`) — `check_x2apic()`'s `CONFIG_X86_X2APIC`-unset fallback path
+/// (`arch/x86/kernel/apic/apic.c`) trusts this MSR bit directly, independent of CPUID, and
+/// unconditionally clears `X86_FEATURE_APIC` the moment it reads set, which made every real Linux
+/// guest conclude "No local APIC present" regardless of a correct MADT (`crate::acpi::build_madt`)
+/// or a correct `crate::lapic::LocalApic` MMIO stub — neither is ever consulted once the kernel
+/// has already given up on this bit. Pinning this MSR explicitly (BSP bit set, x2APIC bit clear,
+/// APIC Global Enable set, base address [`layout::LAPIC_MMIO_BASE`] — the real-hardware reset
+/// values every guest already assumes) makes the guest's own APIC detection deterministic and
+/// correct, exactly the same "don't trust whatever KVM's default happens to leave in place"
+/// reasoning `pin_tsc_value` above already established for the TSC.
+fn pin_apic_base_msr(vcpu: &VcpuFd) -> Result<(), BootError> {
+    const MSR_IA32_APICBASE: u32 = 0x0000_001B;
+    const APICBASE_BSP: u64 = 1 << 8;
+    const APICBASE_ENABLE: u64 = 1 << 11;
+    let value = layout::LAPIC_MMIO_BASE | APICBASE_BSP | APICBASE_ENABLE;
+    let entry = kvm_msr_entry { index: MSR_IA32_APICBASE, data: value, ..Default::default() };
+    let msrs = Msrs::from_entries(&[entry]).map_err(BootError::MsrAlloc)?;
+    vcpu.set_msrs(&msrs)?;
+    Ok(())
+}
+
 /// Run the full boot flow (specs/baud-multiverse.md §2's `Kvm::new → create_vm → register guest
 /// RAM → create_vcpu → CPUID/TSC/MSR setup → linux-loader boot`) and return a [`BootedGuest`]
 /// positioned at the kernel's 64-bit entry point, ready to enter `KVM_RUN`, alongside a
@@ -193,6 +222,7 @@ pub fn boot_guest(
     regs.rsp = layout::BOOT_STACK_POINTER;
     regs.rflags = 0x2; // bit 1 is reserved-must-be-1; every other flag starts clear
     guest.vcpu.set_regs(&regs)?;
+    pin_apic_base_msr(&guest.vcpu)?;
 
     // Pinned last, immediately before returning to the caller (which enters `KVM_RUN` right
     // after) rather than right after `set_tsc_khz` above — real-hardware finding, todo.md §14:
@@ -1336,6 +1366,24 @@ impl Multiverse {
     /// actually took effect.
     pub fn pic(&self) -> &crate::pic8259::Pic8259 {
         self.bus.pic()
+    }
+
+    /// The Local APIC MMIO bookkeeping stub's current state (`crate::lapic::LocalApic`) — mirrors
+    /// [`pic`](Self::pic)'s read-access convention for a caller/test that wants to confirm a real
+    /// guest's own `setup_local_APIC()`/`setup_APIC_timer()` sequence took effect.
+    pub fn lapic(&self) -> &crate::lapic::LocalApic {
+        self.bus.lapic()
+    }
+
+    /// Write the minimal ACPI table set ([`crate::acpi::write_acpi_tables`]: RSDP -> XSDT -> FADT +
+    /// DSDT + MADT-with-one-LAPIC, todo.md §14 item 5(c)) into this booted guest's real memory —
+    /// the real boot-path wiring [`crate::acpi`]'s own doc named as still open. Opt-in: call after
+    /// [`boot`](Self::boot)/[`boot_with_rdseed_sites`](Self::boot_with_rdseed_sites) succeeds and
+    /// before the first `KVM_RUN`/`run_to_first_halt*` call, on a guest whose cmdline sets
+    /// `acpi=on` and whose kernel is `CONFIG_ACPI=y` — every existing caller that never calls this
+    /// keeps booting with no ACPI tables present at all, exactly as before this method existed.
+    pub fn write_acpi_tables(&self) -> Result<(), DeterminismHole> {
+        crate::acpi::write_acpi_tables(&self.guest.guest_mem).map_err(|e| DeterminismHole(e.to_string()))
     }
 
     /// Enable the virtio-blk device on this guest's device bus
@@ -3100,6 +3148,71 @@ mod tests {
             tick_counts[0], tick_counts[1],
             "the same image+tape must survive the same number of periodic ticks before its own \
              natural halt across two boots"
+        );
+    }
+
+    /// todo.md §14 item 5(c)'s two flagged gaps, closed: a real `CONFIG_ACPI=y` guest (`minimal.
+    /// config` flipped `CONFIG_ACPI=n` -> `y`, same "compiled-in-but-inert for anyone still booting
+    /// `acpi=off`" precedent `BUILD.md` already documents for `HPET_TIMER`) boots with `acpi=on`
+    /// and [`Multiverse::write_acpi_tables`] (RSDP -> XSDT -> FADT + DSDT + MADT-with-one-LAPIC,
+    /// `crate::acpi`) actually in guest memory, and [`crate::lapic::LocalApic`] answers its real
+    /// MMIO probes instead of `OpenBusFallback`. Proves the two things `crate::acpi`'s own doc
+    /// named as the real acid test: the kernel's `acpi_boot_table_init()` finds and validates every
+    /// table (no checksum/pointer mistake in `crate::acpi`'s pure construction went unnoticed by a
+    /// real ACPICA parse), and `setup_local_APIC()` completes without hanging on `LocalApic`'s
+    /// stubbed registers (the one real hang hazard research identified: `APIC_ICR`'s busy bit).
+    #[test]
+    fn guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_initramfs();
+        let cmdline = bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
+        assert_ne!(cmdline, bootparams::DETERMINISTIC_CMDLINE, "the replace must actually have matched");
+        const PERIOD_RCB: u64 = 500_000;
+        const MAX_TICKS: u32 = 2000;
+        const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR
+
+        let mut consoles = Vec::new();
+        for i in 0..2 {
+            let mut m = Multiverse::boot_with_rdseed_sites(
+                &kernel,
+                &cmdline,
+                0,
+                1,
+                vec![],
+                None,
+                Some(&initramfs),
+                [],
+            )
+            .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
+            m.write_acpi_tables().unwrap_or_else(|e| panic!("run {i}: write_acpi_tables failed: {e}"));
+            let (_ticks, halt) = m
+                .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+                .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
+            let console = String::from_utf8_lossy(&halt.console_output).to_string();
+            assert!(
+                console.contains(LINUX_GUEST_MARKER),
+                "run {i}: guest must still reach /init and print its marker; got:\n{console}"
+            );
+            assert!(
+                !console.contains("No local APIC present"),
+                "run {i}: a real MADT-advertised LAPIC must be recognized, not disabled; got:\n{console}"
+            );
+            // `DETERMINISTIC_CMDLINE`'s own `quiet loglevel=1` suppresses virtually every printk
+            // line (confirmed: even the non-ACPI boot's console is just the marker plus the
+            // reboot-path message), so console text cannot prove the kernel's real
+            // `setup_local_APIC()`/`setup_APIC_timer()` actually ran -- `LocalApic`'s own
+            // guest-write-derived register state is the real, direct proof instead: the guest's
+            // own real MMIO writes, not a log line, are what a fake/absent LAPIC could never
+            // produce.
+            let spiv = m.lapic().spurious_interrupt_vector();
+            assert_ne!(spiv, 0, "run {i}: the kernel must have written APIC_SPIV (software-enable) itself");
+            let lvt_timer = m.lapic().lvt_timer();
+            assert_ne!(lvt_timer, 0, "run {i}: the kernel must have armed APIC_LVT_TIMER itself");
+            consoles.push((console, spiv, lvt_timer));
+        }
+        assert_eq!(
+            consoles[0], consoles[1],
+            "an ACPI-enabled boot must remain exactly as reproducible as every other guest here"
         );
     }
 
