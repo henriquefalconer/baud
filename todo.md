@@ -2677,15 +2677,19 @@ snapshot, not a duplicate of it.
      74-warning workspace baseline); full `bash drive/gate.sh` → 22 passed, 0 failed, 1 flaked (the
      already-documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in
      isolation — not a regression, see CLAUDE.md's standing note on this unit), 1 skipped, 3m24s. **Still
-     open for H9**: the actual `baud-fingerprint` crate (report rendering/`compare`/`FpError`), `baud
-     verify fingerprint` CLI, `drive/h9.sh`, the two-VM cross-process orchestration
-     (`cross_vm_fingerprint_matches`), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)
-     above) are all still not started — this iteration closes only the previously-completely-missing
-     capture-primitive gap underneath all of them, and surfaced a real precision bug in the shared
+     open for H9 at the time this item was written**: the actual `baud-fingerprint` crate (report
+     rendering/`compare`/`FpError`), `baud verify fingerprint` CLI, `drive/h9.sh`, the two-VM cross-process
+     orchestration (`cross_vm_fingerprint_matches`), and the real Ubuntu 18.04.1 cloud-image
+     acquisition/boot (H9 (d)/(e) above) were all still not started — this iteration closed only the
+     previously-completely-missing capture-primitive gap underneath all of them, and surfaced a real
+     precision bug in the shared
      stepping engine while doing so (§14.1, "`run_to_events`/`inject_at`'s single-step engine can overshoot
      its target RCB" — **since fixed, see §14.1's Resolved list item 8**), which blocked the exact
      "events = N" contract `specs/baud-fingerprint.md` promises; that contract can now be honestly
-     implemented. Separately found this same session, real but deliberately left open and out of scope:
+     implemented. **The `baud-fingerprint` crate itself has since been built — see item 9 below; narrowed
+     down to still open now**: the `baud verify fingerprint` CLI/HTTP route, `drive/h9.sh`, the true
+     cross-process orchestration, and the real Ubuntu 18.04.1 cloud image. Separately found this same
+     session, real but deliberately left open and out of scope:
      `handle_baud_rdtsc_exit`'s (`kernel-module/baud-enforced/rdtsc-enforce.patch`) call to
      `kvm_skip_emulated_instruction` returns 0 unconditionally, without checking for an active
      `KVM_GUESTDBG_SINGLESTEP` window, so a trapped enforced-regime RDTSC that occurs *inside* a
@@ -2693,6 +2697,61 @@ snapshot, not a duplicate of it.
      result is never actually served to the guest. This is narrow — it only affects the **enforced-
      regime patched kernel module** (`kernel-module/baud-enforced/`), never the stock module every
      normal test/drive-script uses — so it is real but not chased further here.
+  9. **H9 — the `baud-fingerprint` crate (report rendering/`compare`/`FpError`) now exists on top of item
+     8's capture primitives; the CLI/HTTP route, `drive/h9.sh`, true cross-process orchestration, and the
+     real Ubuntu image still do not.** New workspace member `crates/baud-fingerprint` (Cargo.toml deps:
+     `baud-multiverse`, `baud-vcpu`, `thiserror`; added to the root `Cargo.toml`'s `members`).
+     `crates/baud-fingerprint/src/lib.rs` implements, per `specs/baud-fingerprint.md` §2-§6: `pub struct
+     Fingerprint { label: String, banner: Vec<u8>, events: u64, rip: u64, gpa: Option<u64>, mem_hash:
+     String }` plus its `render()` (the exact console report block, byte-tested against the spec's own
+     example); `pub enum FpError { DeterminismHole(#[from] baud_vcpu::DeterminismHole)` (`cfg(target_os =
+     "linux")` only) `, NoBanner { events, expected, found } }`; `pub struct Divergence { field: &'static
+     str, a: String, b: String }` with an `impl Display`; `pub fn compare(a: &Fingerprint, b: &Fingerprint)
+     -> Result<(), Divergence>`, comparing `banner`, `events`, `rip`, `gpa`, `mem_hash` in that order and
+     returning the first divergence (deliberately excludes `label`); and (`cfg(target_os = "linux")` only)
+     `pub fn capture(vm: &mut baud_multiverse::linux::Multiverse, label: &str, target_rcb: u64,
+     banner_tail_len: usize, expected_banner: Option<&[u8]>) -> Result<Fingerprint, FpError>`, wrapping
+     `Multiverse::capture_fingerprint` (item 8 above) and slicing the last `banner_tail_len` bytes of
+     console output as the banner, returning `FpError::NoBanner` instead of a wrong-state fingerprint when
+     `expected_banner` is `Some` and the captured tail doesn't end with it. Two deliberate deviations from
+     the spec's illustrative pseudocode, both documented in the crate's own module doc rather than hidden:
+     (1) `mem_hash` is `String` (`"blake3:<hex>"`, matching what `Multiverse::ram_hash()` already returns
+     everywhere else in this codebase), not the spec's illustrative `[u8; 32]`; (2) `capture()` takes the
+     expected banner and its tail length as parameters instead of hardcoding the Ubuntu banner, since the
+     spec's own §5 prose says a non-distro guest "supplies its own banner (or an empty one)" — the
+     not-yet-written Ubuntu H9 caller will pass `UBUNTU_BANNER`. 6 new pure unit tests need no `/dev/kvm`:
+     `render_is_byte_exact`, `render_reports_unmapped_gpa`, `compare_reports_first_divergence`,
+     `compare_names_the_earliest_field_when_several_differ`, `label_difference_is_not_a_divergence`,
+     `banner_divergence_is_reported_by_content_not_by_label` — matching the test names
+     `specs/baud-fingerprint.md` §8 itself lists (`render_is_byte_exact`, `compare_reports_first_divergence`,
+     `label_difference_is_not_a_divergence`). 2 new real-hardware tests, both **passed**:
+     `linux::tests::two_independent_boots_produce_matching_fingerprints` boots the existing `timer-guest`
+     fixture (`crates/baud-multiverse/tests/fixtures/timer-guest/bzImage`) twice, sequentially, in one
+     process — a same-process stand-in for H9's true two-separate-process/two-core orchestration, which is
+     still unbuilt — captures a fingerprint from each at the same `target_rcb = 100_000`, and asserts
+     `compare()` returns `Ok`, the crate-level proof of the same whole-machine determinism property item
+     8's own `timed_exit_fingerprint_is_stable` already established one layer down;
+     `linux::tests::wrong_expected_banner_is_rejected` is the `missing_login_fails_capture` analogue,
+     adapted to the timer-guest fixture (which prints no banner at all) — asking `capture` to require a
+     banner it can never see returns `FpError::NoBanner` rather than a wrong-state fingerprint. Verified:
+     `cargo build -p baud-fingerprint` clean; `cargo test -p baud-fingerprint` → 8 passed, 0 failed, real
+     `/dev/kvm` exercised by 2 of them; `cargo clippy -p baud-fingerprint --all-targets` → 0 new warnings
+     (only pre-existing `baud-multiverse`/`baud-proto` baseline warnings surface, none touching this new
+     crate); `cargo build --workspace` clean; `cargo clippy --workspace --all-targets` → 74 warnings, the
+     exact pre-existing baseline (`grep` confirms none mention `baud-fingerprint`); `cargo test --workspace`
+     → 212 passed, 1 failed (`rdtsc_guest_reproduces_high_bits_across_boots`, the documented load-flake,
+     confirmed passing in isolation, 1/1, before concluding it's not a regression), 10 ignored; full `bash
+     drive/gate.sh` → 24 passed, 0 failed, 0 skipped, 5m20s, clean, no flakes this run. **Still open for
+     H9**: `baud verify fingerprint` CLI (needs a new `baud-server` HTTP route, since `baud-cli` is
+     HTTP-only and has no direct `baud-multiverse` dependency — confirmed by inspection of
+     `crates/baud-cli/Cargo.toml`/`src/client.rs`), `drive/h9.sh`, the true two-separate-OS-process (not
+     same-process-sequential like this iteration's test) cross-VM orchestration (the closest existing
+     primitive is `baud_multiverse::linux::run_fleet`, which does same-process per-thread core-pinning via
+     `baud_host::Host::place`, not separate processes — still needs wiring into an HTTP route, none exists
+     today), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)). This iteration closes
+     only the "the full `baud-fingerprint` crate... does not [exist]" half of item 8's own "still open"
+     note — the report/comparator layer now exists and is real-hardware-tested; CLI/orchestration/
+     actual-Ubuntu remain.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

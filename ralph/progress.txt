@@ -7085,3 +7085,45 @@ Full pre-push gate: 23 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint u
   - Found and documented (not fixed, out of scope, patched-module-only): handle_baud_rdtsc_exit's kvm_skip_emulated_instruction ignores an active KVM_GUESTDBG_SINGLESTEP window, so an enforced-regime RDTSC trapped mid-single-step never gets its EDX:EAX served.
   - todo.md §14.1 updated: overshoot entry moved from open-defects prose to the Resolved numbered list (new item 8); §14 item 8 (H9 fingerprint primitives) closing language updated to reflect the fix; new narrow open finding recorded for the enforced-regime RDTSC/singlestep interaction.
 ---
+
+Post-push verification: origin/main now at 9861d86, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (23 passed, 0 failed, 1 skipped, 2m54s) before this push, at this exact commit's tree. todo.md still has many pending items (H8 Mario blocked on Qt5/SDL2/Xvfb FCEUX packaging, H9 sub-items (d) actual Ubuntu 18.04.1 cloud image and (e) drive/h9.sh + cross-VM fingerprint orchestration + baud-fingerprint crate/CLI still not started, Buildroot/pinned-Nix guest-image pipeline, plus the narrow enforced-regime RDTSC/singlestep interaction just found) -- emitting NEXT.
+
+## 2026-07-27T15:04:45 UTC (50min) - Session usage — build-11 [sonnet]
+- cost $13.4779 (from claude -p)
+- context 141,132 tok peak of 1M (14%) across 36 inference calls, monotonic
+- models opus-5[1m] $10.3055 (in 201 / out 74,544 / cache-read 14,296,633) · sonnet-5 $3.1692 · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x1 · opus-5 x1
+- transcript: ralph/.run/20260727T104433Z/012-build-11.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 12
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md §14 build-status tail and ralph/progress.txt history. Iteration 11 fixed the RCB single-step overshoot bug; the next scoped H9 step is building the baud-fingerprint crate (report renderer + comparator) per specs/baud-fingerprint.md, since the capture primitives (run_to_events/translate_gva/capture_fingerprint) already exist in baud-multiverse but nothing consumes them into a crate/CLI yet.
+
+Confirmed via direct inspection: baud-cli talks to baud-server only over HTTP (reqwest), no direct baud-multiverse dependency -- so full cross-process 'baud verify fingerprint' CLI wiring would need a new server route too. Scoping this iteration to: build the baud-fingerprint crate itself (Fingerprint/render/compare/FpError/Divergence per specs/baud-fingerprint.md) with its own real-hardware test proving two independently-booted Multiverse instances (same process, sequential boots -- not yet separate OS processes/cores) produce identical fingerprints, deferring full HTTP/CLI/drive/h9.sh wiring and the real Ubuntu image to later iterations. Waiting on a subagent survey of exact existing signatures (run_to_events/capture_fingerprint/translate_gva) before writing code.
+
+Created new crates/baud-fingerprint crate per specs/baud-fingerprint.md: Fingerprint struct, render()/compare()/Divergence/FpError, and a capture() wrapper around baud-multiverse's existing capture_fingerprint primitive (adds banner-tail slicing + expected-banner check, generalized beyond a hardcoded Ubuntu constant since the spec itself says non-distro guests supply their own banner or none). Builds clean. Running cargo test -p baud-fingerprint now (includes two real-hardware tests against the timer-guest fixture on real /dev/kvm).
+
+All 8 tests passed, real /dev/kvm exercised (two_independent_boots_produce_matching_fingerprints proves the crate's capture/compare wiring end-to-end: two sequential Multiverse boots of timer-guest at the same target_rcb produce field-identical Fingerprints). Running cargo clippy -p baud-fingerprint --all-targets now.
+
+baud-fingerprint itself clean of new clippy warnings (the only warnings clippy -p baud-fingerprint --all-targets reports live in baud-multiverse/baud-proto, both pre-existing baseline unrelated to this crate). Running the full cargo build/clippy/test --workspace now before the pre-push gate.
+
+cargo clippy --workspace --all-targets: 74 warnings, exact pre-existing baseline (grep confirms none touch baud-fingerprint). Running cargo test --workspace now.
+
+cargo test --workspace: 212 passed, 1 failed (rdtsc_guest_reproduces_high_bits_across_boots -- this is CLAUDE.md's documented load-flake), 10 ignored. Re-running that one test in isolation to confirm flake before proceeding.
+
+Confirmed flake: rdtsc_guest_reproduces_high_bits_across_boots passes in isolation (1 passed). This is the documented pre-existing load-flake, not a regression from this change. Running the full pre-push gate (bash drive/gate.sh) now -- this can take several minutes.
+
+todo.md updated cleanly (2998->3057 lines): item 8's closing note narrowed to reflect the new crate, new item 9 documenting this iteration's baud-fingerprint crate work. Appending the final Changes-committed progress block now and committing everything.
+
+## 2026-07-27T15:21:54 UTC - Changes committed.
+- Built the new baud-fingerprint crate (report renderer + cross-VM comparator), the layer specs/baud-fingerprint.md specifies on top of the capture primitives a prior iteration added to baud-multiverse
+- Files changed: Cargo.toml, crates/baud-fingerprint/Cargo.toml (new), crates/baud-fingerprint/src/lib.rs (new), todo.md
+- **Brief description of changes:**
+  - New workspace member crates/baud-fingerprint (deps: baud-multiverse, baud-vcpu, thiserror). Implements specs/baud-fingerprint.md §2-§6: Fingerprint { label, banner, events, rip, gpa, mem_hash } + render() (byte-tested against the spec's own example), FpError (DeterminismHole passthrough, cfg(linux)-only; NoBanner), Divergence + compare() (field-by-field: banner/events/rip/gpa/mem_hash in order, first divergence wins, label deliberately excluded), and a cfg(linux)-only capture() wrapping Multiverse::capture_fingerprint with banner-tail slicing and an expected-banner check
+  - Two deliberate, documented deviations from the spec's illustrative pseudocode: mem_hash is String ("blake3:<hex>", matching Multiverse::ram_hash()'s existing convention) not [u8; 32]; capture() takes the expected banner/tail-length as parameters instead of hardcoding Ubuntu's, since the spec itself says a non-distro guest supplies its own banner or none
+  - 6 pure unit tests (render_is_byte_exact, render_reports_unmapped_gpa, compare_reports_first_divergence, compare_names_the_earliest_field_when_several_differ, label_difference_is_not_a_divergence, banner_divergence_is_reported_by_content_not_by_label) plus 2 real-hardware tests against the existing timer-guest fixture, both PASSED on real /dev/kvm: two_independent_boots_produce_matching_fingerprints (two sequential Multiverse boots, same target_rcb, compare() == Ok -- the crate-level proof of the determinism property capture_fingerprint's own test already proved one layer down) and wrong_expected_banner_is_rejected (capture() refuses a wrong-state fingerprint rather than silently returning one)
+  - Verified: cargo build/test -p baud-fingerprint clean (8 passed, 0 failed); cargo clippy -p baud-fingerprint --all-targets 0 new warnings; cargo build/clippy --workspace --all-targets clean (74 warnings, exact pre-existing baseline, grep confirms none touch baud-fingerprint); cargo test --workspace 212 passed, 1 failed (rdtsc_guest_reproduces_high_bits_across_boots, confirmed passing in isolation 1/1 -- the documented load-flake, not a regression), 10 ignored; full bash drive/gate.sh: 24 passed, 0 failed, 0 skipped, 5m20s, clean, no flakes this run
+  - Still open for H9: baud verify fingerprint CLI (needs a new baud-server HTTP route -- baud-cli is HTTP-only, no direct baud-multiverse dependency), drive/h9.sh, the true two-separate-OS-process cross-VM orchestration (closest existing primitive is run_fleet, which pins per-thread not per-process), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)); H8 Mario remains blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
+---

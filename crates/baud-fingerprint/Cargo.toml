@@ -1,0 +1,11 @@
+[package]
+name = "baud-fingerprint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The timed-exit determinism check: report renderer + cross-VM comparator (specs/baud-fingerprint.md)"
+
+[dependencies]
+baud-multiverse = { path = "../baud-multiverse" }
+baud-vcpu = { path = "../baud-vcpu" }
+thiserror = { workspace = true }

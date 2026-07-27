@@ -23,6 +23,7 @@ members = [
     "crates/baud-tracing",
     "crates/baud-tape-agent",
     "crates/baud-snapshot-store",
+    "crates/baud-fingerprint",
 ]
 
 [workspace.package]
