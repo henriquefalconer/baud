@@ -36,6 +36,7 @@ use perf_event::{Builder, Counter};
 use std::io;
 use std::path::Path;
 use std::time::Duration;
+use tracing::info;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 /// The guest-RAM backend type this boot flow uses throughout — a single anonymous-mmap region, no
@@ -594,6 +595,15 @@ pub struct Multiverse {
 /// §14.1, `thousand_branches_are_independent_and_deterministic` averages ~200-250ms/branch), but
 /// still finite: this is what actually closes the "hangs forever" gap.
 pub const DEFAULT_WATCHDOG_BUDGET: Duration = Duration::from_secs(30);
+
+/// How often [`Multiverse::run_to_first_halt_with_periodic_timer_and_devices`] emits a `tracing`
+/// progress line — todo.md §14 item 15's named observability gap: a multi-tens-of-minutes real-
+/// kernel boot (e.g. H9's Ubuntu login-banner attempt) was previously a total black box until it
+/// finished, timed out, or was killed, since the HTTP response carries no output until the whole
+/// run resolves. Logging every tick would be too noisy for a 20000+-tick run; every 100 keeps the
+/// log readable while still giving a live "how far in / is it stuck" signal via `tail -f` on the
+/// server's own log output.
+const RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS: u32 = 100;
 
 /// Where an injected interrupt actually landed (H4, specs/baud-vcpu.md §5): the instruction
 /// pointer and cumulative work-clock RCB at the moment `Multiverse::inject_timer_tick` delivered
@@ -1897,9 +1907,18 @@ impl Multiverse {
         let _kicker = self.arm_cancel_kicker();
         let mut last_notify: Vec<u64> =
             devices.iter().map(|d| (d.notify_count)(self).unwrap_or(0)).collect();
-        for _ in 0..max_ticks {
+        let progress_start = std::time::Instant::now();
+        for tick_index in 0..max_ticks {
             if self.is_cancelled() {
                 return Err(RunLoopError::Cancelled);
+            }
+            if tick_index % RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS == 0 {
+                info!(
+                    "run_to_first_halt_with_periodic_timer_and_devices: tick {tick_index}/{max_ticks}, \
+                     console_output {} bytes, {:.1}s elapsed",
+                    self.bus.console.output().len(),
+                    progress_start.elapsed().as_secs_f64(),
+                );
             }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
@@ -3690,6 +3709,99 @@ mod tests {
         assert_eq!(
             second_halt.ram_hash, first_halt.ram_hash,
             "guest RAM at the guest's own natural halt must be byte-identical across two boots"
+        );
+    }
+
+    /// A minimal `tracing::Subscriber` that records every event's `message` field verbatim, with
+    /// no filtering/formatting layer — just enough to assert on in a test, without pulling in
+    /// `tracing-subscriber` as a new dev-dependency for this one assertion.
+    struct RecordingSubscriber {
+        messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for RecordingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct MessageVisitor(String);
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            self.messages.lock().unwrap().push(visitor.0);
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// todo.md §14 item 15's named observability gap: a real-kernel boot run
+    /// (`run_to_first_halt_with_periodic_timer_and_devices`) used to be a total black box until it
+    /// finished, timed out, or was killed. Proves the fix directly: the run loop now emits a
+    /// `tracing` progress event carrying the tick count and running console-output length, visible
+    /// on the very first tick (`tick_index == 0` always satisfies `% RUN_LOOP_PROGRESS_LOG_INTERVAL_
+    /// TICKS == 0`) rather than only after `RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS` ticks have
+    /// elapsed — the same low tick budget `periodic_timer_injection_halts_gracefully_and_reproducibly`
+    /// above uses is enough to observe it, no larger/slower boot required.
+    #[test]
+    fn run_loop_progress_is_logged_via_tracing() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const PERIOD_RCB: u64 = 200_000;
+        const MAX_TICKS: u32 = 20;
+
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = RecordingSubscriber { messages: messages.clone() };
+
+        // Deliberately calls the private `_and_devices` engine directly (accessible here since
+        // `tests` is a descendant module), not the public `run_to_first_halt_with_periodic_timer`
+        // above -- that one is a separate, older loop that does not share this engine (and so does
+        // not carry this progress logging); the real H9 boot path
+        // (`run_until_console_pattern_with_periodic_timer_and_devices`, `baud-server`'s
+        // `routes/run_kvm.rs`) always goes through this shared engine.
+        let mut guest = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+        tracing::subscriber::with_default(subscriber, || {
+            guest
+                .run_to_first_halt_with_periodic_timer_and_devices(
+                    PERIOD_RCB,
+                    TIMER_VECTOR,
+                    &[],
+                    MAX_TICKS,
+                    None,
+                    0,
+                )
+                .expect("periodic run failed")
+        });
+
+        let messages = messages.lock().unwrap();
+        let progress_lines: Vec<&String> = messages
+            .iter()
+            .filter(|m| m.contains("run_to_first_halt_with_periodic_timer_and_devices"))
+            .collect();
+        assert!(
+            !progress_lines.is_empty(),
+            "expected at least one run-loop progress log line, got: {messages:?}"
+        );
+        assert!(
+            progress_lines[0].contains("tick 0/20"),
+            "the very first progress line must report tick 0 (logged before any tick is injected), \
+             got: {:?}",
+            progress_lines[0]
+        );
+        assert!(
+            progress_lines[0].contains("console_output"),
+            "progress line must report the running console-output length, got: {:?}",
+            progress_lines[0]
         );
     }
 

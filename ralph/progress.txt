@@ -7469,3 +7469,43 @@ Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged
 ---
 
 Post-push verification: origin/main == local HEAD (d5cfa16) exactly, working tree clean. Gate was already green (25 passed, 0 failed, 1 skipped, 2m34s) at this commit's tree before pushing. todo.md still has pending items (item 15's observability gap is the freshest, plus H8 Mario's FCEUX/Xvfb block and others already recorded) -- emitting NEXT.
+
+## 2026-07-27T22:10:14 UTC (38min) - Session usage — build-2 [sonnet]
+- cost $2.0658 (from claude -p)
+- context 109,742 tok peak of 1M (11%) across 42 inference calls, monotonic, resumed 1x
+- models sonnet-5 $2.0626 (in 84 / out 33,090 / cache-read 3,499,000) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T203641Z/003-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose todo.md item 15's named next step: add intermediate observability (tracing::info! progress logging every N ticks: tick count, console_output length, elapsed time) to the H9 boot run loop, since blind escalation of tick budgets was concluded unproductive without it.
+
+baud-multiverse builds clean with the new progress-logging constant/import. Running clippy on the crate before the full gate...
+
+Added a unit test (run_loop_progress_is_logged_via_tracing) using a minimal hand-rolled tracing::Subscriber to assert the progress log line actually fires, reusing the timer-guest fixture. Building/testing on real KVM...
+
+Found the root cause of the first test failure: run_to_first_halt_with_periodic_timer (the public, no-devices wrapper) has its own separate inline loop that does NOT delegate to run_to_first_halt_with_periodic_timer_and_devices -- a pre-existing duplication, not something this iteration introduced. Fixed the test to call the shared _and_devices engine directly (the one the real H9 boot path actually uses via routes/run_kvm.rs), matching where the new logging lives. Re-running...
+
+New test passes on real hardware. Running the full baud-multiverse test suite plus clippy to check for regressions before the full gate...
+
+All 224 baud-multiverse tests pass, no regressions. Updating todo.md item 15 to record the observability fix, then running the full pre-push gate (bash drive/gate.sh)...
+
+Critical finding: baud-server's default tracing filter (main.rs) only ever raised the 'baud_server' target to info -- everything else defaults to ERROR-only, so the new baud-multiverse progress logging would have been silently dropped in the real server log, defeating the whole point of item 15's fix. Adding a baud_multiverse=info default directive alongside the existing baud_server=info one.
+
+todo.md item 15 updated via subagent with the fix details, discovered duplication, and the EnvFilter gap. Running bash drive/gate.sh (full pre-push validation) now...
+
+Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged fingerprint), 3m06s. Appending final progress block and committing.
+
+## 2026-07-27T22:22:06 UTC - Changes committed.
+- Implemented todo.md §14 item 15's named next step: intermediate observability for long-running H9-style KVM boot attempts, which previously were a total black box until finished, timed out, or killed
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-server/src/main.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Added `RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS: u32 = 100` and a `tracing::info!` progress line to `Multiverse::run_to_first_halt_with_periodic_timer_and_devices` (crates/baud-multiverse/src/linux/mod.rs), the private shared engine `run_until_console_pattern_with_periodic_timer_and_devices` delegates to -- the actual function the real H9 boot path (baud-server's routes/run_kvm.rs) calls. Logs tick_index/max_ticks, running console_output().len(), and elapsed wall-clock seconds every 100 ticks, always including tick 0.
+  - Added hardware-verified unit test `run_loop_progress_is_logged_via_tracing` using a minimal hand-rolled tracing::Subscriber (no new dev-dependency) that proves the line actually fires; calls the private `_and_devices` engine directly rather than the public no-devices wrapper, because of a discovered pre-existing duplication (documented in todo.md, not fixed this iteration: `run_to_first_halt_with_periodic_timer` has its own separate inline loop that does not share this engine).
+  - Critical follow-on fix: baud-server's main.rs default tracing EnvFilter only ever raised the `baud_server` target to info, so the new baud-multiverse progress logging would have been silently dropped in the real server log during an actual H9 attempt. Added a second default directive, `baud_multiverse=info`, so a plain `baud-server` invocation now surfaces these lines with no extra operator setup.
+  - Verified: `cargo test -p baud-multiverse` (224 passed, 0 failed, 10 ignored), `cargo build -p baud-server` clean, `bash drive/gate.sh` -- 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 3m06s, clean, no flakes
+---

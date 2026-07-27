@@ -3035,6 +3035,47 @@ snapshot, not a duplicate of it.
      `console_output().len()`, and/or a second HTTP endpoint that reports a running run's live console tail) so a
      multi-tens-of-minutes attempt is diagnosable while it runs, rather than only after a kill.
 
+     This iteration implemented the first half of that recommendation. New constant
+     `RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS: u32 = 100` (`crates/baud-multiverse/src/linux/mod.rs:606`)
+     and a `tracing::info!` progress line (`:1915-1921`) added to the private shared engine
+     `Multiverse::run_to_first_halt_with_periodic_timer_and_devices` — the one
+     `run_until_console_pattern_with_periodic_timer_and_devices` (the actual function the real H9 boot
+     path in `baud-server`'s `routes/run_kvm.rs` calls) delegates to — logging the current
+     `tick_index`/`max_ticks`, the running `self.bus.console.output().len()`, and elapsed wall-clock
+     seconds (via an `Instant` captured before the tick loop starts) every 100 ticks, gated on
+     `tick_index % RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS == 0` so it also always fires on the very first
+     tick, tick 0. New hardware-verified unit test `run_loop_progress_is_logged_via_tracing` (same file,
+     `tests` module, `:3757`) proves the line actually fires, using a minimal hand-rolled `tracing::
+     Subscriber` (`RecordingSubscriber`, no new dev-dependency) that records every event's message field
+     into a shared `Arc<Mutex<Vec<String>>>`; it calls the private `_and_devices` engine directly
+     (reachable from the same-file `tests` submodule) rather than going through the public
+     `run_to_first_halt_with_periodic_timer` wrapper, because of a discovered pre-existing duplication
+     described next. Passed on real `/dev/kvm` hardware alongside the rest of the `baud-multiverse`
+     suite (224 passed, 0 failed). Discovered and worth flagging as a small latent inconsistency (not
+     fixed this iteration, out of scope since it is not on the H9 boot path): the public
+     `run_to_first_halt_with_periodic_timer` (no `_and_devices`, no `pattern` parameter — the plain
+     periodic-timer-only entry point used by `periodic_timer_injection_halts_gracefully_and_reproducibly`
+     and similar tests) has its own separate, independent inline loop in the same file that does NOT
+     delegate to `run_to_first_halt_with_periodic_timer_and_devices` — the two loops can silently drift
+     out of sync (this new progress logging only reached the `_and_devices` engine, not this older
+     sibling). Worth consolidating them into one engine in a future iteration. Critical follow-on fix
+     that was necessary for the logging to actually be visible in practice: `crates/baud-server/src/
+     main.rs`'s `tracing_subscriber::fmt()` default `EnvFilter` only ever raised the `baud_server` target
+     to `info` (`add_directive("baud_server=info")`); every other target, including `baud_multiverse`,
+     defaulted to the filter's base `ERROR`-only level, so the new progress logging would have been
+     silently dropped in the server's own log during a real detached H9-style run unless the operator
+     manually set `BAUD_LOG=baud_multiverse=info`. Added a second default directive, `add_directive(
+     "baud_multiverse=info")`, so a plain `baud-server` invocation (exactly how the H9 attempts in items
+     14-15 were launched) now surfaces these lines with no extra setup. Still open, the second half of
+     item 15's "and/or": no live-progress HTTP endpoint exists yet (a route that reports a running run's
+     live console tail / tick count without waiting for the run to finish). The `tracing::info!` line is
+     a real, working, but log-file-only mechanism (visible via `tail -f` on the server's redirected
+     output, e.g. the pattern item 15's own H9 attempt used) — sufficient to tell "still making progress"
+     from "stuck" during a long boot, but a caller cannot query progress over HTTP without also having
+     log access to the server process. Next real H9 attempt should use this new logging (confirm the log
+     file shows periodic tick/console-length lines climbing) as the immediate next observability data
+     point before deciding whether the HTTP endpoint is still needed.
+
 ### 14.1 Defects found in the test suite and the drive scripts
 
 Latent defects, each of which let a test or script report success it had not earned. The pre-push gate is

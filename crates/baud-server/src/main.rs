@@ -25,7 +25,14 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_env("BAUD_LOG")
-                .add_directive("baud_server=info".parse().unwrap()),
+                .add_directive("baud_server=info".parse().unwrap())
+                // Without this, a real KVM run's progress logging (todo.md §14 item 15,
+                // `run_to_first_halt_with_periodic_timer_and_devices`'s per-100-tick `info!`) is
+                // silently dropped by the default filter's `ERROR`-only base level: `baud_server`
+                // was the only target ever raised to `info`, so a long H9-style boot attempt would
+                // still be a total black box in the server's own log even after that logging was
+                // added, defeating its purpose.
+                .add_directive("baud_multiverse=info".parse().unwrap()),
         )
         .init();
 
