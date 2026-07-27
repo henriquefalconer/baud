@@ -6867,3 +6867,41 @@ todo.md updated by a subagent to record the closed gap and both bugs found/fixed
   - Full bash drive/gate.sh: 23 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation -- the documented load-flake), 0 skipped, 6m04s -- counts as a passing gate per todo.md §15
   - Still open: H9 (d) actual Ubuntu 18.04.1 cloud image and (e) drive/h9.sh/cross-VM fingerprint remain not started; VIRTIO_UNCLASSIFIED_CODE (virtio-rng's PCI class code) looks like the same byte-swap bug pattern, flagged but not fixed since no real virtio-rng-over-PCI driver test exists yet to confirm it
 ---
+
+Post-push verification: origin/main now at e5447bf, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (23 passed, 0 failed, 1 flaked (documented rdtsc load-flake, reconfirmed in isolation), 0 skipped, 6m04s) before this push.
+
+todo.md still has pending items (H9 (d)/(e): actual Ubuntu 18.04.1 cloud image + drive/h9.sh/cross-VM fingerprint, both not started; H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline §4.5 itself; RunKvmBranchBody/RunKvmResumeBody still lack an acpi field; VIRTIO_UNCLASSIFIED_CODE flagged as a likely same-pattern byte-swap bug, unconfirmed) -- emitting NEXT.
+
+## 2026-07-27T13:04:10 UTC (34min) - Session usage — build-6 [sonnet]
+- cost $9.9857 (from claude -p)
+- context 276,208 tok peak of 1M (28%) across 103 inference calls, monotonic
+- models sonnet-5 $9.9825 (in 264 / out 103,513 / cache-read 20,934,100) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T104433Z/007-build-6.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md, starting by studying specs and current todo state...
+
+Chose the VIRTIO_UNCLASSIFIED_CODE PCI class-code byte-swap bug flagged in todo.md $14 item 5 (same Base/Sub-Class swap pattern already confirmed and fixed for HOST_BRIDGE_CLASS_CODE) -- it's a real, well-scoped, spec-verifiable bug fix that doesn't require the multi-day Buildroot/Ubuntu-cloud-image work H9(d)/(e) or H8's FCEUX packaging problem still block on.
+
+Fixed VIRTIO_UNCLASSIFIED_CODE constant (0x00FF_0000 -> 0xFF00_0000) and added attached_virtio_rng_class_code_is_unclassified_base_class regression test. Building/testing baud-multiverse now...
+
+cargo test -p baud-multiverse --lib: 211 passed, 0 failed, 10 ignored (up from 210 by exactly the new test). Running clippy next...
+
+cargo clippy -p baud-multiverse --all-targets: 26 warnings, exact pre-existing baseline, zero new. Updating todo.md to record this fix, then running the full pre-push gate (bash drive/gate.sh)...
+
+Gate green: 23 passed, 0 failed, 1 skipped (pkg-build-cli fingerprint-skip, unrelated), 2m43s. Committing and pushing.
+
+## 2026-07-27T13:09:58 UTC - Changes committed.
+- Fixed the VIRTIO_UNCLASSIFIED_CODE PCI class-code byte-swap bug flagged (not fixed) in todo.md $14 item 5
+- Files changed: crates/baud-multiverse/src/pci.rs, todo.md
+- **Brief description of changes:**
+  - VIRTIO_UNCLASSIFIED_CODE was 0x00FF_0000, putting PCI base class 0xFF in the Sub-Class byte instead of the Base Class byte -- the exact same swap HOST_BRIDGE_CLASS_CODE had before its earlier fix. Corrected to 0xFF00_0000 (matches Linux's PCI_CLASS_OTHERS).
+  - Added attached_virtio_rng_class_code_is_unclassified_base_class unit test pinning the byte layout, mirroring host_bridge_class_code_is_bridge_host
+  - cargo test -p baud-multiverse --lib: 211 passed, 0 failed, 10 ignored (up from 210 by exactly this test); cargo clippy -p baud-multiverse --all-targets: 26 warnings, exact pre-existing baseline, zero new
+  - Full bash drive/gate.sh: 23 passed, 0 failed, 1 skipped (pkg-build-cli fingerprint-skip, unrelated), 2m43s
+  - Not hardware-confirmed against a real driver (no virtio-rng-over-PCI driver test exists yet, only virtio-mmio's rng path is real-driver-tested) -- fix is reasoned from the PCI spec / Linux header value alone, documented as such in todo.md
+---

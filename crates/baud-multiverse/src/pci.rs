@@ -120,8 +120,15 @@ const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 const VIRTIO_LEGACY_DEVICE_ID_BASE: u16 = 0x1000;
 /// PCI class code `0xFF` ("device does not fit any defined class", PCI Local Bus spec Appendix D)
 /// — virtio's entropy device has no PCI-defined class of its own, and real virtio-pci-legacy
-/// hardware uses exactly this catch-all for devices without a better match.
-const VIRTIO_UNCLASSIFIED_CODE: u32 = 0x00FF_0000;
+/// hardware uses exactly this catch-all for devices without a better match. Base Class 0xFF,
+/// Sub-Class 0x00, Prog IF 0x00 (bits 31:24 / 23:16 / 15:8 respectively, PCI Local Bus spec
+/// §6.2.1) — matches Linux's `PCI_CLASS_OTHERS` (`0xff00` as the 16-bit base<<8|sub word).
+/// **Real bug, found by inspection and fixed**: this used to be `0x00FF_0000` — the exact same
+/// Base/Sub-Class byte swap [`HOST_BRIDGE_CLASS_CODE`]'s doc describes (0xFF landed in the
+/// Sub-Class byte at offset 0x0A instead of the Base Class byte at offset 0x0B). Unlike the host
+/// bridge, no real virtio-rng-over-PCI driver test exists yet to have caught this the same way, so
+/// this fix is reasoned from the spec/Linux header value alone, not hardware-confirmed.
+const VIRTIO_UNCLASSIFIED_CODE: u32 = 0xFF00_0000;
 /// Class 01h (mass storage controller), subclass 80h ("other mass storage controller"), prog-if
 /// 00h — the real PCI-defined class virtio-blk-pci hardware uses (PCI Local Bus spec Appendix D;
 /// unlike the entropy device, mass storage has a real class of its own, so this is not the
@@ -577,6 +584,24 @@ mod tests {
             "legacy device ID = 0x1000 + virtio device type"
         );
         assert_ne!(dword & 0xFFFF, 0xFFFF, "a present device must never report vendor ID 0xFFFF");
+    }
+
+    #[test]
+    fn attached_virtio_rng_class_code_is_unclassified_base_class() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_rng(0x20);
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_CLASS_REVISION));
+        let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
+        assert_eq!((dword >> 8) & 0xFF, 0x00, "prog IF 00h");
+        assert_eq!((dword >> 16) & 0xFF, 0x00, "subclass 00h");
+        assert_eq!((dword >> 24) & 0xFF, 0xFF, "base class FFh (does not fit any defined class)");
+        assert_eq!(
+            (dword >> 16) as u16,
+            0xFF00,
+            "the 16-bit PCI_CLASS_DEVICE word (offset 0x0A) must equal Linux's PCI_CLASS_OTHERS \
+             exactly, not the byte-swapped 0x00FF a real pci_sanity_check()-style base/sub-class \
+             read would have gotten before this fix"
+        );
     }
 
     #[test]

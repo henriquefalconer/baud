@@ -2540,15 +2540,26 @@ snapshot, not a duplicate of it.
      failed, 1 flaked (the already-documented `rdtsc_guest_reproduces_high_bits_across_boots`
      load-flake, reconfirmed passing in isolation), 0 skipped, 6m04s — counts as a passing gate per
      §15. **Still open**: H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` +
-     the cross-VM fingerprint) remain not started, unchanged. `VIRTIO_UNCLASSIFIED_CODE` (virtio-
-     rng's PCI class code, also in `pci.rs`) looks like it carries the exact same Base/Sub-Class
-     byte-swap bug as the host-bridge one above (spec-correct would put Base Class 0xFF at bits
-     31:24, but the current value `0x00FF_0000` puts 0xFF at bits 23:16 instead) — not fixed this
-     iteration, since no real driver test exercises virtio-rng over PCI yet (only virtio-mmio's rng
-     path is real-driver-tested), so there was no way to confirm it the same way the host-bridge one
-     was confirmed; flagged as a candidate bug for whoever next builds a real virtio-rng-over-PCI
-     test. `VIRTIO_BLK_CLASS_CODE` was already spec-conformant before this iteration touched
-     anything.
+     the cross-VM fingerprint) remain not started, unchanged. `VIRTIO_BLK_CLASS_CODE` was already
+     spec-conformant before this iteration touched anything.
+  6. **`VIRTIO_UNCLASSIFIED_CODE` — the same Base/Sub-Class byte-swap bug flagged (not yet fixed) by
+     item 5 above, fixed.** Confirmed by spec inspection: PCI Local Bus spec Appendix D's class
+     `0xFF` ("does not fit any defined class") is Base Class `0xFF`/Sub-Class `0x00`/Prog IF `0x00`,
+     i.e. the 16-bit `PCI_CLASS_DEVICE` word (bits 23:8) must read `0xFF00` — matching Linux's own
+     `PCI_CLASS_OTHERS` constant — but `VIRTIO_UNCLASSIFIED_CODE` was `0x00FF_0000`, putting `0xFF`
+     in the Sub-Class byte (bits 23:16) instead of the Base Class byte (bits 31:24), the exact same
+     swap `HOST_BRIDGE_CLASS_CODE` had. Fixed to `0xFF00_0000` (`crates/baud-multiverse/src/pci.rs`).
+     Unlike the host-bridge fix, no real virtio-rng-over-PCI driver test exists yet to have caught
+     this the way a real kernel's `pci_sanity_check()` caught the host-bridge swap, so this fix is
+     reasoned from the spec/Linux header value alone, not hardware-confirmed against a real driver —
+     that hardware confirmation remains future work for whoever next builds a real
+     virtio-rng-over-PCI driver test (virtio-rng today is only real-driver-tested over virtio-mmio).
+     New `attached_virtio_rng_class_code_is_unclassified_base_class` unit test
+     (`crates/baud-multiverse/src/pci.rs`) pins the byte layout the same way
+     `host_bridge_class_code_is_bridge_host` already does for the host bridge. Verified: `cargo test
+     -p baud-multiverse --lib` → 211 passed, 0 failed, 10 ignored (up from 210 by exactly this test);
+     `cargo clippy -p baud-multiverse --all-targets` → 26 warnings, the exact pre-existing baseline,
+     zero new.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).
