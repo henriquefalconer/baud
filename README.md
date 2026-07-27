@@ -14,8 +14,8 @@
 
 baud runs a program inside a deterministic environment it controls end to end. Everything the program reads
 becomes one replayable tape, and baud's fuzzer searches that tape for the state you care about: a win, a
-completed task, a crash. You say what winning looks like, baud finds inputs that get there, and replaying
-those inputs lands in the same place every time. Super Mario Bros is just one program you can point it at.
+completed task, etc. You say what winning looks like, baud finds inputs that get there, and replaying
+those inputs lands in the same place every time.
 
 ## Documents
 
