@@ -587,6 +587,23 @@ pub enum RunUntilBranchOutcome {
     MarkBranch { step: u64 },
 }
 
+/// Exactly [`RunUntilBranchOutcome`] minus its `Halted` arm's `ram_hash` (i.e. carrying
+/// [`HaltObservation`] instead of [`HaltOutcome`]) — what the `_without_ram_hash` sibling of every
+/// `run_until_branch_or_halt*` entry point below reports for a caller that runs many branches but
+/// only needs the RAM hash of some of them (todo.md §14.1 "still open" item 1: `run_kvm.rs`'s own
+/// test suite calls these ~90 times and reads the resulting hash in only 2 of them). The
+/// `MarkBranch` arm already carried no `ram_hash` of its own (a live checkpoint's RAM hash is
+/// always read via the separate [`Multiverse::ram_hash`] call, never embedded here), so it is
+/// unchanged between the two enums.
+#[derive(Debug)]
+pub enum RunUntilBranchObservation {
+    /// The guest reached `Hlt`/`Shutdown` before ever calling `MARK_BRANCH`.
+    Halted(HaltObservation),
+    /// The guest issued `MARK_BRANCH` at tape cursor `step` — identical meaning to
+    /// [`RunUntilBranchOutcome::MarkBranch`].
+    MarkBranch { step: u64 },
+}
+
 /// Seed the enforced-regime `RDRAND` entropy stream (`WorkClock::with_entropy_seed`) from the
 /// run's own tape, so the same tape always produces the same `rdrand` draw sequence and a
 /// different tape byte changes it — the same `all_input_is_tape_derived` guarantee the tape
@@ -1035,6 +1052,38 @@ impl Multiverse {
         &mut self,
         max_exits: u32,
     ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let (observed, records) = self.run_until_branch_or_halt_without_ram_hash(max_exits)?;
+        Ok((self.observation_to_outcome(observed), records))
+    }
+
+    /// [`RunUntilBranchObservation`] -> [`RunUntilBranchOutcome`], filling in `ram_hash` (via
+    /// [`ram_hash`](Self::ram_hash)) only for the `Halted` arm — `MarkBranch` never carried one.
+    /// Shared by every `run_until_branch_or_halt*` wrapper that reconstructs the eager outcome on
+    /// top of its own `_without_ram_hash` primitive.
+    fn observation_to_outcome(&self, observed: RunUntilBranchObservation) -> RunUntilBranchOutcome {
+        match observed {
+            RunUntilBranchObservation::Halted(h) => RunUntilBranchOutcome::Halted(HaltOutcome {
+                console_output: h.console_output,
+                ram_hash: self.ram_hash(),
+                exit_pc: h.exit_pc,
+            }),
+            RunUntilBranchObservation::MarkBranch { step } => RunUntilBranchOutcome::MarkBranch { step },
+        }
+    }
+
+    /// [`run_until_branch_or_halt`](Self::run_until_branch_or_halt) without the guest-RAM hash on
+    /// the `Halted` arm — same "skip the blake3 pass" trade [`run_to_first_halt_without_ram_hash`]
+    /// (Self::run_to_first_halt_without_ram_hash) makes for [`run_to_first_halt`]
+    /// (Self::run_to_first_halt), for a caller (todo.md §14.1 "still open" item 1's `run_kvm.rs`
+    /// call sites) that runs many branches and reads the hash of only some. The hash is not lost by
+    /// using this entry point: [`ram_hash`](Self::ram_hash) called afterwards on a `Halted` branch
+    /// returns exactly what `run_until_branch_or_halt` would have put in
+    /// [`HaltOutcome::ram_hash`], the same guarantee `run_to_first_halt_without_ram_hash`'s own doc
+    /// makes.
+    pub fn run_until_branch_or_halt_without_ram_hash(
+        &mut self,
+        max_exits: u32,
+    ) -> Result<(RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
         let mut exits = 0u32;
         let mut records = Vec::new();
         loop {
@@ -1046,12 +1095,9 @@ impl Multiverse {
             let outcome = self.step_exit()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
-                let halt = HaltOutcome {
-                    console_output: self.bus.console.output().to_vec(),
-                    ram_hash: self.ram_hash(),
-                    exit_pc: self.current_rip()?,
-                };
-                return Ok((RunUntilBranchOutcome::Halted(halt), records));
+                let halt =
+                    HaltObservation { console_output: self.bus.console.output().to_vec(), exit_pc: self.current_rip()? };
+                return Ok((RunUntilBranchObservation::Halted(halt), records));
             }
             let mut drained = self.bus.tape.device_mut().drain_records();
             if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
@@ -1060,7 +1106,7 @@ impl Multiverse {
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
                 records.extend(drained.drain(..=pos));
-                return Ok((RunUntilBranchOutcome::MarkBranch { step }, records));
+                return Ok((RunUntilBranchObservation::MarkBranch { step }, records));
             }
             records.extend(drained);
         }
@@ -1209,6 +1255,21 @@ impl Multiverse {
         vector: u8,
         max_ticks: u32,
     ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let (ticks, observed, records) =
+            self.run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)?;
+        Ok((ticks, self.observation_to_outcome(observed), records))
+    }
+
+    /// [`run_until_branch_or_halt_with_periodic_timer`]
+    /// (Self::run_until_branch_or_halt_with_periodic_timer) without the guest-RAM hash on the
+    /// `Halted` arm — the periodic-timer analogue of
+    /// [`run_until_branch_or_halt_without_ram_hash`](Self::run_until_branch_or_halt_without_ram_hash).
+    pub fn run_until_branch_or_halt_with_periodic_timer_without_ram_hash(
+        &mut self,
+        period_rcb: u64,
+        vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
         let mut ticks = Vec::new();
         let mut records = Vec::new();
         for _ in 0..max_ticks {
@@ -1225,7 +1286,7 @@ impl Multiverse {
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
                 records.extend(drained.drain(..=pos));
-                return Ok((ticks, RunUntilBranchOutcome::MarkBranch { step }, records));
+                return Ok((ticks, RunUntilBranchObservation::MarkBranch { step }, records));
             }
             records.extend(drained);
             match outcome {
@@ -1233,12 +1294,11 @@ impl Multiverse {
                     ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
                 }
                 baud_vcpu::boundary::InjectOutcome::Halted(_) => {
-                    let halt = HaltOutcome {
+                    let halt = HaltObservation {
                         console_output: self.bus.console.output().to_vec(),
-                        ram_hash: self.ram_hash(),
                         exit_pc: self.current_rip()?,
                     };
-                    return Ok((ticks, RunUntilBranchOutcome::Halted(halt), records));
+                    return Ok((ticks, RunUntilBranchObservation::Halted(halt), records));
                 }
             }
         }
@@ -1484,6 +1544,18 @@ impl Multiverse {
         vector: u8,
         max_exits: u32,
     ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let (observed, records) = self.run_until_branch_or_halt_with_virtio_rng_without_ram_hash(vector, max_exits)?;
+        Ok((self.observation_to_outcome(observed), records))
+    }
+
+    /// [`run_until_branch_or_halt_with_virtio_rng`](Self::run_until_branch_or_halt_with_virtio_rng)
+    /// without the guest-RAM hash on the `Halted` arm — the virtio-rng analogue of
+    /// [`run_until_branch_or_halt_without_ram_hash`](Self::run_until_branch_or_halt_without_ram_hash).
+    pub fn run_until_branch_or_halt_with_virtio_rng_without_ram_hash(
+        &mut self,
+        vector: u8,
+        max_exits: u32,
+    ) -> Result<(RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
         let mut exits = 0u32;
         let mut records = Vec::new();
         let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
@@ -1497,12 +1569,11 @@ impl Multiverse {
             let outcome = self.step_exit()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
-                let halt = HaltOutcome {
+                let halt = HaltObservation {
                     console_output: self.bus.console.output().to_vec(),
-                    ram_hash: self.ram_hash(),
                     exit_pc: self.current_rip()?,
                 };
-                return Ok((RunUntilBranchOutcome::Halted(halt), records));
+                return Ok((RunUntilBranchObservation::Halted(halt), records));
             }
             let mut drained = self.bus.tape.device_mut().drain_records();
             if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
@@ -1511,7 +1582,7 @@ impl Multiverse {
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
                 records.extend(drained.drain(..=pos));
-                return Ok((RunUntilBranchOutcome::MarkBranch { step }, records));
+                return Ok((RunUntilBranchObservation::MarkBranch { step }, records));
             }
             records.extend(drained);
             let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
@@ -1539,6 +1610,27 @@ impl Multiverse {
         virtio_rng_vector: u8,
         max_ticks: u32,
     ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+        let (ticks, observed, records) = self
+            .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng_without_ram_hash(
+                period_rcb,
+                timer_vector,
+                virtio_rng_vector,
+                max_ticks,
+            )?;
+        Ok((ticks, self.observation_to_outcome(observed), records))
+    }
+
+    /// [`run_until_branch_or_halt_with_periodic_timer_and_virtio_rng`]
+    /// (Self::run_until_branch_or_halt_with_periodic_timer_and_virtio_rng) without the guest-RAM
+    /// hash on the `Halted` arm — the four-way analogue of
+    /// [`run_until_branch_or_halt_without_ram_hash`](Self::run_until_branch_or_halt_without_ram_hash).
+    pub fn run_until_branch_or_halt_with_periodic_timer_and_virtio_rng_without_ram_hash(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        virtio_rng_vector: u8,
+        max_ticks: u32,
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
         let mut ticks = Vec::new();
         let mut records = Vec::new();
         let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
@@ -1556,7 +1648,7 @@ impl Multiverse {
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
                 records.extend(drained.drain(..=pos));
-                return Ok((ticks, RunUntilBranchOutcome::MarkBranch { step }, records));
+                return Ok((ticks, RunUntilBranchObservation::MarkBranch { step }, records));
             }
             records.extend(drained);
             match outcome {
@@ -1569,12 +1661,11 @@ impl Multiverse {
                     }
                 }
                 baud_vcpu::boundary::InjectOutcome::Halted(_) => {
-                    let halt = HaltOutcome {
+                    let halt = HaltObservation {
                         console_output: self.bus.console.output().to_vec(),
-                        ram_hash: self.ram_hash(),
                         exit_pc: self.current_rip()?,
                     };
-                    return Ok((ticks, RunUntilBranchOutcome::Halted(halt), records));
+                    return Ok((ticks, RunUntilBranchObservation::Halted(halt), records));
                 }
             }
         }

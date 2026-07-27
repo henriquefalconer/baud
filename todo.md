@@ -2323,32 +2323,48 @@ were made to assert something.
    to `sops updatekeys` directly, never calling `rotate_secrets`, and silently no-op'd anyway because
    `sops`/`age`/`age-keygen`/`nix` are absent on this host (it hit `.is_err()` guards and asserted nothing).
 
-**Still open, in priority order.** Where a fix contradicts a spec, amend the spec in the same commit rather
-than quietly diverging from it; where it contradicts a claim in `ralph/progress.txt` (as items 1 and 2 above
-do), say so plainly in the new entry instead of leaving the old claim standing.
+**Resolved.**
 
-1. **`ram_hash` is computed and discarded at scale.** `Multiverse::ram_hash`
-   (`crates/baud-multiverse/src/linux/mod.rs:1523`) blake3s all 256 MiB (`layout.rs:19`) and
-   `run_to_first_halt` calls it unconditionally. `thousand_branches` stores 1000 hashes and reads 8;
-   `crates/baud-server/src/routes/run_kvm.rs` computes ~90 (≈23 GiB of hashing) and asserts on 4. A
-   hash-skipping variant or a lazy `HaltOutcome::ram_hash` would roughly halve `h5.sh` — the gate's critical
-   path — with zero coverage change. This is the single biggest remaining lever.
-2. **`fleet_of_vms_run_in_parallel_without_interference` is the workspace's #1 flake source** (19 records in
+1. **`ram_hash` was computed and discarded at scale — fixed.** `Multiverse` (`crates/baud-multiverse/src/
+   linux/mod.rs`) gained `_without_ram_hash` siblings for all four `run_until_branch_or_halt*` entry points
+   (plain, `_with_periodic_timer`, `_with_virtio_rng`, `_with_periodic_timer_and_virtio_rng`), returning a new
+   `RunUntilBranchObservation` (exactly `RunUntilBranchOutcome` minus the `Halted` arm's `ram_hash`) — the
+   same pattern `run_to_first_halt_without_ram_hash` already established and `thousand_branches` already
+   used. The four original eager methods are now thin wrappers on top (`observation_to_outcome` fills in
+   `ram_hash` only for the `Halted` arm). `crates/baud-server/src/routes/run_kvm.rs`'s `run_branches`/
+   `run_driver_generated_branches_with_persist` (and their `boot_snapshot_and_branch`/
+   `boot_snapshot_and_generate` wrappers) gained a `compute_ram_hash: bool` parameter, always calling the
+   `_without_ram_hash` primitive and computing `branch.ram_hash()` separately, only when `true`. Every real
+   HTTP-facing call site (`POST /run/kvm/branch`, `resume_and_branch`, `resume_and_generate`) passes `true`
+   unconditionally — `ram_hash` stays in every HTTP response, no behavior change there. ~15 test call sites
+   that never read the resulting hash now pass `false` (empty-string placeholder, never observed). Two test
+   call sites do whole-outcome-tuple `assert_eq!` comparisons that implicitly depend on `ram_hash`
+   reproducibility (`persisted_universe_resumes_and_branches_without_reboot`,
+   `run_kvm_branch_produces_independent_and_deterministic_branches`) — both correctly pass `true`; getting
+   this wrong (both sides `false`) would have made the comparison vacuously pass, exactly the "test asserts
+   nothing" anti-pattern this whole file's §14.1 catalogs elsewhere. Gate wall-clock dropped from the
+   documented ~6 min baseline to 2m58s in the verifying run (`cargo test --workspace` phase alone: 24s).
+
+**Still open, in priority order.** Where a fix contradicts a spec, amend the spec in the same commit rather
+than quietly diverging from it; where it contradicts a claim in `ralph/progress.txt`, say so plainly in the
+new entry instead of leaving the old claim standing.
+
+1. **`fleet_of_vms_run_in_parallel_without_interference` is the workspace's #1 flake source** (19 records in
    `ralph/progress.txt`): it asserts a timing ratio (`parallel_total < serial_one * n * 0.85`) while up to 7
    sibling KVM tests run on the same 8 threads, and pins to fixed cores 0/2/4. Same treatment as
    `thousand_branches` — `#[ignore]` with `drive/h/h6.sh` as sole runner.
-3. **`shell-into`'s timeout conflates two different things.** `crates/baud-cli/src/cmds/shell_into.rs:33`
+2. **`shell-into`'s timeout conflates two different things.** `crates/baud-cli/src/cmds/shell_into.rs:33`
    uses one `--idle-timeout-ms` as both the idle timeout *and* the first-byte deadline, so under concurrent
    guest boots it returns `ok=true` with an empty transcript (measured: 2000ms → empty 3/3; 8000ms → correct
    3/3). `drive/m/m10.sh` works around it at the call site (now 15000ms); splitting the two would fix every
    caller.
-4. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
+3. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
    `KVM_CREATE_VM`/vCPU/256 MiB/`perf_event` lifecycles (next largest anywhere is 6), but asserts nothing
    about resource growth — a leak surfaces only as an `Err` or an OOM kill. Its `NUM_BRANCHES = 1000` is a
    literal spec figure (`specs/baud-snapshot.md:191-193`, `todo.md` §5), not a tuned number, and its own
    comment wrongly claims it was "chosen to keep this test's real run time … in the tens-of-seconds range".
    Across 51 mentions in `ralph/progress.txt` it has caught **0** defects and flaked **0** times.
-5. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
+4. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
    `baud-keys`, whose `age_encrypt`/`age_decrypt` do the same job in-process. Switching would make the
    encrypted-journal path work and be testable on hosts without `age` (caveat: `baud_keys::age_encrypt`
    emits binary age, not the ASCII armor the journal writes today). Note `open_encrypted` has no callers

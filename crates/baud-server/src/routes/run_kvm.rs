@@ -646,6 +646,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                 initramfs.as_deref(),
                 periodic_timer,
                 virtio_rng,
+                true, // HTTP response always includes ram_hash
             )
         })
         .await
@@ -743,6 +744,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
             initramfs.as_deref(),
             periodic_timer,
             virtio_rng,
+            true, // HTTP response always includes ram_hash
         )
     })
     .await
@@ -846,12 +848,20 @@ fn boot_and_snapshot(
 /// `PartialEq`) keeps working unchanged. `boot_snapshot_and_branch`'s HTTP caller
 /// (`routes::run_kvm::branch`) uses the records to persist a branch's frames under
 /// `RunKvmBranchBody::frame_run_ids`, mirroring `run()`'s own `persist_kvm_run` call.
+/// `compute_ram_hash: false` skips the blake3 pass over every branch's guest RAM
+/// (`Multiverse::run_until_branch_or_halt*_without_ram_hash`, todo.md §14.1 "still open" item 1) —
+/// every real HTTP caller (`boot_snapshot_and_branch`/`resume_and_branch`'s production route
+/// callers) must pass `true`, since `ram_hash` is part of the response contract
+/// (`branch_outcome_to_json`); only this crate's own tests, which call `run_branches` for branches
+/// whose hash they never read, pass `false`. When `false`, `BranchOutcome`'s `ram_hash` field is an
+/// empty placeholder string — never observed by a caller that opted out.
 fn run_branches(
     universe: &baud_snapshot::Universe,
     tape_suffixes: Vec<Vec<u8>>,
     persist: Option<(&SnapshotStore, &str, Option<baud_snapshot_store::NodeId>)>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    compute_ram_hash: bool,
 ) -> Result<(Vec<BranchOutcome>, BranchRecords), String> {
     let mut outcomes = Vec::with_capacity(tape_suffixes.len());
     let mut all_records = Vec::with_capacity(tape_suffixes.len());
@@ -867,7 +877,7 @@ fn run_branches(
         let (run_outcome, mut records) = match (periodic_timer, virtio_rng) {
             (Some((period_rcb, timer_vector, max_ticks)), Some((_, rng_vector, _))) => {
                 let (_ticks, outcome, records) = branch
-                    .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng(
+                    .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng_without_ram_hash(
                         period_rcb,
                         timer_vector,
                         rng_vector,
@@ -878,26 +888,25 @@ fn run_branches(
             }
             (Some((period_rcb, vector, max_ticks)), None) => {
                 let (_ticks, outcome, records) = branch
-                    .run_until_branch_or_halt_with_periodic_timer(period_rcb, vector, max_ticks)
+                    .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)
                     .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
                 (outcome, records)
             }
             (None, Some((_, rng_vector, max_exits))) => branch
-                .run_until_branch_or_halt_with_virtio_rng(rng_vector, max_exits)
+                .run_until_branch_or_halt_with_virtio_rng_without_ram_hash(rng_vector, max_exits)
                 .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
             (None, None) => branch
-                .run_until_branch_or_halt(BRANCH_MAX_EXITS)
+                .run_until_branch_or_halt_without_ram_hash(BRANCH_MAX_EXITS)
                 .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
         };
         records.extend(branch.drain_tape_records());
-        let (console_output, ram_hash, mark_branch_step) = match &run_outcome {
-            baud_multiverse::linux::RunUntilBranchOutcome::Halted(halt) => {
-                (halt.console_output.clone(), halt.ram_hash.clone(), None)
-            }
-            baud_multiverse::linux::RunUntilBranchOutcome::MarkBranch { step } => {
-                (branch.console_output().to_vec(), branch.ram_hash(), Some(*step))
+        let (console_output, mark_branch_step) = match &run_outcome {
+            baud_multiverse::linux::RunUntilBranchObservation::Halted(halt) => (halt.console_output.clone(), None),
+            baud_multiverse::linux::RunUntilBranchObservation::MarkBranch { step } => {
+                (branch.console_output().to_vec(), Some(*step))
             }
         };
+        let ram_hash = if compute_ram_hash { branch.ram_hash() } else { String::new() };
         let tape_range = (offset, offset + suffix_len);
         offset = tape_range.1;
         let node_id = if mark_branch_step.is_some() {
@@ -938,6 +947,8 @@ fn persisted_root_parent(
     }
 }
 
+/// `compute_ram_hash` is forwarded to [`run_branches`] verbatim — see that function's own doc.
+#[allow(clippy::too_many_arguments)]
 fn boot_snapshot_and_branch(
     kernel_path: &Path,
     cmdline: &str,
@@ -946,6 +957,7 @@ fn boot_snapshot_and_branch(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    compute_ram_hash: bool,
 ) -> Result<(Vec<BranchOutcome>, BranchRecords, Option<PersistedRef>), String> {
     let universe = boot_and_snapshot(kernel_path, cmdline, initramfs)?;
     let persisted = match persist {
@@ -955,7 +967,7 @@ fn boot_snapshot_and_branch(
     let parent = persisted_root_parent(&persisted)?;
     let branch_persist = persist.map(|(store, run_id)| (store, run_id, parent));
     let (outcomes, records) =
-        run_branches(&universe, tape_suffixes, branch_persist, periodic_timer, virtio_rng)?;
+        run_branches(&universe, tape_suffixes, branch_persist, periodic_timer, virtio_rng, compute_ram_hash)?;
     Ok((outcomes, records, persisted))
 }
 
@@ -1015,6 +1027,9 @@ struct DriverRunSummary {
     cumulative_generation: u64,
 }
 
+/// `compute_ram_hash` is forwarded to [`run_driver_generated_branches_with_persist`] verbatim —
+/// see that function's own doc.
+#[allow(clippy::too_many_arguments)]
 fn boot_snapshot_and_generate(
     kernel_path: &Path,
     cmdline: &str,
@@ -1023,6 +1038,7 @@ fn boot_snapshot_and_generate(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    compute_ram_hash: bool,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary, Option<PersistedRef>), String> {
     let universe = boot_and_snapshot(kernel_path, cmdline, initramfs)?;
     let persisted = match persist {
@@ -1040,6 +1056,7 @@ fn boot_snapshot_and_generate(
         root_parent,
         periodic_timer,
         virtio_rng,
+        compute_ram_hash,
     )?;
     Ok((outcomes, summary, persisted))
 }
@@ -1050,12 +1067,17 @@ fn boot_snapshot_and_generate(
 /// through `run_driver_generated_branches_with_persist(.., None, None)` inline, and
 /// `/run/kvm/resume`'s generate mode always persists via `resume_and_generate`), so this is now a
 /// test-only convenience for exercising the no-persist path directly against an in-memory universe.
+/// Always computes `ram_hash` (`compute_ram_hash: true`) — both of this crate's own call sites
+/// compare `ram_hash` across two runs (`run_kvm_branch_generate_is_reproducible_and_independent`,
+/// `resumed_universe_generates_reproducible_branches`), unlike every `boot_snapshot_and_branch`/
+/// `boot_snapshot_and_generate` test call site, which never reads it (todo.md §14.1 "still open"
+/// item 1).
 #[cfg(test)]
 fn run_driver_generated_branches(
     universe: &baud_snapshot::Universe,
     spec: DriverGenerateSpec,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
-    run_driver_generated_branches_with_persist(universe, spec, None, None, None, None)
+    run_driver_generated_branches_with_persist(universe, spec, None, None, None, None, true)
 }
 
 /// Draws a tape with `Driver::draw_bits`, fork+runs it, scores it from its drained tape-device
@@ -1074,6 +1096,11 @@ fn run_driver_generated_branches(
 /// to 0, discarding everything the first call learned. `spec.seed`/`spec.strategy` still come
 /// from the request every time (a resumed call can change strategy mid-exploration); only the
 /// accumulated progress persists.
+///
+/// `compute_ram_hash: false` skips the blake3 pass over every branch's guest RAM — same trade,
+/// same "real HTTP callers must pass `true`" rule, as [`run_branches`]'s own doc (todo.md §14.1
+/// "still open" item 1).
+#[allow(clippy::too_many_arguments)]
 fn run_driver_generated_branches_with_persist(
     universe: &baud_snapshot::Universe,
     spec: DriverGenerateSpec,
@@ -1081,6 +1108,7 @@ fn run_driver_generated_branches_with_persist(
     parent: Option<baud_snapshot_store::NodeId>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    compute_ram_hash: bool,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
     let mut driver = baud_driver::Driver::new(spec.seed, spec.strategy, baud_driver::TacticsSpec::default());
     if let Some((store, run_id)) = persist {
@@ -1109,7 +1137,7 @@ fn run_driver_generated_branches_with_persist(
         let (run_outcome, mut records) = match (periodic_timer, virtio_rng) {
             (Some((period_rcb, timer_vector, max_ticks)), Some((_, rng_vector, _))) => {
                 let (_ticks, outcome, records) = branch
-                    .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng(
+                    .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng_without_ram_hash(
                         period_rcb,
                         timer_vector,
                         rng_vector,
@@ -1120,26 +1148,25 @@ fn run_driver_generated_branches_with_persist(
             }
             (Some((period_rcb, vector, max_ticks)), None) => {
                 let (_ticks, outcome, records) = branch
-                    .run_until_branch_or_halt_with_periodic_timer(period_rcb, vector, max_ticks)
+                    .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)
                     .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
                 (outcome, records)
             }
             (None, Some((_, rng_vector, max_exits))) => branch
-                .run_until_branch_or_halt_with_virtio_rng(rng_vector, max_exits)
+                .run_until_branch_or_halt_with_virtio_rng_without_ram_hash(rng_vector, max_exits)
                 .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
             (None, None) => branch
-                .run_until_branch_or_halt(BRANCH_MAX_EXITS)
+                .run_until_branch_or_halt_without_ram_hash(BRANCH_MAX_EXITS)
                 .map_err(|e| format!("branch {i} determinism hole: {e}"))?,
         };
         records.extend(branch.drain_tape_records());
-        let (console_output, ram_hash, mark_branch_step) = match &run_outcome {
-            baud_multiverse::linux::RunUntilBranchOutcome::Halted(halt) => {
-                (halt.console_output.clone(), halt.ram_hash.clone(), None)
-            }
-            baud_multiverse::linux::RunUntilBranchOutcome::MarkBranch { step } => {
-                (branch.console_output().to_vec(), branch.ram_hash(), Some(*step))
+        let (console_output, mark_branch_step) = match &run_outcome {
+            baud_multiverse::linux::RunUntilBranchObservation::Halted(halt) => (halt.console_output.clone(), None),
+            baud_multiverse::linux::RunUntilBranchObservation::MarkBranch { step } => {
+                (branch.console_output().to_vec(), Some(*step))
             }
         };
+        let ram_hash = if compute_ram_hash { branch.ram_hash() } else { String::new() };
         let (observations, crashed) = observations_from_records(&records, console_output.len());
         driver.end_run(&observations);
         let branch_goal = driver.is_goal_reached(&observations);
@@ -1581,7 +1608,14 @@ fn resume_and_branch(
 ) -> Result<(Vec<BranchOutcome>, BranchRecords), String> {
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
     let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
-    run_branches(&universe, tape_suffixes, Some((store, run_id, Some(parent))), periodic_timer, virtio_rng)
+    run_branches(
+        &universe,
+        tape_suffixes,
+        Some((store, run_id, Some(parent))),
+        periodic_timer,
+        virtio_rng,
+        true, // HTTP response always includes ram_hash
+    )
 }
 
 /// Generate-mode analogue of `resume_and_branch`: resuming from a persisted node always has a
@@ -1609,6 +1643,7 @@ fn resume_and_generate(
         Some(parent),
         periodic_timer,
         virtio_rng,
+        true, // HTTP response always includes ram_hash
     )
 }
 
@@ -1764,7 +1799,7 @@ mod tests {
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
         let (outcomes, _records, _persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![]], None, None, None, virtio_rng)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![]], None, None, None, virtio_rng, false)
                 .expect("boot_snapshot_and_branch with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 1);
@@ -1809,7 +1844,7 @@ mod tests {
         };
 
         let (outcomes, _summary, _persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, None, None, None, virtio_rng)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, None, None, None, virtio_rng, false)
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
@@ -1939,6 +1974,7 @@ mod tests {
             Some(&initramfs),
             Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
             None,
+            false,
         )
         .expect("boot_snapshot_and_branch with a real linux-guest initramfs+periodic_timer failed");
 
@@ -1963,7 +1999,7 @@ mod tests {
         let suffixes: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i, 0xAA, 0xBB, 0xCC]).collect();
 
         let (first_run, _records, _) =
-            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None, None, true)
                 .expect("boot_snapshot_and_branch failed");
         assert_eq!(first_run.len(), suffixes.len());
         for (i, (console_output, _ram_hash, mark_branch_step, _node_id)) in first_run.iter().enumerate() {
@@ -1976,7 +2012,7 @@ mod tests {
 
         // Re-forking from a fresh branch point with the same suffixes must be byte-identical —
         // both across branches (no cross-branch bleed) and across this whole re-run (determinism).
-        let (second_run, _records, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None, None)
+        let (second_run, _records, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None, None, true)
             .expect("second boot_snapshot_and_branch failed");
         assert_eq!(first_run, second_run, "re-forking the same suffixes must reproduce byte-identically");
     }
@@ -2006,7 +2042,7 @@ mod tests {
         let run_id = "persist-test-run";
 
         let (direct_outcomes, _direct_records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), Some((&store, run_id)), None, None, None, true)
                 .expect("boot_snapshot_and_branch with persist failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2037,7 +2073,7 @@ mod tests {
         let run_id = "restore-replay-test";
 
         let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false)
                 .expect("persist-only boot_snapshot_and_branch failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2105,7 +2141,7 @@ mod tests {
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
         let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false)
                 .expect("persist-only boot_snapshot_and_branch failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2163,7 +2199,7 @@ mod tests {
         };
 
         let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false)
                 .expect("persist-only boot_snapshot_and_branch failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2296,7 +2332,7 @@ mod tests {
             frame_run_id_prefix: None,
         };
         let (_outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false)
                 .expect("boot_snapshot_and_generate with persist failed");
         let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
@@ -2387,7 +2423,7 @@ mod tests {
         };
 
         let (outcomes, summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false)
                 .expect("boot_snapshot_and_generate failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2464,7 +2500,7 @@ mod tests {
         };
 
         let (outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false)
                 .expect("boot_snapshot_and_generate failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2526,7 +2562,7 @@ mod tests {
         // run_until_branch_or_halt stops right there, same one-byte suffix the generate-mode
         // sibling test above uses (tape_len_bytes: 1).
         let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false)
                 .expect("boot_snapshot_and_branch failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2605,7 +2641,7 @@ mod tests {
         // First branch point: boot + persist (no generate here — just get a root node to resume
         // from), mirroring boot_snapshot_and_branch's own root-then-children shape.
         let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false)
                 .expect("boot_snapshot_and_branch failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
@@ -2659,7 +2695,7 @@ mod tests {
         let run_id = "driver-state-resume-test";
 
         let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None)
+            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false)
                 .expect("boot_snapshot_and_branch failed");
         let (_root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         let (_console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
