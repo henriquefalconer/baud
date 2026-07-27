@@ -34,8 +34,12 @@ pub enum KeysAction {
         #[arg(long)]
         redacted: bool,
     },
-    /// Rotate the sops data encryption key
-    Rotate,
+    /// Rotate the secrets file to a new age recipient (the previous recipient loses access)
+    Rotate {
+        /// age recipient public key to rotate to
+        #[arg(long)]
+        new_recipient: String,
+    },
 }
 
 pub async fn run(cmd: KeysCmd, c: &Client, json: bool) -> Result<()> {
@@ -68,8 +72,8 @@ pub async fn run(cmd: KeysCmd, c: &Client, json: bool) -> Result<()> {
             let v = c.get("/keys/show").await?;
             fmt::print(&v, json);
         }
-        KeysAction::Rotate => {
-            let v = c.post("/keys/rotate", &json!({})).await?;
+        KeysAction::Rotate { new_recipient } => {
+            let v = c.post("/keys/rotate", &json!({ "new_recipient": new_recipient })).await?;
             fmt::print(&v, json);
         }
     }

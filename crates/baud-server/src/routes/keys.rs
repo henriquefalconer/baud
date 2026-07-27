@@ -60,12 +60,25 @@ pub async fn show(_state: State<AppState>) -> Json<Value> {
     }
 }
 
+#[derive(Deserialize)]
+pub struct KeysRotateBody {
+    /// age recipient public key to rotate to; the currently-configured recipient loses access.
+    pub new_recipient: String,
+}
+
 /// POST /keys/rotate — `baud keys rotate`
-/// Rotates the sops data encryption key (does not change recipients or age identity).
-pub async fn rotate(_state: State<AppState>) -> Json<Value> {
+/// Rotates the secrets file's recipient set to `new_recipient` (VR2-M3): the previously
+/// configured age identity can no longer decrypt the file afterwards.
+pub async fn rotate(
+    _state: State<AppState>,
+    Json(body): Json<KeysRotateBody>,
+) -> Json<Value> {
     let secrets_path = baud_keys::secrets_file();
-    match baud_keys::rotate_secrets(&secrets_path) {
-        Ok(()) => Json(json!({ "ok": true, "message": "sops data key rotated successfully" })),
+    match baud_keys::rotate_secrets(&secrets_path, &body.new_recipient) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "message": "recipients rotated; the previous age key can no longer decrypt the secrets file"
+        })),
         Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),
     }
 }

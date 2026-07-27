@@ -45,6 +45,8 @@ pub enum KeysError {
     AgeEncryptFailed(String),
     #[error("age decrypt failed: {0}")]
     AgeDecryptFailed(String),
+    #[error("rotate: new recipient must differ from the current recipient ({0}), or rotation would remove the only remaining recipient")]
+    RotateRecipientUnchanged(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -430,30 +432,57 @@ pub fn show_redacted(secrets_path: &std::path::Path) -> Result<std::collections:
     Ok(decrypt_secrets(secrets_path)?.redacted())
 }
 
-/// Rotate sops data keys (re-encrypt all secrets with a new data encryption key).
+/// Rotate the secrets file's recipient set to `new_recipient` (specs/baud-keys.md §4's
+/// `baud keys rotate` — "sops rotate to **new recipients**"), invalidating the age identity
+/// currently resolved via [`age_key_path`] (VR2-M3).
 ///
-/// This calls `sops --rotate --in-place <file>`, which refreshes the data key
-/// while keeping the same recipient set. After rotation, the old data key is
-/// invalidated; decryption still works because the age identity (private key) is
-/// unchanged — only the SOPS-internal symmetric data key is regenerated.
-pub fn rotate_secrets(secrets_path: &std::path::Path) -> Result<(), KeysError> {
+/// This is deliberately *not* `sops --rotate --in-place`, which only refreshes the SOPS-internal
+/// data key while keeping the same recipient set — the pre-rotation private key still decrypts
+/// the result, which fails the spec's actual requirement. Instead this runs two recipient-set
+/// edits, each of which sops implements by re-encrypting the data key: `sops --add-age
+/// <new_recipient>` (the file becomes decryptable by both the old and new identity), then `sops
+/// --rm-age <old_recipient>` (the old identity is dropped from the recipient list and can no
+/// longer decrypt). The currently-configured identity must remain valid until the second call
+/// completes, since sops needs a still-valid recipient key to perform the intermediate
+/// re-encryption — so this order is required, not incidental.
+pub fn rotate_secrets(secrets_path: &Path, new_recipient: &str) -> Result<(), KeysError> {
+    let key_path = age_key_path().ok_or_else(|| {
+        KeysError::AgeKeyNotFound(PathBuf::from("<none found>"))
+    })?;
+    let old_recipient = age_public_key()
+        .ok_or_else(|| KeysError::AgePublicKeyNotFound(key_path.clone()))?;
+
+    // Checked before touching `sops` at all: a same-recipient "rotation" would still run
+    // `--add-age`/`--rm-age`, but the `--rm-age` half would drop the only recipient the file
+    // has, leaving it undecryptable by anyone. Rejecting this input is cheap and needs no
+    // external tooling, so it happens first.
+    if old_recipient == new_recipient {
+        return Err(KeysError::RotateRecipientUnchanged(old_recipient));
+    }
+
     if Command::new("sops").arg("--version").output().is_err() {
         return Err(KeysError::SopsNotFound("not in PATH".into()));
     }
 
-    let key_path = age_key_path().ok_or_else(|| {
-        KeysError::AgeKeyNotFound(std::path::PathBuf::from("<none found>"))
-    })?;
-
-    let output = Command::new("sops")
-        .args(["--rotate", "--in-place"])
+    let add = Command::new("sops")
+        .args(["--add-age", new_recipient, "--in-place"])
         .arg(secrets_path)
         .env("SOPS_AGE_KEY_FILE", &key_path)
         .output()?;
-
-    if !output.status.success() {
+    if !add.status.success() {
         return Err(KeysError::SopsDecryptFailed(
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&add.stderr).to_string()
+        ));
+    }
+
+    let remove = Command::new("sops")
+        .args(["--rm-age", &old_recipient, "--in-place"])
+        .arg(secrets_path)
+        .env("SOPS_AGE_KEY_FILE", &key_path)
+        .output()?;
+    if !remove.status.success() {
+        return Err(KeysError::SopsDecryptFailed(
+            String::from_utf8_lossy(&remove.stderr).to_string()
         ));
     }
     Ok(())
@@ -708,34 +737,24 @@ mod tests {
     /// passes. Run it with `cargo test -p baud-keys -- --ignored` on a host that has
     /// them; the guards below now fail loudly instead of skipping.
     ///
-    /// NOTE (unfixed, deliberately not papered over): this test drives `sops` directly
-    /// and never calls this crate's own [`rotate_secrets`], which runs
-    /// `sops --rotate --in-place` — a data-key refresh that keeps the same recipient
-    /// set. That does *not* invalidate the old age private key, which is what the
-    /// assertion below (and VR2-M3) demands; recipient replacement needs
-    /// `sops updatekeys`. So even on a host with the tooling, this passing does not
-    /// mean `baud secrets rotate` satisfies the invariant.
+    /// Drives this crate's own [`rotate_secrets`] (not a hand-rolled `sops` invocation) so a
+    /// pass here is a real guarantee about `baud keys rotate`, not just about `sops` itself.
     #[test]
     #[ignore = "requires the `sops` and `age-keygen` binaries on PATH"]
     fn rotate_invalidates_old_key() {
         // VR2-M3: rotate must invalidate the OLD data-encryption key.
         //
-        // The spec (baud-keys.md §5) requires that after `baud secrets rotate`,
-        // anyone possessing only the PRE-ROTATION age private key can no longer
-        // decrypt the secrets file. This requires `sops updatekeys` (recipient
-        // replacement), not just `sops --rotate` (data-key refresh with same
-        // recipients).
+        // The spec (baud-keys.md §4) requires that after `baud keys rotate`, anyone
+        // possessing only the PRE-ROTATION age private key can no longer decrypt the
+        // secrets file — recipient replacement (`sops --add-age`/`--rm-age`, what
+        // `rotate_secrets` now does), not just `sops --rotate` (data-key refresh with the
+        // same recipient set, which leaves the old key valid).
         //
-        // This test simulates the invariant using a temporary directory:
         //   1. Generate two age keypairs (old_key, new_key).
         //   2. Write a minimal SOPS-compatible secrets file encrypted to old_key.
-        //   3. Call rotate logic — re-encrypt to new_key only.
+        //   3. Call this crate's `rotate_secrets(&secrets_path, &new_pub)`.
         //   4. Assert: decryption with old_key FAILS.
         //   5. Assert: decryption with new_key SUCCEEDS.
-        //
-        // Without real sops/age binaries the re-encryption step is skipped
-        // gracefully. The test asserts the structural invariant when tooling is
-        // present, and documents the contract when it is not.
 
         // Loud, not silent: this test is #[ignore]d precisely because it needs these.
         assert!(
@@ -811,18 +830,14 @@ mod tests {
             "old key must decrypt the file before rotation"
         );
 
-        // Rotate: updatekeys to new_pub only (removes old_pub from recipient list)
-        let rotate = std::process::Command::new("sops")
-            .args(["updatekeys", "--yes"])
-            .arg(&secrets_path)
-            .env("SOPS_AGE_KEY_FILE", &old_key_path)
-            .env("SOPS_AGE_RECIPIENTS", &new_pub)
-            .output();
+        // Rotate via the real production path: `SOPS_AGE_KEY_FILE` must point at old_key_path
+        // for `rotate_secrets` to resolve both `age_key_path()` (for the sops calls) and
+        // `age_public_key()` (to learn which recipient to `--rm-age`).
+        let rotate = with_key_env(Some(&old_key_path), None, || {
+            rotate_secrets(&secrets_path, &new_pub)
+        });
 
-        assert!(
-            matches!(&rotate, Ok(o) if o.status.success()),
-            "sops updatekeys must succeed (it may need a .sops.yaml naming the new recipient): {rotate:?}"
-        );
+        assert!(rotate.is_ok(), "rotate_secrets must succeed: {rotate:?}");
 
         // After rotation: old_key must FAIL to decrypt (VR2-M3 core assertion)
         let after_old = std::process::Command::new("sops")
@@ -846,6 +861,31 @@ mod tests {
         assert!(
             after_new.status.success(),
             "NEW age key must successfully decrypt the file after rotation"
+        );
+    }
+
+    /// [`rotate_secrets`] must reject a "rotation" to the recipient it already has, before
+    /// touching `sops` at all — running `--add-age`/`--rm-age` with the same recipient on both
+    /// sides would `--rm-age` the file's only remaining recipient, permanently locking everyone
+    /// out. Needs no `sops`/`age-keygen` binary (the guard fires from `age_key_path`/
+    /// `age_public_key` alone), so unlike [`rotate_invalidates_old_key`] this is not `#[ignore]`d.
+    #[test]
+    fn rotate_rejects_same_recipient() {
+        let contents = generate_identity_file();
+        let recipient = parse_public_key(&contents).expect("recipient must parse out");
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let key_path = tmp.path().join("identity.age");
+        std::fs::write(&key_path, &contents).expect("write identity file");
+        let secrets_path = tmp.path().join("secrets.yaml");
+
+        let result = with_key_env(Some(&key_path), None, || {
+            rotate_secrets(&secrets_path, &recipient)
+        });
+
+        assert!(
+            matches!(result, Err(KeysError::RotateRecipientUnchanged(ref r)) if *r == recipient),
+            "expected RotateRecipientUnchanged({recipient}), got {result:?}"
         );
     }
 

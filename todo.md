@@ -2484,21 +2484,20 @@ runner. Related: `drive/pkg/pkg-build-cli.sh` costs **143s**, not the "~4-5 min"
 no cache); it is now gated on a fingerprint that includes the out-of-tree kernel version and whether the
 enforced-regime patch is applied, since neither is visible to any `git diff`.
 
-**Two spec items are recorded as satisfied but are not.** Both surfaced only when tests that asserted nothing
-were made to assert something.
+**Resolved.**
 
-1. **VR2-M7 (wall-clock watchdog for spinning guests) — `ralph/progress.txt:602` records "FIXED"; it was
-   not.** `Multiverse::run` incremented `guest_quantum_steps[g]` at the top of each quantum and reset it to
-   `0` at the bottom of the *same* iteration, because the simulation modelled no outcome other than "guest
-   reaches a syscall". The counter could never exceed 1, while `quantum_step_limit` is ≥ 1 and the kill is
-   `> limit` — **the kill branch was unreachable for every tape and every `quantum_limit_ms`.**
-   `quantum_overrun_guest_is_killed` hid this by discarding its own observation (`let _ = crash_obs;`).
-   Fixed by adding `SPIN_ACTION` (`crates/baud-multiverse/src/lib.rs:615`) so a guest burning a whole
-   quantum is modelled and the watchdog is reachable; the test now asserts SIGKILL + `"quantum-overrun"` at
-   the exact quantum, plus a negative case and a `quantum_limit_ms = 0` disable case, and was
-   mutation-verified. **Note this widens the per-quantum action draw to `draw_int(0, SPIN_ACTION)`, which
-   changes how tape bytes map to actions and therefore changes stream hashes for existing tapes** — safe
-   only because no golden hashes exist in-tree and `verify`/`replay` derive from the same simulation.
+1. **VR2-M7 (wall-clock watchdog for spinning guests) — `ralph/progress.txt:602` had recorded "FIXED"; it
+   was not, until this entry's fix.** `Multiverse::run` incremented `guest_quantum_steps[g]` at the top of
+   each quantum and reset it to `0` at the bottom of the *same* iteration, because the simulation modelled no
+   outcome other than "guest reaches a syscall". The counter could never exceed 1, while `quantum_step_limit`
+   is ≥ 1 and the kill is `> limit` — **the kill branch was unreachable for every tape and every
+   `quantum_limit_ms`.** `quantum_overrun_guest_is_killed` hid this by discarding its own observation (`let _
+   = crash_obs;`). Fixed by adding `SPIN_ACTION` (`crates/baud-multiverse/src/lib.rs:615`) so a guest burning
+   a whole quantum is modelled and the watchdog is reachable; the test now asserts SIGKILL +
+   `"quantum-overrun"` at the exact quantum, plus a negative case and a `quantum_limit_ms = 0` disable case,
+   and was mutation-verified. **Note this widens the per-quantum action draw to `draw_int(0, SPIN_ACTION)`,
+   which changes how tape bytes map to actions and therefore changes stream hashes for existing tapes** —
+   safe only because no golden hashes exist in-tree and `verify`/`replay` derive from the same simulation.
 
    **Follow-up: the real-KVM-path half of this gap is now closed too, so VR2-M7 is closed everywhere, not
    just in the simulation.** New `crates/baud-vcpu/src/linux/watchdog.rs`: a `Watchdog` struct spawns a
@@ -2541,17 +2540,34 @@ were made to assert something.
    `Watchdog` primitive itself (no `/dev/kvm` needed) in `crates/baud-vcpu/src/linux/watchdog.rs`'s own
    `#[cfg(test)]` module covering: zero-budget disables it, it fires once its budget elapses, and
    disarming before the budget elapses prevents it from ever firing.
-2. **VR2-M3 — `baud keys rotate` does not invalidate the old key.** `specs/baud-keys.md:111` specifies
-   `baud keys rotate  # sops rotate to new recipients`, but `rotate_secrets`
-   (`crates/baud-keys/src/lib.rs:449`) runs `sops --rotate --in-place`, whose own doc comment
-   (`lib.rs:435-438`) states it "refreshes the data key while keeping the same recipient set… the age
-   identity (private key) is unchanged". `rotate_invalidates_old_key` appeared to cover this but shelled out
-   to `sops updatekeys` directly, never calling `rotate_secrets`, and silently no-op'd anyway because
-   `sops`/`age`/`age-keygen`/`nix` are absent on this host (it hit `.is_err()` guards and asserted nothing).
+2. **VR2-M3 — `baud keys rotate` did not invalidate the old key — fixed.** `specs/baud-keys.md:111`
+   specifies `baud keys rotate  # sops rotate to new recipients`, but `rotate_secrets`
+   (`crates/baud-keys/src/lib.rs`) ran `sops --rotate --in-place`, whose own doc comment stated it
+   "refreshes the data key while keeping the same recipient set… the age identity (private key) is
+   unchanged" — the opposite of what the spec and VR2-M3 require. `rotate_invalidates_old_key` appeared to
+   cover this but shelled out to `sops updatekeys` directly, never calling `rotate_secrets`, and silently
+   no-op'd anyway because `sops`/`age`/`age-keygen`/`nix` are absent on this host (it hit `.is_err()` guards
+   and asserted nothing). `rotate_secrets` now takes a `new_recipient: &str` and performs a real recipient
+   swap: `sops --add-age <new_recipient>` (file becomes decryptable by both identities), then `sops --rm-age
+   <old_recipient>` (old identity dropped from the recipient list; sops re-encrypts the data key on each
+   step, so decryption with the pre-rotation key genuinely fails afterwards) — `old_recipient` is read via
+   the existing `age_public_key()`, so the caller never has to supply it. Added `KeysError::
+   RotateRecipientUnchanged`, checked *before* touching `sops` at all, to reject a same-recipient "rotation"
+   that would otherwise `--rm-age` the file's only remaining recipient and lock everyone out permanently.
+   `POST /keys/rotate` and `baud keys rotate` both gained the now-required `--new-recipient <age1...>`
+   argument (previously took none). The `#[ignore]`d `rotate_invalidates_old_key` (needs real
+   `sops`/`age-keygen`, both absent here) now drives this crate's own `rotate_secrets` instead of hand-rolled
+   `sops` calls, so a pass is a real guarantee about `baud keys rotate`, not just about `sops` itself; a new
+   non-ignored `rotate_rejects_same_recipient` covers the new guard (needs no external binary — the check
+   fires from `age_key_path`/`age_public_key` alone, both pure file reads). Verified: `cargo build -p
+   baud-keys -p baud-cli -p baud-server` and `cargo clippy` on the same three, both clean (no new warnings);
+   `cargo test -p baud-keys` → 12 passed, 0 failed, 1 ignored (the sops/age-keygen-requiring test, consistent
+   with this host per `CLAUDE.md`). `sops`/`age-keygen` remain absent here, so the `--add-age`/`--rm-age`
+   recipient-rotation behavior itself is not hardware-verified on this host — only reasoned from documented
+   `sops` CLI flags and exercised by the guard-only unit test; whoever next has `sops`+`age-keygen` on PATH
+   should run `cargo test -p baud-keys -- --ignored rotate_invalidates_old_key` to close that gap.
 
-**Resolved.**
-
-1. **`ram_hash` was computed and discarded at scale — fixed.** `Multiverse` (`crates/baud-multiverse/src/
+3. **`ram_hash` was computed and discarded at scale — fixed.** `Multiverse` (`crates/baud-multiverse/src/
    linux/mod.rs`) gained `_without_ram_hash` siblings for all four `run_until_branch_or_halt*` entry points
    (plain, `_with_periodic_timer`, `_with_virtio_rng`, `_with_periodic_timer_and_virtio_rng`), returning a new
    `RunUntilBranchObservation` (exactly `RunUntilBranchOutcome` minus the `Halted` arm's `ram_hash`) — the
@@ -2570,7 +2586,7 @@ were made to assert something.
    this wrong (both sides `false`) would have made the comparison vacuously pass, exactly the "test asserts
    nothing" anti-pattern this whole file's §14.1 catalogs elsewhere. Gate wall-clock dropped from the
    documented ~6 min baseline to 2m58s in the verifying run (`cargo test --workspace` phase alone: 24s).
-2. **`fleet_of_vms_run_in_parallel_without_interference` flake — already fixed, this entry was stale.**
+4. **`fleet_of_vms_run_in_parallel_without_interference` flake — already fixed, this entry was stale.**
    This item was carried forward as "still open" describing a timing-ratio flake, but commit `2c0919a`
    (`drive: add a parallel verification gate, reorganize drive/, and fix latent test defects`) had already
    applied the same treatment `thousand_branches_are_independent_and_deterministic` got: the test is
@@ -2579,7 +2595,7 @@ were made to assert something.
    `drive/h/h6.sh` is its dedicated runner (`--include-ignored`, asserts a non-zero pass count),
    already wired into `drive/gate.sh` phase 4 (`04-h6`). No code changed for this entry beyond
    correcting the record.
-3. **`shell-into`'s timeout conflated two different things — fixed.**
+5. **`shell-into`'s timeout conflated two different things — fixed.**
    `crates/baud-cli/src/cmds/shell_into.rs` used one `--idle-timeout-ms` as both the idle timeout *and*
    the first-byte deadline, so under concurrent guest boots it returned `ok=true` with an empty
    transcript (measured: 2000ms → empty 3/3; 8000ms → correct 3/3). Split into two flags: `--idle-timeout-ms`
@@ -2589,7 +2605,7 @@ were made to assert something.
    inflating `--idle-timeout-ms`; M10.4's error-path call (no restore involved) keeps both timeouts tight at
    1000ms. Verified: `cargo build -p baud-cli` and `cargo clippy -p baud-cli --all-targets` clean (no new
    warnings), `bash drive/m/m10.sh` passes M10.1-M10.4 end to end against real `/dev/kvm`.
-4. **`thousand_branches`' resource-growth coverage was recorded as "still open" but was already fixed —
+6. **`thousand_branches`' resource-growth coverage was recorded as "still open" but was already fixed —
    stale record, same pattern as the `fleet_of_vms` entry above.** The test (`crates/baud-multiverse/src/
    linux/mod.rs::thousand_branches_are_independent_and_deterministic`) already asserts both open-fd count
    (`fds_after <= fds_before + FD_SLACK`) and `VmRSS` growth (`rss_after_kib <= rss_warm_kib +
@@ -2597,7 +2613,7 @@ were made to assert something.
    its ~1008 sequential `KVM_CREATE_VM`/vCPU/perf_event lifecycles — added by commit `2c0919a` (the same
    commit that fixed the `fleet_of_vms` flake above), predating this record. No code changed for this entry
    beyond correcting the record.
-5. **`crates/baud-journal`'s encrypted path shelled out to the `age` binary — fixed.** `age_encrypt`/
+7. **`crates/baud-journal`'s encrypted path shelled out to the `age` binary — fixed.** `age_encrypt`/
    `age_decrypt` in `crates/baud-journal/src/lib.rs` were removed; `append`/`read_chunk` now call
    `baud_keys::age_encrypt`/`baud_keys::age_decrypt` directly (the pure-Rust `age` crate, already a
    dependency), so the encrypted-journal path needs no `age` binary on PATH and is fully testable on this
