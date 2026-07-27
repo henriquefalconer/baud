@@ -30,7 +30,12 @@ use std::time::{Duration, Instant};
 
 /// Real-time signal repurposed to interrupt a blocking `KVM_RUN`. Nothing else in this workspace
 /// installs a signal handler or sends a signal to a thread (grepped clean across `crates/` before
-/// choosing this), so the number is free and this module owns it exclusively.
+/// choosing this), so the number is free and this module owns it exclusively — both for the
+/// wall-clock [`Watchdog`] and for [`CancelKicker`], which needs the identical "break the vCPU
+/// thread out of a blocking `KVM_RUN`" primitive for a different reason (the supervisor's
+/// cancellation flag). Deliberately one signal, not two: the handler is a no-op either way and the
+/// run loop distinguishes the two causes by reading the two `AtomicBool`s after `EINTR`, so a
+/// second signal number would buy nothing and cost a second process-global disposition.
 const WATCHDOG_SIGNAL: libc::c_int = libc::SIGUSR1;
 
 /// Install a real (not `SIG_IGN`) handler for [`WATCHDOG_SIGNAL`], once per process. A blocking
@@ -147,12 +152,109 @@ impl Watchdog {
     }
 }
 
+/// How often an armed [`CancelKicker`] re-reads the supervisor's flag — and, once it is set, how
+/// often it re-sends [`WATCHDOG_SIGNAL`] to the vCPU thread. Small enough that a cancelled run
+/// leaves `KVM_RUN` in single-digit milliseconds, large enough that an armed-but-never-set flag
+/// costs one atomic load per 5 ms on a thread that is otherwise asleep in `wait_timeout`.
+///
+/// Re-sending (rather than a single kick) is the load-bearing part: a signal delivered while the
+/// vCPU thread happens to be in *userspace* — dispatching a device exit, walking the boundary,
+/// hashing — is consumed by the no-op handler and interrupts nothing, and the thread can then
+/// re-enter a fresh, arbitrarily long `KVM_RUN` that no longer has any signal pending. A kick
+/// every 5 ms until disarm makes the break-out unconditional instead of a race.
+const CANCEL_KICK_INTERVAL: Duration = Duration::from_millis(5);
+
+/// A companion thread that watches the supervisor's cancellation flag
+/// (`baud_multiverse::linux::Multiverse::set_cancel_flag`'s `Arc<AtomicBool>`) and, once it is
+/// set, repeatedly interrupts the vCPU thread's blocking `KVM_RUN` with `SIGUSR1` until
+/// it is dropped — the exact machinery this module's `Watchdog` uses for its wall-clock kill,
+/// pointed at a different trigger.
+///
+/// **Why a signal is required at all.** Polling a flag between VM exits (which is all the run
+/// loops could do before this existed) is only as prompt as the exits are frequent, and a real
+/// guest's exits are not frequent at all: one periodic-timer tick against a real kernel was
+/// measured taking longer than 120 s of wall clock inside a handful of `KVM_RUN` ioctls (8 ioctls
+/// in 5 s at 100% CPU under `strace -c`). A blocked `KVM_RUN` can only be broken out of by a
+/// signal delivered to the running thread, which returns `EINTR`/`EAGAIN` — see this module's
+/// header for why this mechanism (unlike a PMU overflow) works on this host.
+///
+/// **Determinism.** [`arm`](Self::arm)ing with `None` — every caller that never installed a
+/// cancellation flag, which is every caller outside `baud-server`'s HTTP route — spawns no thread,
+/// installs no signal handler, and can never deliver a signal, so a run with no flag executes the
+/// identical instruction/exit sequence it did before this type existed. With a flag installed but
+/// never set, the handler is armed but no signal is ever sent, so the guest is equally untouched.
+///
+/// **Scope.** Armed for the duration of exactly one run-loop call and disarmed by its own `Drop`,
+/// on every path (normal halt, determinism hole, cancellation, panic) — the same "no signalling
+/// thread may outlive the call that armed it" rule `Watchdog`'s doc explains at length, which
+/// matters for the same reason: `baud-server` runs boots on `tokio::task::spawn_blocking`'s
+/// reusable thread pool. `Drop` rather than a consuming `disarm` because the run loops this guards
+/// return early from a dozen places each, and a missed disarm would leave a thread signalling an
+/// unrelated future task.
+pub struct CancelKicker {
+    done: Arc<(Mutex<bool>, Condvar)>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl CancelKicker {
+    /// Arm a kicker targeting the *calling* thread (`libc::pthread_self()`, captured here so a
+    /// caller cannot arm one against the wrong thread) for `flag`. `None` disables it entirely —
+    /// no thread, no handler, no signal, ever (see this type's "Determinism" note).
+    pub fn arm(flag: Option<Arc<AtomicBool>>) -> Self {
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let Some(flag) = flag else {
+            return CancelKicker { done, handle: None };
+        };
+        ensure_handler_installed();
+        // SAFETY: `pthread_self` has no preconditions and always succeeds.
+        let target = unsafe { libc::pthread_self() };
+        let done2 = Arc::clone(&done);
+        let handle = thread::spawn(move || {
+            let (lock, cvar) = &*done2;
+            let mut guard = lock.lock().expect("cancel-kicker mutex poisoned");
+            loop {
+                if *guard {
+                    return; // disarmed: the run finished (or already unwound on cancellation)
+                }
+                if flag.load(Ordering::SeqCst) {
+                    // SAFETY: `target` is the vCPU thread that armed this kicker. That thread
+                    // cannot have exited: it drops this `CancelKicker`, and `drop` must take the
+                    // very mutex this loop is holding right now before it can set `done` and join,
+                    // so for as long as control is inside this critical section the target is
+                    // provably still alive (either running the guest, or blocked in `drop`).
+                    unsafe {
+                        libc::pthread_kill(target, WATCHDOG_SIGNAL);
+                    }
+                }
+                guard = cvar
+                    .wait_timeout(guard, CANCEL_KICK_INTERVAL)
+                    .expect("cancel-kicker mutex poisoned")
+                    .0;
+            }
+        });
+        CancelKicker { done, handle: Some(handle) }
+    }
+}
+
+impl Drop for CancelKicker {
+    fn drop(&mut self) {
+        {
+            let (lock, cvar) = &*self.done;
+            *lock.lock().expect("cancel-kicker mutex poisoned") = true;
+            cvar.notify_all();
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// No real `/dev/kvm` needed for any test in this module — [`Watchdog`] only ever touches
-    /// threads, a mutex/condvar, and a signal, never a `VcpuFd`.
+    /// No real `/dev/kvm` needed for any test in this module — [`Watchdog`] and [`CancelKicker`]
+    /// only ever touch threads, a mutex/condvar, and a signal, never a `VcpuFd`.
 
     #[test]
     fn zero_budget_disables_the_watchdog_entirely() {
@@ -181,5 +283,62 @@ mod tests {
         let fired = Arc::clone(&watchdog.fired);
         watchdog.disarm(); // long before the 5s budget would elapse
         assert!(!fired.load(Ordering::SeqCst), "disarming in time must prevent it from ever firing");
+    }
+
+    /// The determinism guarantee [`CancelKicker`]'s doc makes, at the only place it can be checked
+    /// structurally: no flag installed means no thread at all exists to send anything.
+    #[test]
+    fn no_cancel_flag_spawns_no_kicker_thread_at_all() {
+        let kicker = CancelKicker::arm(None);
+        assert!(kicker.handle.is_none(), "an absent cancellation flag must not spawn a thread");
+    }
+
+    /// An armed-but-never-set flag must be equally silent — the case every `baud-server` run that
+    /// nobody abandons takes.
+    #[test]
+    fn an_unset_cancel_flag_never_signals_the_target_thread() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let kicker = CancelKicker::arm(Some(Arc::clone(&flag)));
+        // A blocking syscall that would return EINTR if any signal were delivered here. 200ms is
+        // 40 kick intervals, so a kicker that signalled an unset flag would be caught with margin.
+        let start = Instant::now();
+        thread::sleep(Duration::from_millis(200));
+        assert!(start.elapsed() >= Duration::from_millis(200));
+        drop(kicker);
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    /// The core mechanism: setting the flag from another thread really does deliver
+    /// [`WATCHDOG_SIGNAL`] to the *armer's* thread, promptly. Uses a blocking `nanosleep` as the
+    /// stand-in for a blocking `KVM_RUN` — both are ordinary interruptible syscalls, and this test
+    /// can therefore run anywhere, with or without `/dev/kvm`.
+    #[test]
+    fn a_set_cancel_flag_interrupts_a_blocking_syscall_on_the_armers_thread() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let kicker = CancelKicker::arm(Some(Arc::clone(&flag)));
+        let setter = {
+            let flag = Arc::clone(&flag);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                flag.store(true, Ordering::SeqCst);
+            })
+        };
+        // `libc::nanosleep` (unlike `std::thread::sleep`, which restarts on EINTR internally)
+        // returns -1/EINTR the moment a handled signal arrives — exactly `KVM_RUN`'s behaviour.
+        let req = libc::timespec { tv_sec: 30, tv_nsec: 0 };
+        let mut rem = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let start = Instant::now();
+        // SAFETY: both timespecs are live, initialized locals for the whole call.
+        let rc = unsafe { libc::nanosleep(&req, &mut rem) };
+        let elapsed = start.elapsed();
+        setter.join().expect("setter thread panicked");
+        drop(kicker);
+        assert_eq!(rc, -1, "the blocking syscall must have been interrupted, not have slept 30s");
+        assert_eq!(io_errno(), libc::EINTR);
+        assert!(elapsed < Duration::from_secs(5), "cancellation must break out promptly (took {elapsed:?})");
+    }
+
+    fn io_errno() -> libc::c_int {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
     }
 }

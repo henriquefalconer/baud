@@ -341,17 +341,25 @@ async fn render_frames_from_real_replay(
         },
         None => None,
     };
+    // Mapped, never read onto the heap — the same fix as `/run/kvm`'s own path; see
+    // `run_kvm::open_virtio_blk_image`'s doc. A replay boots the identical image the original run
+    // did, so it carried the identical double-copy cost until now.
     let virtio_blk_image = match &virtio_blk {
-        Some((path, _, _)) => match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => return Err(json!({ "error": format!("failed to read virtio_blk image_path '{path}': {e}") })),
+        Some((path, _, _)) => match crate::routes::run_kvm::open_virtio_blk_image(path) {
+            Ok(base) => Some(base),
+            Err(e) => return Err(json!({ "error": e })),
         },
         None => None,
     };
     let virtio_blk_meta = virtio_blk.map(|(_, v, m)| (v, m));
     let kernel_path_buf = PathBuf::from(&kernel_path);
+    // Same client-disconnect cancellation as `/run/kvm`: a replay is a full KVM boot, so an
+    // abandoned `POST /stream/:run_id/render` must not leave one running (see
+    // `run_kvm::CancelGuard`).
+    let cancel = crate::routes::run_kvm::CancelGuard::new();
+    let cancel_flag = cancel.flag();
     let records = tokio::task::spawn_blocking(move || {
-        let virtio_blk = match (virtio_blk_image.as_deref(), virtio_blk_meta) {
+        let virtio_blk = match (virtio_blk_image, virtio_blk_meta) {
             (Some(image), Some((vector, max_exits))) => Some((image, vector, max_exits)),
             _ => None,
         };
@@ -364,10 +372,12 @@ async fn render_frames_from_real_replay(
             virtio_rng,
             virtio_blk,
             acpi,
+            Some(cancel_flag),
         )
     })
     .await
     .expect("stream/render replay task panicked");
+    drop(cancel); // held across the `.await` above on purpose — that is the whole mechanism
 
     let records = match records {
         Ok(records) => records,
@@ -455,6 +465,14 @@ async fn render_frames_from_real_restore(params: RealRestoreParams) -> Result<Ve
         Some(t) => t,
         None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
     };
+    // No `run_kvm::CancelGuard` here, deliberately — unlike the reboot path above, this one is
+    // materially different in the one way that matters: every loop it can dispatch to is a
+    // `run_until_branch_or_halt*` variant, and none of those calls `Multiverse::is_cancelled` at
+    // all, so installing a flag would be pure decoration — a mechanism that reads as working
+    // while cancelling nothing. It also has no disk image to map, so it never carried the
+    // double-copy cost that motivated this work. When the branch/resume loops in
+    // `baud-multiverse` learn to poll the flag, this call site gets the same three lines the
+    // reboot path above has.
     let records = tokio::task::spawn_blocking(move || -> Result<Vec<baud_proto::Msg>, String> {
         let universe = crate::routes::run_kvm::reconstruct_universe(&store, &store_run_id, &snapshot_node_id)?;
         let mut branch = baud_multiverse::linux::Multiverse::branch(

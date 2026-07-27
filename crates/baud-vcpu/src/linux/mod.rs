@@ -12,7 +12,7 @@
 // process-wide-signal simplification that a full multi-thread VMM integration must revisit.
 
 pub mod pmu;
-mod watchdog;
+pub mod watchdog;
 
 use crate::{
     dispatch_exit, Bus, DeterminismHole, DispatchOutcome, EnforcedRdseedSite, Exit, RunLoopError, TimeSource,
@@ -21,8 +21,29 @@ use kvm_bindings::{kvm_guest_debug, KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, 
 use kvm_ioctls::{VcpuExit, VcpuFd};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+pub use watchdog::CancelKicker;
 use watchdog::Watchdog;
+
+/// The `io::Error` every `KVM_RUN` loop in this module reports when it stopped because the
+/// supervisor's cancellation flag was observed set, rather than because anything went wrong
+/// (`crate::RunLoopError::Cancelled`'s own doc). `ECANCELED` is the POSIX code for exactly this —
+/// "operation canceled" — and is never produced by any KVM ioctl, so it cannot collide with a real
+/// failure. Exists because [`crate::boundary::PmuStepper::Error`] is the implementor's own error
+/// type (`io::Error` here), leaving no room for a `Cancelled` variant: callers distinguish it with
+/// [`is_cancelled_error`].
+pub(crate) fn cancelled_error() -> io::Error {
+    io::Error::from_raw_os_error(libc::ECANCELED)
+}
+
+/// Is `e` the cancellation marker this module's `cancelled_error` produces? The counterpart a caller
+/// (`baud_multiverse::linux::Multiverse`'s run loops) uses to turn a stepper/run-loop error back
+/// into [`RunLoopError::Cancelled`] rather than misreporting an abandoned run as a determinism
+/// hole.
+pub fn is_cancelled_error(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ECANCELED)
+}
 
 /// Not in pinned `kvm-bindings` 0.14 (invented after that crate was bindgen'd) — the out-of-tree
 /// enforced-regime KVM module's own exit reason for a trapped `RDTSC`/`RDRAND`
@@ -145,15 +166,27 @@ pub fn set_singlestep(vcpu: &VcpuFd, enabled: bool, block_irq: bool) -> io::Resu
 /// force one) would otherwise block this thread inside `KVM_RUN` forever (todo.md §14.1 "Still
 /// open" item 1); `docs/determinism.md`'s "Known limits" §4 names the watchdog kill as the one
 /// deliberately non-deterministic intervention in the whole system.
+///
+/// `cancel` is the supervisor's cancellation flag (`baud_multiverse::linux::Multiverse::
+/// set_cancel_flag`), or `None` for every caller that never installs one. When present it is both
+/// polled after an `EINTR` *and* armed with a [`CancelKicker`], so that flipping it breaks this
+/// vCPU out of even a very long `KVM_RUN` within milliseconds instead of at whatever exit the
+/// guest gets round to next; the run then returns [`RunLoopError::Cancelled`], which is not a
+/// determinism failure (see that variant's doc). `None` spawns nothing and installs no signal
+/// handler, so a run with no flag is byte-identical to one taken before cancellation existed.
 pub fn run_until_halted(
     vcpu: &mut VcpuFd,
     bus: &mut dyn Bus,
     time: &mut dyn TimeSource,
     watchdog_budget: Duration,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<(), RunLoopError> {
     let watchdog = Watchdog::arm(watchdog_budget);
+    // Dropped (disarmed + joined) when this function returns, on every path — see `CancelKicker`.
+    let _kicker = CancelKicker::arm(cancel.clone());
+    let cancel = cancel.as_deref();
     let result = loop {
-        let outcome = match run_one_exit_impl(vcpu, bus, time, Some(&watchdog.fired)) {
+        let outcome = match run_one_exit_impl(vcpu, bus, time, Some(&watchdog.fired), cancel) {
             Ok(outcome) => outcome,
             Err(e) => break Err(e),
         };
@@ -176,12 +209,13 @@ pub fn run_until_halted(
     // watchdog kill: the budget had, in fact, already elapsed either way.
     let watchdog_fired = watchdog.fired.load(Ordering::SeqCst);
     watchdog.disarm();
-    result.map_err(|hole| {
-        if watchdog_fired {
-            RunLoopError::WatchdogKilled { budget_ms: watchdog_budget.as_millis() as u64 }
-        } else {
-            RunLoopError::DeterminismHole(hole)
-        }
+    result.map_err(|e| match e {
+        // Cancellation outranks the watchdog for the same reason the watchdog outranks a hole
+        // below: whichever host-side supervisory decision actually stopped the run is the honest
+        // thing to report, and a cancelled run's caller is by construction no longer listening.
+        RunLoopError::Cancelled => RunLoopError::Cancelled,
+        RunLoopError::DeterminismHole(hole) if !watchdog_fired => RunLoopError::DeterminismHole(hole),
+        _ => RunLoopError::WatchdogKilled { budget_ms: watchdog_budget.as_millis() as u64 },
     })
 }
 
@@ -269,22 +303,45 @@ pub fn run_one_exit(
     bus: &mut dyn Bus,
     time: &mut dyn TimeSource,
 ) -> Result<DispatchOutcome, DeterminismHole> {
-    // No watchdog for this entry point: `Multiverse::step_exit`'s callers (`run_until_console_len`,
-    // `run_until_branch_or_halt`, interactive shell stepping) already carry their own deterministic
-    // `max_exits` budget, so there is nothing here for a wall-clock kill to guard against.
-    run_one_exit_impl(vcpu, bus, time, None)
+    // No watchdog and no cancellation for this entry point: `Multiverse::step_exit`'s callers
+    // (interactive shell stepping) already carry their own deterministic `max_exits` budget, so
+    // there is nothing here for a wall-clock kill to guard against — and with neither flag
+    // installed `run_one_exit_impl` can only ever fail with `DeterminismHole`.
+    run_one_exit_impl(vcpu, bus, time, None, None).map_err(|e| match e {
+        RunLoopError::DeterminismHole(hole) => hole,
+        other => DeterminismHole(other.to_string()),
+    })
 }
 
-/// [`run_one_exit`]'s real body, plus the one thing it does not need: on `EINTR`, check whether
-/// `watchdog` (armed only by [`run_until_halted`]) has already fired before blindly retrying —
-/// see this crate's [`RunLoopError`] and `watchdog`'s own doc for why this loop is otherwise
-/// indistinguishable from a benign signal arriving for some unrelated reason.
+/// [`run_one_exit`] for a caller that *did* install the supervisor's cancellation flag: identical
+/// in every other respect, but a `KVM_RUN` interrupted (by that flag's own [`CancelKicker`]) while
+/// `cancel` is set returns [`RunLoopError::Cancelled`] instead of transparently retrying the
+/// ioctl. Used by every `baud_multiverse::linux::Multiverse` run loop that steps exit-by-exit, so
+/// a single long-running exit inside one of those loops cannot outlive the client that asked for
+/// it. With `cancel = None` this is exactly [`run_one_exit`].
+pub fn run_one_exit_cancellable(
+    vcpu: &mut VcpuFd,
+    bus: &mut dyn Bus,
+    time: &mut dyn TimeSource,
+    cancel: Option<&AtomicBool>,
+) -> Result<DispatchOutcome, RunLoopError> {
+    run_one_exit_impl(vcpu, bus, time, None, cancel)
+}
+
+/// [`run_one_exit`]'s real body, plus the two things it does not need: on `EINTR`, check whether
+/// the supervisor's `cancel` flag is set, or whether `watchdog` (armed only by
+/// [`run_until_halted`]) has already fired, before blindly retrying — see this crate's
+/// [`RunLoopError`] and `watchdog`'s own doc for why this loop is otherwise indistinguishable from
+/// a benign signal arriving for some unrelated reason. Both are `None` for every caller that
+/// installed neither, and two `Option` discriminant tests on the `EINTR` path (which an ordinary
+/// run never even reaches) are the entire cost of that case.
 fn run_one_exit_impl(
     vcpu: &mut VcpuFd,
     bus: &mut dyn Bus,
     time: &mut dyn TimeSource,
     watchdog: Option<&AtomicBool>,
-) -> Result<DispatchOutcome, DeterminismHole> {
+    cancel: Option<&AtomicBool>,
+) -> Result<DispatchOutcome, RunLoopError> {
     loop {
         let exit = match run_and_convert_rcb_bracketed(vcpu, time) {
             Ok(ConvertedExit::Exit(exit)) => Ok(exit),
@@ -329,6 +386,11 @@ fn run_one_exit_impl(
                 };
             }
             Err(e) if e.errno() == libc::EINTR => {
+                // Checked before the watchdog: a run whose caller has gone away should be reported
+                // as abandoned, not as a wall-clock kill, if somehow both are true at once.
+                if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    return Err(RunLoopError::Cancelled);
+                }
                 // Only `run_until_halted` ever passes `Some` here, and only once its own
                 // `Watchdog` has actually fired (`watchdog::Watchdog::fired`'s doc) — any other
                 // `EINTR` (this call site genuinely does not care why) keeps retrying exactly as
@@ -339,15 +401,24 @@ fn run_one_exit_impl(
                         "wall-clock watchdog fired: KVM_RUN was interrupted with the guest never \
                          reaching Hlt/Shutdown"
                             .to_string(),
-                    ));
+                    )
+                    .into());
                 }
                 continue;
             }
             Err(e) => {
+                // A cancelled run reports cancellation for *any* ioctl failure, not just `EINTR`:
+                // `KVM_RUN` can also surface a signal-interrupted entry as `EAGAIN` depending on
+                // where in the entry path the pending signal is noticed, and a run nobody is
+                // waiting on must never be recorded as a determinism hole (`RunLoopError::
+                // Cancelled`'s doc). Only reachable at all when a flag was installed *and* set.
+                if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    return Err(RunLoopError::Cancelled);
+                }
                 // An ioctl failure that is not a benign signal interruption is itself a
                 // determinism hole: the run loop has no deterministic value to serve for "KVM
                 // itself errored" (specs/baud-vcpu.md §3's catch-all covers this too).
-                return Err(DeterminismHole(format!("KVM_RUN ioctl failed: {e}")));
+                return Err(DeterminismHole(format!("KVM_RUN ioctl failed: {e}")).into());
             }
         }
     }

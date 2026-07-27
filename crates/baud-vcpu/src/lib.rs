@@ -136,6 +136,29 @@ pub enum RunLoopError {
          logged, not replayed)"
     )]
     WatchdogKilled { budget_ms: u64 },
+    /// The supervisor's cancellation flag was observed set
+    /// (`baud_multiverse::linux::Multiverse::set_cancel_flag`) — the caller abandoned the run
+    /// (e.g. `baud-server`'s HTTP client disconnected) and does not want its result, so the loop
+    /// stopped and returned, letting the whole `Multiverse` — KVM fds, guest-RAM mapping,
+    /// `perf_event` fd, the block device's backing store — drop through the ordinary
+    /// structural-drop path instead of being held for the rest of a run nobody is waiting on.
+    ///
+    /// Observed at one of three places, all strictly outside a guest instruction: the head of a
+    /// run-loop iteration, the head of a boundary-walk single step
+    /// ([`crate::boundary::PmuStepper::check_cancelled`]), or an `EINTR` from a `KVM_RUN` that
+    /// this run's own [`CancelKicker`](crate::linux::CancelKicker) deliberately interrupted
+    /// — the last of which is what makes cancellation *prompt* rather than merely eventual, since
+    /// a single `KVM_RUN` against a real guest can block for minutes and no amount of polling
+    /// between exits can shorten it.
+    ///
+    /// Like [`Self::WatchdogKilled`] this is *not* a determinism failure and not part of the
+    /// guest's own instruction stream: it is a host-side supervisory decision, taken strictly
+    /// between two VM exits, and it is never reached at all unless a caller installed a flag.
+    #[error(
+        "run cancelled by the supervisor before the guest reached Hlt/Shutdown (the caller \
+         abandoned the run; no determinism hole occurred)"
+    )]
+    Cancelled,
 }
 
 /// What the dispatch loop should do after one exit was resolved.

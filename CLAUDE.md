@@ -32,6 +32,10 @@ code (`kvm-ioctls`, `perf-event`, `userfaultfd`, …) directly.
 
 ## KVM host
 
+**At the start of every task run `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid'`** — it
+resets to `2` on every WSL boot, and until it is `-1` every KVM run fails with `failed to create the work-clock's
+perf_event branch counter: Permission denied`.
+
 `/dev/kvm` is present on this machine. Confirm it and grant access once:
 
 ```

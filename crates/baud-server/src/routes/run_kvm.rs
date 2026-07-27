@@ -229,6 +229,163 @@ pub(crate) fn read_initramfs(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("failed to read initramfs_path '{path}': {e}"))
 }
 
+/// How many times this host's currently-available memory a virtio-blk base image may exceed
+/// before [`open_virtio_blk_image`] refuses it, and the floor that multiple is never allowed to
+/// drop below. Deliberately loose: since the image is *mapped* rather than read
+/// ([`baud_multiverse::virtio_blk::BlockBase::mapped`]), its bytes cost no heap at all and stay
+/// reclaimable page cache, so this is a sanity bound on "that path cannot possibly be a disk
+/// image for this host" — a typo'd path pointing at something enormous, a runaway generated file
+/// — not the primary defence against exhausting memory (mapping is). The floor keeps the bound
+/// independent of transient memory pressure: the real 2.36 GB Ubuntu rootfs
+/// (`specs/baud-ubuntu.md` §4) on this 7.98 GB box must be accepted even when `MemAvailable` has
+/// momentarily collapsed, which a pure multiple-of-available rule would not guarantee.
+const VIRTIO_BLK_IMAGE_AVAILABLE_MEM_MULTIPLE: u64 = 4;
+const VIRTIO_BLK_IMAGE_SIZE_FLOOR: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+
+/// `MemAvailable` from `/proc/meminfo`, in bytes — the kernel's own estimate of how much memory
+/// is obtainable without swapping. `None` if the file is missing or carries no such line, in
+/// which case [`virtio_blk_image_size_limit`] falls back to its floor rather than rejecting
+/// everything: an unreadable `/proc` must never be what stops a legitimate boot.
+fn mem_available_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kib: u64 = rest.trim().trim_end_matches("kB").trim().parse().ok()?;
+            return Some(kib * 1024);
+        }
+    }
+    None
+}
+
+/// The largest virtio-blk base image this host will accept, in bytes — see
+/// [`VIRTIO_BLK_IMAGE_AVAILABLE_MEM_MULTIPLE`].
+fn virtio_blk_image_size_limit() -> u64 {
+    mem_available_bytes()
+        .map(|available| available.saturating_mul(VIRTIO_BLK_IMAGE_AVAILABLE_MEM_MULTIPLE))
+        .unwrap_or(0)
+        .max(VIRTIO_BLK_IMAGE_SIZE_FLOOR)
+}
+
+/// Resolve a `virtio_blk.image_path` into the [`BlockBase`](baud_multiverse::virtio_blk::BlockBase)
+/// a boot actually runs against: a **read-only memory map** of the file, never a heap copy of its
+/// bytes.
+///
+/// This is the whole of todo.md's "2.02x the image size resident" fix. The old shape read the
+/// image with `std::fs::read` in the handler (copy #1) and then handed a `to_vec()` of it to
+/// `Multiverse::enable_virtio_pci_blk` (copy #2), so a 1 GiB image cost 2085 MiB of RSS and the
+/// real 2.36 GB Ubuntu rootfs could not fit on this host at all. A mapping costs no heap: the
+/// device model only ever reads the base (guest writes go to the store's copy-on-write overlay),
+/// its pages are ordinary page cache the kernel can reclaim under pressure, and — see
+/// `BlockBase`'s own doc — servicing a request stays the same synchronous memcpy, so nothing
+/// about the run's determinism changes.
+///
+/// The `stat` first is deliberate: it reproduces the exact I/O error (and therefore the exact
+/// error string) the previous `std::fs::read` produced for the overwhelmingly common failure —
+/// a path that does not exist or cannot be read — before either the size check or the mapping
+/// can dress it up in different words.
+pub(crate) fn open_virtio_blk_image(
+    path: &str,
+) -> Result<baud_multiverse::virtio_blk::BlockBase, String> {
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("failed to read virtio_blk image_path '{path}': {e}"))?
+        .len();
+    let limit = virtio_blk_image_size_limit();
+    if len > limit {
+        return Err(format!(
+            "virtio_blk image_path '{path}' is {len} bytes, above this host's limit of {limit} \
+             bytes ({VIRTIO_BLK_IMAGE_AVAILABLE_MEM_MULTIPLE}x MemAvailable, floored at \
+             {VIRTIO_BLK_IMAGE_SIZE_FLOOR} bytes) — that is not a plausible disk image for this \
+             machine"
+        ));
+    }
+    baud_multiverse::virtio_blk::BlockBase::mapped(std::path::Path::new(path))
+        .map_err(|e| format!("failed to read virtio_blk image_path '{path}': {e}"))
+}
+
+/// The supervisor half of a run's cancellation flag
+/// ([`Multiverse::set_cancel_flag`](baud_multiverse::linux::Multiverse::set_cancel_flag)): a
+/// value an **async** handler holds across its `.await` on the run's `spawn_blocking` join
+/// handle, whose `Drop` sets the flag.
+///
+/// Why this exists. A `spawn_blocking` closure is not cancellable — dropping the `JoinHandle`
+/// does not stop the blocking-pool thread. So when axum/hyper drops a handler future because the
+/// client's socket went away, the KVM run underneath used to keep executing to completion,
+/// holding guest RAM, the block device's backing store and its overlay for a client that no
+/// longer exists (measured: server RSS pinned after the client was reaped, then *growing* as the
+/// orphaned run allocated further). Dropping this guard flips the flag, the run loop observes it
+/// at the top of its next iteration and returns [`baud_vcpu::RunLoopError::Cancelled`], and the
+/// whole `Multiverse` unwinds through the ordinary structural-drop path.
+///
+/// The flag is also set on the *normal* path, when the handler finishes and its locals drop —
+/// harmless, because by then the run has already returned and nothing reads the flag again.
+///
+/// **Measured, because none of it was safe to assume.** hyper *does* drop the handler future
+/// promptly when the client's socket goes away: with a `baud run kvm` client SIGTERMed mid-run,
+/// this guard's `Drop` was observed firing **4 ms** after the client died (server-side socket
+/// gone from `/proc/net/tcp` in the same instant), so this half of the mechanism needs no
+/// liveness polling, no channel-disconnect probe and no `ConnectInfo` plumbing — the shape
+/// `routes/shell_into.rs` needs for its WebSocket session is not needed here.
+///
+/// What is *not* yet prompt is the other half, and it lives across the crate boundary in
+/// `baud-multiverse`: a flipped flag only stops a run where the run loop actually calls
+/// `Multiverse::is_cancelled`. Today that is once per **periodic tick** in
+/// `run_to_first_halt_with_periodic_timer_and_devices` and once per host exit in
+/// `run_to_first_halt_with_virtio_pci_blk`; `baud_vcpu::boundary::inject_at` — where a
+/// periodic-timer run spends essentially all of its time — never polls at all, and neither does
+/// the plain `run_to_first_halt_with_periodic_timer` nor any branch/resume loop. For a guest that
+/// executes rather than exits, one tick can be minutes: measured on this host with the
+/// never-halting `rdinit=`-missing/`panic=0` workload, 4 ticks complete in 0.31 s but 8 do not
+/// complete in 120 s, and an abandoned run of it kept a full core busy for the whole 120 s with
+/// this flag set 4 ms in. Closing that gap is a one-line `is_cancelled` poll inside the boundary
+/// walk (or arming `baud_vcpu::linux::watchdog`'s signal for cancellation, which is the only
+/// thing that can interrupt a long `KVM_RUN` at all) — both in crates this route does not own.
+pub(crate) struct CancelGuard {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancelGuard {
+    pub(crate) fn new() -> Self {
+        CancelGuard { flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+    }
+
+    /// A handle on the flag to hand to the blocking side (`Multiverse::set_cancel_flag`).
+    pub(crate) fn flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.flag.clone()
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Render a run-loop failure as this route's error string. Every genuine failure keeps the exact
+/// `"determinism hole: {e}"` wording it has always had — including a plain
+/// [`DeterminismHole`](baud_vcpu::DeterminismHole), whose `RunLoopError` variant is
+/// `#[error(transparent)]` and so `Display`s identically — and only
+/// [`baud_vcpu::RunLoopError::Cancelled`] is reported differently, because calling it a
+/// determinism hole would be a lie about the guest's execution: it is a host-side supervisory
+/// decision taken between two VM exits when the client abandoned the run (see that variant's own
+/// doc).
+fn run_loop_error(e: impl Into<baud_vcpu::RunLoopError>) -> String {
+    match e.into() {
+        baud_vcpu::RunLoopError::Cancelled => {
+            // The only observable trace of this outcome: by construction nobody is left holding
+            // the response it would otherwise be returned in.
+            tracing::info!(
+                "KVM run cancelled: the client abandoned the request, so the run stopped between \
+                 exits and released everything it held (not a determinism hole)"
+            );
+            // The variant's own `Display` already says exactly this and nothing else needs
+            // prefixing onto it: "run cancelled by the supervisor before the guest reached
+            // Hlt/Shutdown (the caller abandoned the run; no determinism hole occurred)".
+            baud_vcpu::RunLoopError::Cancelled.to_string()
+        }
+        other => format!("determinism hole: {other}"),
+    }
+}
+
 /// POST /run/kvm — boot `kernel_path` (plus an optional `initramfs_path`/`periodic_timer`) and run
 /// it to its first `Hlt`/`Shutdown`.
 pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) -> Json<Value> {
@@ -243,14 +400,12 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
         },
         None => None,
     };
+    // Mapped, not read: see `open_virtio_blk_image`'s doc for why this route never puts a disk
+    // image on the heap (nor a second copy of it) any more.
     let virtio_blk_image = match &body.virtio_blk {
-        Some(spec) => match std::fs::read(&spec.image_path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                return Json(json!({
-                    "error": format!("failed to read virtio_blk image_path '{}': {e}", spec.image_path)
-                }))
-            }
+        Some(spec) => match open_virtio_blk_image(&spec.image_path) {
+            Ok(base) => Some(base),
+            Err(e) => return Json(json!({ "error": e })),
         },
         None => None,
     };
@@ -278,9 +433,17 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     let cmdline = body.cmdline.clone();
     let tape_hex = body.tape_hex.clone();
 
+    // A `spawn_blocking` closure is not cancellable, so the only thing that can stop an abandoned
+    // run is the run loop itself noticing. `cancel` lives in this async handler: if hyper drops
+    // this future because the client's socket went away, the guard drops, the flag flips, and the
+    // boot below returns `RunLoopError::Cancelled` at its next loop-head check instead of driving
+    // a whole KVM guest to completion for nobody. See `CancelGuard`'s doc.
+    let cancel = CancelGuard::new();
+    let cancel_flag = cancel.flag();
+
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
     let result = tokio::task::spawn_blocking(move || {
-        let virtio_blk = match (virtio_blk_image.as_deref(), virtio_blk_meta) {
+        let virtio_blk = match (virtio_blk_image, virtio_blk_meta) {
             (Some(image), Some((vector, max_exits))) => Some((image, vector, max_exits)),
             _ => None,
         };
@@ -294,10 +457,15 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
             virtio_blk,
             acpi,
             halt_console_pattern.as_ref().map(|(p, m)| (p.as_slice(), *m)),
+            Some(cancel_flag),
         )
     })
     .await
     .expect("run/kvm task panicked");
+    // The run has already returned, so the flag is nobody's business now; dropping the guard here
+    // is only to make it explicit that it had to stay alive across the `.await` above — that is
+    // the entire mechanism, and a future "unused binding" tidy-up would silently remove it.
+    drop(cancel);
 
     match result {
         Ok(((console_output, ram_hash, _mark_branch_step, _node_id), records)) => {
@@ -502,7 +670,7 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false, None)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false, None, None)
         .map(|(outcome, _records)| outcome)
 }
 
@@ -513,10 +681,16 @@ fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<Bran
 /// guest emitted along the way (`Multiverse::drain_tape_records`) — the same boot `boot_and_run`
 /// does, plus the drain `/run/kvm`'s `run()` handler needs to persist real `Msg::Frame` records
 /// (previously captured in-process and immediately dropped, todo.md §14's eighteenth-brick gap).
-/// `virtio_blk` is `(base_image_bytes, vector, max_exits)`, mirroring `initramfs`'s "caller
-/// resolves the path, this function only sees bytes" convention. `halt_console_pattern` is
-/// `(pattern_bytes, max_exits_per_burst)`; `None` preserves this function's exact prior behavior
-/// (a guest's first `Hlt` is always terminal).
+/// `virtio_blk` is `(base_image, vector, max_exits)`, mirroring `initramfs`'s "caller resolves the
+/// path, this function only sees the opened resource" convention — a
+/// [`BlockBase`](baud_multiverse::virtio_blk::BlockBase), which for every real caller is a
+/// read-only *mapping* of the image file (`open_virtio_blk_image`) rather than its bytes on the
+/// heap, and which is handed to `enable_virtio_pci_blk` by move: no copy is made anywhere on this
+/// path. `halt_console_pattern` is `(pattern_bytes, max_exits_per_burst)`; `None` preserves this
+/// function's exact prior behavior (a guest's first `Hlt` is always terminal). `cancel`, when
+/// set, is installed on the booted `Multiverse` as its supervisory cancellation flag
+/// ([`Multiverse::set_cancel_flag`](baud_multiverse::linux::Multiverse::set_cancel_flag)) so an
+/// abandoned run stops between exits instead of running to completion — see [`CancelGuard`].
 #[allow(clippy::too_many_arguments)]
 fn boot_run_and_drain(
     kernel_path: &Path,
@@ -525,10 +699,14 @@ fn boot_run_and_drain(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
-    virtio_blk: Option<(&[u8], u8, u32)>,
+    virtio_blk: Option<(baud_multiverse::virtio_blk::BlockBase, u8, u32)>,
     acpi: bool,
     halt_console_pattern: Option<(&[u8], u32)>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
+    // `virtio_blk`'s base image is moved into the device below, so keep the two scalars every
+    // later dispatch arm needs (`(vector, max_exits)`) behind before that happens.
+    let virtio_blk_meta = virtio_blk.as_ref().map(|(_, vector, max_exits)| (*vector, *max_exits));
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
         kernel_path,
@@ -541,6 +719,9 @@ fn boot_run_and_drain(
         rdseed_sites,
     )
     .map_err(|e| format!("boot error: {e}"))?;
+    if let Some(flag) = cancel {
+        mv.set_cancel_flag(flag);
+    }
     if acpi {
         mv.write_acpi_tables().map_err(|e| format!("write_acpi_tables error: {e}"))?;
     }
@@ -549,12 +730,15 @@ fn boot_run_and_drain(
         mv.seed_virtio_rng_entropy(seed);
     }
     if let Some((base_image, _, _)) = virtio_blk {
-        mv.enable_virtio_pci_blk(base_image.to_vec());
+        // By move, and with no `to_vec()`: for a mapped base this hands the device the mapping
+        // itself, so the image costs zero heap here instead of the second full-size copy this
+        // line used to make.
+        mv.enable_virtio_pci_blk(base_image);
     }
     let halt = match (periodic_timer, halt_console_pattern) {
         (Some((period_rcb, timer_vector, max_ticks)), Some((pattern, max_exits_per_burst))) => {
             let rng_vector = virtio_rng.map(|(_, v, _)| v);
-            let blk_vector = virtio_blk.map(|(_, v, _)| v);
+            let blk_vector = virtio_blk_meta.map(|(v, _)| v);
             let (_ticks, halt) = mv
                 .run_until_console_pattern_with_periodic_timer_and_devices(
                     period_rcb,
@@ -565,15 +749,17 @@ fn boot_run_and_drain(
                     max_ticks,
                     max_exits_per_burst,
                 )
-                .map_err(|e| format!("determinism hole: {e}"))?;
+                .map_err(run_loop_error)?;
             halt
         }
         (None, Some(_)) => {
             return Err("halt_console_pattern requires periodic_timer to also be set".to_string())
         }
-        (Some((period_rcb, timer_vector, max_ticks)), None) if virtio_rng.is_some() || virtio_blk.is_some() => {
+        (Some((period_rcb, timer_vector, max_ticks)), None)
+            if virtio_rng.is_some() || virtio_blk_meta.is_some() =>
+        {
             let rng_vector = virtio_rng.map(|(_, v, _)| v).unwrap_or(0);
-            let blk_vector = virtio_blk.map(|(_, v, _)| v).unwrap_or(0);
+            let blk_vector = virtio_blk_meta.map(|(v, _)| v).unwrap_or(0);
             let (_ticks, halt) = mv
                 .run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk(
                     period_rcb,
@@ -582,22 +768,22 @@ fn boot_run_and_drain(
                     blk_vector,
                     max_ticks,
                 )
-                .map_err(|e| format!("determinism hole: {e}"))?;
+                .map_err(run_loop_error)?;
             halt
         }
         (Some((period_rcb, vector, max_ticks)), None) => {
             let (_ticks, halt) = mv
                 .run_to_first_halt_with_periodic_timer(period_rcb, vector, max_ticks)
-                .map_err(|e| format!("determinism hole: {e}"))?;
+                .map_err(run_loop_error)?;
             halt
         }
-        (None, None) => match (virtio_rng, virtio_blk) {
+        (None, None) => match (virtio_rng, virtio_blk_meta) {
             (Some((_, rng_vector, max_exits)), None) => mv
                 .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
-                .map_err(|e| format!("determinism hole: {e}"))?,
-            (None, Some((_, blk_vector, max_exits))) => mv
+                .map_err(run_loop_error)?,
+            (None, Some((blk_vector, max_exits))) => mv
                 .run_to_first_halt_with_virtio_pci_blk(blk_vector, max_exits)
-                .map_err(|e| format!("determinism hole: {e}"))?,
+                .map_err(run_loop_error)?,
             // No run loop drives two independent per-host-exit device polls at once without the
             // periodic-timer engine's coarser per-tick polling to ride on (see
             // RunKvmBody::virtio_blk's doc) — fail loud rather than silently starving one device.
@@ -629,7 +815,9 @@ fn boot_run_and_drain(
 /// so a virtio-rng/virtio-blk-enabled run replays with the device(s) enabled and seeded/backed
 /// identically to its original boot. `acpi` is threaded the same way (the `kvm_run_meta.acpi`
 /// column), so an ACPI-enabled run replays with `write_acpi_tables` called identically to its
-/// original boot.
+/// original boot. `virtio_blk`'s base image is a [`BlockBase`](baud_multiverse::virtio_blk::BlockBase)
+/// (a mapping, for every real caller — `open_virtio_blk_image`) and `cancel` an optional
+/// supervisory cancellation flag, both exactly as `boot_run_and_drain` takes them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn boot_and_drain_frames(
     kernel_path: &Path,
@@ -638,8 +826,9 @@ pub(crate) fn boot_and_drain_frames(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
-    virtio_blk: Option<(&[u8], u8, u32)>,
+    virtio_blk: Option<(baud_multiverse::virtio_blk::BlockBase, u8, u32)>,
     acpi: bool,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Vec<baud_proto::FrameRecord>, String> {
     let (_outcome, records) = boot_run_and_drain(
         kernel_path,
@@ -651,6 +840,7 @@ pub(crate) fn boot_and_drain_frames(
         virtio_blk,
         acpi,
         None,
+        cancel,
     )?;
     Ok(records
         .into_iter()
@@ -1992,9 +2182,11 @@ mod tests {
         let cmdline = "console=ttyS0";
 
         let first =
-            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false).expect("first boot failed");
+            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false, None)
+                .expect("first boot failed");
         let second =
-            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false).expect("second boot failed");
+            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false, None)
+                .expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
         assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
@@ -2030,9 +2222,9 @@ mod tests {
         let cmdline = "console=ttyS0";
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
             .expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
             .expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
@@ -2075,7 +2267,7 @@ mod tests {
         assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(
@@ -2116,7 +2308,7 @@ mod tests {
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 3);
@@ -2195,6 +2387,7 @@ mod tests {
             None,
             false,
             None,
+            None,
         )
         .expect("real linux-guest boot through boot_run_and_drain failed");
 
@@ -2242,6 +2435,7 @@ mod tests {
                 None,
                 true, // acpi
                 None,
+                None,
             )
             .unwrap_or_else(|e| panic!("run {i}: acpi-enabled boot through boot_run_and_drain failed: {e}"));
             let console = String::from_utf8_lossy(&console_output).to_string();
@@ -2288,6 +2482,7 @@ mod tests {
             None,
             false,
             Some((pattern, MAX_EXITS_PER_BURST)),
+            None,
         )
         .expect("idle-halt-guest boot through boot_run_and_drain did not reach the target console pattern");
 
@@ -2329,6 +2524,14 @@ mod tests {
         const SECTORS: u64 = 4;
         let sector_size = baud_multiverse::virtio_blk::SECTOR_SIZE as usize;
         let base_image: Vec<u8> = (0..(sector_size as u64 * SECTORS)).map(|i| (i % 256) as u8).collect();
+        // Through the real production path — an image file resolved by `open_virtio_blk_image`,
+        // i.e. a read-only *mapping*, not bytes on the heap — so this test covers what `POST
+        // /run/kvm` actually does with a `virtio_blk.image_path` rather than an owned-`Vec` shape
+        // no caller uses any more.
+        let image_file = tempfile::NamedTempFile::new().expect("create virtio-blk image tempfile");
+        std::fs::write(image_file.path(), &base_image).expect("write virtio-blk image tempfile");
+        let base = open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"))
+            .expect("map the virtio-blk image file");
         let virtio_blk_vector = baud_multiverse::pic8259::isa_irq_vector(11); // matches
                                                                                // PciHostBridge's
                                                                                // VIRTIO_BLK_DEFAULT_IRQ_LINE
@@ -2340,8 +2543,9 @@ mod tests {
             Some(&initramfs),
             Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
             None,
-            Some((&base_image, virtio_blk_vector, 200_000)),
+            Some((base, virtio_blk_vector, 200_000)),
             false,
+            None,
             None,
         )
         .expect("real linux-guest boot with virtio_blk through boot_run_and_drain failed");
@@ -2360,6 +2564,111 @@ mod tests {
             console.contains("baud-guest: blk-write-sector1-ok"),
             "a real VIRTIO_BLK_T_OUT write to sector 1 must complete through this route's wiring; \
              got:\n{console}"
+        );
+    }
+
+    /// The supervisory cancellation path end to end at this route's own level: a run whose flag is
+    /// already set must stop at the run loop's first check and be reported as a **cancellation**,
+    /// never as a determinism hole — the distinction `run_loop_error` exists to preserve, and the
+    /// one thing about `RunLoopError::Cancelled` that would be a lie about the guest's execution
+    /// if it were got wrong.
+    ///
+    /// The flag is set *before* the call rather than from a timer thread on purpose: that makes
+    /// the outcome deterministic (the very first loop-head check fires) instead of racing a real
+    /// boot. What this test does **not** claim is *promptness* — how soon after a client
+    /// disconnects the run actually stops depends on how often the run loop in `baud-multiverse`
+    /// reaches a check, which for the periodic-timer engine is once per tick (`inject_at` does not
+    /// poll at all), and a single tick can be minutes long for a guest that spends its time
+    /// executing rather than exiting. Measured on this host: 4 ticks of the never-halting
+    /// `rdinit=`-missing/`panic=0` workload complete in 0.31s, 8 do not complete in 120s.
+    ///
+    /// Nor does it claim *coverage*: only the run loops that call `Multiverse::is_cancelled` can
+    /// honour the flag at all, and today that is the device-polling family (this test's
+    /// virtio-blk path, plus `run_to_first_halt_with_virtio_pci_blk`) — the plain
+    /// `run_to_first_halt_with_periodic_timer` and the branch/resume loops never look at it, so a
+    /// run on those paths still cannot be cancelled. That is a `baud-multiverse` gap, not a
+    /// wiring one: everything on this side of the boundary is installed identically for all of
+    /// them.
+    #[test]
+    fn cancelling_a_run_reports_a_cancellation_not_a_determinism_hole() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_virtio_blk_initramfs();
+        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let image_file = tempfile::NamedTempFile::new().expect("create virtio-blk image tempfile");
+        image_file.as_file().set_len(4 * baud_multiverse::virtio_blk::SECTOR_SIZE).expect("size image");
+        let base = open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"))
+            .expect("map the virtio-blk image file");
+
+        let Err(err) = boot_run_and_drain(
+            &kernel,
+            &cmdline,
+            vec![],
+            Some(&initramfs),
+            Some((500_000, 0xec, 2000)),
+            None,
+            Some((base, baud_multiverse::pic8259::isa_irq_vector(11), 200_000)),
+            false,
+            None,
+            Some(flag),
+        ) else {
+            panic!("a run whose cancellation flag is already set must not complete")
+        };
+
+        assert!(
+            err.starts_with("run cancelled by the supervisor"),
+            "a cancelled run must be reported as a cancellation; got: {err}"
+        );
+        assert!(
+            !err.starts_with("determinism hole"),
+            "cancellation is a host-side supervisory decision, never a determinism failure; got: {err}"
+        );
+    }
+
+    /// The image-size guard (`open_virtio_blk_image`): an implausibly large `image_path` is
+    /// rejected up front, naming both the size and the limit, while a real-sized image is not.
+    /// The oversized file is created sparse (`set_len`), so this costs no disk and no memory —
+    /// and it is deliberately far above the limit's floor rather than just above `MemAvailable`,
+    /// so the test cannot flap with this host's memory pressure. The negative half is the one
+    /// that matters most in practice: the real 2.36 GB Ubuntu rootfs must stay bootable on this
+    /// 7.98 GB box.
+    #[test]
+    fn virtio_blk_image_size_guard_rejects_only_implausible_images() {
+        let limit = virtio_blk_image_size_limit();
+        assert!(
+            limit >= VIRTIO_BLK_IMAGE_SIZE_FLOOR,
+            "the limit must never drop below its floor, whatever MemAvailable says (got {limit})"
+        );
+        assert!(
+            limit > 3 * 1024 * 1024 * 1024,
+            "the real 2.36 GB Ubuntu rootfs must be comfortably under the limit (got {limit})"
+        );
+
+        let huge = tempfile::NamedTempFile::new().expect("create sparse image tempfile");
+        let huge_len = limit.saturating_add(1024 * 1024 * 1024);
+        huge.as_file().set_len(huge_len).expect("set sparse length");
+        let Err(err) = open_virtio_blk_image(huge.path().to_str().expect("utf-8 tempfile path"))
+        else {
+            panic!("an image far above the limit must be rejected")
+        };
+        assert!(
+            err.contains(&huge_len.to_string()) && err.contains(&limit.to_string()),
+            "the rejection must name both the size and the limit; got: {err}"
+        );
+
+        let ordinary = tempfile::NamedTempFile::new().expect("create ordinary image tempfile");
+        ordinary.as_file().set_len(64 * 1024 * 1024).expect("set sparse length");
+        assert!(
+            open_virtio_blk_image(ordinary.path().to_str().expect("utf-8 tempfile path")).is_ok(),
+            "an ordinary-sized image must still be accepted"
+        );
+
+        let Err(missing) = open_virtio_blk_image("/no/such/virtio-blk/image.img") else {
+            panic!("a missing path must still fail")
+        };
+        assert!(
+            missing.starts_with("failed to read virtio_blk image_path '/no/such/virtio-blk/image.img': "),
+            "a missing image must keep the exact error string this route has always produced; got: {missing}"
         );
     }
 
@@ -2694,7 +3003,7 @@ mod tests {
                 .expect("resume_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(resumed_outcomes.len(), 3);

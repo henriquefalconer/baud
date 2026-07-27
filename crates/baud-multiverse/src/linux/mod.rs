@@ -575,6 +575,17 @@ pub struct Multiverse {
     /// Every other `run_to_first_halt_with_*` entry point already carries its own deterministic
     /// `max_exits`/`max_ticks` bound and does not consult this field at all.
     watchdog_budget: Duration,
+    /// The supervisor's cancellation flag, if one was installed via
+    /// [`set_cancel_flag`](Self::set_cancel_flag) — `None` for every caller that never installs
+    /// one, which is every existing caller. Modelled on `baud_vcpu::linux::watchdog`'s own
+    /// `Arc<AtomicBool>` hand-down: the flag is set by some *other* thread (the one that noticed
+    /// the caller went away) and read by the run loops between exits, never inside one.
+    ///
+    /// Determinism: an absent flag is a `None` check and a present one is a plain atomic load —
+    /// neither touches the vCPU, the work clock, the device bus, or the exit sequence, so a run
+    /// with no flag installed executes exactly the same sequence it did before this field
+    /// existed, and a run with one installed but never set does too.
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// The default real wall-clock budget a booted or restored [`Multiverse`] gives its plain
@@ -743,8 +754,8 @@ fn console_tail(console: &[u8]) -> String {
 struct TickPolledDevice {
     vector: u8,
     notify_count: fn(&Multiverse) -> Option<u64>,
-    service_running: fn(&mut Multiverse, u8) -> Result<u32, DeterminismHole>,
-    service_halted: fn(&mut Multiverse, u8) -> Result<u32, DeterminismHole>,
+    service_running: fn(&mut Multiverse, u8) -> Result<u32, RunLoopError>,
+    service_halted: fn(&mut Multiverse, u8) -> Result<u32, RunLoopError>,
 }
 
 impl Multiverse {
@@ -821,7 +832,7 @@ impl Multiverse {
         let time = WorkClock::new(base, k, counter)
             .with_entropy_seed(entropy_seed)
             .with_rdseed_sites(rdseed_sites);
-        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET })
+        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, cancel: None })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -934,7 +945,7 @@ impl Multiverse {
             universe.clock.entropy_state,
             counter,
         );
-        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET })
+        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, cancel: None })
     }
 
     /// Fork a new, independent continuation from a captured [`Universe`] on its own tape suffix
@@ -1031,6 +1042,99 @@ impl Multiverse {
         self.watchdog_budget = budget;
     }
 
+    /// Install the supervisor's cancellation flag: once some other thread stores `true` into
+    /// `flag`, **every** run loop on this `Multiverse` stops within milliseconds and returns
+    /// [`RunLoopError::Cancelled`], instead of driving the guest to completion for a caller that
+    /// is no longer there.
+    ///
+    /// "Within milliseconds" is the load-bearing part, and it takes three cooperating pieces —
+    /// polling alone was measured to be worth nothing here:
+    ///
+    /// 1. **A signal.** A blocked `KVM_RUN` ioctl can only be broken out of by a signal delivered
+    ///    to the running thread. Each run loop arms a
+    ///    [`CancelKicker`](baud_vcpu::linux::CancelKicker) — the same `SIGUSR1` machinery
+    ///    `baud_vcpu::linux::watchdog` already used for its wall-clock kill — which re-signals the
+    ///    vCPU thread every few milliseconds for as long as the flag is set. Without it, a single
+    ///    tick of a real periodic-timer run was measured holding a core for 120 s+ with the flag
+    ///    set 4 ms in; one tick can be arbitrarily long, so a per-tick poll is not a bound.
+    /// 2. **A check in the boundary walk.** `baud_vcpu::boundary::inject_at`'s single-step walk —
+    ///    where a periodic-timer run spends nearly all of its time — checks the flag once per
+    ///    step (`PmuStepper::check_cancelled`), so a cancelled run stops between two exits even
+    ///    when no signal was needed.
+    /// 3. **A check at every loop head**, which is what the other two hand control back to.
+    ///
+    /// Like the watchdog kill this is deliberately outside the deterministic boundary: *whether* a
+    /// run is cancelled depends on host-side events, not on the guest's own instruction stream.
+    /// What it must never do is perturb a run that is *not* cancelled, and it does not — with no
+    /// flag installed no thread is spawned, no signal handler is installed, and no signal can ever
+    /// be delivered; see the [`cancel`](Self::cancel) field's own note and
+    /// `an_installed_but_unset_cancel_flag_leaves_a_periodic_timer_run_byte_identical`, which pins
+    /// tick-for-tick identical landing points against a run with no flag at all.
+    ///
+    /// Returning `Cancelled` unwinds normally, so this `Multiverse` and everything it owns (KVM
+    /// fds, the guest-RAM mapping, the `perf_event` counter, the virtio-blk backing store) is
+    /// released by the ordinary structural drop of whatever owns it — there is no teardown step
+    /// a caller has to remember.
+    pub fn set_cancel_flag(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.cancel = Some(flag);
+    }
+
+    /// Whether [`set_cancel_flag`](Self::set_cancel_flag)'s flag is installed *and* currently
+    /// set. `None` (no flag installed) short-circuits without any atomic access at all, so the
+    /// overwhelmingly common case costs one `Option` discriminant test per loop iteration.
+    fn is_cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// Arm this run's `SIGUSR1` kicker for the duration of one run-loop call
+    /// (`baud_vcpu::linux::CancelKicker` — read that type's doc first; it is the whole reason
+    /// cancellation is prompt rather than eventual). Returns a guard that disarms and joins on
+    /// drop, so every early return in the loops below is covered without any explicit teardown.
+    ///
+    /// With no flag installed this spawns nothing, installs no signal handler, and can never
+    /// deliver a signal — the guest's exit sequence is untouched, which is the whole determinism
+    /// contract [`set_cancel_flag`](Self::set_cancel_flag) makes.
+    fn arm_cancel_kicker(&self) -> baud_vcpu::linux::CancelKicker {
+        baud_vcpu::linux::CancelKicker::arm(self.cancel.clone())
+    }
+
+    /// A `LinuxPmuStepper` over this `Multiverse`'s own vCPU/bus/time handles, carrying this run's
+    /// cancellation flag (if any) so `boundary::inject_at`'s single-step walk and the stepper's own
+    /// `KVM_RUN` loops both stop when the supervisor cancels — the one factory every periodic-timer
+    /// call site uses, so none of them can forget the flag.
+    fn cancellable_stepper(&mut self) -> baud_vcpu::linux::pmu::LinuxPmuStepper<'_, '_> {
+        let cancel = self.cancel.clone();
+        baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
+            .with_cancel(cancel)
+    }
+
+    /// Classify a boundary-engine (`inject_at`/`PmuStepper`) failure: a run whose supervisor
+    /// cancelled it is [`RunLoopError::Cancelled`], never a [`DeterminismHole`] — calling an
+    /// abandoned run a determinism hole would be a lie about the guest's execution
+    /// (`RunLoopError::Cancelled`'s own doc). Checks both the flag itself and the stepper's own
+    /// `ECANCELED` marker (`baud_vcpu::linux::is_cancelled_error`), so a flag that was somehow
+    /// cleared again between the stepper noticing it and this call still classifies correctly.
+    fn stepper_error(&self, e: std::io::Error) -> RunLoopError {
+        if self.is_cancelled() || baud_vcpu::linux::is_cancelled_error(&e) {
+            RunLoopError::Cancelled
+        } else {
+            DeterminismHole(e.to_string()).into()
+        }
+    }
+
+    /// [`step_exit`](Self::step_exit) for the run loops that carry a cancellation flag: a
+    /// `KVM_RUN` broken out of by this run's own [`CancelKicker`](baud_vcpu::linux::CancelKicker)
+    /// returns [`RunLoopError::Cancelled`] instead of transparently re-entering the ioctl that
+    /// kick was sent to escape. Identical to `step_exit` when no flag is installed.
+    fn step_exit_cancellable(&mut self) -> Result<baud_vcpu::DispatchOutcome, RunLoopError> {
+        baud_vcpu::linux::run_one_exit_cancellable(
+            &mut self.guest.vcpu,
+            &mut self.bus,
+            &mut self.time,
+            self.cancel.as_deref(),
+        )
+    }
+
     /// [`run_to_first_halt`](Self::run_to_first_halt) without the guest-RAM hash: the identical run
     /// loop, stopping at the identical first `Hlt`/`Shutdown` and reporting the identical console
     /// output and exit PC, but skipping [`ram_hash`](Self::ram_hash)'s blake3 pass over all
@@ -1051,6 +1155,7 @@ impl Multiverse {
             &mut self.bus,
             &mut self.time,
             self.watchdog_budget,
+            self.cancel.clone(),
         )?;
         Ok(HaltObservation {
             console_output: self.bus.console.output().to_vec(),
@@ -1097,17 +1202,22 @@ impl Multiverse {
     /// same "no silent continuation" convention every other run-loop entry point here follows) if
     /// `max_exits` is exhausted first — a caller-supplied bound that is too tight to observe real,
     /// intended guest progress, not a determinism violation in itself.
-    pub fn run_until_console_len(&mut self, target_len: usize, max_exits: u32) -> Result<(), DeterminismHole> {
+    pub fn run_until_console_len(&mut self, target_len: usize, max_exits: u32) -> Result<(), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut exits = 0u32;
         while self.console_output().len() < target_len {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             if exits >= max_exits {
                 return Err(DeterminismHole(format!(
                     "run_until_console_len: {target_len} bytes not reached within {max_exits} exits \
                      (got {} bytes)",
                     self.console_output().len()
-                )));
+                ))
+                .into());
             }
-            self.step_exit()?;
+            self.step_exit_cancellable()?;
             exits += 1;
         }
         Ok(())
@@ -1128,7 +1238,7 @@ impl Multiverse {
     pub fn run_until_branch_or_halt(
         &mut self,
         max_exits: u32,
-    ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), RunLoopError> {
         let (observed, records) = self.run_until_branch_or_halt_without_ram_hash(max_exits)?;
         Ok((self.observation_to_outcome(observed), records))
     }
@@ -1160,16 +1270,21 @@ impl Multiverse {
     pub fn run_until_branch_or_halt_without_ram_hash(
         &mut self,
         max_exits: u32,
-    ) -> Result<(RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(RunUntilBranchObservation, Vec<baud_proto::Msg>), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut exits = 0u32;
         let mut records = Vec::new();
         loop {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             if exits >= max_exits {
                 return Err(DeterminismHole(format!(
                     "run_until_branch_or_halt: neither Hlt nor MARK_BRANCH within {max_exits} exits"
-                )));
+                ))
+                .into());
             }
-            let outcome = self.step_exit()?;
+            let outcome = self.step_exit_cancellable()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
                 let halt =
@@ -1199,13 +1314,14 @@ impl Multiverse {
     /// epoched counter of its own — todo.md §14 next-actions item 2(c)), then calls
     /// `boundary::inject_at`. Returns the exact `(rip, rcb)` the interrupt landed at — the tuple
     /// `timer_tick_lands_at_identical_instruction` compares across a double-run.
-    pub fn inject_timer_tick(&mut self, period_rcb: u64, vector: u8) -> Result<TimerTick, DeterminismHole> {
+    pub fn inject_timer_tick(&mut self, period_rcb: u64, vector: u8) -> Result<TimerTick, RunLoopError> {
         let baseline = self.time.current_rcb();
         let target_rcb = baseline.saturating_add(period_rcb);
-        let mut stepper =
-            baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
-        let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
-            .map_err(|e| DeterminismHole(e.to_string()))?;
+        let mut stepper = self.cancellable_stepper();
+        let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector);
+        // `stepper`'s borrows of this `Multiverse`'s fields end at its last use above, so
+        // `stepper_error` (which needs `&self` to read the cancellation flag) is free to run here.
+        let outcome = result.map_err(|e| self.stepper_error(e))?;
         match outcome {
             baud_vcpu::boundary::InjectOutcome::Injected(point) => {
                 Ok(TimerTick { rip: point.rip, rcb: point.rcb })
@@ -1215,7 +1331,8 @@ impl Multiverse {
                  -- use run_to_first_halt_with_periodic_timer for a guest whose tick count is not \
                  known ahead of time",
                 point.rcb
-            ))),
+            ))
+            .into()),
         }
     }
 
@@ -1236,8 +1353,12 @@ impl Multiverse {
         vector: u8,
         num_ticks: u32,
     ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut ticks = Vec::with_capacity(num_ticks as usize);
         for _ in 0..num_ticks {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             ticks.push(self.inject_timer_tick(period_rcb, vector)?);
         }
         let halt = self.run_to_first_halt()?;
@@ -1263,15 +1384,18 @@ impl Multiverse {
         period_rcb: u64,
         vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut ticks = Vec::new();
         for _ in 0..max_ticks {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
-            let mut stepper =
-                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
-            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
-                .map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut stepper = self.cancellable_stepper();
+            let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector);
+            let outcome = result.map_err(|e| self.stepper_error(e))?;
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
                     ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
@@ -1293,7 +1417,8 @@ impl Multiverse {
         }
         Err(DeterminismHole(format!(
             "run_to_first_halt_with_periodic_timer: guest did not halt within {max_ticks} periodic ticks"
-        )))
+        ))
+        .into())
     }
 
     /// [`run_to_first_halt_with_periodic_timer`](Self::run_to_first_halt_with_periodic_timer)'s
@@ -1331,7 +1456,7 @@ impl Multiverse {
         period_rcb: u64,
         vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), RunLoopError> {
         let (ticks, observed, records) =
             self.run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)?;
         Ok((ticks, self.observation_to_outcome(observed), records))
@@ -1346,16 +1471,19 @@ impl Multiverse {
         period_rcb: u64,
         vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut ticks = Vec::new();
         let mut records = Vec::new();
         for _ in 0..max_ticks {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
-            let mut stepper =
-                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
-            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector)
-                .map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut stepper = self.cancellable_stepper();
+            let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector);
+            let outcome = result.map_err(|e| self.stepper_error(e))?;
             let mut drained = self.bus.tape.device_mut().drain_records();
             if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
                 let step = match drained[pos] {
@@ -1382,7 +1510,8 @@ impl Multiverse {
         Err(DeterminismHole(format!(
             "run_until_branch_or_halt_with_periodic_timer: neither Hlt nor MARK_BRANCH within \
              {max_ticks} periodic ticks"
-        )))
+        ))
+        .into())
     }
 
     /// Enable the virtio-rng device on this guest's device bus ([`DeviceBus::enable_virtio_rng`])
@@ -1439,7 +1568,12 @@ impl Multiverse {
     /// 5(b)); every guest write only ever lands in an in-memory copy-on-write overlay layered on
     /// top (`crate::virtio_blk::BlockBackingStore`). Every existing `boot`/`restore` call leaves
     /// this disabled by default, so nothing changes for a caller that never calls this.
-    pub fn enable_virtio_pci_blk(&mut self, base_image: Vec<u8>) {
+    ///
+    /// `base_image` is anything convertible into a [`crate::virtio_blk::BlockBase`] — a plain
+    /// `Vec<u8>`, or a read-only memory map of an image file
+    /// ([`BlockBase::mapped`](crate::virtio_blk::BlockBase::mapped)) for a base too large to want
+    /// resident on the heap. Both are equally deterministic; see `BlockBase`'s own doc.
+    pub fn enable_virtio_pci_blk(&mut self, base_image: impl Into<crate::virtio_blk::BlockBase>) {
         self.bus.enable_virtio_pci_blk(base_image);
     }
 
@@ -1467,7 +1601,7 @@ impl Multiverse {
     /// [`service_virtio_rng_interrupt`](Self::service_virtio_rng_interrupt) —
     /// [`service_virtio_blk_interrupt_while_halted`](Self::service_virtio_blk_interrupt_while_halted)
     /// is that counterpart.
-    pub fn service_virtio_blk_interrupt(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+    pub fn service_virtio_blk_interrupt(&mut self, vector: u8) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
@@ -1485,7 +1619,7 @@ impl Multiverse {
     /// [`step_exit`](Self::step_exit) is safe here: a real block-request completion wait
     /// (`wait_for_completion_io`) reaches the idle loop's `safe_halt()`, `RFLAGS.IF=1` guaranteed,
     /// the same as virtio-rng's `wait_for_completion_killable`).
-    fn service_virtio_blk_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+    fn service_virtio_blk_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
@@ -1499,7 +1633,7 @@ impl Multiverse {
                 .vcpu
                 .set_vcpu_events(&events)
                 .map_err(|e| DeterminismHole(e.to_string()))?;
-            self.step_exit()?;
+            self.step_exit_cancellable()?;
         }
         Ok(processed)
     }
@@ -1520,20 +1654,34 @@ impl Multiverse {
     /// at once, which the current one-combinator-per-combination approach does not scale to
     /// (todo.md §14 item 5(b)'s own note on this). Left as a follow-up once that combined boot is
     /// actually being driven, rather than speculatively generalized here.
+    ///
+    /// Errors are [`RunLoopError`]: a genuine [`DeterminismHole`] (including this loop's own
+    /// `max_exits` bound), or [`RunLoopError::Cancelled`] if
+    /// [`set_cancel_flag`](Self::set_cancel_flag)'s flag was set — checked once per iteration
+    /// right next to the `max_exits` bound, and (via this loop's own
+    /// [`CancelKicker`](baud_vcpu::linux::CancelKicker) plus the cancellation-aware step it drives
+    /// every exit through) on the way out of a single `KVM_RUN` that would otherwise have run for
+    /// far longer than the client was there for. Both are strictly *between* two guest
+    /// instructions.
     pub fn run_to_first_halt_with_virtio_pci_blk(
         &mut self,
         vector: u8,
         max_exits: u32,
-    ) -> Result<HaltOutcome, DeterminismHole> {
+    ) -> Result<HaltOutcome, RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut exits = 0u32;
         let mut last_notify_count = self.virtio_pci_blk().map(|t| t.notify_count()).unwrap_or(0);
         loop {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             if exits >= max_exits {
                 return Err(DeterminismHole(format!(
                     "run_to_first_halt_with_virtio_pci_blk: guest did not halt within {max_exits} exits"
-                )));
+                ))
+                .into());
             }
-            let outcome = self.step_exit()?;
+            let outcome = self.step_exit_cancellable()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
                 return Ok(HaltOutcome {
@@ -1575,7 +1723,7 @@ impl Multiverse {
     /// doc (see `run_to_first_halt_with_periodic_timer`'s `Halted` arm above) explains why:
     /// re-entering `KVM_RUN` on an already-halted vCPU with no in-kernel irqchip and no interrupt
     /// yet staged risks blocking indefinitely instead of re-observing the halt.
-    pub fn service_virtio_rng_interrupt(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+    pub fn service_virtio_rng_interrupt(&mut self, vector: u8) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
             .service_virtio_rng(&self.guest.guest_mem)
@@ -1605,7 +1753,7 @@ impl Multiverse {
     /// `request_interrupt_window`), staging the interrupt directly via `KVM_SET_VCPU_EVENTS` and
     /// re-entering with one plain [`step_exit`](Self::step_exit) is safe and mirrors exactly how
     /// real hardware wakes a halted core: the very next `KVM_RUN` delivers it and resumes.
-    fn service_virtio_rng_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, DeterminismHole> {
+    fn service_virtio_rng_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
             .service_virtio_rng(&self.guest.guest_mem)
@@ -1619,7 +1767,7 @@ impl Multiverse {
                 .vcpu
                 .set_vcpu_events(&events)
                 .map_err(|e| DeterminismHole(e.to_string()))?;
-            self.step_exit()?;
+            self.step_exit_cancellable()?;
         }
         Ok(processed)
     }
@@ -1649,16 +1797,21 @@ impl Multiverse {
         &mut self,
         vector: u8,
         max_exits: u32,
-    ) -> Result<HaltOutcome, DeterminismHole> {
+    ) -> Result<HaltOutcome, RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut exits = 0u32;
         let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
         loop {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             if exits >= max_exits {
                 return Err(DeterminismHole(format!(
                     "run_to_first_halt_with_virtio_rng: guest did not halt within {max_exits} exits"
-                )));
+                ))
+                .into());
             }
-            let outcome = self.step_exit()?;
+            let outcome = self.step_exit_cancellable()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
                 return Ok(HaltOutcome {
@@ -1700,6 +1853,18 @@ impl Multiverse {
     /// every single exit, not just at each halt, so a match produced mid-burst is never missed.
     /// `None` preserves this function's exact prior behavior (a halt with no device work pending
     /// is terminal) — every existing caller below passes `None`.
+    ///
+    /// Errors are [`RunLoopError`]: a genuine [`DeterminismHole`] (including this loop's own
+    /// `max_ticks`/`max_exits_per_burst` bounds), or [`RunLoopError::Cancelled`] if
+    /// [`set_cancel_flag`](Self::set_cancel_flag)'s flag was set. The flag is checked at the top
+    /// of *both* loops here — once per periodic tick, and once per exit inside a delivered tick's
+    /// burst, because a single tick's burst can run for thousands of exits and a per-tick check
+    /// alone would leave a cancelled run driving the guest for an unbounded time. Neither check is
+    /// sufficient on its own either: one tick's `inject_at` can sit inside a single multi-minute
+    /// `KVM_RUN`, which is why this loop also arms a
+    /// [`CancelKicker`](baud_vcpu::linux::CancelKicker) and hands its flag to the stepper
+    /// ([`cancellable_stepper`](Self::cancellable_stepper)) and to every burst exit
+    /// ([`step_exit_cancellable`](Self::step_exit_cancellable)).
     #[allow(clippy::too_many_arguments)]
     fn run_to_first_halt_with_periodic_timer_and_devices(
         &mut self,
@@ -1709,13 +1874,14 @@ impl Multiverse {
         max_ticks: u32,
         pattern: Option<&[u8]>,
         max_exits_per_burst: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         if let Some(p) = pattern {
             if p.is_empty() {
                 return Err(DeterminismHole(
                     "run_to_first_halt_with_periodic_timer_and_devices: pattern must not be empty"
                         .to_string(),
-                ));
+                )
+                .into());
             }
         }
         let contains_pattern =
@@ -1728,15 +1894,18 @@ impl Multiverse {
             })
         };
         let mut ticks = Vec::new();
+        let _kicker = self.arm_cancel_kicker();
         let mut last_notify: Vec<u64> =
             devices.iter().map(|d| (d.notify_count)(self).unwrap_or(0)).collect();
         for _ in 0..max_ticks {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
-            let mut stepper =
-                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
-            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector)
-                .map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut stepper = self.cancellable_stepper();
+            let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector);
+            let outcome = result.map_err(|e| self.stepper_error(e))?;
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
                     ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
@@ -1794,6 +1963,9 @@ impl Multiverse {
                     self.guest.vcpu.set_vcpu_events(&events).map_err(|e| DeterminismHole(e.to_string()))?;
                     let mut burst_exits = 0u32;
                     loop {
+                        if self.is_cancelled() {
+                            return Err(RunLoopError::Cancelled);
+                        }
                         if contains_pattern(self.bus.console.output(), p) {
                             return Ok((ticks, halt_outcome(self)?));
                         }
@@ -1803,9 +1975,10 @@ impl Multiverse {
                                  halt again within {max_exits_per_burst} exits of one delivered tick \
                                  (console tail: {:?})",
                                 console_tail(self.bus.console.output())
-                            )));
+                            ))
+                            .into());
                         }
-                        let dispatch = self.step_exit()?;
+                        let dispatch = self.step_exit_cancellable()?;
                         burst_exits += 1;
                         if matches!(dispatch, baud_vcpu::DispatchOutcome::Halted) {
                             break;
@@ -1824,7 +1997,8 @@ impl Multiverse {
                 "run_to_first_halt_with_periodic_timer_and_devices: guest did not halt within \
                  {max_ticks} periodic ticks"
             ),
-        }))
+        })
+        .into())
     }
 
     /// H9's last recorded open blocker (todo.md §14 item 12): every `run_to_first_halt_with_*`
@@ -1851,7 +2025,7 @@ impl Multiverse {
         pattern: &[u8],
         max_ticks: u32,
         max_exits_per_burst: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         self.run_to_first_halt_with_periodic_timer_and_devices(
             period_rcb,
             vector,
@@ -1883,7 +2057,7 @@ impl Multiverse {
         pattern: &[u8],
         max_ticks: u32,
         max_exits_per_burst: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         let mut devices = Vec::new();
         if let Some(vector) = virtio_rng_vector {
             devices.push(TickPolledDevice {
@@ -1928,7 +2102,7 @@ impl Multiverse {
         timer_vector: u8,
         virtio_rng_vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         self.run_to_first_halt_with_periodic_timer_and_devices(
             period_rcb,
             timer_vector,
@@ -1964,7 +2138,7 @@ impl Multiverse {
         virtio_rng_vector: u8,
         virtio_blk_vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         self.run_to_first_halt_with_periodic_timer_and_devices(
             period_rcb,
             timer_vector,
@@ -2005,7 +2179,7 @@ impl Multiverse {
         &mut self,
         vector: u8,
         max_exits: u32,
-    ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), RunLoopError> {
         let (observed, records) = self.run_until_branch_or_halt_with_virtio_rng_without_ram_hash(vector, max_exits)?;
         Ok((self.observation_to_outcome(observed), records))
     }
@@ -2017,18 +2191,23 @@ impl Multiverse {
         &mut self,
         vector: u8,
         max_exits: u32,
-    ) -> Result<(RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(RunUntilBranchObservation, Vec<baud_proto::Msg>), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut exits = 0u32;
         let mut records = Vec::new();
         let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
         loop {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             if exits >= max_exits {
                 return Err(DeterminismHole(format!(
                     "run_until_branch_or_halt_with_virtio_rng: neither Hlt nor MARK_BRANCH within \
                      {max_exits} exits"
-                )));
+                ))
+                .into());
             }
-            let outcome = self.step_exit()?;
+            let outcome = self.step_exit_cancellable()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
                 let halt = HaltObservation {
@@ -2071,7 +2250,7 @@ impl Multiverse {
         timer_vector: u8,
         virtio_rng_vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), RunLoopError> {
         let (ticks, observed, records) = self
             .run_until_branch_or_halt_with_periodic_timer_and_virtio_rng_without_ram_hash(
                 period_rcb,
@@ -2092,17 +2271,20 @@ impl Multiverse {
         timer_vector: u8,
         virtio_rng_vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), RunLoopError> {
+        let _kicker = self.arm_cancel_kicker();
         let mut ticks = Vec::new();
         let mut records = Vec::new();
         let mut last_notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
         for _ in 0..max_ticks {
+            if self.is_cancelled() {
+                return Err(RunLoopError::Cancelled);
+            }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
-            let mut stepper =
-                baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
-            let outcome = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector)
-                .map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut stepper = self.cancellable_stepper();
+            let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector);
+            let outcome = result.map_err(|e| self.stepper_error(e))?;
             let mut drained = self.bus.tape.device_mut().drain_records();
             if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
                 let step = match drained[pos] {
@@ -2134,7 +2316,8 @@ impl Multiverse {
         Err(DeterminismHole(format!(
             "run_until_branch_or_halt_with_periodic_timer_and_virtio_rng: neither Hlt nor \
              MARK_BRANCH within {max_ticks} periodic ticks"
-        )))
+        ))
+        .into())
     }
 
     /// Every tape-device record (`PROBE`/`MARK_BRANCH`/`GOAL`/`VIOLATION`/`LOG`,
@@ -2490,6 +2673,164 @@ mod tests {
 
         let outcome = mv.run_to_first_halt().expect("a guest that halts well within its budget must succeed");
         assert_eq!(String::from_utf8_lossy(&outcome.console_output), HELLO_GUEST_MARKER);
+    }
+
+    /// Set `flag` from another thread after `delay`, the way `baud-server`'s `CancelGuard` does
+    /// when hyper drops an abandoned request's handler future (measured there at 4 ms after the
+    /// client dies). Returns the join handle so a test can prove the setter really ran.
+    fn set_flag_after(
+        flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        delay: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let flag = std::sync::Arc::clone(flag);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    }
+
+    /// The supervisory-cancellation path against the one guest that makes **zero** VM exits ever
+    /// (`spin-guest`, the same fixture the wall-clock watchdog test uses): with the flag set 100 ms
+    /// in, the run must return `Cancelled` in seconds, not sit inside one blocking `KVM_RUN` until
+    /// the watchdog's budget elapses.
+    ///
+    /// The watchdog budget is deliberately set to 60 s — far longer than this test's own bound —
+    /// so a pass cannot be the watchdog doing the work: only the cancellation signal
+    /// (`baud_vcpu::linux::CancelKicker`) can stop this guest inside the bound, and the returned
+    /// error variant proves which mechanism it was. Before that kicker existed, polling the flag
+    /// between exits achieved exactly nothing here: this guest has no exits to poll between.
+    #[test]
+    fn cancelling_a_spinning_guest_stops_the_run_promptly() {
+        let kernel = spin_guest_kernel_path();
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_watchdog_budget(std::time::Duration::from_secs(60));
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        mv.set_cancel_flag(std::sync::Arc::clone(&flag));
+        let setter = set_flag_after(&flag, std::time::Duration::from_millis(100));
+
+        let start = std::time::Instant::now();
+        let result = mv.run_to_first_halt_without_ram_hash();
+        let elapsed = start.elapsed();
+        setter.join().expect("flag-setting thread panicked");
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "a cancelled run must stop promptly, not after the 60s watchdog budget (took {elapsed:?})"
+        );
+        match result {
+            Err(baud_vcpu::RunLoopError::Cancelled) => {}
+            other => panic!("expected RunLoopError::Cancelled, got {other:?}"),
+        }
+    }
+
+    /// The gap this iteration actually closes, measured end to end: a *periodic-timer* run spends
+    /// nearly all of its time inside `boundary::inject_at` — one `KVM_RUN` per tick that can last
+    /// arbitrarily long — so polling the flag once per tick never stopped anything. Driven here
+    /// against `spin-guest`, whose `jmp $` loop retires **no conditional branches at all**, one
+    /// tick's target work-count is never reached and that single `KVM_RUN` would block forever
+    /// (measured before this fix: 120 s+ of a pegged core with the flag set 4 ms in, and
+    /// `max_ticks=8` never completing).
+    ///
+    /// A regression here does not fail this test, it hangs it — exactly like the existing
+    /// `wall_clock_watchdog_kills_a_truly_spinning_guest`, which is the established shape in this
+    /// module for "prove the escape hatch actually exists".
+    #[test]
+    fn cancelling_a_periodic_timer_run_stops_inside_one_unbounded_tick() {
+        let kernel = spin_guest_kernel_path();
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        mv.set_cancel_flag(std::sync::Arc::clone(&flag));
+        let setter = set_flag_after(&flag, std::time::Duration::from_millis(100));
+
+        let start = std::time::Instant::now();
+        // 8 ticks of 200_000 RCB each: a bound this guest can never reach, since it retires no
+        // conditional branches — the run can only end by being cancelled.
+        let result = mv.run_to_first_halt_with_periodic_timer(200_000, TIMER_VECTOR, 8);
+        let elapsed = start.elapsed();
+        setter.join().expect("flag-setting thread panicked");
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "a cancelled periodic-timer run must stop inside the tick it is in, not at the end of \
+             it (took {elapsed:?})"
+        );
+        match result {
+            Err(baud_vcpu::RunLoopError::Cancelled) => {}
+            // Specifically not a DeterminismHole: an abandoned run is a host-side supervisory
+            // decision, and reporting it as a determinism hole would be a lie about the guest.
+            other => panic!("expected RunLoopError::Cancelled, got {other:?}"),
+        }
+    }
+
+    /// The determinism half of the contract [`Multiverse::set_cancel_flag`] makes: a flag that is
+    /// installed but never set must leave the run byte-identical — same console bytes, same RAM
+    /// hash, same exit PC — to the same run with no flag installed at all. (The no-flag case is
+    /// itself pinned against the fixture's own marker by `double_boot_memory_identical`.)
+    #[test]
+    fn an_installed_but_unset_cancel_flag_leaves_a_run_byte_identical() {
+        let kernel = hello_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+
+        let mut plain = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("plain boot failed");
+        let plain_outcome = plain.run_to_first_halt().expect("plain run failed");
+
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut flagged = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("flagged boot failed");
+        flagged.set_cancel_flag(std::sync::Arc::clone(&flag));
+        let flagged_outcome = flagged.run_to_first_halt().expect("a never-set flag must not disturb the run");
+
+        assert_eq!(String::from_utf8_lossy(&plain_outcome.console_output), HELLO_GUEST_MARKER);
+        assert_eq!(flagged_outcome.console_output, plain_outcome.console_output);
+        assert_eq!(flagged_outcome.ram_hash, plain_outcome.ram_hash);
+        assert_eq!(flagged_outcome.exit_pc, plain_outcome.exit_pc);
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst), "nothing may set the flag but the supervisor");
+    }
+
+    /// The same determinism check on the path cancellation actually had to be threaded *into* —
+    /// the periodic-timer engine's boundary walk. Every landed tick's `(rip, rcb)` must be
+    /// identical between a run with a never-set flag installed and one with no flag at all, to the
+    /// same exactness (`RCB_HARDWARE_JITTER_TOLERANCE == 0`) two plain boots are held to by
+    /// `periodic_timer_injection_halts_gracefully_and_reproducibly`.
+    #[test]
+    fn an_installed_but_unset_cancel_flag_leaves_a_periodic_timer_run_byte_identical() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const PERIOD_RCB: u64 = 200_000;
+        const MAX_TICKS: u32 = 20;
+
+        let mut plain = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("plain boot failed");
+        let (plain_ticks, plain_halt) = plain
+            .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+            .expect("plain periodic run failed");
+
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut flagged = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("flagged boot failed");
+        flagged.set_cancel_flag(std::sync::Arc::clone(&flag));
+        let (flagged_ticks, flagged_halt) = flagged
+            .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
+            .expect("a never-set flag must not disturb the periodic-timer run");
+
+        assert!(!plain_ticks.is_empty(), "the fixture must survive at least one tick for this to prove anything");
+        assert_eq!(
+            flagged_ticks.len(),
+            plain_ticks.len(),
+            "an installed-but-unset flag must not change how many ticks the guest survives"
+        );
+        for (i, (a, b)) in plain_ticks.iter().zip(flagged_ticks.iter()).enumerate() {
+            assert_eq!(a.rip, b.rip, "tick {i}: landing rip must be unchanged by an unset cancellation flag");
+            // Read through a binding, exactly like the sibling assertions in
+            // `timer_tick_lands_at_identical_instruction` — see their comment.
+            let tolerance = RCB_HARDWARE_JITTER_TOLERANCE;
+            assert!(
+                a.rcb.abs_diff(b.rcb) <= tolerance,
+                "tick {i}: landing rcb {} vs {} — see RCB_HARDWARE_JITTER_TOLERANCE",
+                a.rcb,
+                b.rcb
+            );
+        }
+        assert_eq!(flagged_halt.console_output, plain_halt.console_output);
+        assert_eq!(flagged_halt.ram_hash, plain_halt.ram_hash);
+        assert_eq!(flagged_halt.exit_pc, plain_halt.exit_pc);
     }
 
     /// Reads the `SETUP_RNG_SEED` node's 32 seed bytes back out of a booted `Multiverse`'s real

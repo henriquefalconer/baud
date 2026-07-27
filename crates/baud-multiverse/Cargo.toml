@@ -38,6 +38,10 @@ vmm-sys-util = "0.15"
 # The work-clock's real branch-counter source (`linux::LinuxBranchCounter`, specs/baud-multiverse.md
 # §4's "Work-clock" row) — same crate/version baud-vcpu's `LinuxPmuStepper` already pins.
 perf-event = "0.4"
+# The virtio-blk base image's read-only memory map (`virtio_blk::BlockBase::Mapped`) — gated
+# alongside `vm-memory` because the only module that names it (`virtio_blk.rs`) is itself
+# `cfg(target_os = "linux")`-gated in lib.rs for exactly that reason.
+memmap2 = "0.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }

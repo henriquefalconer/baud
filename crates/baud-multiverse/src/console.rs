@@ -427,20 +427,27 @@ impl DeviceBus {
     /// blk`) and stands up its I/O-port transport plus its backing store (`base_image`'s bytes,
     /// read-only, plus a fresh empty copy-on-write overlay — `crate::virtio_blk::
     /// BlockBackingStore`) — opt-in like [`Self::enable_virtio_pci_rng`], todo.md §14 item 5(b).
-    /// The transport's advertised `capacity` (spec §5.2.4) is derived from `base_image.len()`, so
+    /// The transport's advertised `capacity` (spec §5.2.4) is derived from the base's length, so
     /// the guest always sees a disk exactly as large as the image handed to it.
-    pub fn enable_virtio_pci_blk(&mut self, base_image: Vec<u8>) {
-        let capacity_sectors = base_image.len() as u64 / crate::virtio_blk::SECTOR_SIZE;
+    ///
+    /// `base_image` is anything convertible into a `crate::virtio_blk::BlockBase`: a plain
+    /// `Vec<u8>` (every existing caller) or a read-only memory map of an image file
+    /// (`BlockBase::mapped`, for a multi-gigabyte rootfs that should not be resident on the
+    /// heap). Both are equally deterministic and produce byte-identical guest-visible behavior —
+    /// see `BlockBase`'s own doc.
+    pub fn enable_virtio_pci_blk(&mut self, base_image: impl Into<crate::virtio_blk::BlockBase>) {
+        let base = base_image.into();
+        let capacity_sectors = base.len() as u64 / crate::virtio_blk::SECTOR_SIZE;
         self.pci.attach_virtio_blk(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
         self.virtio_pci_blk = Some(VirtioPciTransport::new_blk(capacity_sectors));
         #[cfg(target_os = "linux")]
         {
             self.virtio_blk_queue = None;
-            self.virtio_blk_store = Some(crate::virtio_blk::BlockBackingStore::new(base_image));
+            self.virtio_blk_store = Some(crate::virtio_blk::BlockBackingStore::new(base));
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = base_image; // the backing store is Linux-only, see the fields' own doc
+            let _ = base; // the backing store is Linux-only, see the fields' own doc
         }
     }
 

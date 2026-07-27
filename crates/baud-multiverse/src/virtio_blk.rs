@@ -12,9 +12,10 @@
 //
 // **Why this needs no new timing primitive ("blkreplay-style, not host-I/O-return timing",
 // specs/baud-ubuntu.md §4)**: the backing store is already-resident host memory (an in-process
-// `Vec<u8>` plus an in-memory overlay map), so servicing a request is a synchronous memcpy, never
-// real async I/O with host-dependent latency — there is no "return" to wait on in the first
-// place. Completion is delivered the same way virtio-rng's already is
+// `Vec<u8>` *or a read-only memory map of the image file* — [`BlockBase`], see its doc for why
+// the mapping is equally timing-independent — plus an in-memory overlay map), so servicing a
+// request is a synchronous memcpy, never real async I/O with host-dependent latency — there is
+// no "return" to wait on in the first place. Completion is delivered the same way virtio-rng's already is
 // (`console.rs`'s `service_virtio_blk`, `linux::Multiverse::service_virtio_blk_interrupt`): drain
 // the ring synchronously, then inject an interrupt at the next reachable work-clock boundary via
 // the existing exact-boundary engine (`inject_at`/`inject_timer_tick`, `period_rcb = 0`) — the
@@ -46,6 +47,74 @@ const VIRTIO_BLK_S_IOERR: u8 = 1;
 /// The request type is not supported by this device (e.g. `VIRTIO_BLK_T_GET_ID`, not implemented).
 const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
+/// Where a [`BlockBackingStore`]'s immutable base bytes actually live: either an owned buffer
+/// (small in-test images, or one a caller already had in memory) or a read-only memory map of a
+/// raw image file on disk. Either way the bytes are addressed as one flat `&[u8]` via [`Deref`]
+/// (`std::ops::Deref`), so every reader below is written once and works for both.
+///
+/// **Why a mapping is still deterministic**, i.e. why this does not weaken the module doc's
+/// "needs no new timing primitive" argument: that argument only ever needed the base to be
+/// *already-resident host memory*, so that servicing a request is a synchronous memcpy rather
+/// than real async I/O with a host-dependent completion latency to wait on. A `PROT_READ`
+/// `MAP_PRIVATE` mapping of a regular file has exactly that shape — reads are ordinary memory
+/// accesses served out of the host page cache, never an I/O request the device model can observe
+/// the return of, and the guest-visible byte stream is identical either way. Nothing about the
+/// *content* changes either: the map is read-only and, like the owned case, is never mutated
+/// after construction (see [`BlockBackingStore`]).
+///
+/// What it does change is the host's cost: a multi-gigabyte raw rootfs no longer needs a
+/// same-size heap allocation (nor the copy of one) resident per run.
+pub enum BlockBase {
+    /// Base bytes owned outright on the heap — what every `Vec<u8>` caller gets, unchanged.
+    Owned(Vec<u8>),
+    /// A read-only mapping of an image file, built by [`BlockBase::mapped`].
+    Mapped(memmap2::Mmap),
+}
+
+impl std::ops::Deref for BlockBase {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            BlockBase::Owned(bytes) => bytes,
+            BlockBase::Mapped(map) => map,
+        }
+    }
+}
+
+impl From<Vec<u8>> for BlockBase {
+    fn from(bytes: Vec<u8>) -> Self {
+        BlockBase::Owned(bytes)
+    }
+}
+
+impl From<memmap2::Mmap> for BlockBase {
+    fn from(map: memmap2::Mmap) -> Self {
+        BlockBase::Mapped(map)
+    }
+}
+
+impl BlockBase {
+    /// Open `path` **read-only** and map it, instead of reading its bytes onto the heap — the
+    /// constructor a caller with a real multi-gigabyte raw disk image on disk should use.
+    /// Returns a human-readable error string naming both the path and the failing step, since
+    /// "open failed" and "mmap failed" have completely different causes (a missing/unreadable
+    /// file vs. an out-of-address-space or empty-file mapping).
+    pub fn mapped(path: &std::path::Path) -> Result<Self, String> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("virtio-blk base image {}: open failed: {e}", path.display()))?;
+        // SAFETY: `Mmap::map` is unsafe only because a *concurrent external* modification of the
+        // mapped file (another process writing or truncating it) would be observable here as
+        // changing bytes or a SIGBUS. The mapping itself is `PROT_READ`/`MAP_PRIVATE` — this
+        // process never writes through it (guest writes go to `overlay`, never to `base`) — and
+        // the file it maps is a run's content-addressed, immutable base image, which by
+        // construction nothing in this system rewrites in place while a run holds it open.
+        let map = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| format!("virtio-blk base image {}: mmap failed: {e}", path.display()))?;
+        Ok(BlockBase::Mapped(map))
+    }
+}
+
 /// A read-only, content-addressed base disk image plus an in-memory, sector-granularity
 /// copy-on-write overlay for guest writes. `base` is never mutated after construction — every
 /// guest write only ever inserts into `overlay`, so the base image stays pristine and byte-
@@ -53,18 +122,28 @@ const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 /// stays pristine" — determinism of the disk's *content* falls straight out of the run being a
 /// pure function of `(image, tape)`: the base is part of `image`, and every write is itself a
 /// deterministic consequence of the guest's own execution up to that point.
+///
+/// The base may be owned bytes *or* a read-only mapping of an image file ([`BlockBase`]); the
+/// overlay/copy-on-write semantics are identical either way, and so is every guest-visible byte.
 pub struct BlockBackingStore {
-    base: Vec<u8>,
+    base: BlockBase,
     overlay: std::collections::HashMap<u64, [u8; SECTOR_SIZE as usize]>,
 }
 
 impl BlockBackingStore {
     /// A backing store over `base` (raw disk image bytes — e.g. the Ubuntu cloud image's qcow2
-    /// converted to raw, specs/baud-ubuntu.md §4). `base.len()` need not be a multiple of
-    /// [`SECTOR_SIZE`]; [`Self::capacity_sectors`] simply floors it, matching how a real disk's
-    /// last partial sector (if any) would be unreachable.
-    pub fn new(base: Vec<u8>) -> Self {
-        BlockBackingStore { base, overlay: std::collections::HashMap::new() }
+    /// converted to raw, specs/baud-ubuntu.md §4), which may be an owned `Vec<u8>` or an already-
+    /// opened [`BlockBase`] (see [`Self::mapped`] for the map-a-file-by-path shorthand). The
+    /// length need not be a multiple of [`SECTOR_SIZE`]; [`Self::capacity_sectors`] simply floors
+    /// it, matching how a real disk's last partial sector (if any) would be unreachable.
+    pub fn new(base: impl Into<BlockBase>) -> Self {
+        BlockBackingStore { base: base.into(), overlay: std::collections::HashMap::new() }
+    }
+
+    /// [`Self::new`] over a read-only memory map of the image file at `path`
+    /// ([`BlockBase::mapped`]) — the same store, with none of the image resident on the heap.
+    pub fn mapped(path: &std::path::Path) -> Result<Self, String> {
+        Ok(BlockBackingStore::new(BlockBase::mapped(path)?))
     }
 
     /// The disk's capacity in [`SECTOR_SIZE`]-byte sectors — published to the guest via
@@ -350,5 +429,58 @@ mod tests {
         let mut store = BlockBackingStore::new(base_image(2));
         let chain = vec![Descriptor { addr: HEADER_BASE, len: REQ_HEADER_LEN as u32, write: false }];
         assert_eq!(service_request(&mem, &chain, &mut store).unwrap(), 0);
+    }
+
+    /// The whole point of [`BlockBase::Mapped`]: a store backed by a read-only mapping of an
+    /// image *file* must be indistinguishable, from the guest's side, from the same bytes owned
+    /// on the heap — same capacity, same read data, and writes still landing only in the overlay
+    /// (the file on disk must come back byte-identical afterwards, since a mapped base that could
+    /// be written through would break "the base stays pristine" outright).
+    #[test]
+    fn a_memory_mapped_base_reads_identically_to_an_owned_one_and_is_never_written_through() {
+        let image = base_image(4);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("base.img");
+        std::fs::write(&path, &image).expect("write the base image out");
+
+        let mem = test_guest_mem();
+        let mut mapped = BlockBackingStore::mapped(&path).expect("mapping a readable file must succeed");
+        assert_eq!(mapped.capacity_sectors(), 4, "capacity comes from the mapping's length");
+
+        // Read sector 1 -- byte-identical to the owned-Vec store's own test above.
+        write_header(&mem, VIRTIO_BLK_T_IN, 1);
+        let read_chain = chain(SECTOR_SIZE as u32, true);
+        assert_eq!(service_request(&mem, &read_chain, &mut mapped).unwrap(), SECTOR_SIZE as u32 + 1);
+        assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
+        let mut data = vec![0u8; SECTOR_SIZE as usize];
+        mem.read_slice(&mut data, GuestAddress(DATA_BASE)).unwrap();
+        let expected: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
+        assert_eq!(data, expected, "sector 1's own bytes, read straight out of the mapping");
+
+        // Write sector 1, then read it back: the overlay answers, and the file is untouched.
+        mem.write_slice(&[0xABu8; SECTOR_SIZE as usize], GuestAddress(DATA_BASE)).unwrap();
+        write_header(&mem, VIRTIO_BLK_T_OUT, 1);
+        let write_chain = chain(SECTOR_SIZE as u32, false);
+        assert_eq!(service_request(&mem, &write_chain, &mut mapped).unwrap(), 1);
+        assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
+        let mut overlaid = [0u8; SECTOR_SIZE as usize];
+        mapped.read_sector(1, &mut overlaid);
+        assert_eq!(overlaid, [0xABu8; SECTOR_SIZE as usize], "the overlay, not the mapping, answers");
+        assert_eq!(
+            std::fs::read(&path).expect("re-read the base image"),
+            image,
+            "a mapped base must never be written through -- the file on disk stays pristine"
+        );
+    }
+
+    #[test]
+    fn mapping_a_missing_base_image_reports_the_path_and_the_failing_step() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("does-not-exist.img");
+        let Err(err) = BlockBackingStore::mapped(&missing) else {
+            panic!("a missing file cannot be mapped");
+        };
+        assert!(err.contains("does-not-exist.img"), "error must name the path, got: {err}");
+        assert!(err.contains("open failed"), "error must name the failing step, got: {err}");
     }
 }

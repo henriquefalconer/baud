@@ -84,6 +84,25 @@ pub trait PmuStepper {
     /// many ticks a real kernel survives before its own shutdown) — so `inject_at` checks this
     /// after every step that could have observed a halt exit, instead of erroring.
     fn is_halted(&self) -> bool;
+
+    /// Has the supervisor cancelled this run (`baud_multiverse::linux::Multiverse::
+    /// set_cancel_flag`)? Called by [`inject_at`]/[`run_to_events`] once per single-step iteration,
+    /// which is the only place either of them spends unbounded time in: one call to
+    /// [`run_until_exit`](Self::run_until_exit) can sit inside a single multi-second `KVM_RUN`
+    /// (a real implementation breaks *that* out with a signal — `linux::watchdog::CancelKicker`),
+    /// but the walk that follows it is a userspace loop that would otherwise keep single-stepping
+    /// a guest whose caller has already gone away.
+    ///
+    /// `Err` (rather than a `bool`) because the implementor's own [`Error`](Self::Error) type is
+    /// the only error currency these generic functions have; the real implementation returns
+    /// `linux::cancelled_error()`, which its caller maps back to
+    /// `baud_vcpu::RunLoopError::Cancelled` — never to a determinism hole, which cancellation is
+    /// not. The default `Ok(())` means a stepper that knows nothing about cancellation (every test
+    /// double, and every caller that never installed a flag) behaves exactly as it did before this
+    /// method existed: no atomic access, no branch that can ever be taken.
+    fn check_cancelled(&self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// What [`inject_at`] actually managed to do: land the injection (carrying the [`ExecPoint`] it
@@ -153,6 +172,9 @@ pub fn run_to_events<S: PmuStepper>(
 
     let mut point = stepper.current_point();
     while point.rcb < target_rcb {
+        // Same per-step supervisory check `inject_at`'s walk makes, for the same reason — see
+        // `PmuStepper::check_cancelled`.
+        stepper.check_cancelled()?;
         point = stepper.step()?;
         if stepper.is_halted() {
             return Ok(RunToEventsOutcome::Halted(point));
@@ -180,6 +202,10 @@ pub fn inject_at<S: PmuStepper>(
 
     let mut point = stepper.current_point();
     while point.rcb < target_rcb {
+        // The one unbounded userspace loop in this engine: a tick whose target is thousands of
+        // branches away single-steps thousands of times here, so a run whose caller has gone away
+        // stops between two steps rather than at the end of the tick (`check_cancelled`'s doc).
+        stepper.check_cancelled()?;
         point = stepper.step()?;
         if stepper.is_halted() {
             return Ok(InjectOutcome::Halted(point));
@@ -219,6 +245,9 @@ mod tests {
         /// models a guest whose own natural halt falls before the requested target boundary.
         halt_at_rcb: Option<u64>,
         halted: bool,
+        /// When `Some(n)`, `check_cancelled` starts reporting cancellation once `n` steps have
+        /// been taken — models the supervisor's flag being set mid-walk by another thread.
+        cancel_after_steps: Option<u32>,
     }
 
     impl ScriptedStepper {
@@ -235,6 +264,7 @@ mod tests {
                 steps_taken: 0,
                 halt_at_rcb: None,
                 halted: false,
+                cancel_after_steps: None,
             }
         }
 
@@ -310,6 +340,13 @@ mod tests {
 
         fn is_halted(&self) -> bool {
             self.halted
+        }
+
+        fn check_cancelled(&self) -> Result<(), Self::Error> {
+            match self.cancel_after_steps {
+                Some(n) if self.steps_taken >= n => Err("cancelled"),
+                _ => Ok(()),
+            }
         }
     }
 
@@ -407,6 +444,46 @@ mod tests {
         let outcome = run_to_events(&mut stepper, 1_000).expect("a graceful halt must not surface as an error");
         assert_eq!(outcome, RunToEventsOutcome::Halted(stepper.point_at(510)));
         assert!(!outcome.was_reached());
+    }
+
+    /// The (b) half of the supervisory-cancellation fix: the single-step walk is where a
+    /// periodic-timer run spends nearly all of its time, and it used to have no cancellation check
+    /// at all, so a cancelled run kept stepping to the end of the tick no matter what. A stepper
+    /// that reports cancellation mid-walk must abort the walk right there — not inject, not run to
+    /// the target.
+    #[test]
+    fn inject_at_stops_mid_walk_when_the_stepper_reports_cancellation() {
+        let mut stepper = ScriptedStepper::new(1_000, 0);
+        stepper.cancel_after_steps = Some(3); // the walk to 1_000 would otherwise take MARGIN steps
+        let err = inject_at(&mut stepper, 1_000, 42).expect_err("a cancelled walk must not succeed");
+        assert_eq!(err, "cancelled");
+        assert_eq!(stepper.steps_taken, 3, "the walk must stop at the first check that reports cancellation");
+        assert!(stepper.injected.is_none(), "a cancelled walk must never inject anything");
+    }
+
+    /// [`run_to_events`]'s half of the same fix — the fingerprint-capture walk is the identical
+    /// unbounded loop.
+    #[test]
+    fn run_to_events_stops_mid_walk_when_the_stepper_reports_cancellation() {
+        let mut stepper = ScriptedStepper::new(1_000, 0);
+        stepper.cancel_after_steps = Some(2);
+        let err = run_to_events(&mut stepper, 1_000).expect_err("a cancelled walk must not succeed");
+        assert_eq!(err, "cancelled");
+        assert_eq!(stepper.steps_taken, 2);
+    }
+
+    /// The determinism half: a stepper that never reports cancellation (the default
+    /// `check_cancelled`, i.e. every caller that installed no flag) must take the identical number
+    /// of steps and land on the identical point it did before the check existed —
+    /// [`injects_exactly_at_target_rcb`] above pins the exact same numbers, so the two together
+    /// prove the check added nothing observable.
+    #[test]
+    fn an_uncancelled_walk_is_unchanged_by_the_cancellation_check() {
+        let mut stepper = ScriptedStepper::new(1_000, 0);
+        assert!(stepper.cancel_after_steps.is_none());
+        let outcome = inject_at(&mut stepper, 1_000, 42).expect("injection must succeed");
+        assert_eq!(outcome.point().rcb, 1_000);
+        assert_eq!(stepper.steps_taken as u64, MARGIN);
     }
 
     #[test]

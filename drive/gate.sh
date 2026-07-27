@@ -349,6 +349,11 @@ pool_drain
 say "phase 4: h6 (exclusive — its speedup assertion needs an otherwise-idle host)"
 run_one "04-h6" bash drive/h/h6.sh
 
+# Exclusive for the same reason as h6: it asserts on CPU rate (the abandoned run's burn must
+# stop), and a loaded host skews both the "run is underway" and "burn stopped" thresholds.
+say "phase 4: pkg-blk-cancel (exclusive — it asserts on CPU rate, so it needs an idle host)"
+run_one "04-pkg-blk-cancel" bash drive/pkg/pkg-blk-cancel-cli.sh
+
 # ── phase 5: gated kernel-build pipeline ─────────────────────────────────────
 
 STAMP="drive/pkg/pkg-build-cli.stamp"
