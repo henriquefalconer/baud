@@ -8,9 +8,9 @@
 # with a phased runner that overlaps what can overlap and skips what provably cannot
 # have changed.
 #
-#   ./drive/gate.sh                  # full gate, 4-wide fan-out
+#   ./drive/gate.sh                  # full gate
 #   ./drive/gate.sh --jobs 1         # identical work, strictly serial — the A/B baseline
-#   ./drive/gate.sh --jobs 6         # more aggressive
+#   ./drive/gate.sh --no-h5-first    # queue h5 inside the pool instead of running it alone
 #   ./drive/gate.sh --skip-cargo     # drive scripts only
 #   ./drive/gate.sh --force-build-cli
 #
@@ -63,7 +63,7 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 
-JOBS=4
+JOBS=8
 H5_FIRST=1
 SKIP_CARGO=0
 FORCE_BUILD_CLI=0
