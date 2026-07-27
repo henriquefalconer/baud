@@ -2384,11 +2384,12 @@ snapshot, not a duplicate of it.
      three devices enabled stay fully deterministic. `cargo test -p baud-multiverse --lib` → 208
      passed, 0 failed, 10 ignored (up from 207 by exactly this test). `cargo clippy -p
      baud-multiverse --all-targets` → 26 warnings, the exact pre-existing baseline, zero new.
-     **Still open, unchanged from above**: no real-KVM fixture actually exercises virtio-blk end to
-     end (needs `CONFIG_VIRTIO_BLK`/`CONFIG_VIRTIO_PCI_LEGACY` enabled in `minimal.config`, a kernel
-     rebuild, and a new hand-written `virtio_blk_init.c` analogous to `virtio_rng_init.c` that reads/
-     writes real sectors); H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` +
-     the cross-VM fingerprint) remain not started.
+     **Still open at this point** (closed by a later dated finding further below, see "the last-
+     named gap in this item is now closed"): no real-KVM fixture actually exercises virtio-blk end
+     to end (needs `CONFIG_VIRTIO_BLK`/`CONFIG_VIRTIO_PCI_LEGACY` enabled in `minimal.config`, a
+     kernel rebuild, and a new hand-written `virtio_blk_init.c` analogous to `virtio_rng_init.c` that
+     reads/writes real sectors); H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e)
+     (`drive/h9.sh` + the cross-VM fingerprint) remain not started, unchanged.
      **(c) is now done, as a table-construction library, not yet wired into any real boot path.**
      New `crates/baud-multiverse/src/acpi.rs` (`#[cfg(target_os = "linux")]`, same gating as
      `virtio_queue`/`virtio_blk` — it dereferences guest memory via `vm-memory`): pure,
@@ -2485,6 +2486,69 @@ snapshot, not a duplicate of it.
      (`drive/h9.sh` + the cross-VM fingerprint) remain not started. H8 Mario remains separately
      blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem (item 3 above), unrelated to this PCI/ACPI
      work.
+     **The last-named gap in this item is now closed: a real-KVM fixture now exercises virtio-blk
+     end to end.** `crates/baud-multiverse/tests/fixtures/linux-guest/minimal.config` gained
+     `CONFIG_VIRTIO_PCI=y`, `CONFIG_VIRTIO_PCI_LEGACY=y`, `CONFIG_BLK_DEV=y` (a Kconfig gotcha found
+     along the way: `VIRTIO_BLK` lives under `drivers/block/Kconfig`'s `menuconfig BLK_DEV`, which
+     `allnoconfig` disables and which the fragment had not been setting, so `VIRTIO_BLK=y` silently
+     dropped out of the merged `.config` until this was added), and `CONFIG_VIRTIO_BLK=y`; the
+     kernel was rebuilt per `tests/fixtures/linux-guest/BUILD.md`'s existing recipe (scratch-copy
+     `~/wsl-kernel-src/src`, `mrproper`/`allnoconfig`/`merge_config.sh`/`olddefconfig`/`bzImage`) and
+     the new `bzImage` committed. New `tests/fixtures/linux-guest/virtio_blk_init.c` (`/init`,
+     modeled directly on `virtio_rng_init.c`) mounts sysfs, discovers `/dev/vda`'s major:minor from
+     `/sys/class/block/vda/dev` (the same devtmpfsd-race workaround `virtio_rng_init.c` already
+     uses), `mknod`s it, reads sector 0 and prints it in hex, writes a fixed pattern to sector 1,
+     then reads it back and prints that too — all via the same raw-`outb`-to-COM1-marker convention
+     every other real-kernel fixture uses; built into `virtio_blk_initramfs.cpio.gz` via the same
+     reproducible-cpio recipe. Two new real-hardware tests in `crates/baud-multiverse/src/
+     linux/mod.rs`: `guest_virtio_pci_blk_driver_reads_and_writes_real_sectors` (asserts the real
+     `virtio_pci_legacy`+`virtio_blk` kernel drivers probe the device, read sector 0's exact pristine
+     base-image bytes, write sector 1, and read back the exact just-written bytes — proving the
+     write landed in the overlay, not merely that the write request completed) and
+     `guest_virtio_pci_blk_driver_io_is_reproducible_across_two_boots` (byte-identical console output
+     across two boots); both reuse the existing three-way
+     `run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk` combinator with
+     virtio-rng simply left disabled (never `enable_virtio_rng`d) rather than adding a new
+     two-device wrapper — that combinator's own doc already covers an unenabled device degrading
+     gracefully.
+     Getting a real driver this far surfaced two real, pre-existing bugs, both in
+     `crates/baud-multiverse/src/pci.rs`. First, `PciHostBridge::HOST_BRIDGE_CLASS_CODE` had Base
+     Class and Sub-Class byte-swapped (`0x0006_0000` instead of the spec-correct `0x0600_0000` —
+     Base Class 0x06 landed in the Sub-Class byte position at config-space offset 0x0A instead of
+     the Base Class byte at offset 0x0B). Every existing unit test asserted the same swapped
+     convention as correct (self-consistent but wrong against the real PCI Local Bus spec), so this
+     was invisible until a real, unmodified Linux kernel's own `pci_sanity_check()`
+     (`arch/x86/pci/direct.c`) read the 16-bit `PCI_CLASS_DEVICE` word at offset 0x0A expecting
+     exactly `PCI_CLASS_BRIDGE_HOST` (`0x0600`) and got `0x0006` instead, so `raw_pci_ops` was never
+     set at all ("PCI: Fatal: No config space access function found" / "PCI: System does not
+     support PCI") — confirmed by an exploratory real-`/dev/kvm` boot before the fix and confirmed
+     fixed after; fixed the constant, its doc comment, and the one unit test
+     (`host_bridge_class_code_is_bridge_host`) that encoded the same swapped assumption. Second,
+     `PciVirtioFunction::interrupt_line` defaulted to `0` with nothing ever changing it: on a
+     direct-boot kernel with no BIOS/ACPI/`$PIR` table, nothing routes a PCI device's legacy IRQ, so
+     a real `virtio_pci_legacy` driver logged "can't find IRQ for PCI INT A; please try using
+     pci=biosirq" and `virtio_blk` probe failed with `-ENOSPC`. Fixed by having baud itself
+     pre-route each virtio-pci-legacy function's interrupt line at construction (new
+     `VIRTIO_RNG_DEFAULT_IRQ_LINE = 10`, `VIRTIO_BLK_DEFAULT_IRQ_LINE = 11` constants in `pci.rs`,
+     threaded through a new `default_interrupt_line` parameter on `PciVirtioFunction::new`) — the
+     same "no BIOS exists, so the VMM plays that role" precedent baud's own `boot_params`/e820
+     construction already established; the register stays guest-writable exactly as before, only
+     the pre-boot default changed.
+     `cargo test -p baud-multiverse --lib` → 210 passed, 0 failed, 10 ignored (up from 208 by
+     exactly the 2 new tests); `cargo clippy -p baud-multiverse --all-targets` → 26 warnings, the
+     exact documented pre-existing baseline, zero new. Full `bash drive/gate.sh` → 23 passed, 0
+     failed, 1 flaked (the already-documented `rdtsc_guest_reproduces_high_bits_across_boots`
+     load-flake, reconfirmed passing in isolation), 0 skipped, 6m04s — counts as a passing gate per
+     §15. **Still open**: H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` +
+     the cross-VM fingerprint) remain not started, unchanged. `VIRTIO_UNCLASSIFIED_CODE` (virtio-
+     rng's PCI class code, also in `pci.rs`) looks like it carries the exact same Base/Sub-Class
+     byte-swap bug as the host-bridge one above (spec-correct would put Base Class 0xFF at bits
+     31:24, but the current value `0x00FF_0000` puts 0xFF at bits 23:16 instead) — not fixed this
+     iteration, since no real driver test exercises virtio-rng over PCI yet (only virtio-mmio's rng
+     path is real-driver-tested), so there was no way to confirm it the same way the host-bridge one
+     was confirmed; flagged as a candidate bug for whoever next builds a real virtio-rng-over-PCI
+     test. `VIRTIO_BLK_CLASS_CODE` was already spec-conformant before this iteration touched
+     anything.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

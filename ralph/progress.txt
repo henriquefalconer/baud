@@ -6815,3 +6815,55 @@ Gate result: 22 passed, 0 failed, 1 flaked, 1 skipped (2m29s). The sole failure 
   - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation -- the documented load-flake), 1 skipped (pkg-build-cli, fingerprint unchanged) -- counts as a passing gate per todo.md §15
   - Still open: no real-KVM fixture exercises virtio-blk end to end yet (needs CONFIG_VIRTIO_BLK/CONFIG_VIRTIO_PCI_LEGACY in minimal.config + a new virtio_blk_init.c); H9 (d) actual Ubuntu cloud image and (e) drive/h9.sh/cross-VM fingerprint remain not started
 ---
+
+Post-push verification: origin/main now at 6ff82b3, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked (documented rdtsc load-flake, reconfirmed in isolation), 1 skipped, 2m29s) before this push.
+
+todo.md still has pending items (H9 (d)/(e): actual Ubuntu 18.04.1 cloud image + drive/h9.sh/cross-VM fingerprint, both not started; a real-KVM virtio-blk-exercising fixture still needed; H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline §4.5 itself) -- emitting NEXT.
+
+## 2026-07-27T12:30:08 UTC (17min) - Session usage — build-5 [sonnet]
+- cost $4.6309 (from claude -p)
+- context 157,392 tok peak of 1M (16%) across 55 inference calls, monotonic
+- models sonnet-5 $4.6277 (in 156 / out 58,983 / cache-read 7,586,342) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T104433Z/006-build-5.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 6
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Chose the real-KVM virtio-blk fixture: §14 item 5 flags that (a)/(b)/(c) (virtio-pci transport, virtio-blk device model, ACPI tables) are all unit-tested only against in-memory GuestMemoryMmap, with no real-hardware fixture proving virtio-blk actually works end to end on /dev/kvm (unlike virtio-rng's tests/fixtures/virtio-rng-guest/). This is the natural next step before attempting the much larger (d)/(e) real Ubuntu image work, and it's the last unproven piece of the PCI/virtio-blk/ACPI stack built in prior iterations.
+
+Added CONFIG_VIRTIO_PCI/VIRTIO_PCI_LEGACY/VIRTIO_BLK=y to minimal.config. Rebuilding the guest kernel bzImage now (copy tree, allnoconfig+merge_config+olddefconfig+bzImage, ~65-90s)...
+
+Kconfig fix: VIRTIO_BLK requires the BLK_DEV menuconfig gate (drivers/block/Kconfig 'if BLK_DEV') which allnoconfig disables and the fragment didn't set -- added CONFIG_BLK_DEV=y. All virtio-blk/virtio-pci-legacy symbols now land in .config. Compiling bzImage now...
+
+Kernel rebuilt clean with CONFIG_VIRTIO_BLK/VIRTIO_PCI_LEGACY compiled in; bzImage copied into the fixture dir. Existing fixtures (hello-guest, virtio-rng-guest, ACPI test) all share this same bzImage so need re-verification after this rebuild -- will run those tests as part of the gate later. Now writing virtio_blk_init.c.
+
+virtio_blk_init.c written (sysfs-dev-node discovery for /dev/vda, read sector 0, write+readback sector 1) and compiled clean with musl-gcc; virtio_blk_initramfs.cpio.gz built via the reproducible-cpio recipe. Now writing the real-hardware Rust test in linux/mod.rs.
+
+Real bug found via hardware boot: PciHostBridge's HOST_BRIDGE_CLASS_CODE (crates/baud-multiverse/src/pci.rs) had Base Class and Sub-Class byte-swapped (0x0006_0000 instead of 0x0600_0000) -- every existing unit test asserted the same swapped convention as 'correct', so it was invisible until a real unmodified Linux kernel's pci_sanity_check() rejected it outright ('PCI: Fatal: No config space access function found'), confirmed via an exploratory real-/dev/kvm boot. Fixed the constant + its doc + the one unit test that encoded the bug; VIRTIO_BLK_CLASS_CODE was already correct (spec-conformant), but VIRTIO_UNCLASSIFIED_CODE (the rng device's class code) looks like the same swap pattern -- noting as a follow-up in todo.md, out of scope for this iteration since no real driver test exercises virtio-rng-over-PCI yet. Re-running the exploratory boot now to confirm PCI enumeration actually works.
+
+Both new tests pass on real /dev/kvm: guest_virtio_pci_blk_driver_reads_and_writes_real_sectors (a real virtio_pci_legacy+virtio_blk driver reads sector 0, writes+reads back sector 1, exact byte match both times) and guest_virtio_pci_blk_driver_io_is_reproducible_across_two_boots (byte-identical console across two boots). Two real bugs found and fixed along the way: HOST_BRIDGE_CLASS_CODE's byte-swapped Base/SubClass, and PciVirtioFunction::interrupt_line defaulting to 0 with no BIOS/ACPI to route it (added VIRTIO_RNG_DEFAULT_IRQ_LINE=10/VIRTIO_BLK_DEFAULT_IRQ_LINE=11). Running full baud-multiverse test suite + clippy to check for regressions before the full gate.
+
+cargo test -p baud-multiverse --lib: 210 passed, 0 failed, 10 ignored (up from 208 by exactly the 2 new virtio-blk tests). cargo clippy -p baud-multiverse --all-targets: 26 warnings, the exact documented baseline, zero new. Running full workspace build/test/clippy now before the pre-push gate.
+
+cargo test --workspace: all green, no FAILED entries. cargo clippy --workspace --all-targets: clean, only pre-existing warnings in unrelated crates (baud-server, baud-tracing). Running the full pre-push gate (bash drive/gate.sh) now -- this can take several minutes.
+
+Gate result: 23 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation by phase 6 in 4s -- the documented load-flake), 0 skipped, 6m04s. Counts as a passing gate per todo.md §15. Cleaning up scratch kernel tree and updating todo.md now.
+
+todo.md updated by a subagent to record the closed gap and both bugs found/fixed. Committing everything now.
+
+## 2026-07-27T13:02:49 UTC - Changes committed.
+- Closed todo.md §14 item 5's last-named gap: a real-KVM fixture now exercises virtio-blk end to end
+- Files changed: crates/baud-multiverse/tests/fixtures/linux-guest/minimal.config, bzImage, virtio_blk_init.c (new), virtio_blk_initramfs.cpio.gz (new), crates/baud-multiverse/src/pci.rs, crates/baud-multiverse/src/linux/mod.rs, todo.md
+- **Brief description of changes:**
+  - minimal.config gained CONFIG_VIRTIO_PCI/VIRTIO_PCI_LEGACY/BLK_DEV/VIRTIO_BLK=y (BLK_DEV's own menuconfig gate was the gotcha -- allnoconfig disables it and the fragment never set it, so VIRTIO_BLK silently dropped out); kernel rebuilt and bzImage recommitted
+  - New virtio_blk_init.c /init (modeled on virtio_rng_init.c): discovers /dev/vda via sysfs, reads sector 0, writes+reads back sector 1, all via raw-outb markers; built into virtio_blk_initramfs.cpio.gz
+  - Two new real-hardware tests in linux/mod.rs: guest_virtio_pci_blk_driver_reads_and_writes_real_sectors and guest_virtio_pci_blk_driver_io_is_reproducible_across_two_boots, reusing the existing three-way timer+rng+blk combinator with rng left disabled
+  - Two real bugs found and fixed in pci.rs: HOST_BRIDGE_CLASS_CODE had Base/Sub-Class byte-swapped (0x0006_0000 -> 0x0600_0000), which made a real kernel's pci_sanity_check() reject PCI outright ("Fatal: No config space access function found") -- every existing unit test had encoded the same swapped assumption as correct, invisible until a real driver actually tried; PciVirtioFunction::interrupt_line defaulted to 0 with no BIOS/ACPI to route it, causing "can't find IRQ for PCI INT A" / virtio_blk probe failing with -ENOSPC -- fixed by having baud pre-route each function's IRQ line at construction (VIRTIO_RNG_DEFAULT_IRQ_LINE=10, VIRTIO_BLK_DEFAULT_IRQ_LINE=11)
+  - cargo test -p baud-multiverse --lib: 210 passed, 0 failed, 10 ignored (up from 208 by exactly the 2 new tests); cargo clippy -p baud-multiverse --all-targets: 26 warnings, exact pre-existing baseline, zero new
+  - Full bash drive/gate.sh: 23 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation -- the documented load-flake), 0 skipped, 6m04s -- counts as a passing gate per todo.md §15
+  - Still open: H9 (d) actual Ubuntu 18.04.1 cloud image and (e) drive/h9.sh/cross-VM fingerprint remain not started; VIRTIO_UNCLASSIFIED_CODE (virtio-rng's PCI class code) looks like the same byte-swap bug pattern, flagged but not fixed since no real virtio-rng-over-PCI driver test exists yet to confirm it
+---

@@ -87,9 +87,18 @@ impl ConfigAddress {
 /// only enumerated, so no vendor/device-ID-specific quirk is needed for boot to proceed.
 const HOST_BRIDGE_VENDOR_ID: u16 = 0x1B36;
 const HOST_BRIDGE_DEVICE_ID: u16 = 0x0000;
-/// Class code (bits 31:8 of the class/revision register) — class 06h, subclass 00h, no
-/// programming interface.
-const HOST_BRIDGE_CLASS_CODE: u32 = 0x0006_0000;
+/// Class code (bits 31:8 of the class/revision register: bits 15:8 Prog IF, bits 23:16 Sub-Class,
+/// bits 31:24 Base Class, PCI Local Bus spec §6.2.1) — class 06h (bridge), subclass 00h (host), no
+/// programming interface. **Real-hardware bug, found and fixed**: this used to be `0x0006_0000`
+/// (Base Class and Sub-Class swapped — Base Class 0x06 landed in the Sub-Class byte at offset
+/// 0x0A instead of the Base Class byte at offset 0x0B), which every existing unit test asserted as
+/// correct (self-consistently checking the same swapped byte positions) but which a real,
+/// unmodified Linux kernel's `pci_sanity_check()` (`arch/x86/pci/direct.c`) rejects outright: it
+/// reads the 16-bit `PCI_CLASS_DEVICE` word at offset 0x0A expecting exactly `PCI_CLASS_BRIDGE_HOST`
+/// (`0x0600`), and the swapped byte order answered `0x0006` instead, so `raw_pci_ops` was never set
+/// at all ("PCI: Fatal: No config space access function found") — confirmed by booting
+/// `tests/fixtures/linux-guest/virtio_blk_init.c` on real `/dev/kvm` before this fix.
+const HOST_BRIDGE_CLASS_CODE: u32 = 0x0600_0000;
 
 /// Configuration-space register offsets this bridge answers with a non-zero value (PCI Local Bus
 /// spec §6.1, "Type 0" header) — every other offset in the 256-byte space reads back `0`, matching
@@ -126,6 +135,16 @@ const BAR_IO_SPACE_BIT: u32 = 0x1;
 /// `Interrupt Pin` value `1` = `INTA#` (PCI Local Bus spec §6.2.4) — baud's virtio functions each
 /// claim exactly one interrupt pin, never sharing a line with anything else in this model.
 const INTERRUPT_PIN_INTA: u32 = 1;
+/// Legacy ISA IRQ lines baud pre-routes each virtio-pci-legacy function's `Interrupt Line`
+/// register to at construction, standing in for what a real BIOS's PIRQ router (or ACPI's
+/// `_PRT`) would normally program before the OS boots — direct-boot Linux has neither, so nothing
+/// else ever assigns one (see [`PciVirtioFunction::interrupt_line`]'s doc for the real-hardware
+/// failure this fixes). Both are otherwise-unused legacy IRQs in every existing fixture (no i8042/
+/// RTC/ATA modeled here, and the periodic-timer engine injects the LAPIC's own
+/// `LOCAL_TIMER_VECTOR` directly, never a legacy IRQ0 PIT tick), and distinct from each other so
+/// the two devices never share a line.
+const VIRTIO_RNG_DEFAULT_IRQ_LINE: u8 = 10;
+const VIRTIO_BLK_DEFAULT_IRQ_LINE: u8 = 11;
 
 /// One PCI function's configuration-space header for a virtio-pci *legacy* device — the
 /// enumeration-and-BAR-assignment half of `crate::virtio_pci::VirtioPciTransport`; see this
@@ -153,21 +172,29 @@ pub struct PciVirtioFunction {
     /// "the guest wants to point the BAR at address `0xFFFF_FFFC`", so this bridge tracks it
     /// explicitly instead of misinterpreting an all-ones write as a real (nonsensical) base.
     bar0_sizing: bool,
-    /// `Interrupt Line` (PCI Local Bus spec §6.2.4) — purely guest-writable bookkeeping; baud
-    /// never reads it back to decide anything, matching real hardware (the field only tells
-    /// *software*, never other hardware, which line was routed).
+    /// `Interrupt Line` (PCI Local Bus spec §6.2.4) — guest-writable, but seeded with a nonzero
+    /// default at construction (see [`Self::new`]'s `default_interrupt_line` param): baud never
+    /// reads this field back to pick an injection vector itself (a caller always names the vector
+    /// explicitly), but the *guest*'s own `pci_read_irq()` (`drivers/pci/probe.c`) does, at
+    /// enumeration time, straight from this register — and on a direct-boot kernel with no BIOS/
+    /// ACPI/`$PIR` table to program it, nothing else would ever give this register a real value.
+    /// Real-hardware finding: leaving it at `0` (the pre-fix default) makes a real
+    /// `virtio_pci_legacy`/`virtio_blk` driver print "can't find IRQ for PCI INT A" and fail probe
+    /// with `-ENOSPC`, confirmed booting `tests/fixtures/linux-guest/virtio_blk_init.c` — the same
+    /// "no BIOS exists, so the VMM must pre-program what a BIOS normally would" role baud already
+    /// plays for e.g. `boot_params`/e820 (§4.2).
     interrupt_line: u8,
 }
 
 impl PciVirtioFunction {
-    fn new(device_kind: u32, class_code: u32, bar0_size: u32) -> Self {
+    fn new(device_kind: u32, class_code: u32, bar0_size: u32, default_interrupt_line: u8) -> Self {
         PciVirtioFunction {
             device_kind,
             class_code,
             bar0_size,
             bar0_base: 0,
             bar0_sizing: false,
-            interrupt_line: 0,
+            interrupt_line: default_interrupt_line,
         }
     }
 
@@ -264,8 +291,12 @@ impl PciHostBridge {
     /// (the caller's responsibility — this module has no dependency on `virtio_pci.rs` to check it
     /// itself, keeping config-space bookkeeping and the transport register block independent).
     pub fn attach_virtio_rng(&mut self, bar0_size: u32) {
-        self.virtio_rng =
-            Some(PciVirtioFunction::new(crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG, VIRTIO_UNCLASSIFIED_CODE, bar0_size));
+        self.virtio_rng = Some(PciVirtioFunction::new(
+            crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG,
+            VIRTIO_UNCLASSIFIED_CODE,
+            bar0_size,
+            VIRTIO_RNG_DEFAULT_IRQ_LINE,
+        ));
     }
 
     /// Installs a virtio-pci legacy block-device function at 00:02.0 with a `bar0_size`-byte I/O
@@ -273,8 +304,12 @@ impl PciHostBridge {
     /// `bar0_size` must match `crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN`, same caller
     /// responsibility as `attach_virtio_rng`'s.
     pub fn attach_virtio_blk(&mut self, bar0_size: u32) {
-        self.virtio_blk =
-            Some(PciVirtioFunction::new(crate::virtio_mmio::VIRTIO_DEVICE_ID_BLK, VIRTIO_BLK_CLASS_CODE, bar0_size));
+        self.virtio_blk = Some(PciVirtioFunction::new(
+            crate::virtio_mmio::VIRTIO_DEVICE_ID_BLK,
+            VIRTIO_BLK_CLASS_CODE,
+            bar0_size,
+            VIRTIO_BLK_DEFAULT_IRQ_LINE,
+        ));
     }
 
     /// The virtio-rng function's guest-assigned I/O base, if attached and assigned — `DeviceBus`
@@ -443,8 +478,15 @@ mod tests {
         write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_CLASS_REVISION));
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
         assert_eq!(dword & 0xFF, 0, "revision ID 0 in the low byte");
-        assert_eq!((dword >> 8) & 0xFF, 0x00, "subclass 00h (host)");
-        assert_eq!((dword >> 16) & 0xFF, 0x06, "class 06h (bridge)");
+        assert_eq!((dword >> 8) & 0xFF, 0x00, "prog IF 00h");
+        assert_eq!((dword >> 16) & 0xFF, 0x00, "subclass 00h (host)");
+        assert_eq!((dword >> 24) & 0xFF, 0x06, "base class 06h (bridge)");
+        assert_eq!(
+            (dword >> 16) as u16,
+            0x0600,
+            "the 16-bit PCI_CLASS_DEVICE word (offset 0x0A, what a real kernel's \
+             pci_sanity_check() reads) must equal PCI_CLASS_BRIDGE_HOST exactly"
+        );
         assert_eq!(dword, HOST_BRIDGE_CLASS_CODE, "revision 0 plus the class code, bits 31:8");
     }
 
