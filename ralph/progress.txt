@@ -6235,3 +6235,39 @@ Gate finished in 2m58s (vs. the previously documented ~6min baseline) with 22 pa
   - Updated todo.md to move this item from "still open" to "resolved" with the mechanism and gate timing evidence, and renumbered the remaining still-open items
 - Verification: `cargo build`/`cargo test`/`cargo clippy` clean on both touched crates individually (131/131 baud-multiverse tests, 24/24 run_kvm tests), then full `bash drive/gate.sh`: 22 passed, 0 real failures, 1 flake (`rdtsc_guest_reproduces_high_bits_across_boots`, the documented load-flake — failed under the 8-wide fan-out, passed in isolation in phase 6 per the gate's own flake-isolation rule, 3s) — gate wall-clock 2m58s, down from the previously documented ~6 min baseline
 ---
+
+Post-push verification: origin/main now at 377e232, identical to local HEAD; working tree clean. todo.md has no separate post-push protocol beyond §15's pre-push gate, which was already green (with the documented rdtsc load-flake exception) before this push. todo.md still has pending items (§14.1 items 1-4 renumbered, plus H8 Mario FCEUX/Xvfb packaging, H9 Ubuntu not started, Buildroot/pinned-Nix image pipeline) — emitting NEXT.
+
+## 2026-07-27T06:06:02 UTC (30min) - Session usage — build-1 [sonnet]
+- cost $8.2145 (from claude -p)
+- context 235,811 tok peak of 1M (24%) across 101 inference calls, monotonic
+- models sonnet-5 $8.2113 (in 228 / out 83,315 / cache-read 18,080,033) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T053631Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history first.
+
+Item 1 in todo.md §14.1 'still open' (fleet_of_vms flake) turns out already fixed by commit 2c0919a — test is #[ignore]d, drive/h6.sh is its dedicated runner, gate.sh phase 4 already calls it. todo.md is just stale here. Moving it to resolved and picking item 2 (shell-into's conflated idle/first-byte timeout) as this iteration's real work.
+
+Implemented the fix: shell_into.rs now has a separate --first-byte-timeout-ms (default 10000ms) distinct from --idle-timeout-ms (default 2000ms, now only used once output has started). Updated drive/m/m10.sh's M10.2/M10.3 to pass --first-byte-timeout-ms 15000 instead of inflating --idle-timeout-ms, and M10.4's error-path call to keep both timeouts tight (1000ms). cargo build -p baud-cli is clean. Running drive/m/m10.sh now to verify end-to-end on real KVM.
+
+drive/m10.sh passed end-to-end on real KVM (M10.1-M10.4 all PASS). Running cargo clippy on baud-cli before updating todo.md.
+
+todo.md updated: corrected the stale fleet_of_vms entry and recorded the shell-into timeout fix as resolved, renumbered remaining still-open items. Now running the full pre-push gate (bash drive/gate.sh) per todo.md §15.
+
+Gate green: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input) in 2m41s — no flake this run. Committing and pushing.
+
+## 2026-07-27T06:13:08 UTC - Changes committed.
+- Corrected a stale todo.md §14.1 entry and fixed shell-into's conflated timeout
+- Files changed: crates/baud-cli/src/cmds/shell_into.rs, drive/m/m10.sh, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - todo.md's "still open" item 1 (fleet_of_vms_run_in_parallel_without_interference flake) was stale: commit 2c0919a had already #[ignore]'d it with drive/h/h6.sh as its dedicated runner, wired into drive/gate.sh phase 4. Moved to "resolved" with the corrected record, no code change needed for it.
+  - Fixed still-open item 2: shell_into.rs's --idle-timeout-ms was used as both the idle timeout and the first-byte deadline, so under concurrent guest boots (other drive scripts booting guests) the collector returned an empty transcript. Added a separate --first-byte-timeout-ms flag (default 10000ms) used only while output.is_empty(); --idle-timeout-ms (default 2000ms, unchanged) now only governs the gap after output has started.
+  - drive/m/m10.sh's M10.2/M10.3 now pass --first-byte-timeout-ms 15000 instead of inflating --idle-timeout-ms to work around the conflation; M10.4's error-path call (no restore involved) keeps both timeouts tight at 1000ms.
+  - Renumbered todo.md's remaining still-open items (thousand_branches' implicit value, baud-journal's age binary shell-out) down to 1-2.
+- Verification: cargo build -p baud-cli and cargo clippy -p baud-cli --all-targets clean (no new warnings — pre-existing warnings in net.rs/tape.rs untouched); bash drive/m/m10.sh passes M10.1-M10.4 end to end against real /dev/kvm; full bash drive/gate.sh: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input), no flake, 2m41s wall-clock.
+---

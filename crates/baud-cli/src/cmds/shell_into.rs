@@ -32,6 +32,14 @@ pub struct ShellIntoArgs {
     /// session as quiescent and closing (`--input-hex` mode only).
     #[arg(long, default_value_t = 2000)]
     pub idle_timeout_ms: u64,
+    /// How long to wait for the *first* byte of guest output before giving up (`--input-hex` mode
+    /// only). Kept separate from `--idle-timeout-ms`: that one measures "the guest stopped
+    /// talking", which is fast once output has started, while this one measures "restore +
+    /// stepping the guest to its first output hasn't happened yet", which can take much longer
+    /// under concurrent host load (e.g. several other guests booting at once) without the session
+    /// itself being unhealthy.
+    #[arg(long, default_value_t = 10000)]
+    pub first_byte_timeout_ms: u64,
 }
 
 pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
@@ -48,8 +56,17 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
 
             let mut output = Vec::new();
             loop {
+                // Before any output has arrived, the guest may still be mid-restore under
+                // concurrent host load, so wait up to `first_byte_timeout_ms`; once it has
+                // started talking, a gap means it is genuinely quiescent, so switch to the
+                // shorter `idle_timeout_ms`.
+                let timeout_ms = if output.is_empty() {
+                    args.first_byte_timeout_ms
+                } else {
+                    args.idle_timeout_ms
+                };
                 let next = tokio::time::timeout(
-                    std::time::Duration::from_millis(args.idle_timeout_ms),
+                    std::time::Duration::from_millis(timeout_ms),
                     rx.next(),
                 )
                 .await;
@@ -59,7 +76,7 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
                     Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
                     Ok(Some(Ok(_))) => {}
                     Ok(Some(Err(e))) => return Err(e).context("shell-into websocket error"),
-                    Err(_) => break, // idle timeout: no more output expected
+                    Err(_) => break, // idle/first-byte timeout: no more output expected
                 }
             }
             // "No more input" sentinel (an empty `Binary` frame, never a `Close` — see

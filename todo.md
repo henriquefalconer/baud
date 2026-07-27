@@ -2344,27 +2344,37 @@ were made to assert something.
    this wrong (both sides `false`) would have made the comparison vacuously pass, exactly the "test asserts
    nothing" anti-pattern this whole file's §14.1 catalogs elsewhere. Gate wall-clock dropped from the
    documented ~6 min baseline to 2m58s in the verifying run (`cargo test --workspace` phase alone: 24s).
+2. **`fleet_of_vms_run_in_parallel_without_interference` flake — already fixed, this entry was stale.**
+   This item was carried forward as "still open" describing a timing-ratio flake, but commit `2c0919a`
+   (`drive: add a parallel verification gate, reorganize drive/, and fix latent test defects`) had already
+   applied the same treatment `thousand_branches_are_independent_and_deterministic` got: the test is
+   `#[ignore = "timing-ratio + fixed-core pinning, flaky under any concurrent load; covered by
+   drive/h/h6.sh on a quiet machine"]` (`crates/baud-multiverse/src/linux/mod.rs:4349`), and
+   `drive/h/h6.sh` is its dedicated runner (`--include-ignored`, asserts a non-zero pass count),
+   already wired into `drive/gate.sh` phase 4 (`04-h6`). No code changed for this entry beyond
+   correcting the record.
+3. **`shell-into`'s timeout conflated two different things — fixed.**
+   `crates/baud-cli/src/cmds/shell_into.rs` used one `--idle-timeout-ms` as both the idle timeout *and*
+   the first-byte deadline, so under concurrent guest boots it returned `ok=true` with an empty
+   transcript (measured: 2000ms → empty 3/3; 8000ms → correct 3/3). Split into two flags: `--idle-timeout-ms`
+   (default 2000ms, "the guest stopped talking", used once output has started) and the new
+   `--first-byte-timeout-ms` (default 10000ms, "restore hasn't produced output yet under load", used while
+   `output.is_empty()`). `drive/m/m10.sh`'s M10.2/M10.3 now pass `--first-byte-timeout-ms 15000` instead of
+   inflating `--idle-timeout-ms`; M10.4's error-path call (no restore involved) keeps both timeouts tight at
+   1000ms. Verified: `cargo build -p baud-cli` and `cargo clippy -p baud-cli --all-targets` clean (no new
+   warnings), `bash drive/m/m10.sh` passes M10.1-M10.4 end to end against real `/dev/kvm`.
 
 **Still open, in priority order.** Where a fix contradicts a spec, amend the spec in the same commit rather
 than quietly diverging from it; where it contradicts a claim in `ralph/progress.txt`, say so plainly in the
 new entry instead of leaving the old claim standing.
 
-1. **`fleet_of_vms_run_in_parallel_without_interference` is the workspace's #1 flake source** (19 records in
-   `ralph/progress.txt`): it asserts a timing ratio (`parallel_total < serial_one * n * 0.85`) while up to 7
-   sibling KVM tests run on the same 8 threads, and pins to fixed cores 0/2/4. Same treatment as
-   `thousand_branches` — `#[ignore]` with `drive/h/h6.sh` as sole runner.
-2. **`shell-into`'s timeout conflates two different things.** `crates/baud-cli/src/cmds/shell_into.rs:33`
-   uses one `--idle-timeout-ms` as both the idle timeout *and* the first-byte deadline, so under concurrent
-   guest boots it returns `ok=true` with an empty transcript (measured: 2000ms → empty 3/3; 8000ms → correct
-   3/3). `drive/m/m10.sh` works around it at the call site (now 15000ms); splitting the two would fix every
-   caller.
-3. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
+1. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
    `KVM_CREATE_VM`/vCPU/256 MiB/`perf_event` lifecycles (next largest anywhere is 6), but asserts nothing
    about resource growth — a leak surfaces only as an `Err` or an OOM kill. Its `NUM_BRANCHES = 1000` is a
    literal spec figure (`specs/baud-snapshot.md:191-193`, `todo.md` §5), not a tuned number, and its own
    comment wrongly claims it was "chosen to keep this test's real run time … in the tens-of-seconds range".
    Across 51 mentions in `ralph/progress.txt` it has caught **0** defects and flaked **0** times.
-4. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
+2. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
    `baud-keys`, whose `age_encrypt`/`age_decrypt` do the same job in-process. Switching would make the
    encrypted-journal path work and be testable on hosts without `age` (caveat: `baud_keys::age_encrypt`
    emits binary age, not the ASCII armor the journal writes today). Note `open_encrypted` has no callers
