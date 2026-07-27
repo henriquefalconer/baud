@@ -113,6 +113,13 @@ pub enum RunAction {
         /// instead). Only used when `--virtio-rng-seed` is set.
         #[arg(long, default_value_t = 200_000)]
         virtio_rng_max_exits: u32,
+        /// Write the minimal ACPI table set (RSDP -> XSDT -> FADT + DSDT + MADT-with-one-LAPIC)
+        /// into guest memory right after boot, before the guest runs at all
+        /// (`Multiverse::write_acpi_tables`). A harmless no-op for a guest that boots with
+        /// `acpi=off` (the `--cmdline` default) — a real ACPI-enabled boot also needs `--cmdline`
+        /// without `acpi=off` and a `CONFIG_ACPI=y` kernel.
+        #[arg(long)]
+        acpi: bool,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
     /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
@@ -330,11 +337,13 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             virtio_rng_seed,
             virtio_rng_vector,
             virtio_rng_max_exits,
+            acpi,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
                 "tape_hex": tape_hex,
                 "initramfs_path": initramfs,
+                "acpi": acpi,
             });
             if let Some(cmdline) = cmdline {
                 body["cmdline"] = json!(cmdline);

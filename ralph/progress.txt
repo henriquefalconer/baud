@@ -6734,3 +6734,44 @@ Full drive/gate.sh: 24 passed, 0 failed, 0 skipped in 5m43s. Updating documentat
   - `cargo build`/`clippy --workspace --all-targets`/`test --workspace` clean (0 new warnings, 26 pre-existing baseline unchanged); full `bash drive/gate.sh`: 24 passed, 0 failed, 0 skipped, 5m43s — confirms the shared rebuilt `linux-guest` bzImage caused no regression in any other fixture/drive script
   - Updated `crates/baud-multiverse/src/acpi.rs`'s module doc and `tests/fixtures/linux-guest/BUILD.md` (new "`CONFIG_ACPI=y` + `LocalApic`" section) plus `todo.md` §14 item 5(c) to record both gaps closed
 ---
+
+Post-push verification: origin/main now at 02c3300, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (24 passed, 0 failed, 0 skipped, 5m43s) before this push.
+
+todo.md still has pending items (H9 (d) actual Ubuntu cloud image + (e) drive/h9.sh/cross-VM fingerprint; write_acpi_tables not yet the production default for baud run kvm's plain path; H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline §4.5 itself) -- emitting NEXT.
+
+## 2026-07-27T11:54:07 UTC (50min) - Session usage — build-3 [sonnet]
+- cost $22.4689 (from claude -p)
+- context 414,066 tok peak of 1M (41%) across 178 inference calls, monotonic
+- models sonnet-5 $19.8375 (in 356 / out 144,704 / cache-read 51,078,919) · opus-5[1m] $2.6281 · haiku-4-5 $0.0032
+- subagents (1) opus-5 x1
+- transcript: ralph/.run/20260727T104433Z/004-build-3.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md and studying specs/*...
+
+Chose making write_acpi_tables the production default for baud run kvm's plain path (behind an opt-in flag, since minimal-guest fixtures boot acpi=off and specs/baud-ubuntu.md scopes ACPI specifically to the Ubuntu/H9 addition) -- it's the smallest, best-scoped remaining item from todo.md's list (vs. the multi-day H9 cloud-image pipeline, Mario FCEUX packaging blocker, or the Buildroot/Nix image pipeline), and it directly continues last iteration's ACPI/LAPIC work.
+
+Implementing: adding acpi:bool field to RunKvmBody, threading through boot_run_and_drain/boot_and_drain_frames, persisting to kvm_run_meta (new migration), and wiring stream.rs's real-replay path -- then a real-hardware server-route test proving the wiring.
+
+Build/clippy for baud-server + baud-cli clean (0 new warnings). Now writing the real-hardware server-route test proving RunKvmBody.acpi wiring, mirroring run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer but with acpi:true and acpi=off stripped from cmdline.
+
+New route-level test run_kvm_boots_a_real_linux_guest_with_acpi_enabled passes on real /dev/kvm (25/25 in routes::run_kvm::tests, 2 boots byte-identical). cargo build/clippy for baud-server+baud-cli clean, 0 new warnings vs the documented 26-warning baseline. Also added a CLI --acpi flag on 'baud run kvm' so the plain path is reachable end-to-end, not just the HTTP route. Now running the full workspace build/clippy/test as a sanity check before the pre-push gate.
+
+Workspace build clean. Starting bash drive/gate.sh (full pre-push gate per todo.md §15) -- this is the long-running step, may take up to ~6-16 min.
+
+Gate result: 22 passed, 0 failed, 1 flaked, 1 skipped (2m55s). The sole failure was rdtsc_guest_reproduces_high_bits_across_boots inside cargo test --workspace, reconfirmed passing in isolation by gate.sh's own phase 6 (3s) -- exactly the documented load-flake CLAUDE.md/todo.md §15 say counts as a passing gate. pkg-build-cli skipped (fingerprint unchanged). Proceeding to commit.
+
+## 2026-07-27T12:12:21 UTC - Changes committed.
+- Wired write_acpi_tables as the production default for baud run kvm's plain path (todo.md §14 item 5(c)'s last-open gap)
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, crates/baud-server/migrations/0014_kvm_run_meta_acpi.sql (new), crates/baud-cli/src/cmds/run.rs, todo.md
+- **Brief description of changes:**
+  - RunKvmBody gained an acpi:bool field (serde default false); boot_run_and_drain/boot_and_drain_frames/boot_and_run thread it through, calling mv.write_acpi_tables() right after boot when true
+  - Persisted into a new kvm_run_meta.acpi column so stream::render's real-replay path reboots the exact same guest; RunKvmBranchBody/RunKvmResumeBody deliberately left unextended (still pass acpi:false), scoped to the plain /run/kvm path per the todo item's own wording
+  - baud run kvm gained a --acpi CLI flag so this is reachable end-to-end, not just the HTTP route
+  - New real-hardware test run_kvm_boots_a_real_linux_guest_with_acpi_enabled (crates/baud-server/src/routes/run_kvm.rs): 2/2 identical console output across two boots with ACPI enabled through the route
+  - cargo build --workspace / clippy -p baud-server -p baud-cli --all-targets clean (0 new warnings); cargo test -p baud-server --bin baud-server run_kvm:: -> 25 passed (up from 24); cargo test -p baud-cli -> 1 passed
+  - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation by gate.sh's own phase 6 -- the documented load-flake), 1 skipped (pkg-build-cli, fingerprint unchanged) -- counts as a passing gate per todo.md §15
+---

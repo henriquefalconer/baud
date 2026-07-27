@@ -148,10 +148,10 @@ pub async fn render(
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
     #[allow(clippy::type_complexity)]
-    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>)>(
+    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>, bool)>(
         "SELECT kernel_path, cmdline, tape_hex, initramfs_path, periodic_timer_period_rcb, \
          periodic_timer_vector, periodic_timer_max_ticks, store_run_id, snapshot_node_id, \
-         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits \
+         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, acpi \
          FROM kvm_run_meta WHERE run_id = ?",
     )
     .bind(&run_id)
@@ -172,6 +172,7 @@ pub async fn render(
             rng_seed,
             rng_vector,
             rng_max_exits,
+            acpi,
         ))) => {
             let periodic_timer = match (period_rcb, vector, max_ticks) {
                 (Some(p), Some(v), Some(m)) => Some((p as u64, v as u8, m as u32)),
@@ -208,6 +209,7 @@ pub async fn render(
                         initramfs_path,
                         periodic_timer,
                         virtio_rng,
+                        acpi,
                         from_step,
                         to_step,
                     })
@@ -289,6 +291,7 @@ struct RealReplayParams {
     initramfs_path: Option<String>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    acpi: bool,
     from_step: u64,
     to_step: Option<u64>,
 }
@@ -311,6 +314,7 @@ async fn render_frames_from_real_replay(
         initramfs_path,
         periodic_timer,
         virtio_rng,
+        acpi,
         from_step,
         to_step,
     } = params;
@@ -334,6 +338,7 @@ async fn render_frames_from_real_replay(
             initramfs.as_deref(),
             periodic_timer,
             virtio_rng,
+            acpi,
         )
     })
     .await
@@ -367,6 +372,7 @@ struct RealReplayParams {
     initramfs_path: Option<String>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    acpi: bool,
     from_step: u64,
     to_step: Option<u64>,
 }

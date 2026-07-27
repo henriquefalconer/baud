@@ -2435,11 +2435,25 @@ snapshot, not a duplicate of it.
      build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 new warnings; 26
      baseline unchanged); full `bash drive/gate.sh` (24/24, 5m43s) confirms the shared rebuilt
      `linux-guest` bzImage introduced no regression in any of the other fixtures/drive scripts that
-     boot it. **Still open**: `write_acpi_tables` is not yet the production default for `baud run
-     kvm`'s plain path (opt-in only, exercised so far by this one dedicated test); (d) (the actual
-     Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` + the cross-VM fingerprint) remain not
-     started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
-     (item 3 above), unrelated to this PCI/ACPI work.
+     boot it. **`write_acpi_tables` is now wired as the production default for `baud run kvm`'s
+     plain path** (previously opt-in only): `RunKvmBody` gained an `acpi: bool` field
+     (`#[serde(default)]`, false preserves prior behavior; `crates/baud-server/src/routes/run_kvm.rs`),
+     threaded through `boot_run_and_drain`/`boot_and_drain_frames`/`boot_and_run` — when true,
+     `boot_run_and_drain` calls `mv.write_acpi_tables()` right after boot, before the guest runs —
+     and persisted into a new `kvm_run_meta.acpi` column (migration
+     `crates/baud-server/migrations/0014_kvm_run_meta_acpi.sql`) so `stream::render`'s real-replay
+     path reboots the exact same guest; `baud run kvm --acpi` (`crates/baud-cli/src/cmds/run.rs`) is
+     the actual user-facing surface, not just the HTTP route. New real-hardware test
+     `run_kvm_boots_a_real_linux_guest_with_acpi_enabled` (`crates/baud-server/src/routes/run_kvm.rs`)
+     proves the route-level wiring boots cleanly and reproducibly with ACPI tables written, 2/2
+     identical console output across two boots; `cargo test -p baud-server --bin baud-server
+     run_kvm::` → 25 passed, 0 failed (up from 24 by exactly this test). Deliberately not extended to
+     `RunKvmBranchBody`/`RunKvmResumeBody` — the branch/resume/generate routes still can't turn ACPI
+     on at all, still pass `acpi: false` literally into `KvmBootParams` — scoped to the plain path
+     per this item's own wording. **Still open**: (d) (the actual Ubuntu 18.04.1 cloud image) and (e)
+     (`drive/h9.sh` + the cross-VM fingerprint) remain not started. H8 Mario remains separately
+     blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem (item 3 above), unrelated to this PCI/ACPI
+     work.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

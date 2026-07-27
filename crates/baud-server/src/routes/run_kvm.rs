@@ -74,6 +74,21 @@ pub struct RunKvmBody {
     /// like every existing `boot`/`restore` call site.
     #[serde(default)]
     pub virtio_rng: Option<VirtioRngSpec>,
+    /// When `true`, write the minimal ACPI table set (`Multiverse::write_acpi_tables` — RSDP → XSDT
+    /// → FADT + DSDT + MADT-with-one-LAPIC, `crate::acpi`) into guest memory right after boot,
+    /// before the guest runs at all — closes todo.md §14 item 5(c)'s last-open gap
+    /// ("`write_acpi_tables` is not yet the production default for `baud run kvm`'s plain path").
+    /// Harmless no-op for a guest that boots with `acpi=off` (the `cmdline` default): the tables
+    /// land in the free BIOS-area window `layout.rs` reserves for them and are never read by a
+    /// kernel whose own ACPI subsystem is disabled. A caller wanting a real ACPI-enabled boot must
+    /// also supply a `cmdline` without `acpi=off` (this field does not rewrite `cmdline` itself) and
+    /// boot a `CONFIG_ACPI=y` kernel — see `guest_kernel_boots_with_acpi_enabled_and_recognizes_the_
+    /// lapic` (`baud_multiverse::linux`) for the primitive-level proof and this crate's own
+    /// `run_kvm_boots_a_real_linux_guest_with_acpi_enabled` for the route-level one. `false` (the
+    /// default) preserves this route's exact prior behavior — no ACPI tables, exactly like every
+    /// existing `boot`/`boot_with_rdseed_sites` call site before this field existed.
+    #[serde(default)]
+    pub acpi: bool,
 }
 
 /// See [`RunKvmBody::virtio_rng`]'s doc for why this exists at all.
@@ -158,13 +173,14 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     };
     let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
     let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
+    let acpi = body.acpi;
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
     let tape_hex = body.tape_hex.clone();
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
     let result = tokio::task::spawn_blocking(move || {
-        boot_run_and_drain(&kernel_path, &cmdline, tape, initramfs.as_deref(), periodic_timer, virtio_rng)
+        boot_run_and_drain(&kernel_path, &cmdline, tape, initramfs.as_deref(), periodic_timer, virtio_rng, acpi)
     })
     .await
     .expect("run/kvm task panicked");
@@ -184,6 +200,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                     initramfs_path: body.initramfs_path.as_deref(),
                     periodic_timer,
                     virtio_rng,
+                    acpi,
                     store_run_id: None,
                     snapshot_node_id: None,
                 };
@@ -218,6 +235,9 @@ struct KvmBootParams<'a> {
     periodic_timer: Option<(u64, u8, u32)>,
     /// `(seed, vector, max_exits)` — see [`RunKvmBody::virtio_rng`]'s doc.
     virtio_rng: Option<(u64, u8, u32)>,
+    /// See [`RunKvmBody::acpi`]'s doc. Persisted so `stream::render`'s real-replay path
+    /// (`render_frames_from_real_replay`) reboots the exact same guest.
+    acpi: bool,
     /// Set only for a resume-originated (restore-based) persisted run, where `tape_hex` is a tape
     /// *suffix* fed to `Multiverse::branch` on top of the `Universe` this names, not a whole-boot
     /// tape for `kernel_path` (which is `""` and unused in that case) — `stream::render`'s
@@ -258,9 +278,9 @@ async fn persist_kvm_run(
     sqlx::query(
         "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, initramfs_path, \
          periodic_timer_period_rcb, periodic_timer_vector, periodic_timer_max_ticks, \
-         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, \
+         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, acpi, \
          store_run_id, snapshot_node_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
             kernel_path = excluded.kernel_path,
             cmdline = excluded.cmdline,
@@ -272,6 +292,7 @@ async fn persist_kvm_run(
             virtio_rng_seed = excluded.virtio_rng_seed,
             virtio_rng_vector = excluded.virtio_rng_vector,
             virtio_rng_max_exits = excluded.virtio_rng_max_exits,
+            acpi = excluded.acpi,
             store_run_id = excluded.store_run_id,
             snapshot_node_id = excluded.snapshot_node_id,
             created_at = excluded.created_at",
@@ -287,6 +308,7 @@ async fn persist_kvm_run(
     .bind(rng_seed)
     .bind(rng_vector)
     .bind(rng_max_exits)
+    .bind(params.acpi)
     .bind(params.store_run_id)
     .bind(params.snapshot_node_id)
     .bind(now)
@@ -350,10 +372,10 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None).map(|(outcome, _records)| outcome)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, false).map(|(outcome, _records)| outcome)
 }
 
-/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`, see
+/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`/`acpi`, see
 /// [`RunKvmBody`]'s doc for why each exists), run to first `Hlt`/`Shutdown`, then drain every
 /// tape-device record the guest emitted along the way (`Multiverse::drain_tape_records`) — the
 /// same boot `boot_and_run` does, plus the drain `/run/kvm`'s `run()` handler needs to persist
@@ -366,6 +388,7 @@ fn boot_run_and_drain(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    acpi: bool,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
@@ -379,6 +402,9 @@ fn boot_run_and_drain(
         rdseed_sites,
     )
     .map_err(|e| format!("boot error: {e}"))?;
+    if acpi {
+        mv.write_acpi_tables().map_err(|e| format!("write_acpi_tables error: {e}"))?;
+    }
     if let Some((seed, _, _)) = virtio_rng {
         mv.enable_virtio_rng();
         mv.seed_virtio_rng_entropy(seed);
@@ -419,7 +445,9 @@ fn boot_run_and_drain(
 /// `/run/kvm` persisted (`kvm_run_meta`), instead of fabricating a synthetic gradient from a
 /// stored hash. `virtio_rng` is threaded through exactly like `periodic_timer` — `stream::render`
 /// now reads the `virtio_rng_*` columns back and passes them here, so a virtio-rng-enabled run
-/// replays with the device enabled and seeded identically to its original boot.
+/// replays with the device enabled and seeded identically to its original boot. `acpi` is
+/// threaded the same way (the `kvm_run_meta.acpi` column), so an ACPI-enabled run replays with
+/// `write_acpi_tables` called identically to its original boot.
 pub(crate) fn boot_and_drain_frames(
     kernel_path: &Path,
     cmdline: &str,
@@ -427,8 +455,10 @@ pub(crate) fn boot_and_drain_frames(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    acpi: bool,
 ) -> Result<Vec<baud_proto::FrameRecord>, String> {
-    let (_outcome, records) = boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer, virtio_rng)?;
+    let (_outcome, records) =
+        boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer, virtio_rng, acpi)?;
     Ok(records
         .into_iter()
         .filter_map(|m| match m {
@@ -666,6 +696,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                             initramfs_path: body.initramfs_path.as_deref(),
                             periodic_timer,
                             virtio_rng,
+                            acpi: false, // RunKvmBranchBody has no `acpi` field yet — see RunKvmBody::acpi's doc
                             store_run_id: None,
                             snapshot_node_id: None,
                         };
@@ -763,6 +794,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         initramfs_path: body.initramfs_path.as_deref(),
                         periodic_timer,
                         virtio_rng,
+                        acpi: false, // RunKvmBranchBody has no `acpi` field yet — see RunKvmBody::acpi's doc
                         store_run_id: None,
                         snapshot_node_id: None,
                     };
@@ -1449,6 +1481,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                             initramfs_path: None,
                             periodic_timer,
                             virtio_rng,
+                            acpi: false, // RunKvmResumeBody has no `acpi` field yet — see RunKvmBody::acpi's doc
                             store_run_id: Some(&run_id),
                             snapshot_node_id: Some(&node_id_hex),
                         };
@@ -1533,6 +1566,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                         initramfs_path: None,
                         periodic_timer,
                         virtio_rng,
+                        acpi: false, // RunKvmResumeBody has no `acpi` field yet — see RunKvmBody::acpi's doc
                         store_run_id: Some(&run_id),
                         snapshot_node_id: Some(&node_id_hex),
                     };
@@ -1725,8 +1759,10 @@ mod tests {
         let kernel = framebuffer_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None).expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None).expect("second boot failed");
+        let first =
+            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, false).expect("first boot failed");
+        let second =
+            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, false).expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
         assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
@@ -1762,9 +1798,9 @@ mod tests {
         let cmdline = "console=ttyS0";
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng)
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, false)
             .expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng)
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, false)
             .expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
@@ -1807,7 +1843,7 @@ mod tests {
         assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, false)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(
@@ -1848,7 +1884,7 @@ mod tests {
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, false)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 3);
@@ -1924,6 +1960,7 @@ mod tests {
             Some(&initramfs),
             Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
             None,
+            false,
         )
         .expect("real linux-guest boot through boot_run_and_drain failed");
 
@@ -1931,6 +1968,56 @@ mod tests {
         assert!(
             console.contains("baud-guest: minimal kernel reached /init"),
             "guest must reach /init and print its marker; got:\n{console}"
+        );
+    }
+
+    /// Closes todo.md §14 item 5(c)'s last-open gap: `write_acpi_tables` was only reachable from a
+    /// Rust test calling `Multiverse` directly (`baud_multiverse::linux::
+    /// guest_kernel_boots_with_acpi_enabled_and_recognizes_the_lapic`), never through the
+    /// CLI/server path — this is the server-route-level proof that `RunKvmBody::acpi`/
+    /// `boot_run_and_drain`'s new `acpi` parameter actually calls `write_acpi_tables` and does not
+    /// break a real Linux guest's boot, mirroring
+    /// `run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer`'s own doc but for this
+    /// field. Deep proof that the guest's own `setup_local_APIC()` actually consumed the tables
+    /// (not just that nothing broke) is `baud-multiverse`'s own primitive-level test above — this
+    /// route doesn't expose the booted `Multiverse` (`boot_run_and_drain` drops it once it returns
+    /// the outcome tuple), so console text plus a clean two-boot run is what this level can prove.
+    #[test]
+    fn run_kvm_boots_a_real_linux_guest_with_acpi_enabled() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_initramfs();
+        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
+        assert_ne!(
+            cmdline,
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE,
+            "the replace must actually have matched"
+        );
+        const PERIOD_RCB: u64 = 500_000;
+        const TIMER_VECTOR: u8 = 0xec;
+        const MAX_TICKS: u32 = 2000;
+
+        let mut consoles = Vec::new();
+        for i in 0..2 {
+            let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
+                &kernel,
+                &cmdline,
+                vec![],
+                Some(&initramfs),
+                Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+                None,
+                true, // acpi
+            )
+            .unwrap_or_else(|e| panic!("run {i}: acpi-enabled boot through boot_run_and_drain failed: {e}"));
+            let console = String::from_utf8_lossy(&console_output).to_string();
+            assert!(
+                console.contains("baud-guest: minimal kernel reached /init"),
+                "run {i}: guest must still reach /init and print its marker with acpi enabled; got:\n{console}"
+            );
+            consoles.push(console);
+        }
+        assert_eq!(
+            consoles[0], consoles[1],
+            "an acpi-enabled boot through this route must stay exactly as reproducible as every other guest here"
         );
     }
 
@@ -2209,7 +2296,7 @@ mod tests {
                 .expect("resume_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, false)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(resumed_outcomes.len(), 3);
