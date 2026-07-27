@@ -68,6 +68,12 @@ pub enum BootParamsError {
     RngSeedWrite(vm_memory::guest_memory::Error),
     #[error("failed writing initramfs ({0} bytes) to guest memory: {1}")]
     InitramfsWrite(usize, vm_memory::guest_memory::Error),
+    #[error(
+        "initramfs ({initramfs_len} bytes) does not fit at {addr:#x}: {addr:#x} + {initramfs_len} \
+         exceeds ram_size ({ram_size} bytes) — this kernel's own init_size ({kernel_init_size:#x}) \
+         pushed the load address past available RAM"
+    )]
+    InitramfsDoesNotFit { addr: u64, initramfs_len: usize, ram_size: usize, kernel_init_size: u32 },
 }
 
 /// Write the `SETUP_RNG_SEED` `setup_data` node — `{next: 0, type: SETUP_RNG_SEED, len:
@@ -85,14 +91,16 @@ fn write_rng_seed_setup_data<M: GuestMemoryBackend>(
     guest_mem.write_slice(&bytes, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR))
 }
 
-/// Write `initramfs` verbatim at [`layout::INITRAMFS_ADDR`] — no framing, no compression baud adds
-/// itself; the bytes are whatever `baud-packages` (todo.md §4.5) produced (a gzipped reproducible
-/// newc cpio, §4.3), and the kernel's own initramfs unpacker handles that format.
+/// Write `initramfs` verbatim at `addr` (`layout::initramfs_load_addr`) — no framing, no
+/// compression baud adds itself; the bytes are whatever `baud-packages` (todo.md §4.5) produced (a
+/// gzipped reproducible newc cpio, §4.3), and the kernel's own initramfs unpacker handles that
+/// format.
 fn write_initramfs<M: GuestMemoryBackend>(
     guest_mem: &M,
     initramfs: &[u8],
+    addr: u64,
 ) -> Result<(), vm_memory::guest_memory::Error> {
-    guest_mem.write_slice(initramfs, GuestAddress(layout::INITRAMFS_ADDR))
+    guest_mem.write_slice(initramfs, GuestAddress(addr))
 }
 
 /// Load `kernel_path` (a bzImage) into `guest_mem`, write `cmdline` at [`layout::CMDLINE_ADDR`],
@@ -145,9 +153,18 @@ pub fn load_kernel_and_write_boot_params<M: GuestMemoryBackend>(
     hdr.setup_data = layout::RNG_SEED_SETUP_DATA_ADDR;
 
     if let Some(initramfs) = initramfs {
-        write_initramfs(guest_mem, initramfs)
+        let addr = layout::initramfs_load_addr(hdr.init_size);
+        if addr.saturating_add(initramfs.len() as u64) > ram_size as u64 {
+            return Err(BootParamsError::InitramfsDoesNotFit {
+                addr,
+                initramfs_len: initramfs.len(),
+                ram_size,
+                kernel_init_size: hdr.init_size,
+            });
+        }
+        write_initramfs(guest_mem, initramfs, addr)
             .map_err(|e| BootParamsError::InitramfsWrite(initramfs.len(), e))?;
-        hdr.ramdisk_image = layout::INITRAMFS_ADDR as u32;
+        hdr.ramdisk_image = addr as u32;
         hdr.ramdisk_size = initramfs.len() as u32;
         // Highest guest-physical address the kernel may place/relocate the initrd at — left at 0
         // this reads to some kernels as "no initrd allowed above address 0" rather than "no

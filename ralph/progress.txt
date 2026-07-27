@@ -7221,3 +7221,51 @@ todo.md updated (3095->3138 lines): item 10's closing note narrowed to point at 
   - Verified: cargo build/clippy -p baud-server -p baud-cli clean (no new warnings; grep confirmed none touch the changed files); cargo test -p baud-server verify_fingerprint 3 passed; cargo test --workspace all green, 0 failed; bats drive/gate.test.bats --filter-tags '!slow' 28/28 pass (no regressions from the two new servers per script); bash drive/h/h9.sh standalone: H9.1-H9.5 all PASS on real /dev/kvm (~9s); full bash drive/gate.sh: 24 passed, 0 failed, 1 skipped (pkg-build-cli, cached), 3m29s, clean, no flakes this run
   - Still open for full H9: the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)) plus the ACPI/PCI/virtio-blk machine additions §4.7 specifies; H8 Mario remains blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem; the Buildroot/pinned-Nix guest-image pipeline (§4.5)
 ---
+
+Post-push verification: origin/main now at 2c947ea, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (24 passed, 0 failed, 1 skipped, 3m29s) before this push, at this exact commit's tree.
+
+todo.md still has pending items: the real Ubuntu 18.04.1 cloud image + ACPI/PCI/virtio-blk (H9 (d)/(e)) remain not started; H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; Buildroot/pinned-Nix guest-image pipeline (§4.5) not implemented. Emitting NEXT.
+
+## 2026-07-27T15:57:48 UTC (16min) - Session usage — build-14 [sonnet]
+- cost $3.1761 (from claude -p)
+- context 143,028 tok peak of 1M (14%) across 58 inference calls, monotonic
+- models sonnet-5 $3.1729 (in 116 / out 38,721 / cache-read 6,252,545) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T104433Z/015-build-14.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 15
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and specs...
+
+Chose H9 (d)/(e): acquiring the real Ubuntu 18.04.1 cloud image and booting it via virtio-blk to attempt the cross-VM fingerprint against a real distro instead of the timer-guest stand-in — it's the last unstarted named H9 sub-item, all prerequisite plumbing (virtio-blk, ACPI/PCI, cross-process fingerprint) is already built and hardware-verified.
+
+Downloaded and SHA256-verified the real Ubuntu 18.04.1 cloud image (qcow2 + unpacked vmlinuz-generic/initrd-generic) against the official SHA256SUMS. Converting qcow2->raw and prepping per spec §4 next.
+
+Confirmed the CLI/server already have every primitive needed for an Ubuntu boot attempt: --acpi, --virtio-blk-image, --initramfs, --cmdline all wired end-to-end on 'baud run kvm'. Building the workspace, then attempting a real boot with the verified 18.04.1 artifacts to see how far it gets.
+
+First real Ubuntu boot attempt hit a genuine kernel crash: 'Initramfs unpacking failed: junk in compressed archive' followed by a page fault in free_reserved_area, preceded by 3x 'do_IRQ: No irq handler for vector' -- all within the first 236ms, before periodic timer ticks should even be due. Isolating variables: retrying without --acpi/--virtio-blk to see if the plain kernel+initrd+periodic-timer combo alone reproduces it.
+
+ROOT-CAUSED the crash: bzImage header decode shows Ubuntu's vmlinuz-generic has init_size=0x1e4f000 (~30.4MiB) from KERNEL_LOAD_ADDR=0x200000 (2MiB), i.e. the kernel's own self-decompression scratch space extends to ~32.28MiB -- just past the fixed INITRAMFS_ADDR=0x2000000 (32MiB), so the kernel stomps the first ~299KB of the initrd during its own decompression before ever unpacking it. This is why every custom baud fixture kernel (tiny, <30MiB footprint) never hit it. Fixing by placing the initramfs dynamically past the real kernel's init_size instead of a fixed constant.
+
+With generous +64MiB slack added past init_size the crash disappeared entirely and the boot proceeded all the way to 'Freeing unused kernel memory' (past initramfs unpack, past most of early boot) -- confirming placement WAS the real mechanism, but init_size alone understates the true safe margin. Bisecting to find the real minimal margin before committing a principled fix.
+
+Bisected the real margin: +8MiB still corrupts the initrd, +16MiB and +32MiB are both clean (boot reaches 'Freeing unused kernel memory'). Settling on a documented +32MiB fixed safety margin (2x the empirically-found minimum) rather than chasing the exact internal mechanism further -- finalizing the fix, removing the throwaway diagnostic test, and re-verifying the full workspace.
+
+Real Ubuntu boot with ACPI+PCI+virtio-blk enabled now gets past initramfs unpack (fix confirmed working under the full device set too), ACPI/PCI enumerate cleanly, and boot reaches 'Freeing unused kernel memory' (end of kernel init, about to exec /init) at 200 ticks/500000 RCB each -- cut off there by the tick budget, not a crash. Retrying with a much larger tick budget to see if it reaches virtio-blk probe / root mount / login.
+
+Wrote examples/ubuntu/fetch.sh + BUILD.md (reusable, idempotent download/verify/prep script, artifacts kept outside git) and updated todo.md §14 item 12 with the full narrative: image acquired+verified, initramfs_load_addr bug root-caused+fixed+bisected, and the new 'stops at first idle halt' blocker for reaching login. Running the full pre-push gate next.
+
+## 2026-07-27T16:37:10 UTC - Changes committed.
+- Acquired, SHA256-verified, and prepped the real Ubuntu 18.04.1 LTS cloud image (H9 (d)) via a new reusable examples/ubuntu/fetch.sh + BUILD.md
+- Root-caused and fixed a real, general initramfs-placement bug that any sufficiently large kernel would hit
+- Files changed: crates/baud-multiverse/src/layout.rs, crates/baud-multiverse/src/linux/bootparams.rs, examples/ubuntu/fetch.sh (new), examples/ubuntu/BUILD.md (new), .gitignore, todo.md
+- **Brief description of changes:**
+  - Discovered cloud-images.ubuntu.com/releases/18.04/release/ is a rolling alias (now serves 18.04.6); pinned the dated release-20180806 build that actually reports "Ubuntu 18.04.1 LTS" per specs/baud-ubuntu.md §4
+  - Real boot attempt with the actual kernel+initrd crashed: "Initramfs unpacking failed: junk in compressed archive" -> a page fault freeing the corrupted initrd
+  - Root-caused via direct bzImage header decode: the kernel's own init_size-driven self-decompression scratch space collided with the fixed 32 MiB INITRAMFS_ADDR constant (every prior baud fixture kernel was too small to ever hit this)
+  - Added layout::initramfs_load_addr(kernel_init_size), computing real placement dynamically; verified byte-load-fidelity with a direct read-back test; real-hardware-bisected the required safety margin (+8 MiB still crashed, +16/+32 MiB clean) rather than guessing
+  - Added BootParamsError::InitramfsDoesNotFit so an oversized placement fails loud instead of silently writing out of bounds
+  - With the fix, a full real boot (kernel + initrd + real 2.2 GiB rootfs.raw via virtio-blk + ACPI + PCI) now reaches "Freeing unused kernel memory" (end of kernel init) -- confirmed the remaining blocker is that run_to_first_halt_with_periodic_timer stops at the guest's first idle HLT, not a truncation (byte-identical console at 200 vs 3000 ticks)
+  - Updated todo.md §14 item 12 with the full narrative and the precise remaining gap for the next iteration
+---

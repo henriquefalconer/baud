@@ -52,3 +52,11 @@ keys.txt
 
 # ─── Python bytecode ───
 __pycache__/
+
+# ─── examples/ubuntu (H9): fetch.sh's large downloaded/derived artifacts, never committed —
+# defence in depth, since fetch.sh's default --out-dir is already outside this tree ───
+/examples/ubuntu/*.img
+/examples/ubuntu/*.raw
+/examples/ubuntu/vmlinuz-generic
+/examples/ubuntu/initrd-generic
+/examples/ubuntu/SHA256SUMS*

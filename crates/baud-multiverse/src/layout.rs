@@ -70,12 +70,54 @@ pub const RNG_SEED_SETUP_DATA_LEN: u64 = 16 + 32;
 pub const CMDLINE_ADDR: u64 = 0x0002_0000;
 pub const CMDLINE_MAX_SIZE: usize = 0x1_0000;
 
-/// Where the initramfs (`ramdisk_image`/`ramdisk_size`, todo.md §4.2) is loaded — 32 MiB in,
-/// comfortably clear of [`KERNEL_LOAD_ADDR`] for any minimal builtin kernel (todo.md §4.1's
+/// Where the initramfs (`ramdisk_image`/`ramdisk_size`, todo.md §4.2) is loaded by default — 32 MiB
+/// in, comfortably clear of [`KERNEL_LOAD_ADDR`] for any minimal builtin kernel (todo.md §4.1's
 /// no-modules config; a `bzImage` built that way is a few MiB at most) with room to grow, and well
 /// inside [`GUEST_RAM_SIZE`] so a compressed initramfs has tens of MiB of headroom before it would
-/// need to shrink below what a real rootfs (§4.5) needs.
+/// need to shrink below what a real rootfs (§4.5) needs. **Not always the actual load address** —
+/// see [`initramfs_load_addr`], which every real caller uses instead of this constant directly.
 pub const INITRAMFS_ADDR: u64 = 0x0200_0000;
+
+/// The real initramfs load address for a kernel whose own self-decompression footprint is
+/// `kernel_init_size` bytes (`setup_header.init_size`, read straight off the loaded bzImage —
+/// Documentation/x86/boot.txt: the bootloader must place nothing else in
+/// `[code load address, code load address + init_size)` until the kernel proper has decompressed
+/// itself). A real distro kernel found this fixed-32-MiB constant broken in practice: Ubuntu
+/// 18.04.1's stock `vmlinuz-generic` (4.15) reports `init_size = 0x1e4f000` (~30.4 MiB) from
+/// [`KERNEL_LOAD_ADDR`] (2 MiB) — the kernel's own decompression scratch space extends to
+/// ~32.28 MiB, just past [`INITRAMFS_ADDR`] at exactly 32 MiB, so the kernel silently overwrote the
+/// first ~300 KiB of the initrd with its own decompression output before ever unpacking it
+/// (`Initramfs unpacking failed: junk in compressed archive`, then a page fault in
+/// `free_reserved_area` freeing the now-inconsistent initrd pages). Every prior baud fixture kernel
+/// (todo.md §4.1's no-modules minimal config) stayed small enough that `KERNEL_LOAD_ADDR +
+/// init_size` never reached 32 MiB, so this collision was real but unobserved until a full-size
+/// distro kernel was tried.
+///
+/// **`init_size` alone is not the whole story**: moving the initramfs to exactly
+/// `KERNEL_LOAD_ADDR + init_size` (no margin) still reproduced the identical crash — real-hardware
+/// bisection against this exact kernel found the true requirement lands somewhere between 8 MiB and
+/// 16 MiB *past* `init_size` (a fixed +8 MiB margin still corrupted the initrd; +16 MiB and +32 MiB
+/// were both clean, confirmed by booting past `Unpacking initramfs...` to `Freeing unused kernel
+/// memory` with no oops). The precise mechanism was not root-caused further (a plausible suspect:
+/// the decompressor's own internal relocate-then-decompress safety copy, Documentation/x86/boot.txt
+/// does not fully spell out its size) — rather than chase it further, a fixed `+32 MiB` safety
+/// margin is applied on top of `init_size`, but **only when the kernel's raw (no-margin) scratch
+/// space already reaches [`INITRAMFS_ADDR`]** — every existing fixture kernel's raw
+/// `KERNEL_LOAD_ADDR + init_size` sits comfortably below [`INITRAMFS_ADDR`] (a few MiB at most, todo.md
+/// §4.1's no-modules config), so this returns exactly [`INITRAMFS_ADDR`] unchanged for all of them
+/// (verified by `initramfs_load_addr_is_unchanged_for_any_kernel_small_enough_to_fit_under_the_old_
+/// constant` below); applying the margin unconditionally would have pushed every one of those small
+/// kernels' placement a full 32 MiB higher for no reason, breaking their locked-in
+/// `ramdisk_image == INITRAMFS_ADDR` assertions.
+pub fn initramfs_load_addr(kernel_init_size: u32) -> u64 {
+    const DECOMPRESSION_SAFETY_MARGIN: u64 = 32 * 1024 * 1024;
+    let kernel_scratch_end = KERNEL_LOAD_ADDR + u64::from(kernel_init_size);
+    if kernel_scratch_end <= INITRAMFS_ADDR {
+        INITRAMFS_ADDR
+    } else {
+        (kernel_scratch_end + DECOMPRESSION_SAFETY_MARGIN).next_multiple_of(0x1000)
+    }
+}
 
 /// The three fixed page-table pages built fresh on every boot (`build_identity_page_tables`
 /// below) — one PML4 page, one PDPTE page, and enough PDE pages to cover `GUEST_RAM_SIZE` via
@@ -307,6 +349,36 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initramfs_load_addr_is_unchanged_for_any_kernel_small_enough_to_fit_under_the_old_constant() {
+        // Every fixture kernel in this workspace (todo.md §4.1's no-modules minimal config) has an
+        // init_size far under `INITRAMFS_ADDR - KERNEL_LOAD_ADDR` (30 MiB) -- confirm the new
+        // dynamic placement is a no-op for them, so no existing boot's placement changes.
+        assert_eq!(initramfs_load_addr(0), INITRAMFS_ADDR);
+        assert_eq!(initramfs_load_addr(4 * 1024 * 1024), INITRAMFS_ADDR); // a 4 MiB kernel
+        assert_eq!(
+            initramfs_load_addr((INITRAMFS_ADDR - KERNEL_LOAD_ADDR) as u32),
+            INITRAMFS_ADDR,
+            "landing exactly on the old boundary must not push past it"
+        );
+    }
+
+    #[test]
+    fn initramfs_load_addr_moves_past_a_real_distro_kernels_larger_init_size() {
+        // Ubuntu 18.04.1's stock vmlinuz-generic (4.15): init_size = 0x1e4f000, which the fixed
+        // 32 MiB constant collided with (the kernel's own self-decompression overwrote the first
+        // ~300 KiB of the initrd before it was ever unpacked). The dynamic address must clear the
+        // kernel's own scratch region entirely.
+        const UBUNTU_INIT_SIZE: u32 = 0x01e4_f000;
+        let addr = initramfs_load_addr(UBUNTU_INIT_SIZE);
+        assert!(
+            addr >= KERNEL_LOAD_ADDR + u64::from(UBUNTU_INIT_SIZE),
+            "initramfs must load at or after the kernel's own decompression scratch space ends"
+        );
+        assert!(addr > INITRAMFS_ADDR, "this kernel's footprint exceeds the old fixed constant");
+        assert_eq!(addr % 0x1000, 0, "must stay 4 KiB-aligned");
+    }
 
     #[test]
     fn pml4_entry_zero_points_at_pdpte_present_and_writable() {

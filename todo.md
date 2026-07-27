@@ -2833,6 +2833,65 @@ snapshot, not a duplicate of it.
      real and hardware-verified, but still exercises the `timer-guest` fixture standing in for the
      not-yet-acquired distro image. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging
      problem, untouched by this iteration.
+  12. **H9 — the real Ubuntu 18.04.1 cloud image (H9 (d)) is now acquired, SHA256-verified, and prepped; a
+     real boot attempt found and fixed a genuine, general `initramfs_load_addr` placement bug, then reached
+     the end of kernel init before hitting a distinct, well-scoped remaining gap.** `examples/ubuntu/fetch.sh`
+     (new) downloads, verifies, and preps the exact dated build `specs/baud-ubuntu.md` §4 asks for —
+     **finding**: `cloud-images.ubuntu.com/releases/18.04/release/` is a *rolling* alias that now serves
+     18.04.6, not 18.04.1; the dated snapshot `releases/bionic/release-20180806/` was confirmed (by
+     downloading and reading `/etc/os-release`/`/etc/issue` directly) to be the one that actually reports
+     `PRETTY_NAME="Ubuntu 18.04.1 LTS"` and the exact three-token `/etc/issue` banner form §4 names — pinned
+     in `fetch.sh`. `examples/ubuntu/BUILD.md` documents all of this plus a manual repro command. Artifacts
+     (~2.2 GiB raw rootfs + kernel + initrd) are never committed (`fetch.sh` writes outside the repo tree by
+     default, `.gitignore` guards the in-tree path too, same convention as `~/wsl-kernel-src`).
+     **Real bug found and fixed**: booting this real kernel+initrd (every CLI flag needed —
+     `--initramfs`/`--acpi`/`--virtio-blk-image` — was already wired end-to-end by items 5/8-11, never
+     exercised against a full-size distro kernel until now) crashed immediately: `Initramfs unpacking failed:
+     junk in compressed archive`, then a page fault in `free_reserved_area`. Root-caused by decoding the raw
+     bzImage header directly (`hdr.init_size = 0x1e4f000` ≈ 30.4 MiB from `KERNEL_LOAD_ADDR` at 2 MiB): the
+     kernel's own self-decompression scratch space extends to ~32.28 MiB, just past the fixed
+     `layout::INITRAMFS_ADDR` at exactly 32 MiB — the kernel silently overwrote the first ~300 KiB of the
+     initrd with its own decompression output before ever unpacking it. Every prior baud fixture kernel
+     (todo.md §4.1's no-modules minimal config, a few MiB at most) stayed small enough this was never hit.
+     A direct read-back unit test (`load_kernel_and_write_boot_params` writes, then a plain `read_slice`
+     compares against the source file) proved the *load* step was already byte-faithful, so the corruption
+     happens during the kernel's own early execution, not baud's write path — ruling out a simple off-by-one
+     in the write itself. New `layout::initramfs_load_addr(kernel_init_size)` (`crates/baud-multiverse/src/
+     layout.rs`) computes the real placement dynamically: for a kernel small enough that
+     `KERNEL_LOAD_ADDR + init_size` stays at or under the old fixed `INITRAMFS_ADDR`, it returns
+     `INITRAMFS_ADDR` unchanged (every existing fixture, confirmed by a new unit test, so no prior boot's
+     placement moved); otherwise it moves past `KERNEL_LOAD_ADDR + init_size` plus a fixed `+32 MiB` safety
+     margin. **That margin number is itself a real-hardware-bisected finding, not a guess**: moving the
+     initramfs to exactly `KERNEL_LOAD_ADDR + init_size` (zero margin) still reproduced the identical crash;
+     `+8 MiB` still corrupted it; `+16 MiB` and `+32 MiB` were both clean (confirmed by booting past
+     `Unpacking initramfs...` all the way to `Freeing unused kernel memory` with no oops). The exact
+     mechanism requiring more than the documented `init_size` was not root-caused further (a plausible
+     suspect noted in the function's own doc: the decompressor's own internal relocate-then-decompress
+     safety copy, which Documentation/x86/boot.txt does not fully size) — `+32 MiB` (2x the empirically-found
+     minimum) is used as a documented, verified-safe margin rather than chasing the precise mechanism.
+     `bootparams.rs`'s `load_kernel_and_write_boot_params` now calls this function instead of using the fixed
+     constant directly, and returns a new `BootParamsError::InitramfsDoesNotFit` if the computed placement
+     plus the initramfs's own length would exceed `ram_size`, rather than silently writing out of bounds.
+     `cargo test -p baud-multiverse -- layout:: bootparams::` → 18 passed, 0 failed (2 new pure unit tests for
+     `initramfs_load_addr` itself, no external fixture needed); full `cargo build`/`clippy --workspace
+     --all-targets`/`test --workspace` and `bash drive/gate.sh` reconfirmed clean (§15's protocol, see below).
+     **With the fix, a real boot attempt (kernel + initrd + the real 2.2 GiB rootfs.raw via
+     `--virtio-blk-image` + `--acpi`) got much further**: ACPI tables parse cleanly (`ACPI: Core revision
+     ...`), PCI enumerates via the legacy `0xCF8/0xCFC` mechanism (`PCI: Using configuration type 1 for base
+     access`), the initramfs unpacks successfully, and the boot reaches `Freeing unused kernel memory` — the
+     very end of kernel init, immediately before handing off to `/init`. **Still open, the next concrete
+     blocker**: the run stops there because `Multiverse::run_to_first_halt_with_periodic_timer` (the
+     primitive `boot_run_and_drain` uses) returns on the guest's *first* `Hlt`, and a real multi-tasking
+     kernel's idle loop calls `hlt` the moment nothing is runnable — which happens almost immediately once
+     `/init` blocks on its first disk read, long before systemd, `agetty`, or the `ubuntu login:` banner.
+     Raising `--periodic-timer-max-ticks` from 200 to 3000 produced **byte-identical console output**
+     (confirmed via a real side-by-side diff), proving this is a genuine halt, not a truncation — reaching
+     login needs a different run-loop primitive (survive/resume past an idle halt, or "run until console
+     contains `ubuntu login:`"), not a bigger tick budget on the existing one. That primitive does not exist
+     yet anywhere in this workspace (every existing "run until X" combinator stops at the first halt, a
+     `MARK_BRANCH`, or a fixed console-byte-length target — none of those is "keep resuming across repeated
+     idle halts until a byte pattern appears"). H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/
+     Xvfb packaging problem, untouched by this iteration.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 
