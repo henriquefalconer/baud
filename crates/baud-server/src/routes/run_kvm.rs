@@ -89,6 +89,56 @@ pub struct RunKvmBody {
     /// existing `boot`/`boot_with_rdseed_sites` call site before this field existed.
     #[serde(default)]
     pub acpi: bool,
+    /// Attach a real, deterministic virtio-blk block device — a read-only, content-addressed disk
+    /// image plus an in-memory copy-on-write overlay (`Multiverse::enable_virtio_pci_blk`), with its
+    /// used-buffer interrupt delivered at a caller-specified vector
+    /// (`Multiverse::run_to_first_halt_with_virtio_pci_blk`, or the three-device periodic-timer
+    /// combinator when `periodic_timer` is also set) — hardware-proven against
+    /// `tests/fixtures/linux-guest/virtio_blk_init.c`'s real `virtio_pci_legacy`+`virtio_blk`
+    /// drivers but, before this field, reachable only from a Rust test calling `Multiverse`
+    /// directly, never through the CLI/server path (todo.md §14 item 5's last-open "boot/cmdline/
+    /// CLI wiring" gap — the concrete prerequisite for H9's Ubuntu boot). A caller wanting a real
+    /// virtio-blk boot must also supply a `cmdline` without `pci=off` (this field does not rewrite
+    /// `cmdline` itself, same caller responsibility `acpi`'s doc documents for `acpi=off`) and boot
+    /// a `CONFIG_VIRTIO_PCI_LEGACY=y CONFIG_VIRTIO_BLK=y` kernel. Combining this with `virtio_rng`
+    /// when `periodic_timer` is *not* also set has no combined run loop (both devices poll for a
+    /// `QueueNotify` once per host-side exit, and nothing drives two independent per-exit polls at
+    /// once) and is rejected with a clear error rather than silently starving one device — set
+    /// `periodic_timer` too, which every real Linux guest needs anyway for `calibrate_delay`. `None`
+    /// (the default) preserves this route's exact prior behavior — virtio-blk stays disabled,
+    /// exactly like every existing `boot`/`restore` call site before this field existed.
+    #[serde(default)]
+    pub virtio_blk: Option<VirtioBlkSpec>,
+}
+
+/// See [`RunKvmBody::virtio_blk`]'s doc for why this exists at all.
+#[derive(Debug, Deserialize)]
+pub struct VirtioBlkSpec {
+    /// Path to a raw disk image on this host's filesystem — becomes the device's read-only,
+    /// content-addressed base (`Multiverse::enable_virtio_pci_blk`'s `base_image`); every guest
+    /// write only ever lands in an in-memory copy-on-write overlay layered on top, so the base file
+    /// itself is never modified. Like `kernel_path`/`initramfs_path`, resolved on the server host
+    /// and never transferred as request content — a real disk image can be far larger than an
+    /// initramfs.
+    pub image_path: String,
+    /// Interrupt vector delivered on a serviced `QueueNotify`. Defaults to `0x3b`
+    /// (`pic8259::isa_irq_vector(11)`), the vector `PciHostBridge`'s `VIRTIO_BLK_DEFAULT_IRQ_LINE`
+    /// pre-routes virtio-blk's PCI interrupt line to (`crates/baud-multiverse/src/pci.rs`) — the
+    /// value every real-Linux-guest virtio-blk test in this workspace uses.
+    #[serde(default = "default_virtio_blk_vector")]
+    pub vector: u8,
+    /// Bound on host-side exits before giving up when no `periodic_timer` is also set — see
+    /// [`VirtioRngSpec::max_exits`]'s doc for the identical convention.
+    #[serde(default = "default_virtio_blk_max_exits")]
+    pub max_exits: u32,
+}
+
+fn default_virtio_blk_vector() -> u8 {
+    0x3b
+}
+
+fn default_virtio_blk_max_exits() -> u32 {
+    200_000
 }
 
 /// See [`RunKvmBody::virtio_rng`]'s doc for why this exists at all.
@@ -171,8 +221,20 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
         },
         None => None,
     };
+    let virtio_blk_image = match &body.virtio_blk {
+        Some(spec) => match std::fs::read(&spec.image_path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                return Json(json!({
+                    "error": format!("failed to read virtio_blk image_path '{}': {e}", spec.image_path)
+                }))
+            }
+        },
+        None => None,
+    };
     let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
     let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
+    let virtio_blk_meta = body.virtio_blk.as_ref().map(|s| (s.vector, s.max_exits));
     let acpi = body.acpi;
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
@@ -180,7 +242,20 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
     let result = tokio::task::spawn_blocking(move || {
-        boot_run_and_drain(&kernel_path, &cmdline, tape, initramfs.as_deref(), periodic_timer, virtio_rng, acpi)
+        let virtio_blk = match (virtio_blk_image.as_deref(), virtio_blk_meta) {
+            (Some(image), Some((vector, max_exits))) => Some((image, vector, max_exits)),
+            _ => None,
+        };
+        boot_run_and_drain(
+            &kernel_path,
+            &cmdline,
+            tape,
+            initramfs.as_deref(),
+            periodic_timer,
+            virtio_rng,
+            virtio_blk,
+            acpi,
+        )
     })
     .await
     .expect("run/kvm task panicked");
@@ -200,6 +275,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                     initramfs_path: body.initramfs_path.as_deref(),
                     periodic_timer,
                     virtio_rng,
+                    virtio_blk: body.virtio_blk.as_ref().map(|s| (s.image_path.as_str(), s.vector, s.max_exits)),
                     acpi,
                     store_run_id: None,
                     snapshot_node_id: None,
@@ -235,6 +311,10 @@ struct KvmBootParams<'a> {
     periodic_timer: Option<(u64, u8, u32)>,
     /// `(seed, vector, max_exits)` — see [`RunKvmBody::virtio_rng`]'s doc.
     virtio_rng: Option<(u64, u8, u32)>,
+    /// `(image_path, vector, max_exits)` — see [`RunKvmBody::virtio_blk`]'s doc. Persisted as the
+    /// image *path*, not its bytes (mirrors `initramfs_path`), so `stream::render`'s real-replay
+    /// path re-reads the same file rather than storing a potentially huge disk image in SQLite.
+    virtio_blk: Option<(&'a str, u8, u32)>,
     /// See [`RunKvmBody::acpi`]'s doc. Persisted so `stream::render`'s real-replay path
     /// (`render_frames_from_real_replay`) reboots the exact same guest.
     acpi: bool,
@@ -274,13 +354,18 @@ async fn persist_kvm_run(
         Some((s, v, m)) => (Some(s as i64), Some(v as i64), Some(m as i64)),
         None => (None, None, None),
     };
+    let (blk_image_path, blk_vector, blk_max_exits) = match params.virtio_blk {
+        Some((p, v, m)) => (Some(p), Some(v as i64), Some(m as i64)),
+        None => (None, None, None),
+    };
 
     sqlx::query(
         "INSERT INTO kvm_run_meta (run_id, kernel_path, cmdline, tape_hex, initramfs_path, \
          periodic_timer_period_rcb, periodic_timer_vector, periodic_timer_max_ticks, \
          virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, acpi, \
+         virtio_blk_image_path, virtio_blk_vector, virtio_blk_max_exits, \
          store_run_id, snapshot_node_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
             kernel_path = excluded.kernel_path,
             cmdline = excluded.cmdline,
@@ -293,6 +378,9 @@ async fn persist_kvm_run(
             virtio_rng_vector = excluded.virtio_rng_vector,
             virtio_rng_max_exits = excluded.virtio_rng_max_exits,
             acpi = excluded.acpi,
+            virtio_blk_image_path = excluded.virtio_blk_image_path,
+            virtio_blk_vector = excluded.virtio_blk_vector,
+            virtio_blk_max_exits = excluded.virtio_blk_max_exits,
             store_run_id = excluded.store_run_id,
             snapshot_node_id = excluded.snapshot_node_id,
             created_at = excluded.created_at",
@@ -309,6 +397,9 @@ async fn persist_kvm_run(
     .bind(rng_vector)
     .bind(rng_max_exits)
     .bind(params.acpi)
+    .bind(blk_image_path)
+    .bind(blk_vector)
+    .bind(blk_max_exits)
     .bind(params.store_run_id)
     .bind(params.snapshot_node_id)
     .bind(now)
@@ -372,15 +463,18 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, false).map(|(outcome, _records)| outcome)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false)
+        .map(|(outcome, _records)| outcome)
 }
 
-/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`/`acpi`, see
-/// [`RunKvmBody`]'s doc for why each exists), run to first `Hlt`/`Shutdown`, then drain every
-/// tape-device record the guest emitted along the way (`Multiverse::drain_tape_records`) — the
-/// same boot `boot_and_run` does, plus the drain `/run/kvm`'s `run()` handler needs to persist
+/// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`/`virtio_blk`/
+/// `acpi`, see [`RunKvmBody`]'s doc for why each exists), run to first `Hlt`/`Shutdown`, then drain
+/// every tape-device record the guest emitted along the way (`Multiverse::drain_tape_records`) —
+/// the same boot `boot_and_run` does, plus the drain `/run/kvm`'s `run()` handler needs to persist
 /// real `Msg::Frame` records (previously captured in-process and immediately dropped, todo.md
-/// §14's eighteenth-brick gap).
+/// §14's eighteenth-brick gap). `virtio_blk` is `(base_image_bytes, vector, max_exits)`, mirroring
+/// `initramfs`'s "caller resolves the path, this function only sees bytes" convention.
+#[allow(clippy::too_many_arguments)]
 fn boot_run_and_drain(
     kernel_path: &Path,
     cmdline: &str,
@@ -388,6 +482,7 @@ fn boot_run_and_drain(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    virtio_blk: Option<(&[u8], u8, u32)>,
     acpi: bool,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
@@ -409,32 +504,55 @@ fn boot_run_and_drain(
         mv.enable_virtio_rng();
         mv.seed_virtio_rng_entropy(seed);
     }
-    let halt = match (periodic_timer, virtio_rng) {
-        (Some((period_rcb, timer_vector, max_ticks)), Some((_, rng_vector, _))) => {
+    if let Some((base_image, _, _)) = virtio_blk {
+        mv.enable_virtio_pci_blk(base_image.to_vec());
+    }
+    let halt = match periodic_timer {
+        Some((period_rcb, timer_vector, max_ticks)) if virtio_rng.is_some() || virtio_blk.is_some() => {
+            let rng_vector = virtio_rng.map(|(_, v, _)| v).unwrap_or(0);
+            let blk_vector = virtio_blk.map(|(_, v, _)| v).unwrap_or(0);
             let (_ticks, halt) = mv
-                .run_to_first_halt_with_periodic_timer_and_virtio_rng(
+                .run_to_first_halt_with_periodic_timer_and_virtio_rng_and_virtio_pci_blk(
                     period_rcb,
                     timer_vector,
                     rng_vector,
+                    blk_vector,
                     max_ticks,
                 )
                 .map_err(|e| format!("determinism hole: {e}"))?;
             halt
         }
-        (Some((period_rcb, vector, max_ticks)), None) => {
+        Some((period_rcb, vector, max_ticks)) => {
             let (_ticks, halt) = mv
                 .run_to_first_halt_with_periodic_timer(period_rcb, vector, max_ticks)
                 .map_err(|e| format!("determinism hole: {e}"))?;
             halt
         }
-        (None, Some((_, rng_vector, max_exits))) => mv
-            .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
-            .map_err(|e| format!("determinism hole: {e}"))?,
-        // `run_to_first_halt` (unlike every arm above) has no deterministic `max_exits`/`max_ticks`
-        // bound of its own, so its error can also be `RunLoopError::WatchdogKilled` (todo.md §14.1
-        // "Still open" item 1) rather than a genuine determinism hole — reflect that in the message
-        // instead of always saying "determinism hole" for a failure that may not be one.
-        (None, None) => mv.run_to_first_halt().map_err(|e| format!("run failed: {e}"))?,
+        None => match (virtio_rng, virtio_blk) {
+            (Some((_, rng_vector, max_exits)), None) => mv
+                .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
+                .map_err(|e| format!("determinism hole: {e}"))?,
+            (None, Some((_, blk_vector, max_exits))) => mv
+                .run_to_first_halt_with_virtio_pci_blk(blk_vector, max_exits)
+                .map_err(|e| format!("determinism hole: {e}"))?,
+            // No run loop drives two independent per-host-exit device polls at once without the
+            // periodic-timer engine's coarser per-tick polling to ride on (see
+            // RunKvmBody::virtio_blk's doc) — fail loud rather than silently starving one device.
+            (Some(_), Some(_)) => {
+                return Err(
+                    "virtio_rng + virtio_blk without periodic_timer has no combined run loop yet; \
+                     set periodic_timer too (every real Linux guest needs it for calibrate_delay \
+                     anyway)"
+                        .to_string(),
+                )
+            }
+            // `run_to_first_halt` (unlike every arm above) has no deterministic
+            // `max_exits`/`max_ticks` bound of its own, so its error can also be
+            // `RunLoopError::WatchdogKilled` (todo.md §14.1 "Still open" item 1) rather than a
+            // genuine determinism hole — reflect that in the message instead of always saying
+            // "determinism hole" for a failure that may not be one.
+            (None, None) => mv.run_to_first_halt().map_err(|e| format!("run failed: {e}"))?,
+        },
     };
     let records = mv.drain_tape_records();
     Ok(((halt.console_output, halt.ram_hash, None, None), records))
@@ -443,11 +561,13 @@ fn boot_run_and_drain(
 /// Re-boot a real KVM guest and return only the `Msg::Frame` records it produced, in order — the
 /// primitive `stream::render`'s real-replay path uses to regenerate actual pixels for a run that
 /// `/run/kvm` persisted (`kvm_run_meta`), instead of fabricating a synthetic gradient from a
-/// stored hash. `virtio_rng` is threaded through exactly like `periodic_timer` — `stream::render`
-/// now reads the `virtio_rng_*` columns back and passes them here, so a virtio-rng-enabled run
-/// replays with the device enabled and seeded identically to its original boot. `acpi` is
-/// threaded the same way (the `kvm_run_meta.acpi` column), so an ACPI-enabled run replays with
-/// `write_acpi_tables` called identically to its original boot.
+/// stored hash. `virtio_rng`/`virtio_blk` are threaded through exactly like `periodic_timer` —
+/// `stream::render` now reads the `virtio_rng_*`/`virtio_blk_*` columns back and passes them here,
+/// so a virtio-rng/virtio-blk-enabled run replays with the device(s) enabled and seeded/backed
+/// identically to its original boot. `acpi` is threaded the same way (the `kvm_run_meta.acpi`
+/// column), so an ACPI-enabled run replays with `write_acpi_tables` called identically to its
+/// original boot.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn boot_and_drain_frames(
     kernel_path: &Path,
     cmdline: &str,
@@ -455,10 +575,19 @@ pub(crate) fn boot_and_drain_frames(
     initramfs: Option<&[u8]>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    virtio_blk: Option<(&[u8], u8, u32)>,
     acpi: bool,
 ) -> Result<Vec<baud_proto::FrameRecord>, String> {
-    let (_outcome, records) =
-        boot_run_and_drain(kernel_path, cmdline, tape, initramfs, periodic_timer, virtio_rng, acpi)?;
+    let (_outcome, records) = boot_run_and_drain(
+        kernel_path,
+        cmdline,
+        tape,
+        initramfs,
+        periodic_timer,
+        virtio_rng,
+        virtio_blk,
+        acpi,
+    )?;
     Ok(records
         .into_iter()
         .filter_map(|m| match m {
@@ -707,6 +836,10 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                             initramfs_path: body.initramfs_path.as_deref(),
                             periodic_timer,
                             virtio_rng,
+                            // RunKvmBranchBody has no `virtio_blk` field yet -- scoped out of this
+                            // iteration's wiring, same as every branch/resume route (see
+                            // RunKvmBody::virtio_blk's doc).
+                            virtio_blk: None,
                             acpi,
                             store_run_id: None,
                             snapshot_node_id: None,
@@ -806,6 +939,7 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         initramfs_path: body.initramfs_path.as_deref(),
                         periodic_timer,
                         virtio_rng,
+                        virtio_blk: None, // RunKvmBranchBody has no `virtio_blk` field yet, see above
                         acpi,
                         store_run_id: None,
                         snapshot_node_id: None,
@@ -1503,6 +1637,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                             initramfs_path: None,
                             periodic_timer,
                             virtio_rng,
+                            virtio_blk: None, // RunKvmResumeBody has no `virtio_blk` field yet, see above
                             // Always false, and deliberately not a `RunKvmResumeBody` field at all:
                             // this call's persisted row is always restore-based (`store_run_id`/
                             // `snapshot_node_id` set, never `kernel_path`/`cmdline`), so
@@ -1598,6 +1733,7 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                         initramfs_path: None,
                         periodic_timer,
                         virtio_rng,
+                        virtio_blk: None, // RunKvmResumeBody has no `virtio_blk` field yet, see above
                         acpi: false, // RunKvmResumeBody has no `acpi` field yet — see RunKvmBody::acpi's doc
                         store_run_id: Some(&run_id),
                         snapshot_node_id: Some(&node_id_hex),
@@ -1792,9 +1928,9 @@ mod tests {
         let cmdline = "console=ttyS0";
 
         let first =
-            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, false).expect("first boot failed");
+            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false).expect("first boot failed");
         let second =
-            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, false).expect("second boot failed");
+            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false).expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
         assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
@@ -1830,9 +1966,9 @@ mod tests {
         let cmdline = "console=ttyS0";
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, false)
+        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
             .expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, false)
+        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
             .expect("second boot failed");
 
         assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
@@ -1875,7 +2011,7 @@ mod tests {
         assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, false)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(
@@ -1916,7 +2052,7 @@ mod tests {
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, false)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 3);
@@ -1992,6 +2128,7 @@ mod tests {
             Some(&initramfs),
             Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
             None,
+            None,
             false,
         )
         .expect("real linux-guest boot through boot_run_and_drain failed");
@@ -2037,6 +2174,7 @@ mod tests {
                 Some(&initramfs),
                 Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
                 None,
+                None,
                 true, // acpi
             )
             .unwrap_or_else(|e| panic!("run {i}: acpi-enabled boot through boot_run_and_drain failed: {e}"));
@@ -2050,6 +2188,69 @@ mod tests {
         assert_eq!(
             consoles[0], consoles[1],
             "an acpi-enabled boot through this route must stay exactly as reproducible as every other guest here"
+        );
+    }
+
+    fn linux_guest_virtio_blk_initramfs() -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/linux-guest/virtio_blk_initramfs.cpio.gz");
+        std::fs::read(path).expect("read linux-guest virtio_blk initramfs fixture")
+    }
+
+    /// This route-level counterpart to `baud_multiverse::linux::
+    /// guest_virtio_pci_blk_driver_reads_and_writes_real_sectors` closes todo.md §14 item 5's
+    /// remaining "boot/cmdline/CLI wiring" gap: `RunKvmBody::virtio_blk`/`boot_run_and_drain`'s new
+    /// `virtio_blk` parameter, exercised through this route's own `boot_run_and_drain` — the exact
+    /// function `POST /run/kvm`'s HTTP handler calls, minus only the axum/JSON plumbing — instead of
+    /// `Multiverse` directly. Same base-image formula and fixture as the primitive-level test (real
+    /// `virtio_pci_legacy`+`virtio_blk` kernel drivers, `pci=off` stripped from the cmdline since a
+    /// virtio-pci device needs real PCI enumeration to be found at all).
+    #[test]
+    fn run_kvm_boots_a_real_linux_guest_with_virtio_blk_enabled() {
+        let kernel = linux_guest_kernel_path();
+        let initramfs = linux_guest_virtio_blk_initramfs();
+        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
+        assert_ne!(
+            cmdline,
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE,
+            "the replace must actually have matched"
+        );
+        const PERIOD_RCB: u64 = 500_000;
+        const TIMER_VECTOR: u8 = 0xec;
+        const MAX_TICKS: u32 = 2000;
+        const SECTORS: u64 = 4;
+        let sector_size = baud_multiverse::virtio_blk::SECTOR_SIZE as usize;
+        let base_image: Vec<u8> = (0..(sector_size as u64 * SECTORS)).map(|i| (i % 256) as u8).collect();
+        let virtio_blk_vector = baud_multiverse::pic8259::isa_irq_vector(11); // matches
+                                                                               // PciHostBridge's
+                                                                               // VIRTIO_BLK_DEFAULT_IRQ_LINE
+
+        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
+            &kernel,
+            &cmdline,
+            vec![],
+            Some(&initramfs),
+            Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+            None,
+            Some((&base_image, virtio_blk_vector, 200_000)),
+            false,
+        )
+        .expect("real linux-guest boot with virtio_blk through boot_run_and_drain failed");
+
+        let console = String::from_utf8_lossy(&console_output);
+        assert!(
+            console.contains("baud-guest: minimal kernel reached /init"),
+            "guest must reach /init and print its marker; got:\n{console}"
+        );
+        assert!(
+            console.contains("baud-guest: blk-open-ok"),
+            "the guest's own real virtio_pci_legacy/virtio_blk drivers must probe the device \
+             through this route's wiring and open /dev/vda; got:\n{console}"
+        );
+        assert!(
+            console.contains("baud-guest: blk-write-sector1-ok"),
+            "a real VIRTIO_BLK_T_OUT write to sector 1 must complete through this route's wiring; \
+             got:\n{console}"
         );
     }
 
@@ -2384,7 +2585,7 @@ mod tests {
                 .expect("resume_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, false)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(resumed_outcomes.len(), 3);

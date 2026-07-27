@@ -6948,3 +6948,42 @@ Gate result: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_acr
   - Full bash drive/gate.sh: 22 passed, 0 failed, 1 flaked (rdtsc_guest_reproduces_high_bits_across_boots, reconfirmed passing in isolation), 1 skipped (pkg-build-cli, no input changed), 2m44s -- counts as a passing gate per CLAUDE.md/todo.md §15
   - Still open: H9 (d)/(e) actual Ubuntu 18.04.1 cloud image + drive/h9.sh cross-VM fingerprint (not started); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on
 ---
+
+Post-push verification: origin/main now at 4e37e40, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked (documented rdtsc load-flake, reconfirmed in isolation), 1 skipped, 2m44s) before this push.
+
+todo.md still has pending items: H9 (d)/(e) actual Ubuntu 18.04.1 cloud image + drive/h9.sh cross-VM fingerprint (not started); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on -- emitting NEXT.
+
+## 2026-07-27T13:25:41 UTC (15min) - Session usage — build-8 [sonnet]
+- cost $5.4914 (from claude -p)
+- context 195,971 tok peak of 1M (20%) across 88 inference calls, monotonic
+- models sonnet-5 $5.4882 (in 176 / out 32,802 / cache-read 13,206,634) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T104433Z/009-build-8.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 9
+═══════════════════════════════════════════════════════
+
+Finding most important item to address by studying todo.md and progress.txt...
+
+Chose to wire virtio-pci-blk (block device) into the /run/kvm HTTP route and baud CLI, mirroring how virtio-rng and periodic_timer were wired in prior iterations. This is the concrete next step toward H9 (Ubuntu boot): the virtio-blk device model, PCI transport, and a real-hardware-tested Multiverse-level combinator already exist (crates/baud-multiverse/src/virtio_blk.rs, virtio_pci.rs), but nothing wires it into RunKvmBody/the CLI yet -- todo.md §14 item 5's remaining gap before attempting the actual Ubuntu cloud-image boot (H9 d/e).
+
+Wired virtio_blk into RunKvmBody/boot_run_and_drain/persist_kvm_run/stream::render's real-replay path -- new migration 0015_kvm_run_meta_virtio_blk.sql, VirtioBlkSpec struct, and dispatch logic reusing the existing periodic_timer+virtio_rng+virtio_pci_blk combinator (with rng vector 0 when unused) plus the existing single-device combinators; the one uncovered combo (virtio_rng+virtio_blk with no periodic_timer) fails loud with a clear error since no run loop supports it. cargo build -p baud-server and --tests both clean. Now adding CLI flags.
+
+Added baud CLI flags (--virtio-blk-image/--virtio-blk-vector/--virtio-blk-max-exits), a route-level real-hardware test (run_kvm_boots_a_real_linux_guest_with_virtio_blk_enabled, PASSED on real /dev/kvm), and new opt-in drive/pkg/pkg-boot-virtio-blk-cli.sh proving 'baud run kvm --virtio-blk-image' works end-to-end over real HTTP against a live baud-server -- real /dev/kvm result PASSED (guest's real virtio_pci_legacy/virtio_blk drivers opened /dev/vda and completed a real write). Now running the full gate before committing.
+
+
+## 2026-07-27T13:46:07 UTC - Changes committed.
+- Wired virtio-pci-blk (block device) into the /run/kvm HTTP route and the baud CLI, the last named prerequisite before H9's real Ubuntu boot can be attempted
+- Files changed: crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, crates/baud-server/migrations/0015_kvm_run_meta_virtio_blk.sql, crates/baud-cli/src/cmds/run.rs, drive/pkg/pkg-boot-virtio-blk-cli.sh, todo.md
+- **Brief description of changes:**
+  - RunKvmBody gained an optional virtio_blk: Option<VirtioBlkSpec> field (image_path/vector/max_exits) threaded through boot_run_and_drain/boot_and_drain_frames; Multiverse::enable_virtio_pci_blk is called before the run loop and dispatch reuses the existing periodic_timer+virtio_rng+virtio_pci_blk combinator (rng left disabled/vector 0 when the caller didn't ask for it) or the existing virtio_pci_blk-only combinator, rather than adding new run-loop code
+  - The one combination with no combinator (virtio_rng + virtio_blk together with no periodic_timer -- both devices poll per host-side exit, nothing drives two independent per-exit polls at once) fails loud with a clear error instead of silently starving a device
+  - New migration 0015_kvm_run_meta_virtio_blk.sql persists virtio_blk_image_path/vector/max_exits (path, not bytes, mirroring initramfs_path) so stream::render's real-replay path reboots a persisted virtio-blk-enabled run with the same backing image
+  - RunKvmBranchBody/RunKvmResumeBody deliberately did not get virtio_blk this iteration -- same scoping precedent virtio_rng itself set when it first landed
+  - baud CLI: `baud run kvm` gained --virtio-blk-image/--virtio-blk-vector (default 0x3b, PciHostBridge::VIRTIO_BLK_DEFAULT_IRQ_LINE's pre-routed vector)/--virtio-blk-max-exits
+  - New real-hardware test run_kvm_boots_a_real_linux_guest_with_virtio_blk_enabled (crates/baud-server/src/routes/run_kvm.rs) -- passed on real /dev/kvm, guest's real virtio_pci_legacy/virtio_blk drivers open /dev/vda and complete a real sector write through this route's own boot_run_and_drain
+  - New opt-in drive/pkg/pkg-boot-virtio-blk-cli.sh drives the same fixture through a real `baud run kvm --virtio-blk-image ... --json` CLI call against a live baud-server over real HTTP -- real result: ok=true, console contains blk-open-ok and blk-write-sector1-ok, the project's first real CLI/HTTP-level proof of the virtio-blk driver path
+  - boot_run_and_drain/boot_and_drain_frames each crossed clippy's too_many_arguments threshold (8 params) and got #[allow(clippy::too_many_arguments)], the same precedent already used four other places in this workspace, rather than a KvmBootParams-style struct that would have forced a call-site rewrite across ~15 existing tests
+  - cargo build/clippy --workspace --all-targets/test --workspace all clean (0 new warnings); full bash drive/gate.sh: 23 passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, unchanged input), 2m55s
+  - Still open: H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (drive/h9.sh + cross-VM fingerprint) remain not started -- this closes the last named prerequisite gap before they can be attempted, not H9 itself; H8 Mario remains blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on is still not implemented
+---

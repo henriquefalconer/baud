@@ -2544,6 +2544,57 @@ snapshot, not a duplicate of it.
      §15. **Still open**: H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` +
      the cross-VM fingerprint) remain not started, unchanged. `VIRTIO_BLK_CLASS_CODE` was already
      spec-conformant before this iteration touched anything.
+     **This iteration: virtio-blk's own "boot/cmdline/CLI wiring" gap is now closed — the last
+     piece before H9 (d)/(e) can be attempted.** Everything below (a)/(b)/(c) built (the transport,
+     the block device model, the ACPI table builders) was real-hardware-tested only from a Rust
+     test calling `Multiverse` directly; nothing reached `POST /run/kvm` or `baud run kvm`.
+     `RunKvmBody` gained an optional `virtio_blk: Option<VirtioBlkSpec>` field (`image_path`/
+     `vector`/`max_exits`, mirroring `virtio_rng`'s shape but with a disk-image *path* instead of a
+     seed — `crates/baud-server/src/routes/run_kvm.rs`), threaded through `boot_run_and_drain`/
+     `boot_and_drain_frames`: `Multiverse::enable_virtio_pci_blk` is called before the run loop, and
+     the periodic_timer/virtio_rng/virtio_blk dispatch reuses the already-existing combinators
+     rather than adding new ones — `run_to_first_halt_with_periodic_timer_and_virtio_rng_and_
+     virtio_pci_blk` for any periodic_timer-enabled boot (rng left at vector `0` and never enabled
+     when the caller didn't ask for it, the same "unenabled device degrades to a no-op" behavior
+     `tests/fixtures/linux-guest/BUILD.md`'s own `run_linux_guest_virtio_blk_once` helper already
+     established as safe), `run_to_first_halt_with_virtio_pci_blk` for blk-only without a periodic
+     timer. The one combination with no combinator at all — virtio_rng **and** virtio_blk together
+     with **no** periodic_timer, since both devices independently poll for a `QueueNotify` once per
+     host-side exit and nothing drives two such polls at once — fails loud with a clear error
+     instead of silently starving one device (every real Linux guest needs periodic_timer for
+     `calibrate_delay` anyway, so this is not expected to matter in practice). New migration
+     `crates/baud-server/migrations/0015_kvm_run_meta_virtio_blk.sql` adds nullable
+     `virtio_blk_image_path`/`virtio_blk_vector`/`virtio_blk_max_exits` columns to `kvm_run_meta`
+     (image *path*, not bytes, persisted — mirrors `initramfs_path`, since a real disk image can be
+     far larger than an initramfs); `stream::render`'s real-replay path now reads them back and
+     threads a `virtio_blk` spec into `boot_and_drain_frames` so a persisted virtio-blk-enabled run
+     replays with the same backing image. `RunKvmBranchBody`/`RunKvmResumeBody` deliberately did
+     **not** get a `virtio_blk` field this iteration — same scoping precedent `virtio_rng` itself
+     set when it first landed on the plain path only. CLI: `baud run kvm` gained
+     `--virtio-blk-image`/`--virtio-blk-vector` (default `0x3b`, `pic8259::isa_irq_vector(11)`,
+     `PciHostBridge::VIRTIO_BLK_DEFAULT_IRQ_LINE`'s pre-routed vector)/`--virtio-blk-max-exits`.
+     New real-hardware test `run_kvm_boots_a_real_linux_guest_with_virtio_blk_enabled`
+     (`crates/baud-server/src/routes/run_kvm.rs`) boots the checked-in `virtio_blk_initramfs.cpio.gz`
+     fixture through `boot_run_and_drain` directly and asserts the real `virtio_pci_legacy`/
+     `virtio_blk` drivers open `/dev/vda` and complete a real sector write — **passed on real
+     `/dev/kvm`**. New opt-in `drive/pkg/pkg-boot-virtio-blk-cli.sh` (mirrors `drive/pkg/
+     pkg-boot-cli.sh`'s structure) drives the same fixture through a real `baud run kvm
+     --virtio-blk-image ... --json` CLI invocation against a live `baud-server` over real HTTP —
+     **real result: `ok=true`, console contains `baud-guest: blk-open-ok` and
+     `baud-guest: blk-write-sector1-ok`** — the project's first real "spec in, guest's virtio-blk
+     driver exercised" proof through the actual CLI binary + HTTP server, not a Rust test calling
+     `Multiverse` directly. `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all
+     clean (0 new warnings — `boot_run_and_drain`/`boot_and_drain_frames` each crossed clippy's
+     `too_many_arguments` threshold at 8 params and got `#[allow(clippy::too_many_arguments)]`,
+     the same precedent already used four other places in this workspace, rather than a
+     `KvmBootParams`-style struct that would have forced yet another call-site rewrite across ~15
+     existing tests for a `pub(crate)`-only pair of functions); full `bash drive/gate.sh` → 23
+     passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, unchanged input), 2m55s. **Still open**:
+     H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (`drive/h9.sh` + the cross-VM
+     fingerprint) remain not started — this closes the last named prerequisite gap before they can
+     be attempted, not H9 itself; H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb
+     packaging problem (item 3 above); the Buildroot/pinned-Nix guest-image pipeline (§4.5) both
+     depend on for a full rootfs is still not implemented.
   6. **`VIRTIO_UNCLASSIFIED_CODE` — the same Base/Sub-Class byte-swap bug flagged (not yet fixed) by
      item 5 above, fixed.** Confirmed by spec inspection: PCI Local Bus spec Appendix D's class
      `0xFF` ("does not fit any defined class") is Base Class `0xFF`/Sub-Class `0x00`/Prog IF `0x00`,

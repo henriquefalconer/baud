@@ -120,6 +120,24 @@ pub enum RunAction {
         /// without `acpi=off` and a `CONFIG_ACPI=y` kernel.
         #[arg(long)]
         acpi: bool,
+        /// Path to a raw disk image on the server host's filesystem — attaches a real, deterministic
+        /// virtio-blk block device (`Multiverse::enable_virtio_pci_blk`: read-only content-addressed
+        /// base image plus an in-memory copy-on-write overlay). Setting this enables the device for
+        /// the boot, mirroring `--periodic-timer-period-rcb`'s "presence enables" convention. A real
+        /// virtio-blk boot also needs `--cmdline` without `pci=off` and a
+        /// `CONFIG_VIRTIO_PCI_LEGACY=y CONFIG_VIRTIO_BLK=y` kernel.
+        #[arg(long)]
+        virtio_blk_image: Option<String>,
+        /// Interrupt vector delivered on a serviced `QueueNotify`. Defaults to `0x3b`
+        /// (`pic8259::isa_irq_vector(11)`), the vector `PciHostBridge`'s
+        /// `VIRTIO_BLK_DEFAULT_IRQ_LINE` pre-routes virtio-blk's PCI interrupt line to. Only used
+        /// when `--virtio-blk-image` is set.
+        #[arg(long, default_value_t = 0x3b)]
+        virtio_blk_vector: u8,
+        /// Bound on host-side exits before giving up when `--periodic-timer-period-rcb` is not also
+        /// set. Only used when `--virtio-blk-image` is set.
+        #[arg(long, default_value_t = 200_000)]
+        virtio_blk_max_exits: u32,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
     /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
@@ -338,6 +356,9 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             virtio_rng_vector,
             virtio_rng_max_exits,
             acpi,
+            virtio_blk_image,
+            virtio_blk_vector,
+            virtio_blk_max_exits,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -360,6 +381,13 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                     "seed": seed,
                     "vector": virtio_rng_vector,
                     "max_exits": virtio_rng_max_exits,
+                });
+            }
+            if let Some(image_path) = virtio_blk_image {
+                body["virtio_blk"] = json!({
+                    "image_path": image_path,
+                    "vector": virtio_blk_vector,
+                    "max_exits": virtio_blk_max_exits,
                 });
             }
             let v = c.post("/run/kvm", &body).await?;

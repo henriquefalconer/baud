@@ -148,10 +148,11 @@ pub async fn render(
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
     #[allow(clippy::type_complexity)]
-    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>, bool)>(
+    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>, bool, Option<String>, Option<i64>, Option<i64>)>(
         "SELECT kernel_path, cmdline, tape_hex, initramfs_path, periodic_timer_period_rcb, \
          periodic_timer_vector, periodic_timer_max_ticks, store_run_id, snapshot_node_id, \
-         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, acpi \
+         virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, acpi, \
+         virtio_blk_image_path, virtio_blk_vector, virtio_blk_max_exits \
          FROM kvm_run_meta WHERE run_id = ?",
     )
     .bind(&run_id)
@@ -173,6 +174,9 @@ pub async fn render(
             rng_vector,
             rng_max_exits,
             acpi,
+            blk_image_path,
+            blk_vector,
+            blk_max_exits,
         ))) => {
             let periodic_timer = match (period_rcb, vector, max_ticks) {
                 (Some(p), Some(v), Some(m)) => Some((p as u64, v as u8, m as u32)),
@@ -180,6 +184,10 @@ pub async fn render(
             };
             let virtio_rng = match (rng_seed, rng_vector, rng_max_exits) {
                 (Some(s), Some(v), Some(m)) => Some((s as u64, v as u8, m as u32)),
+                _ => None,
+            };
+            let virtio_blk = match (blk_image_path, blk_vector, blk_max_exits) {
+                (Some(p), Some(v), Some(m)) => Some((p, v as u8, m as u32)),
                 _ => None,
             };
             // A resume-originated run (todo.md §14's "`/run/kvm/resume`'s lineage gap") has no
@@ -209,6 +217,7 @@ pub async fn render(
                         initramfs_path,
                         periodic_timer,
                         virtio_rng,
+                        virtio_blk,
                         acpi,
                         from_step,
                         to_step,
@@ -291,6 +300,8 @@ struct RealReplayParams {
     initramfs_path: Option<String>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    /// `(image_path, vector, max_exits)` — see `run_kvm::RunKvmBody::virtio_blk`'s doc.
+    virtio_blk: Option<(String, u8, u32)>,
     acpi: bool,
     from_step: u64,
     to_step: Option<u64>,
@@ -314,6 +325,7 @@ async fn render_frames_from_real_replay(
         initramfs_path,
         periodic_timer,
         virtio_rng,
+        virtio_blk,
         acpi,
         from_step,
         to_step,
@@ -329,8 +341,20 @@ async fn render_frames_from_real_replay(
         },
         None => None,
     };
+    let virtio_blk_image = match &virtio_blk {
+        Some((path, _, _)) => match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => return Err(json!({ "error": format!("failed to read virtio_blk image_path '{path}': {e}") })),
+        },
+        None => None,
+    };
+    let virtio_blk_meta = virtio_blk.map(|(_, v, m)| (v, m));
     let kernel_path_buf = PathBuf::from(&kernel_path);
     let records = tokio::task::spawn_blocking(move || {
+        let virtio_blk = match (virtio_blk_image.as_deref(), virtio_blk_meta) {
+            (Some(image), Some((vector, max_exits))) => Some((image, vector, max_exits)),
+            _ => None,
+        };
         crate::routes::run_kvm::boot_and_drain_frames(
             &kernel_path_buf,
             &cmdline,
@@ -338,6 +362,7 @@ async fn render_frames_from_real_replay(
             initramfs.as_deref(),
             periodic_timer,
             virtio_rng,
+            virtio_blk,
             acpi,
         )
     })
@@ -372,6 +397,7 @@ struct RealReplayParams {
     initramfs_path: Option<String>,
     periodic_timer: Option<(u64, u8, u32)>,
     virtio_rng: Option<(u64, u8, u32)>,
+    virtio_blk: Option<(String, u8, u32)>,
     acpi: bool,
     from_step: u64,
     to_step: Option<u64>,
