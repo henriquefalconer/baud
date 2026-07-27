@@ -6987,3 +6987,7 @@ Added baud CLI flags (--virtio-blk-image/--virtio-blk-vector/--virtio-blk-max-ex
   - cargo build/clippy --workspace --all-targets/test --workspace all clean (0 new warnings); full bash drive/gate.sh: 23 passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, unchanged input), 2m55s
   - Still open: H9 (d) (the actual Ubuntu 18.04.1 cloud image) and (e) (drive/h9.sh + cross-VM fingerprint) remain not started -- this closes the last named prerequisite gap before they can be attempted, not H9 itself; H8 Mario remains blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on is still not implemented
 ---
+
+Post-push verification: origin/main now at 036b12e, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (23 passed, 0 failed, 0 flaked, 1 skipped, 2m55s) before this push.
+
+todo.md still has pending items: H9 (d)/(e) actual Ubuntu 18.04.1 cloud image + drive/h9.sh cross-VM fingerprint (not started); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the Buildroot/pinned-Nix guest-image pipeline (§4.5) both depend on -- emitting NEXT.
