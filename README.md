@@ -8,7 +8,7 @@
 <p align="center">
   <img src="docs/mario.gif" alt="baud driving an emulator to beat Super Mario Bros, fully deterministically" width="512">
 </p>
-<p align="center"><sub>Not a screen recording. baud regenerated this from the winning run's tape hash.</sub></p>
+<p align="center"><sub>The winning run, replayed from its tape.</sub></p>
 
 **baud beats Super Mario Bros. Point it at your program and it does the same thing.**
 
