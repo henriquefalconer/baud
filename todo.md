@@ -3005,6 +3005,36 @@ snapshot, not a duplicate of it.
      on this exact code path: the server log showed `KVM run cancelled: the client abandoned the request` and
      released everything within seconds of the CLI process being killed, both times.
 
+  15. **Gave the 20000-tick vector-238 attempt a genuine multi-tens-of-minutes run (not an early interactive**
+     **kill) and it still did not complete — a materially new data point, and it exposes the real blocker: this**
+     **run loop has zero intermediate observability.** Following item 14's own recommended next step, launched
+     `baud run kvm` (the exact `examples/ubuntu/BUILD.md` recipe, vector `238`, `--periodic-timer-max-ticks
+     20000`) fully detached from the interactive session (`setsid nohup ... & disown`, output redirected to a
+     log file, tracked only by PID) precisely so an early client disconnect could not itself cancel the run — the
+     opposite risk from item 14's kills. Polled it with `ps -o %cpu,etime` in bounded foreground rounds rather
+     than trusting a backgrounded/monitor task to survive: this session confirmed firsthand that a harness-level
+     background task (the `Monitor` tool's own polling wrapper, not the `baud` process it watched) can be silently
+     torn down across a session boundary with no completion record, exactly the class of failure `CLAUDE.md`
+     already warns about for `run_in_background`/gate.sh — the detached `setsid`+`disown`+redirected-output OS
+     process survived that teardown untouched (confirmed alive via `kill -0` immediately after), but the lesson
+     generalizes: **for any run expected to outlive one polling mechanism, launch it as a genuinely detached OS
+     process and re-attach by PID, never rely on a harness-tracked background/monitor task alone.** The boot ran
+     **~30 minutes at a sustained 97-99% host CPU** with no error, no crash, and no completion — comfortably past
+     the prior 19.5-minute kill point for a *larger* 30000-tick budget, meaning either per-tick cost has grown
+     further under real (not synthetic) systemd/disk activity, or 20000 ticks is simply short of whatever `/init`
+     needs to reach a getty prompt and the run would have kept going for much longer still. Killed deliberately at
+     that point (not exhausted) to keep this iteration boundable; the `baud-server` client-disconnect cancellation
+     (`c1836d5`) again released everything cleanly within seconds, confirming that mechanism is solid across repeat
+     use. **The real conclusion is that further blind escalation (bigger `--periodic-timer-max-ticks`, longer
+     waits) is not a productive next step by itself** — every attempt so far has been a black box: the HTTP
+     response is silent until the whole run finishes, times out, or the process is killed, so there is no way to
+     tell "close to the login prompt" apart from "stuck" without an external kill-and-inspect. The concrete next
+     step is the observability gap `examples/ubuntu/BUILD.md` already named but no iteration has yet built: add a
+     way to inspect an in-flight run's progress (e.g. a `tracing::info!` emitted every N resumes in
+     `run_until_console_pattern_with_periodic_timer_and_devices` logging ticks-consumed and
+     `console_output().len()`, and/or a second HTTP endpoint that reports a running run's live console tail) so a
+     multi-tens-of-minutes attempt is diagnosable while it runs, rather than only after a kill.
+
 ### 14.1 Defects found in the test suite and the drive scripts
 
 Latent defects, each of which let a test or script report success it had not earned. The pre-push gate is

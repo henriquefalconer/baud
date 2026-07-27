@@ -7427,3 +7427,43 @@ Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged
   - Still open: reaching the actual "ubuntu login:" banner. With the correct vector the resume-past-halt engine does real, CPU-heavy per-tick work (unlike vector 236's cheap infinite spin) but a 20000-tick attempt didn't finish inside this session's interactive budget (killed after ~280s; a 30000-tick attempt in this same session separately ran ~19.5 minutes pegged near 100% CPU before being killed) — next step is `run_in_background: true` with a much longer budget, per BUILD.md's updated "still open" note
   - Verified: `bash drive/gate.sh` — 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m26s, clean, no flakes
 ---
+
+Post-push verification: origin/main == local HEAD (4fe1347) exactly, working tree clean. Gate was already green (25 passed, 0 failed, 1 skipped, 2m26s) at this commit's tree before pushing. todo.md still has pending items (H9's login-banner reach is the freshest, plus H8 Mario's FCEUX/Xvfb block and others already recorded as still open) -- emitting NEXT.
+
+## 2026-07-27T21:32:13 UTC (56min) - Session usage — build-1 [sonnet]
+- cost $6.3903 (from claude -p)
+- context 232,891 tok peak of 1M (23%) across 88 inference calls, monotonic
+- models sonnet-5 $6.3826 (in 176 / out 90,337 / cache-read 12,572,837) · haiku-4-5 $0.0076
+- transcript: ralph/.run/20260727T203641Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history.
+
+Launched the H9 login-banner boot attempt detached (server pid via setsid, CLI pid 68186), following BUILD.md's exact recipe (vector 238, 20000-tick budget, halt-console-pattern-hex for "ubuntu login:"). Prior attempts were killed early (~200-280s) before finishing; this time letting it run to real completion or a long bounded window, polling CPU/elapsed via Monitor rather than blocking on the synchronous HTTP response. Continuing task...
+
+Monitor armed (2.5-min poll interval, 50-min cap) watching CLI PID 68186; will wait for it to exit (pattern found, tick budget exhausted, or crash) before deciding next action. Continuing task...
+
+H9 boot attempt still running after ~11.5 min real wall-clock, server CPU pegged near 97-98%, no result yet (previous interactive attempts were killed at 200-280s before this point -- this is already well past that). Continuing to poll in foreground rounds...
+
+H9 boot attempt still running after ~20.5 min, server CPU pegged 97-99%. This already exceeds the previous 30000-tick attempt's 19.5-min kill point for a 20000-tick run, meaning per-tick real cost is even higher than previously measured, or systemd/disk activity is heavier this run. One more polling round before deciding whether to let it keep going or cut losses and document precisely.
+
+Boot attempt killed cleanly at exactly ~30 min real wall-clock (client-disconnect cancellation confirmed working again in server log). Writing up the finding in todo.md §14: 20000-tick attempt at vector 238 ran 30+ min at 97-99% host CPU without completing or erroring, exceeding the previous 30000-tick/19.5-min data point, with no way to observe tick-by-tick progress. Recommending progress instrumentation as the concrete next step rather than further blind escalation. Continuing task...
+
+todo.md updated with item 15 (the 30-min sustained-CPU measurement and the observability-gap conclusion). Running bash drive/gate.sh before committing, per the pre-push validation protocol...
+
+Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m34s. Appending final progress block and committing.
+
+## 2026-07-27T22:09:27 UTC - Changes committed.
+- Ran the H9 ubuntu-login-banner boot attempt for a genuine ~30-minute wall-clock duration (not an early interactive kill), the concrete next step item 14 had already recorded
+- Files changed: todo.md (item 15), ralph/progress.txt (no Rust code changed this iteration)
+- **Brief description of changes:**
+  - Launched the exact `examples/ubuntu/BUILD.md` recipe (vector 238, 20000-tick budget) fully detached (`setsid nohup ... & disown`) from the interactive session, polled by PID via bounded foreground rounds
+  - Learned firsthand that a harness-level Monitor/background-task wrapper can be torn down across a session boundary with no completion record (exactly the class of gotcha CLAUDE.md already documents for `run_in_background`), while the genuinely detached `setsid`+`disown` OS process it was watching survived untouched -- confirmed alive via `kill -0` right after the wrapper's teardown notification arrived
+  - The boot ran ~30 minutes at a sustained 97-99% host CPU with no crash, no error, and no completion -- past the prior 19.5-minute kill point for a *larger* 30000-tick budget, a materially new data point
+  - Killed it deliberately at that point to keep the iteration boundable; `baud-server`'s client-disconnect cancellation (`c1836d5`) again released everything cleanly within seconds, reconfirmed solid on repeat use
+  - Concluded that further blind escalation (bigger tick budgets, longer waits) is not the productive next step: every attempt is a black box (the HTTP response is silent until the run finishes, times out, or is killed), so todo.md item 15 names the real next step as adding intermediate observability (a periodic `tracing::info!` of ticks-consumed/`console_output().len()` in the resume loop, and/or a live-progress HTTP endpoint) before further escalation attempts
+  - Verified: `bash drive/gate.sh` -- 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m34s, clean, no flakes
+---
