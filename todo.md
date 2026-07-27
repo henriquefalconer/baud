@@ -3141,6 +3141,78 @@ snapshot, not a duplicate of it.
      elapsed time become the next concrete clue) — either outcome is real forward progress over the old
      "hang with no signal either way" state.
 
+  17. **H9 — following item 16's own next step, launched a genuinely detached real Ubuntu boot attempt**
+     **with the new per-tick watchdog in place, and found it does not actually save a real attempt: the**
+     **stall lies inside device servicing, a window the per-tick watchdog never covered, not inside**
+     **`inject_at`.** Launched the exact `examples/ubuntu/BUILD.md` recipe (vector `238`, 20000 max ticks)
+     as genuinely detached OS processes (`setsid nohup ... & disown` for both `baud-server` and the `baud
+     run kvm` client, per items 15-16's own precedent) with item 16's 600s per-tick watchdog wired in.
+     Ticks climbed to ~5100/20000 within seconds — the same "cheap early ticks, then real work" pattern
+     item 16 saw at ~17100/20000 — then the server log went silent for 28+ minutes with the server process
+     pinned at ~95-99% CPU. Unlike item 16's attempt, the per-tick watchdog should have fired and returned
+     a diagnosable `RunLoopError::WatchdogKilled` well before the 28-minute mark; it never did.
+     `/proc/<vcpu-tid>/status` showed `SigBlk=0`/`SigPnd=0` (`SIGUSR1` not blocked, nothing pending) and
+     the thread stayed `R` (running) throughout, with no panic in the server log. Killed once established,
+     per item 16's own boundable-iteration precedent.
+     To find out why, wrote and hardware-verified a new test,
+     `periodic_tick_watchdog_kills_a_stuck_tick_via_spawn_blocking` (`crates/baud-multiverse/src/linux/
+     mod.rs`, immediately after `periodic_tick_watchdog_does_not_fire_on_a_normal_tick`), which reproduces
+     the exact thread context every real boot actually runs on — `tokio::task::spawn_blocking`'s reusable
+     pool (`crates/baud-vcpu/src/linux/watchdog.rs`'s own doc already flags this as a real hazard: a
+     pending signal on a reused blocking-pool thread could hit unrelated future work) — rather than a
+     plain `#[test]`'s own OS thread the way `periodic_tick_watchdog_kills_a_stuck_tick` runs. It PASSED:
+     the watchdog correctly kills a wedged spin-guest tick even driven through a real `spawn_blocking`
+     closure, ruling out "the mechanism is fundamentally broken under tokio's blocking pool" as the
+     explanation for the real stall above. Added `tokio = { workspace = true }` as a dev-dependency of
+     `baud-multiverse` (`Cargo.toml`) to make this test possible.
+     Re-reading `run_to_first_halt_with_periodic_timer_and_devices` while investigating found the real
+     structural gap, left open, NOT fixed: `tick_watchdog.disarm()` runs immediately after `inject_at`
+     returns, before the subsequent per-device `dev.service_running`/`dev.service_halted` calls (e.g.
+     `service_virtio_blk_interrupt`) — so a hang or pathological slowness inside device servicing is
+     entirely outside the per-tick watchdog's window, unlike `inject_at` itself. Leading theory for the
+     28-minute stall: a virtio-blk request batch doing real work against the real 2.2 GiB rootfs image,
+     serviced via the mmap'd `BlockBase::Mapped` backing store with almost no ioctls, consistent with the
+     observed CPU-bound `R`-state/near-zero-ioctl symptom. Deliberately not fixed this iteration:
+     `SplitVirtqueue::process_available_chains` (`crates/baud-multiverse/src/virtio_queue.rs`) snapshots
+     `driver_idx` once at entry and its `while` loop is strictly bounded by that snapshot, so by
+     construction it cannot hang forever — only be slow, and it will eventually return. A real fix
+     (threading a cooperative stop-check into that loop so a fired watchdog can also interrupt mid-batch)
+     would touch `virtio_queue.rs`, `virtio_blk.rs`/`console.rs`'s `service_virtio_blk`/`service_virtio_rng`,
+     and `TickPolledDevice`'s function-pointer signatures in `mod.rs` (currently plain `fn(&mut Multiverse,
+     u8) → Result<u32, RunLoopError>`, no way to pass a stop flag through) — judged too large a
+     speculative refactor to risk on an unproven theory without first directly confirming device
+     servicing, not `inject_at`, is where the real attempt's time went.
+     Made the safe, low-risk improvement instead: added phase-level tracing to
+     `run_to_first_halt_with_periodic_timer_and_devices` (new `SLOW_TICK_PHASE_LOG_THRESHOLD: Duration =
+     Duration::from_secs(1)` constant, `mod.rs`) — an `info!` line whenever a single tick's `inject_at`
+     call, or a single device's `service_running`/`service_halted` call, takes ≥1s, naming which phase and
+     how long. Pure observability, no control-flow change; it closes the exact ambiguity the 28-minute
+     stall left, since the existing every-100-ticks progress line could not tell "`inject_at` is wedged"
+     (already caught by item 16's watchdog) apart from "a device's own servicing is legitimately or
+     pathologically slow" (caught by nothing). The next real H9 attempt's server log will show directly
+     which one it is.
+     Also found and fixed a second, independent instance of the exact tracing-`EnvFilter` gap item 15
+     already fixed once for `baud_multiverse`: the per-tick `Watchdog`'s own `tracing::warn!` (`crates/
+     baud-vcpu/src/linux/watchdog.rs`) lives in the `baud_vcpu` crate, which `baud-server`'s default
+     `EnvFilter` (`crates/baud-server/src/main.rs`) never raised above the base `ERROR`-only level — so a
+     real watchdog kill during an H9 attempt would have fired completely silently in the server's own log,
+     with no trace of why the run failed, even though item 16 built the mechanism specifically to make a
+     wedged tick diagnosable. Added `baud_vcpu=info` alongside the existing `baud_server=info`/
+     `baud_multiverse=info` directives.
+     Verified: `cargo test -p baud-vcpu -p baud-multiverse` → 227 + 40 passed, 0 failed (227 = the prior
+     226 plus the new `spawn_blocking` test), on real `/dev/kvm`. `cargo clippy --workspace --all-targets`
+     → 74 warnings, confirmed via `git stash` to be the exact pre-existing baseline, zero new. Full `bash
+     drive/gate.sh` → 25 passed, 0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, the
+     documented load-flake, confirmed passing in isolation by phase 6 — green per `CLAUDE.md`), 0 skipped,
+     5m37s.
+     **Still open for H9, the real next step** (carried forward from item 16, still unresolved):
+     re-attempt the real Ubuntu boot again, now with phase-level tracing in place, to learn definitively
+     whether the stall is inside `inject_at` (a case the existing per-tick watchdog should already catch —
+     if it doesn't even with this logging, the watchdog has a real-world gap distinct from anything ruled
+     out here, needing its own dedicated repro) or inside device servicing (a case needing the
+     cooperative-stop-flag refactor scoped out above). Whichever it is, the phase-level log line will name
+     it directly instead of leaving it ambiguous.
+
 ### 14.1 Defects found in the test suite and the drive scripts
 
 Latent defects, each of which let a test or script report success it had not earned. The pre-push gate is

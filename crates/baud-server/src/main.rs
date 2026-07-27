@@ -32,7 +32,13 @@ async fn main() -> Result<()> {
                 // was the only target ever raised to `info`, so a long H9-style boot attempt would
                 // still be a total black box in the server's own log even after that logging was
                 // added, defeating its purpose.
-                .add_directive("baud_multiverse=info".parse().unwrap()),
+                .add_directive("baud_multiverse=info".parse().unwrap())
+                // Same gap, one crate over: the per-tick wall-clock `Watchdog`'s own `tracing::
+                // warn!` (todo.md §14 item 16, `crates/baud-vcpu/src/linux/watchdog.rs`) lives in
+                // `baud_vcpu`, which this filter never raised above the default `ERROR`-only base
+                // level -- a real watchdog kill during an H9-style attempt would fire silently in
+                // the server's own log with no trace of why the run failed.
+                .add_directive("baud_vcpu=info".parse().unwrap()),
         )
         .init();
 

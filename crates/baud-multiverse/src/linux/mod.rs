@@ -643,6 +643,19 @@ const RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS: u32 = 100;
 /// [`watchdog::Watchdog`]: baud_vcpu::linux::Watchdog
 const PERIODIC_TICK_WATCHDOG_BUDGET: Duration = Duration::from_secs(600);
 
+/// Below this, a single `inject_at`/device-service call inside one periodic-timer tick is normal
+/// and not worth a log line of its own (the every-100-ticks progress line already covers the
+/// common case) — at or above it, `run_to_first_halt_with_periodic_timer_and_devices` logs which
+/// specific phase (the coarse/fine `inject_at` walk, or a named device's `service_running`/
+/// `service_halted` call) actually took the time, at `tick_index`-level granularity instead of
+/// the coarser 100-tick progress line. Filed after a real H9 (Ubuntu) attempt stalled for 28+
+/// minutes with only the 100-tick progress line to go on — ambiguous between "`inject_at` is
+/// wedged" (which the per-tick `Watchdog` already catches) and "a device's own servicing is
+/// legitimately/pathologically slow" (which it does not, `process_available_chains`'s own bound
+/// on the driver's snapshotted index notwithstanding — a large real batch can still be slow, just
+/// not infinite). Pure observability: does not change control flow.
+const SLOW_TICK_PHASE_LOG_THRESHOLD: Duration = Duration::from_secs(1);
+
 /// Where an injected interrupt actually landed (H4, specs/baud-vcpu.md §5): the instruction
 /// pointer and cumulative work-clock RCB at the moment `Multiverse::inject_timer_tick` delivered
 /// the vector. `timer_tick_lands_at_identical_instruction` asserts this tuple is identical across
@@ -1983,9 +1996,19 @@ impl Multiverse {
             let mut stepper = self
                 .cancellable_stepper()
                 .with_watchdog(Some(std::sync::Arc::clone(&tick_watchdog.fired)));
+            let inject_at_start = std::time::Instant::now();
             let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector);
+            let inject_at_elapsed = inject_at_start.elapsed();
             let tick_timed_out = tick_watchdog.fired.load(std::sync::atomic::Ordering::SeqCst);
             tick_watchdog.disarm();
+            if inject_at_elapsed >= SLOW_TICK_PHASE_LOG_THRESHOLD {
+                info!(
+                    "run_to_first_halt_with_periodic_timer_and_devices: tick {tick_index}/{max_ticks} \
+                     inject_at took {:.1}s (of a {:.0}s watchdog budget)",
+                    inject_at_elapsed.as_secs_f64(),
+                    tick_watchdog_budget.as_secs_f64(),
+                );
+            }
             let outcome = result.map_err(|e| {
                 // A real supervisor cancellation takes priority even if this tick's watchdog also
                 // happened to fire in the same window — `stepper_error` already makes that same
@@ -2003,7 +2026,16 @@ impl Multiverse {
                         let notify_count = (dev.notify_count)(self).unwrap_or(0);
                         if notify_count != last_notify[i] {
                             last_notify[i] = notify_count;
+                            let service_start = std::time::Instant::now();
                             (dev.service_running)(self, dev.vector)?;
+                            let service_elapsed = service_start.elapsed();
+                            if service_elapsed >= SLOW_TICK_PHASE_LOG_THRESHOLD {
+                                info!(
+                                    "run_to_first_halt_with_periodic_timer_and_devices: tick \
+                                     {tick_index}/{max_ticks} device[{i}].service_running took {:.1}s",
+                                    service_elapsed.as_secs_f64(),
+                                );
+                            }
                         }
                     }
                     if let Some(p) = pattern {
@@ -2025,7 +2057,16 @@ impl Multiverse {
                         let notify_count = (dev.notify_count)(self).unwrap_or(0);
                         if notify_count != last_notify[i] {
                             last_notify[i] = notify_count;
+                            let service_start = std::time::Instant::now();
                             (dev.service_halted)(self, dev.vector)?;
+                            let service_elapsed = service_start.elapsed();
+                            if service_elapsed >= SLOW_TICK_PHASE_LOG_THRESHOLD {
+                                info!(
+                                    "run_to_first_halt_with_periodic_timer_and_devices: tick \
+                                     {tick_index}/{max_ticks} device[{i}].service_halted took {:.1}s",
+                                    service_elapsed.as_secs_f64(),
+                                );
+                            }
                             serviced_any = true;
                         }
                     }
@@ -2808,6 +2849,75 @@ mod tests {
 
         mv.run_to_first_halt_with_periodic_timer_and_devices(200_000, TIMER_VECTOR, &[], 20, None, 0)
             .expect("a tick that completes well within its budget must succeed");
+    }
+
+    /// Reproduces the exact thread the real `baud-server` run loop executes on: every real boot
+    /// runs inside `tokio::task::spawn_blocking`'s reusable pool (`watchdog.rs`'s own doc:
+    /// "baud-server runs boots on tokio::task::spawn_blocking's reusable thread pool"), not a
+    /// plain `#[test]`'s own OS thread the way [`periodic_tick_watchdog_kills_a_stuck_tick`]
+    /// (which this test is otherwise identical to) runs on. Filed after a real Ubuntu H9 boot
+    /// attempt (todo.md §14 item 16's own real next step) stalled well past the 600s per-tick
+    /// budget through the real server with no `WatchdogKilled` ever surfacing — this isolates
+    /// whether that gap is specific to the `spawn_blocking` thread pool.
+    #[test]
+    fn periodic_tick_watchdog_kills_a_stuck_tick_via_spawn_blocking() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build a tokio runtime");
+        let budget = std::time::Duration::from_millis(300);
+        let outcome = runtime.block_on(async {
+            let handle = tokio::task::spawn_blocking(move || {
+                let kernel = spin_guest_kernel_path();
+                let mut mv =
+                    Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+                mv.set_periodic_tick_watchdog_budget(budget);
+                let start = std::time::Instant::now();
+                let result = mv.run_to_first_halt_with_periodic_timer_and_devices(
+                    500_000,
+                    TIMER_VECTOR,
+                    &[],
+                    20_000,
+                    None,
+                    0,
+                );
+                (result, start.elapsed())
+            });
+            match tokio::time::timeout(std::time::Duration::from_secs(10), handle).await {
+                Ok(join_result) => {
+                    let (result, elapsed) = join_result.expect("spawn_blocking task panicked");
+                    match result {
+                        Err(e) => Ok((e, elapsed)),
+                        Ok(_) => Err(
+                            "expected the wedged tick to error, guest halted instead".to_string(),
+                        ),
+                    }
+                }
+                Err(_) => Err(format!(
+                    "the per-tick watchdog did NOT reclaim a wedged tick within 10s when the guest \
+                     runs on a tokio::task::spawn_blocking thread (budget was {budget:?}) -- it does \
+                     on a plain #[test] OS thread (periodic_tick_watchdog_kills_a_stuck_tick), so \
+                     this gap is spawn_blocking-specific"
+                )),
+            }
+        });
+        // Bounded, not the implicit `Drop` (which waits unboundedly for outstanding
+        // `spawn_blocking` tasks) -- if the watchdog really did fail to reclaim the tick above,
+        // that task is still running and must not hang this test's own process teardown.
+        runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+
+        match outcome {
+            Ok((RunLoopError::WatchdogKilled { budget_ms }, elapsed)) => {
+                assert_eq!(budget_ms, budget.as_millis() as u64);
+                assert!(
+                    elapsed < std::time::Duration::from_secs(10),
+                    "the per-tick watchdog must reclaim a wedged tick promptly (took {elapsed:?})"
+                );
+            }
+            Ok((other, _)) => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
+            Err(msg) => panic!("{msg}"),
+        }
     }
 
     /// Set `flag` from another thread after `delay`, the way `baud-server`'s `CancelGuard` does

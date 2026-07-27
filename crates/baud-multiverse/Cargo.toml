@@ -46,6 +46,10 @@ memmap2 = "0.9"
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = "1"
+# Only for periodic_tick_watchdog_kills_a_stuck_tick_via_spawn_blocking, which reproduces the
+# exact thread the real baud-server run loop executes on (todo.md §14 item 16/17) — every real
+# boot runs inside tokio::task::spawn_blocking, not a plain #[test]'s own OS thread.
+tokio = { workspace = true }
 # Only for framebuffer_guest_frame_is_reproducible_across_boots' cross-check that
 # baud-tape-device's Frame-record hash agrees with baud-stream's own fingerprint function — no
 # non-test code in this crate depends on baud-stream.
