@@ -2648,6 +2648,43 @@ snapshot, not a duplicate of it.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).
+  8. **H9 — the timed-exit fingerprint's capture primitives (specs/baud-fingerprint.md, specs/baud-ubuntu.md
+     §6) now exist; the full crate/CLI/cross-VM orchestration does not.** Confirmed by a research pass
+     before starting that none of this existed anywhere in the codebase (no `KVM_TRANSLATE`, no CR3-walk-
+     for-arbitrary-RIP, no `run_to_events`, no cross-VM comparator) — ACPI (item 5(c) above,
+     `crates/baud-multiverse/src/acpi.rs`) and legacy PCI config space (item 5 above,
+     `crates/baud-multiverse/src/pci.rs`) were the two pieces already real-hardware-tested from prior
+     iterations; MCFG/ECAM is the one PCI gap still left (legacy-only, single bus, 3 functions). New
+     `baud_vcpu::boundary::run_to_events` + `RunToEventsOutcome` (`crates/baud-vcpu/src/boundary.rs`) is
+     the "stop at N without injecting" primitive `specs/baud-fingerprint.md` §4 step 1 and
+     `specs/baud-ubuntu.md` §6 both need: it shares `inject_at`'s arm-early-then-single-step machinery
+     (steps 1-3 — arm the branch counter a margin short, take the sloppy early exit, single-step the
+     remainder) but never reaches its injection steps (4-5), since a fingerprint capture must observe the
+     guest, not perturb it. 4 new unit tests reuse the existing `ScriptedStepper` harness (no real
+     `/dev/kvm` needed for these), all passing. `Multiverse::run_to_events`, `Multiverse::translate_gva`
+     (`KVM_TRANSLATE` plus an independent manual CR3 4-level page-walk cross-check via a new `walk_cr3`
+     free function — a real correctness check, not a redundant call, since a bug in the kernel's own
+     translation would otherwise be indistinguishable from a bug in baud's use of it), and
+     `Multiverse::capture_fingerprint` (returns a new `TimedExitFingerprint { events, rip, gpa, mem_hash,
+     console_output }`) all landed in `crates/baud-multiverse/src/linux/mod.rs`; the pre-existing
+     `ram_hash()` was reused directly for `mem_hash` since guest RAM is already registered as exactly one
+     canonical region, needing no new hashing logic. New real-hardware test
+     `timed_exit_fingerprint_is_stable` (`crates/baud-multiverse/src/linux/mod.rs`, alongside the other
+     `timer-guest` tests) boots `timer-guest` twice, calls `capture_fingerprint` with no timer injection at
+     all, and asserts the two independent boots land an identical `(events, rip, gpa, mem_hash)` tuple —
+     **passed on real `/dev/kvm`**. `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all
+     clean (0 new warnings — clippy held at the exact pre-existing 26-warning `baud-multiverse` baseline /
+     74-warning workspace baseline); full `bash drive/gate.sh` → 22 passed, 0 failed, 1 flaked (the
+     already-documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in
+     isolation — not a regression, see CLAUDE.md's standing note on this unit), 1 skipped, 3m24s. **Still
+     open for H9**: the actual `baud-fingerprint` crate (report rendering/`compare`/`FpError`), `baud
+     verify fingerprint` CLI, `drive/h9.sh`, the two-VM cross-process orchestration
+     (`cross_vm_fingerprint_matches`), and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)
+     above) are all still not started — this iteration closes only the previously-completely-missing
+     capture-primitive gap underneath all of them, and surfaced a real precision bug in the shared
+     stepping engine while doing so (§14.1, "`run_to_events`/`inject_at`'s single-step engine can overshoot
+     its target RCB" below) that is worth fixing before the exact "events = N" contract
+     `specs/baud-fingerprint.md` promises can be honestly implemented.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 
@@ -2705,6 +2742,41 @@ runner. Related: `drive/pkg/pkg-build-cli.sh` costs **143s**, not the "~4-5 min"
 `ralph/progress.txt` claim, and it rebuilds from scratch every run (`cp -a` of a 1.8G tree plus `mrproper`,
 no cache); it is now gated on a fingerprint that includes the out-of-tree kernel version and whether the
 enforced-regime patch is applied, since neither is visible to any `git diff`.
+
+**`run_to_events`/`inject_at`'s single-step engine can overshoot its target RCB — found while building
+the H9 fingerprint primitives (§14 item 8 above), not yet fixed.** `run_to_events`
+(`crates/baud-vcpu/src/boundary.rs`) — and, since it shares the same arm-early-then-single-step machinery,
+`inject_at`/`inject_timer_tick` too, which means every periodic-timer/virtio-rng/virtio-blk test in this
+workspace goes through the same code path — does not always land exactly on the requested `target_rcb`. It
+can overshoot by a variable, non-monotonic amount (empirically observed 6 to 43 branches, against
+`timer-guest`'s fixture) when a forced-diagnostic-exit instruction (`out 0x80, al`, the same harmless
+forced-exit `tests/fixtures/timer-guest/BUILD.md` documents) coincides with the single-step window.
+Root-cause hypothesis: `baud_vcpu::linux::pmu::LinuxPmuStepper::step` (`crates/baud-vcpu/src/linux/mod.rs`)
+re-enters `KVM_RUN` in a loop whenever an exit resolves to `DispatchOutcome::Continue` rather than
+`SingleStepBoundary`, and each such loop iteration still lets one more guest instruction retire — so when
+an intervening exit (e.g. the forced PIO write) competes with the pending single-step trap for several
+instructions in a row, more than one instruction, and potentially more than one retired conditional branch,
+can slip through a single call to `step()` before it returns. `run_to_events`'s own loop
+(`while point.rcb < target_rcb { point = stepper.step()?; ... }`) only checks the post-step count against
+the target, so a `step()` call that jumps clean past `target_rcb` is still reported as `Reached`, never
+detected as an overshoot.
+
+The landing point is still a fully deterministic, reproducible function of `(image, tape, target_rcb)` —
+the new `timed_exit_fingerprint_is_stable` test (§14 item 8) confirms two independent boots land the exact
+identical (overshot) point — so this is a *precision*, not a *determinism*, bug. But it directly
+contradicts `specs/baud-fingerprint.md` §4 step 1's "single-step to the exact count. events = N" and
+`specs/baud-ubuntu.md` §6's pseudocode (`assert_eq!(c, target)`), and it is very likely the true root cause
+the existing `RCB_HARDWARE_JITTER_TOLERANCE` (`crates/baud-multiverse/src/linux/mod.rs:2998`, used by
+`periodic_timer_injection_halts_gracefully_and_reproducibly`/`timer_tick_lands_at_identical_instruction`)
+has been attributing to raw hardware perf-counter read imprecision, rather than this stepping-loop
+interaction — worth revisiting those tests' own tolerance reasoning once this is fixed.
+`Multiverse::run_to_events`/`capture_fingerprint` were deliberately implemented to report the *actual*
+landed `rcb`, never the caller's requested `target_rcb` verbatim, specifically so a caller is never misled
+about which point was really observed (a correctness choice, not a workaround) — but a real fix to
+`LinuxPmuStepper::step` (making it retire strictly one guest instruction per call regardless of
+intervening non-debug exits) is real follow-up work needed before the exact "events = N" contract
+`specs/baud-fingerprint.md` promises can be honestly implemented, and is worth investigating before or
+during the eventual `baud-fingerprint` crate build-out.
 
 **Resolved.**
 

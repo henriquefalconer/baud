@@ -110,6 +110,57 @@ impl InjectOutcome {
     }
 }
 
+/// What [`run_to_events`] actually observed: the guest is still running, landed exactly on
+/// `target_rcb` (carrying the [`ExecPoint`], compared across runs the same way
+/// [`InjectOutcome::Injected`] is), or it halted on its own before ever reaching that boundary
+/// (carrying the last observed point — mirrors [`InjectOutcome::Halted`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunToEventsOutcome {
+    Reached(ExecPoint),
+    Halted(ExecPoint),
+}
+
+impl RunToEventsOutcome {
+    /// The [`ExecPoint`] either variant carries — the landing point whether or not the target was
+    /// actually reached.
+    pub fn point(&self) -> &ExecPoint {
+        match self {
+            RunToEventsOutcome::Reached(p) | RunToEventsOutcome::Halted(p) => p,
+        }
+    }
+
+    pub fn was_reached(&self) -> bool {
+        matches!(self, RunToEventsOutcome::Reached(_))
+    }
+}
+
+/// Drive `stepper` to land exactly on `target_rcb` retired conditional branches without injecting
+/// anything — the timed-exit fingerprint's "stop at exactly N" primitive (specs/baud-ubuntu.md §6,
+/// specs/baud-fingerprint.md §4 step 1). Shares [`inject_at`]'s arm-early-then-single-step
+/// machinery (steps 1-3: arm a margin short, take the sloppy early exit, single-step the
+/// remainder) but never reaches its injection steps (4-5) — a fingerprint capture must observe the
+/// guest, not perturb it.
+pub fn run_to_events<S: PmuStepper>(
+    stepper: &mut S,
+    target_rcb: u64,
+) -> Result<RunToEventsOutcome, S::Error> {
+    let armed_target = target_rcb.saturating_sub(MARGIN);
+    stepper.arm_overflow(armed_target)?;
+    stepper.run_until_exit()?;
+    if stepper.is_halted() {
+        return Ok(RunToEventsOutcome::Halted(stepper.current_point()));
+    }
+
+    let mut point = stepper.current_point();
+    while point.rcb < target_rcb {
+        point = stepper.step()?;
+        if stepper.is_halted() {
+            return Ok(RunToEventsOutcome::Halted(point));
+        }
+    }
+    Ok(RunToEventsOutcome::Reached(point))
+}
+
 /// Drive `stepper` to land the injection of `vector` at exactly `target_rcb` retired conditional
 /// branches, per specs/baud-vcpu.md §5 — or discover the guest halted on its own first (see
 /// [`PmuStepper::is_halted`]'s doc). Returns the outcome, so callers can compare the landed
@@ -316,6 +367,46 @@ mod tests {
         assert_eq!(outcome, InjectOutcome::Halted(stepper.point_at(510)));
         assert!(!outcome.was_injected());
         assert!(stepper.injected.is_none(), "must never inject once the guest has halted on its own");
+    }
+
+    /// [`run_to_events`]'s core contract, mirroring [`injects_exactly_at_target_rcb`] but without
+    /// ever calling `inject`: it must land exactly on `target_rcb`, having armed the same
+    /// `MARGIN`-short overflow and single-stepped the rest, without ever opening an interrupt
+    /// window or injecting anything.
+    #[test]
+    fn reaches_exactly_target_rcb_without_injecting() {
+        let mut stepper = ScriptedStepper::new(1_000, 0);
+        let outcome = run_to_events(&mut stepper, 1_000).expect("run_to_events must succeed");
+        assert!(outcome.was_reached());
+        assert_eq!(outcome.point().rcb, 1_000);
+        assert_eq!(stepper.armed, Some(1_000 - MARGIN));
+        assert_eq!(stepper.steps_taken as u64, MARGIN);
+        assert!(stepper.injected.is_none(), "run_to_events must never inject anything");
+        assert_eq!(stepper.windows_opened, 0, "run_to_events must never open an interrupt window");
+    }
+
+    /// The fingerprint's own determinism proof in miniature (specs/baud-fingerprint.md §8's
+    /// `timed_exit_fingerprint_is_stable`): two independent "runs" driven to the same target RCB
+    /// land on an identical tuple.
+    #[test]
+    fn identical_target_yields_identical_run_to_events_tuple_across_runs() {
+        let mut run_a = ScriptedStepper::new(10_000, 0);
+        let mut run_b = ScriptedStepper::new(10_000, 0);
+        let outcome_a = run_to_events(&mut run_a, 10_000).unwrap();
+        let outcome_b = run_to_events(&mut run_b, 10_000).unwrap();
+        assert_eq!(outcome_a, outcome_b);
+    }
+
+    /// A guest that halts on its own before the requested `target_rcb` must be reported as
+    /// [`RunToEventsOutcome::Halted`], never as an error — the fingerprint-capture analogue of
+    /// [`reports_halted_instead_of_injecting_when_guest_halts_before_target`].
+    #[test]
+    fn reports_halted_when_guest_halts_before_target_rcb() {
+        let mut stepper = ScriptedStepper::new(500, 0);
+        stepper.halt_at_rcb = Some(510);
+        let outcome = run_to_events(&mut stepper, 1_000).expect("a graceful halt must not surface as an error");
+        assert_eq!(outcome, RunToEventsOutcome::Halted(stepper.point_at(510)));
+        assert!(!outcome.was_reached());
     }
 
     #[test]

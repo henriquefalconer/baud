@@ -1974,6 +1974,137 @@ impl Multiverse {
         }
         format!("blake3:{}", hasher.finalize().to_hex())
     }
+
+    /// H9's timed-exit "stop at `N`" primitive (specs/baud-ubuntu.md §6, specs/baud-fingerprint.md
+    /// §4 step 1): drive this guest's vCPU toward `target_rcb` retired conditional branches via the
+    /// same arm-early-then-single-step engine [`inject_timer_tick`](Self::inject_timer_tick) uses,
+    /// but inject nothing — a fingerprint capture must observe the guest, not perturb it.
+    /// `target_rcb` is an **absolute** work-clock count from boot (unlike the periodic-timer
+    /// methods' `period_rcb`, which is relative to a per-call baseline), since the whole point of a
+    /// fingerprint is that a fixed `N` names the same machine state across independent boots.
+    ///
+    /// **Known real-hardware finding, not yet fixed (todo.md §14.1)**: the returned
+    /// [`ExecPoint`](baud_vcpu::boundary::ExecPoint)'s `rcb` is not always exactly `target_rcb` —
+    /// it can land tens of branches past it when a forced-diagnostic-exit instruction (e.g.
+    /// `timer-guest`'s periodic `out 0x80, al`) coincides with the single-step window, because
+    /// `LinuxPmuStepper::step`'s inner "keep single-stepping past any non-debug exit" loop can
+    /// silently retire more than one guest instruction per call in that case. The landing is still
+    /// a deterministic, reproducible function of `(image, tape, target_rcb)` (verified by
+    /// `timed_exit_fingerprint_is_stable` below) — this primitive reports the *actual* landed
+    /// `rcb`, never the caller's requested value, specifically so a caller can never be misled
+    /// about which point was really observed. This is very likely the same root cause the
+    /// existing periodic-timer/interrupt-injection tests have been attributing to raw hardware
+    /// counter-read jitter (`RCB_HARDWARE_JITTER_TOLERANCE` below) — worth revisiting once this is
+    /// fixed, since a real fix would also tighten those guarantees, not just this one.
+    pub fn run_to_events(
+        &mut self,
+        target_rcb: u64,
+    ) -> Result<baud_vcpu::boundary::RunToEventsOutcome, DeterminismHole> {
+        let mut stepper =
+            baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
+        baud_vcpu::boundary::run_to_events(&mut stepper, target_rcb).map_err(|e| DeterminismHole(e.to_string()))
+    }
+
+    /// Guest-virtual → guest-physical translation (specs/baud-ubuntu.md §6, specs/baud-fingerprint.md
+    /// §4 step 3): `KVM_TRANSLATE`, cross-checked by a manual CR3 four-level page walk built from
+    /// `KVM_GET_SREGS`'s own `cr3` — an independent implementation of the same architectural walk
+    /// KVM does internally, so a reported translation is confirmed by two separate code paths
+    /// rather than trusted from the ioctl alone. Returns `None` if `gva` is unmapped; a
+    /// [`DeterminismHole`] if the two methods disagree (an unmodeled bug, not a valid outcome).
+    pub fn translate_gva(&self, gva: u64) -> Result<Option<u64>, DeterminismHole> {
+        let kvm_result = self.guest.vcpu.translate_gva(gva).map_err(|e| DeterminismHole(e.to_string()))?;
+        let kvm_gpa = (kvm_result.valid != 0).then_some(kvm_result.physical_address);
+
+        let sregs = self.guest.vcpu.get_sregs().map_err(|e| DeterminismHole(e.to_string()))?;
+        let walked_gpa = walk_cr3(&self.guest.guest_mem, sregs.cr3, gva);
+
+        if kvm_gpa != walked_gpa {
+            return Err(DeterminismHole(format!(
+                "KVM_TRANSLATE ({kvm_gpa:?}) disagrees with the manual CR3 walk ({walked_gpa:?}) for gva {gva:#x}"
+            )));
+        }
+        Ok(kvm_gpa)
+    }
+
+    /// Capture the full four-field timed-exit fingerprint (specs/baud-fingerprint.md §4): stop at
+    /// or past `target_rcb` via [`run_to_events`](Self::run_to_events) (see that method's doc for
+    /// the known "may overshoot `target_rcb`" real-hardware finding), then read `guest RIP`,
+    /// translate it to `guest physical`, and hash guest RAM. `events` is the *actual* landed `rcb`,
+    /// not `target_rcb` verbatim. Errors (rather than silently fingerprinting the wrong state) if
+    /// the guest halted on its own before `target_rcb` — the same "did not reach the requested
+    /// point" contract `specs/baud-fingerprint.md` §5's `FpError::NoBanner` describes.
+    pub fn capture_fingerprint(&mut self, target_rcb: u64) -> Result<TimedExitFingerprint, DeterminismHole> {
+        let outcome = self.run_to_events(target_rcb)?;
+        let point = match outcome {
+            baud_vcpu::boundary::RunToEventsOutcome::Reached(point) => point,
+            baud_vcpu::boundary::RunToEventsOutcome::Halted(point) => {
+                return Err(DeterminismHole(format!(
+                    "capture_fingerprint: guest halted at rcb={} before reaching target_rcb={target_rcb}",
+                    point.rcb
+                )));
+            }
+        };
+        let gpa = self.translate_gva(point.rip)?;
+        Ok(TimedExitFingerprint {
+            events: point.rcb,
+            rip: point.rip,
+            gpa,
+            mem_hash: self.ram_hash(),
+            console_output: self.bus.console.output().to_vec(),
+        })
+    }
+}
+
+/// The four-field timed-exit fingerprint plus the console output observed alongside it
+/// (specs/baud-fingerprint.md §2's `Fingerprint`, minus the report-rendering/comparator layer,
+/// which is future work for a dedicated `baud-fingerprint` crate — this is only the capture this
+/// crate is responsible for producing, per that spec's own Non-Goals).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedExitFingerprint {
+    /// Deterministic events = retired conditional branches = the requested `target_rcb`.
+    pub events: u64,
+    /// Guest-virtual RIP at the stop.
+    pub rip: u64,
+    /// Guest-physical address of `rip`; `None` if unmapped.
+    pub gpa: Option<u64>,
+    /// `blake3:<hex>` of the whole guest-RAM region, computed right after the stop.
+    pub mem_hash: String,
+    /// Every byte the guest had written to the console up to the stop.
+    pub console_output: Vec<u8>,
+}
+
+/// A manual x86-64 four-level page walk from `cr3`, translating linear address `lin` to a
+/// guest-physical address — an independent cross-check of `KVM_TRANSLATE`
+/// ([`Multiverse::translate_gva`]), not merely a reimplementation trusted on its own. Mirrors
+/// specs/baud-ubuntu.md §6's reference pseudocode exactly: 4 levels (PML4/PDPTE/PDE/PTE), a `PS`
+/// (bit 7) large-page entry at PDPTE/PDE terminates the walk early, and each entry's physical
+/// frame is bits `[51:12]` masked to the level's page size.
+fn walk_cr3<M: GuestMemoryBackend>(guest_mem: &M, cr3: u64, lin: u64) -> Option<u64> {
+    /// `(high bit, low bit, PS-mask)` for each of the 4 levels, high-to-low (PML4 first).
+    const LEVELS: [(u32, u32, u64); 4] = [
+        (47, 39, 0),                    // PML4E — never a large-page terminator
+        (38, 30, 0x000f_ffff_c000_0000), // PDPTE — PS=1 means a 1 GiB page
+        (29, 21, 0x000f_ffff_ffe0_0000), // PDE — PS=1 means a 2 MiB page
+        (20, 12, 0),                     // PTE — the walk's normal 4 KiB terminator
+    ];
+    const PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+
+    let mut table = cr3 & PHYS_ADDR_MASK;
+    for (hi, lo, ps_mask) in LEVELS {
+        let bits = hi - lo + 1;
+        let index = (lin >> lo) & ((1u64 << bits) - 1);
+        let mut raw = [0u8; 8];
+        guest_mem.read_slice(&mut raw, GuestAddress(table + index * 8)).ok()?;
+        let entry = u64::from_le_bytes(raw);
+        if entry & 1 == 0 {
+            return None; // not present
+        }
+        if lo != 12 && entry & (1 << 7) != 0 {
+            return Some((entry & ps_mask) | (lin & ((1u64 << lo) - 1)));
+        }
+        table = entry & PHYS_ADDR_MASK;
+    }
+    Some(table | (lin & 0xfff))
 }
 
 /// One VM's result from [`run_fleet`] (H6, todo.md §10 — "many single-vCPU VMs pinned across
@@ -3013,6 +3144,51 @@ mod tests {
             "guest RAM at the guest's own natural halt must be byte-identical across two boots"
         );
     }
+
+    /// H9's core, previously-unbuilt gap (todo.md §14: the timed-exit fingerprint capability
+    /// itself did not exist anywhere in this workspace before this iteration): boots
+    /// `timer-guest` twice, freely runs each to the same absolute `TARGET_RCB` via
+    /// [`Multiverse::capture_fingerprint`] -- **no timer tick injected at all**, this is `run_to_
+    /// events`, not `inject_timer_tick` -- and asserts the two independent boots land the
+    /// identical `(events, rip, gpa, mem_hash)` tuple. `TARGET_RCB` is chosen comfortably inside
+    /// `timer-guest`'s single dec/jnz busy loop (BUILD.md), well below the `PERIOD_RCB = 200_000`
+    /// `periodic_timer_injection_halts_gracefully_and_reproducibly` above empirically found the
+    /// guest survives before its first tick, so the guest is still running (never halted) when
+    /// this lands -- proving the mechanism specs/baud-ubuntu.md §6 and specs/baud-fingerprint.md
+    /// §4 describe (arm-early-then-single-step to an exact RCB, `KVM_TRANSLATE` cross-checked by a
+    /// manual CR3 walk, blake3 over guest RAM) is itself a pure function of `(image, tape, N)` --
+    /// the load-bearing property the eventual `cross_vm_fingerprint_matches` (H9) depends on.
+    /// `gpa` is asserted `Some` and equal to `rip` itself: `timer-guest` never leaves the fixed
+    /// identity map this boot flow builds (`pagetables::write_identity_page_tables`), so its own
+    /// guest-virtual and guest-physical addresses coincide by construction -- a real Linux kernel
+    /// guest (whose own page tables remap RIP away from identity) is what will first exercise a
+    /// `gpa != rip` translation for real, future H9 work this test does not attempt.
+    #[test]
+    fn timed_exit_fingerprint_is_stable() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const TARGET_RCB: u64 = 100_000;
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_fp = first.capture_fingerprint(TARGET_RCB).expect("first capture failed");
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_fp = second.capture_fingerprint(TARGET_RCB).expect("second capture failed");
+
+        assert!(
+            first_fp.events >= TARGET_RCB,
+            "must land at or past the requested target, never short of it (landed {})",
+            first_fp.events
+        );
+        assert_eq!(first_fp.gpa, Some(first_fp.rip), "timer-guest never leaves the fixed identity map");
+        assert_eq!(
+            second_fp, first_fp,
+            "the same (image, tape, N) must produce a byte-identical fingerprint across two \
+             independent boots -- this is the whole-machine determinism proof H9's cross-VM check \
+             depends on"
+        );
+    }
+
 
     /// `tests/fixtures/virtio-rng-guest/`'s payload: a real (hand-assembled) virtio-rng driver
     /// sequence -- negotiate, set up one queue, post one writable descriptor, notify -- against the
