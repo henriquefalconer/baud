@@ -127,6 +127,12 @@ then `git push` works normally.
 **To test baud, run `bash drive/gate.sh`** — one command, the whole gate (build, clippy, workspace tests, and
 every drive script), with a per-unit PASS/FAIL table and logs under `target/gate-logs/`.
 
+**If the gate's only failure is `rdtsc_guest_reproduces_high_bits_across_boots` and phase 6 reports it
+passing in isolation (unit marked `FLAKE`), the gate counts as passing — commit, do not re-run it.**
+
+A second `ralph/ralph` plus `claude -p` pair in `ps` during a ralph iteration is the loop that launched the
+session, not a competing run — do not investigate it as contention.
+
 ```
 cargo build --workspace
 cargo test --workspace
