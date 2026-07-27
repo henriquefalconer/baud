@@ -6520,3 +6520,75 @@ todo.md §14 item 5 updated to record sub-item (b) done (virtio-blk device), wit
   - Full `bash drive/gate.sh`: 22 passed, 0 failed, 1 flaked (documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in isolation), 1 skipped — green per CLAUDE.md's documented exception
   - Left open (documented in todo.md): a combined periodic-timer+virtio-rng+virtio-blk run-loop combinator (needs a design change, not just another hand-written combinator), and a real-KVM guest-fixture test for virtio-blk (this sub-step's tests are all in-memory, same scope boundary (a) drew for itself)
 ---
+
+Post-push verification: origin/main now at 5015257, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked as documented, 1 skipped) before this push. todo.md still has pending items (H9 sub-items (c) minimal ACPI, (d) actual Ubuntu image, (e) drive/h9.sh + cross-VM fingerprint; H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging) -- emitting NEXT.
+
+## 2026-07-27T07:41:07 UTC (26min) - Session usage — build-6 [sonnet]
+- cost $11.4216 (from claude -p)
+- context 287,422 tok peak of 1M (29%) across 108 inference calls, monotonic
+- models sonnet-5 $11.4184 (in 290 / out 130,395 / cache-read 23,673,905) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T053631Z/010-build-6.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where the last iteration left off.
+
+Chose H9 item 5(c) — minimal ACPI (RSDP→RSDT/XSDT→FADT+DSDT+MADT with one LAPIC), the next sub-step after (a) virtio-pci transport and (b) virtio-blk, both done in prior iterations. Researched specs/baud-ubuntu.md's one-sentence ACPI requirement plus real ACPICA/Linux parsing rules (RSDP must live in the 0xE0000-0xFFFFF BIOS scan window, HW_REDUCED_ACPI flag lets us skip modeling PM1a/GPE register blocks). Added layout.rs address constants; now writing crates/baud-multiverse/src/acpi.rs table builders.
+
+acpi.rs done: 11 new unit tests all green, cargo clippy back to the documented 26-warning baseline with zero new warnings (fixed two clippy::assertions_on_constants/manual_is_multiple_of hits by moving the RSDP-scan-window check into a compile-time const assertion, mirroring layout.rs's own convention). Full cargo test --workspace via a verification subagent: 535 passed, 0 failed, 15 ignored (one documented rdtsc flake reconfirmed passing in isolation). Now updating todo.md item 5(c) with what was built and what remains open.
+
+todo.md updated with the full 5(c) status block (what was implemented, the two explicitly-open follow-ups: boot-path wiring and the LAPIC MMIO shim). Now running the full pre-push gate (bash drive/gate.sh) per CLAUDE.md/todo.md §15 before committing.
+
+bash drive/gate.sh launched in background (full build+clippy+workspace-tests+every drive script gate). Waiting for it to complete before committing.
+
+## 2026-07-27T08:04:08 UTC (23min) - Session usage — build-7 [sonnet]
+- cost $6.6592 (from claude -p)
+- context 198,365 tok peak of 1M (20%) across 73 inference calls, monotonic
+- models sonnet-5 $6.6560 (in 1,520 / out 85,677 / cache-read 12,164,532) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T053631Z/011-build-7.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Studying todo.md and prior progress to find most important item to address...
+
+Found: prior session (iteration 7) already implemented acpi.rs for todo.md item 5(c) minimal ACPI, updated todo.md, and launched bash drive/gate.sh in background but the session ended before it could observe the result or commit -- acpi.rs is untracked, layout.rs/lib.rs modified. Continuing that work: re-verifying tests then re-running the gate before committing.
+
+Confirmed: todo.md already carries the full (c) status block for the ACPI table-builder work (write_acpi_tables, 11 new tests, 26-warning clippy baseline unchanged). Re-running cargo test -p baud-multiverse --lib to reconfirm before launching the full gate.
+
+cargo test -p baud-multiverse --lib: 193 passed, 0 failed, 10 ignored -- matches prior session's recorded count exactly. Running clippy on baud-multiverse now.
+
+clippy -p baud-multiverse --all-targets: 26 warnings, matching the documented pre-existing baseline exactly -- zero new. Launching the full pre-push gate (bash drive/gate.sh) now in background per CLAUDE.md/todo.md section 15.
+
+Gate launched in background (bbr27llv1). Waiting for completion notification before committing.
+
+## 2026-07-27T08:06:38 UTC (3min) - Session usage — build-7 [sonnet]
+- cost $0.8934 (from claude -p)
+- context 99,115 tok peak of 1M (10%) across 15 inference calls, monotonic
+- models sonnet-5 $0.8902 (in 30 / out 4,566 / cache-read 1,230,462) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/012-build-7.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reviewing todo.md and current git state (uncommitted changes in baud-multiverse layout.rs, lib.rs, and new acpi.rs).
+
+Prior gate runs (080311Z, 080541Z) were both killed mid-run when the previous session ended -- only warmup-build + h5 completed, no results table. Re-launching bash drive/gate.sh fresh in this session, in background, to get a full run.
+
+Verified todo.md's item 5(c) description matches the actual diff (layout.rs +26 lines of ACPI addresses, lib.rs wires acpi module, acpi.rs is 410 lines). Waiting on the background gate run (bb2k102s5) to finish before committing.
+
+Gate re-run (bb2k102s5) is progressing normally -- warmup build passed, now moving through phases. Waiting for completion notification.
+
+Continuing to wait for the gate.sh background run (bb2k102s5) to finish; will commit once it reports pass/fail.
+
+## 2026-07-27T08:08:38 UTC (2min) - Session usage — build-7 [sonnet]
+- cost $0.7430 (from claude -p)
+- context 90,721 tok peak of 1M (9%) across 20 inference calls, monotonic
+- models sonnet-5 $0.7398 (in 40 / out 4,682 / cache-read 1,339,539) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/013-build-7.json

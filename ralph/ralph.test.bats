@@ -338,22 +338,57 @@ JSON
     [[ "$fn" == *'${resume_args[@]+"${resume_args[@]}"}'* ]]
 }
 
-@test "the resume nudge tells the session the background job is dead, not pending" {
+@test "the resume nudge is one sentence telling it not to background the command" {
     write_resume_prompt "$TMP/nudge.txt"
+    [ "$(wc -l < "$TMP/nudge.txt")" -eq 1 ]
     run cat "$TMP/nudge.txt"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"killed with it"* ]]
-    [[ "$output" == *"FOREGROUND"* ]]
+    [[ "$output" == *"without backgrounding"* ]]
     [[ "$output" == *"promise"* ]]
 }
 
 @test "the build loop resumes before spending a fresh session on the slot" {
     # Order matters: a restart throws away everything the stranded session did.
-    loop=$(sed -n '/no promise tag after resume/,+0p;/Before spending a fresh session/,/^    fi$/p' "$RALPH")
-    [[ "$loop" == *"resumable_session_id"* ]]
-    resume_line=$(grep -n 'resumable_session_id "\$LAST_JSON"' "$RALPH" | cut -d: -f1)
+    resume_line=$(grep -n 'resumable_session_id "\$LAST_JSON"' "$RALPH" | head -1 | cut -d: -f1)
     fail_line=$(grep -n 'fails=\$((fails + 1))' "$RALPH" | head -1 | cut -d: -f1)
+    [ -n "$resume_line" ] && [ -n "$fail_line" ]
     [ "$resume_line" -lt "$fail_line" ]
+}
+
+@test "a resumed iteration writes ONE usage entry, summing every invocation" {
+    # Resume JSONs carry per-turn cost, not a running total, so they must be summed.
+    printf '{"session_id":"n","total_cost_usd":0.1008,"modelUsage":{"claude-sonnet-5":{"costUSD":0.1008,"contextWindow":1000000}}}' > "$TMP/a.json"
+    printf '{"session_id":"n","total_cost_usd":0.0150,"modelUsage":{"claude-sonnet-5":{"costUSD":0.0150,"contextWindow":1000000}}}' > "$TMP/b.json"
+    SESSION_SECS=120
+    log_usage "build-7" "$TMP/a.json" "$TMP/b.json"
+    [ "$(grep -c 'Session usage' "$PROGRESS")" -eq 1 ]
+    run grep -q 'cost \$0.1158' "$PROGRESS"
+    [ "$status" -eq 0 ]
+}
+
+@test "run_session defers its usage entry while an iteration is accumulating" {
+    fn=$(sed -n '/^run_session() {/,/^}/p' "$RALPH")
+    [[ "$fn" == *'ITER_JSONS+=( "$out" )'* ]]
+    [[ "$fn" == *'USAGE_DEFERRED'* ]]
+    # begin/flush must bracket the loop body, so a resume adds no ledger entry.
+    [[ "$(grep -c 'begin_iteration_usage' "$RALPH")" -ge 2 ]]
+}
+
+@test "merging invocations sums counters but not the context window" {
+    printf '{"session_id":"n","total_cost_usd":0.05,"modelUsage":{"claude-sonnet-5":{"costUSD":0.05,"outputTokens":100,"contextWindow":1000000}}}' > "$TMP/a.json"
+    cp "$TMP/a.json" "$TMP/b.json"
+    SESSION_SECS=60
+    log_usage "build-7" "$TMP/a.json" "$TMP/b.json"
+    run grep -q 'out 200' "$PROGRESS"      # counters add
+    [ "$status" -eq 0 ]
+    run grep -q 'of 2M' "$PROGRESS"        # the window must not
+    [ "$status" -ne 0 ]
+}
+
+@test "the ledger flags a resumed iteration even when the context looks monotonic" {
+    src=$(sed -n '/^log_usage()/,/^}/p' "$RALPH")
+    [[ "$src" == *'resumed {len(metas) - 1}x'* ]]
+    # The flag must sit outside the drops branch, or a clean run hides the resume.
+    [[ "$src" != *'else f"{drops} drop(s), final {ctx[-1]:,}"\n    if len(metas)'* ]]
 }
 
 @test "each invocation derives its own run directory" {

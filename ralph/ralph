@@ -60,7 +60,8 @@ WATCHDOG="${RALPH_WATCHDOG_SECS:-2700}"
 BUDGET_USD="${RALPH_MAX_BUDGET_USD:-}"
 BUDGET_TOTAL_USD="${RALPH_BUDGET_TOTAL_USD:-}"
 BUDGET_RESERVE_USD="${RALPH_BUDGET_RESERVE_USD:-2.00}"
-GROUP_WAIT_MAX="${RALPH_GROUP_WAIT_MAX:-900}"    # seconds to wait for leftover session work
+GROUP_WAIT_MAX="${RALPH_GROUP_WAIT_MAX:-900}"
+RESUME_MAX="${RALPH_RESUME_MAX:-4}"      # resumes allowed within one iteration    # seconds to wait for leftover session work
 BUILD_ONLY=0
 
 while [[ $# -gt 0 ]]; do
@@ -128,6 +129,21 @@ promise_of() {
 
 SESSION_N=0
 LAST_JSON=""
+USAGE_DEFERRED=0
+ITER_JSONS=()
+ITER_SECS=0
+
+# Start a fresh usage accumulation for one iteration.
+begin_iteration_usage() { ITER_JSONS=(); ITER_SECS=0; USAGE_DEFERRED=1; }
+
+# Emit the single ledger entry for the iteration just finished.
+flush_iteration_usage() { # <label>
+  USAGE_DEFERRED=0
+  (( ${#ITER_JSONS[@]} )) || return 0
+  SESSION_SECS="$ITER_SECS"
+  log_usage "$1" "${ITER_JSONS[@]}"
+  ITER_JSONS=(); ITER_SECS=0
+}
 # run_session hands its result back through a FILE, never stdout: wrapping it in
 # $( ) would run it in a subshell and discard every variable it sets — session
 # numbering would reset each call and collide transcripts, and the cost ledger
@@ -245,14 +261,26 @@ watchdog() { # <pid> <label>
 # every prompt token is billed exactly once into one of those three buckets, so
 # their sum is the whole prompt the model saw. Peak across calls is the headline;
 # a mid-session DROP means auto-compaction fired, which is worth seeing in the log.
-log_usage() { # <label> <json-file>
-  local label="$1" f="$2" cost
-  cost=$(jsonfield "$f" total_cost_usd 2>/dev/null || echo "")
-  [[ -z "$cost" ]] && return 0
+# log_usage <label> <json-file>... — one entry per ITERATION, not per invocation.
+# A resumed turn writes its own session JSON with its own total_cost_usd covering
+# only that turn (measured: $0.1008 for the first turn, $0.0150 for the resume), so
+# the cost and modelUsage figures are SUMMED across every JSON of the iteration. The
+# transcript is not: --resume appends to the same ~/.claude/projects/<cwd>/<sid>.jsonl,
+# so context peak and inference-call count are already whole-iteration figures and are
+# read from the last JSON's session_id alone.
+log_usage() {
+  local label="$1"; shift
+  local f cost="" any=0
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    cost=$(jsonfield "$f" total_cost_usd 2>/dev/null || echo "")
+    [[ -n "$cost" ]] && any=1
+  done
+  (( any )) || return 0
   {
     printf '\n## %s UTC (%s) - Session usage — %s [%s]\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%S)" "$(fmt_dur "${SESSION_SECS:-0}")" "$label" "$MODEL"
-    python3 - "$f" <<'PY'
+    python3 - "$@" <<'PY'
 import glob, json, os, sys
 
 # The context window is NOT hardcoded: the session JSON reports it per model as
@@ -306,10 +334,16 @@ def calls(path):
             })
     return out
 
-try:
-    meta = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
+metas = []
+for path in sys.argv[1:]:
+    try:
+        metas.append(json.load(open(path)))
+    except (OSError, ValueError):
+        pass
+if not metas:
     sys.exit(0)
+# The last invocation identifies the session; every one of them carries cost.
+meta = metas[-1]
 sid = meta.get("session_id")
 if not sid:
     sys.exit(0)
@@ -326,8 +360,20 @@ root = os.path.join(os.path.expanduser("~"), ".claude", "projects",
 # subagent was measured at total_cost_usd $12.3886 against a modelUsage sum of
 # $16.5541. Print the headline figure, and say so when the two disagree rather
 # than emitting two contradictory numbers in one entry.
-total = meta.get("total_cost_usd", 0) or 0
-mu = meta.get("modelUsage") or {}
+total = sum((m.get("total_cost_usd") or 0) for m in metas)
+# Counters add across invocations; contextWindow and maxOutputTokens are fixed
+# properties of the model and must NOT (summing them reported a 1M window as "2M"
+# and halved the percentage).
+NON_ADDITIVE = {"contextWindow", "maxOutputTokens"}
+mu = {}
+for m in metas:
+    for model, d in (m.get("modelUsage") or {}).items():
+        acc = mu.setdefault(model, {})
+        for k, v in d.items():
+            if isinstance(v, (int, float)) and k not in NON_ADDITIVE:
+                acc[k] = acc.get(k, 0) + v
+            else:
+                acc[k] = v
 mu_sum = sum((m.get("costUSD") or 0) for m in mu.values())
 # Only meaningful when per-model data exists — an absent modelUsage sums to 0
 # and would otherwise report the whole cost as a discrepancy.
@@ -341,7 +387,7 @@ session = calls(os.path.join(root, sid + ".jsonl"))
 if session:
     ctx = [c["in"] + c["cr"] + c["cw"] for c in session]
     peak = max(ctx)
-    mu_all = meta.get("modelUsage") or {}
+    mu_all = mu
     last = session[-1]["model"]
     entry = mu_all.get(last) or next(
         (v for k, v in mu_all.items() if base(k) == base(last)), {})
@@ -356,9 +402,19 @@ if session:
     # drop is reported as an observation and not labelled as compaction.
     drops = sum(1 for i in range(1, len(ctx)) if ctx[i] < ctx[i - 1] * 0.8)
     shape = "monotonic" if not drops else f"{drops} drop(s), final {ctx[-1]:,}"
+    # A resumed iteration produces one series from several processes. --resume
+    # replays the conversation, so it normally keeps climbing — measured on a real
+    # resume the series stayed monotonic (36,455 -> 36,797 -> 37,347). It is not
+    # guaranteed to for a large context, though, and a step down at a resume
+    # boundary would be an artifact of restarting, NOT context being reclaimed.
+    # Say how many turns produced the series so a drop here is not read as
+    # compaction.
+    # Unconditional: flagged whether or not the series dipped, so "monotonic" alone
+    # never hides that the iteration took more than one process to produce.
+    if len(metas) > 1:
+        shape += f", resumed {len(metas) - 1}x"
     print(f"- context {peak:,} tok peak{of}{pct} across {len(ctx)} inference calls, {shape}")
 
-mu = meta.get("modelUsage") or {}
 if mu:
     parts = []
     for model, d in sorted(mu.items(), key=lambda kv: -kv[1].get("costUSD", 0)):
@@ -403,23 +459,7 @@ resumable_session_id() { # <session-json> -> session id, if the run looks resuma
 }
 
 write_resume_prompt() { # <file>
-  cat > "$1" <<'NUDGE'
-Your previous turn ended while a Bash task was still running in the background.
-
-Under `claude -p` there is no completion notification and no automatic resume: ending
-your turn exits the process, and every background task it owns is killed with it. The
-job you were waiting on did NOT finish and produced no result — do not wait for it, and
-do not check on it.
-
-Re-run that command now in the FOREGROUND: a normal Bash call, `run_in_background`
-omitted, with a generous `timeout` (600000 ms). Stay in this turn until it actually
-returns a result you can read. Never background a command whose result you intend to
-act on in this same iteration.
-
-Then finish the iteration exactly as the house protocol requires — progress block,
-`git add -A`, commit, push, post-push verification — and end your final message with
-the promise tag, `<promise>NEXT</promise>` or `<promise>COMPLETE</promise>`.
-NUDGE
+  printf '%s\n' "Repeat the command without backgrounding it, then finish the iteration and end with <promise>NEXT</promise> or <promise>COMPLETE</promise>." > "$1"
 }
 
 # run_session <label> <prompt-file> — writes the session's final text to
@@ -446,7 +486,15 @@ run_session() {
   # `wait` returns when THIS claude exits; subagents it spawned live on.
   await_group "$pgid" "$label"
   SESSION_SECS=$(( $(date +%s) - t0 ))   # read by log_usage for the header
-  log_usage "$label" "$out"
+  ITER_JSONS+=( "$out" )
+  ITER_SECS=$(( ITER_SECS + SESSION_SECS ))
+  # A deferred caller (the build loop, which may resume this same session several
+  # times) logs once for the whole iteration instead of once per invocation.
+  if (( USAGE_DEFERRED )); then
+    :
+  else
+    log_usage "$label" "$out"
+  fi
   (( rc != 0 )) && say "session [$label] exited rc=$rc — see $out.err"
   jsonfield "$out" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
   return 0
@@ -505,32 +553,40 @@ build_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
       return 1
     fi
     pf="$(build_prompt_file "$ITER" "$extra")"
+    # One iteration may take several `claude -p` invocations — the first, plus a
+    # resume for each time it ends its turn on a backgrounded command. They are one
+    # unit of work on one session id, so usage is accumulated and written once, at
+    # the end, instead of once per invocation.
+    begin_iteration_usage
     run_session "build-$ITER" "$pf"
     out="$(cat "$RESULT_FILE")"
     p="$(promise_of "$out")"
+
+    # A missing tag almost always means the turn ended waiting on a command that -p
+    # then killed. Resuming costs one short turn and keeps everything the session
+    # already did; restarting the slot throws all of it away. Bounded only to stop a
+    # session that cannot finish from looping forever.
+    local sid rp tries=0
+    while [[ -z "$p" ]] && (( tries < RESUME_MAX )); do
+      sid="$(resumable_session_id "$LAST_JSON")" || break
+      [ -n "$sid" ] || break
+      tries=$((tries + 1))
+      say "iteration $ITER [$phase]: no promise tag — resuming session $sid (resume $tries/$RESUME_MAX)"
+      rp="$RUNDIR/prompt-resume-$ITER-$tries.txt"
+      write_resume_prompt "$rp"
+      run_session "build-$ITER" "$rp" "$sid"
+      out="$(cat "$RESULT_FILE")"
+      p="$(promise_of "$out")"
+    done
+
     if [[ -z "$p" ]]; then
-      # Before spending a fresh session on the same slot, try to rescue this one. A
-      # missing tag most often means the turn ended waiting on a backgrounded command
-      # that -p then killed; resuming costs one short turn and keeps everything the
-      # session already did, where a restart throws it away.
-      local sid rp
-      for _ in 1 2; do
-        sid="$(resumable_session_id "$LAST_JSON")" || break
-        [ -n "$sid" ] || break
-        rp="$RUNDIR/prompt-resume-$SESSION_N.txt"
-        write_resume_prompt "$rp"
-        run_session "$phase-$ITER-resume" "$rp" "$sid"
-        out="$(cat "$RESULT_FILE")"
-        p="$(promise_of "$out")"
-        [[ -n "$p" ]] && break
-      done
-    fi
-    if [[ -z "$p" ]]; then
+      flush_iteration_usage "build-$ITER"
       fails=$((fails + 1))
-      say "iteration $ITER [$phase]: no promise tag after resume ($fails/3 consecutive) — retrying the slot"
+      say "iteration $ITER [$phase]: still no promise tag after $tries resume(s) ($fails/3 consecutive) — retrying the slot"
       (( fails >= 3 )) && { say "aborting: 3 consecutive abnormal exits at iteration $ITER"; return 1; }
       continue
     fi
+    flush_iteration_usage "build-$ITER"
     fails=0
     say "iteration $ITER [$phase] -> <promise>$p</promise>"
     ITER=$((ITER + 1))
