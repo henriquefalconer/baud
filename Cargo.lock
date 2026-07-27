@@ -709,6 +709,7 @@ dependencies = [
  "perf-event",
  "proptest",
  "thiserror 2.0.19",
+ "tracing",
  "vmm-sys-util",
 ]
 

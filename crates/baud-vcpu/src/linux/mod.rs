@@ -12,11 +12,17 @@
 // process-wide-signal simplification that a full multi-thread VMM integration must revisit.
 
 pub mod pmu;
+mod watchdog;
 
-use crate::{dispatch_exit, Bus, DeterminismHole, DispatchOutcome, EnforcedRdseedSite, Exit, TimeSource};
+use crate::{
+    dispatch_exit, Bus, DeterminismHole, DispatchOutcome, EnforcedRdseedSite, Exit, RunLoopError, TimeSource,
+};
 use kvm_bindings::{kvm_guest_debug, KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP};
 use kvm_ioctls::{VcpuExit, VcpuFd};
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use watchdog::Watchdog;
 
 /// Not in pinned `kvm-bindings` 0.14 (invented after that crate was bindgen'd) — the out-of-tree
 /// enforced-regime KVM module's own exit reason for a trapped `RDTSC`/`RDRAND`
@@ -131,17 +137,29 @@ pub fn set_singlestep(vcpu: &VcpuFd, enabled: bool, block_irq: bool) -> io::Resu
     vcpu.set_guest_debug(&debug).map_err(io::Error::from)
 }
 
-/// Run the `KVM_RUN` loop until a `Halted` outcome, retrying transparently on `EINTR` (a signal
-/// arriving mid-ioctl, e.g. from `pmu`'s armed overflow — this call site does not care why).
+/// Run the `KVM_RUN` loop until a `Halted` outcome, retrying transparently on a benign `EINTR` (a
+/// signal arriving mid-ioctl for some unrelated reason — this call site does not care why), but
+/// bounded by a real wall-clock [`Watchdog`] armed for `watchdog_budget` (`Duration::ZERO`
+/// disables it — see [`Watchdog::arm`]'s doc). Without this bound a guest that makes zero VM
+/// exits at all (this project's subtractive machine model has no APIC/PIT/host interrupts to
+/// force one) would otherwise block this thread inside `KVM_RUN` forever (todo.md §14.1 "Still
+/// open" item 1); `docs/determinism.md`'s "Known limits" §4 names the watchdog kill as the one
+/// deliberately non-deterministic intervention in the whole system.
 pub fn run_until_halted(
     vcpu: &mut VcpuFd,
     bus: &mut dyn Bus,
     time: &mut dyn TimeSource,
-) -> Result<(), DeterminismHole> {
-    loop {
-        match run_one_exit(vcpu, bus, time)? {
+    watchdog_budget: Duration,
+) -> Result<(), RunLoopError> {
+    let watchdog = Watchdog::arm(watchdog_budget);
+    let result = loop {
+        let outcome = match run_one_exit_impl(vcpu, bus, time, Some(&watchdog.fired)) {
+            Ok(outcome) => outcome,
+            Err(e) => break Err(e),
+        };
+        match outcome {
             DispatchOutcome::Continue => continue,
-            DispatchOutcome::Halted => return Ok(()),
+            DispatchOutcome::Halted => break Ok(()),
             DispatchOutcome::SingleStepBoundary => continue, // no boundary walk in progress here
             DispatchOutcome::ServeEnforcedRdtsc(_)
             | DispatchOutcome::ServeEnforcedRdtscp { .. }
@@ -151,7 +169,20 @@ pub fn run_until_halted(
                 unreachable!("run_one_exit always resolves this to Continue before returning")
             }
         }
-    }
+    };
+    // Read `fired` before `disarm` consumes `watchdog` — a hole that raced the watchdog firing
+    // (both true at once is possible only in the narrow window where the guest's own genuine
+    // ioctl failure happens to land in the same instant the budget ran out) is reported as the
+    // watchdog kill: the budget had, in fact, already elapsed either way.
+    let watchdog_fired = watchdog.fired.load(Ordering::SeqCst);
+    watchdog.disarm();
+    result.map_err(|hole| {
+        if watchdog_fired {
+            RunLoopError::WatchdogKilled { budget_ms: watchdog_budget.as_millis() as u64 }
+        } else {
+            RunLoopError::DeterminismHole(hole)
+        }
+    })
 }
 
 /// What one `KVM_RUN` step converted to: either a fully-resolved [`Exit`], or a signal that the
@@ -238,6 +269,22 @@ pub fn run_one_exit(
     bus: &mut dyn Bus,
     time: &mut dyn TimeSource,
 ) -> Result<DispatchOutcome, DeterminismHole> {
+    // No watchdog for this entry point: `Multiverse::step_exit`'s callers (`run_until_console_len`,
+    // `run_until_branch_or_halt`, interactive shell stepping) already carry their own deterministic
+    // `max_exits` budget, so there is nothing here for a wall-clock kill to guard against.
+    run_one_exit_impl(vcpu, bus, time, None)
+}
+
+/// [`run_one_exit`]'s real body, plus the one thing it does not need: on `EINTR`, check whether
+/// `watchdog` (armed only by [`run_until_halted`]) has already fired before blindly retrying —
+/// see this crate's [`RunLoopError`] and `watchdog`'s own doc for why this loop is otherwise
+/// indistinguishable from a benign signal arriving for some unrelated reason.
+fn run_one_exit_impl(
+    vcpu: &mut VcpuFd,
+    bus: &mut dyn Bus,
+    time: &mut dyn TimeSource,
+    watchdog: Option<&AtomicBool>,
+) -> Result<DispatchOutcome, DeterminismHole> {
     loop {
         let exit = match run_and_convert_rcb_bracketed(vcpu, time) {
             Ok(ConvertedExit::Exit(exit)) => Ok(exit),
@@ -281,7 +328,21 @@ pub fn run_one_exit(
                     other => Ok(other),
                 };
             }
-            Err(e) if e.errno() == libc::EINTR => continue,
+            Err(e) if e.errno() == libc::EINTR => {
+                // Only `run_until_halted` ever passes `Some` here, and only once its own
+                // `Watchdog` has actually fired (`watchdog::Watchdog::fired`'s doc) — any other
+                // `EINTR` (this call site genuinely does not care why) keeps retrying exactly as
+                // before. Returning here rather than looping is what lets a truly zero-exit
+                // spinning guest ever be reclaimed at all.
+                if watchdog.is_some_and(|fired| fired.load(Ordering::SeqCst)) {
+                    return Err(DeterminismHole(
+                        "wall-clock watchdog fired: KVM_RUN was interrupted with the guest never \
+                         reaching Hlt/Shutdown"
+                            .to_string(),
+                    ));
+                }
+                continue;
+            }
             Err(e) => {
                 // An ioctl failure that is not a benign signal interruption is itself a
                 // determinism hole: the run loop has no deterministic value to serve for "KVM

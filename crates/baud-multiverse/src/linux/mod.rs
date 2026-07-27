@@ -26,7 +26,7 @@ use crate::layout;
 use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX};
 use crate::virtio_mmio::VirtioMmioTransport;
 use baud_snapshot::{PageRef, PageStore, Universe};
-use baud_vcpu::DeterminismHole;
+use baud_vcpu::{DeterminismHole, RunLoopError};
 use kvm_bindings::{
     kvm_cpuid_entry2, kvm_enable_cap, kvm_msr_entry, kvm_userspace_memory_region, Msrs,
     KVM_MAX_CPUID_ENTRIES, KVM_MEM_LOG_DIRTY_PAGES,
@@ -35,6 +35,7 @@ use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange
 use perf_event::{Builder, Counter};
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 /// The guest-RAM backend type this boot flow uses throughout — a single anonymous-mmap region, no
@@ -516,7 +517,22 @@ pub struct Multiverse {
     /// per-slot dirty-page write-protection) a caller that never rewinds this `Multiverse` should
     /// not pay. [`reset_dirty_pages`](Self::reset_dirty_pages) requires it to be `Some`.
     dirty_ring: Option<baud_snapshot::linux::DirtyRing>,
+    /// The real wall-clock budget [`run_to_first_halt`](Self::run_to_first_halt)/
+    /// [`run_to_first_halt_without_ram_hash`](Self::run_to_first_halt_without_ram_hash) give
+    /// `baud_vcpu::linux::run_until_halted`'s watchdog (todo.md §14.1 "Still open" item 1) —
+    /// initialized to [`DEFAULT_WATCHDOG_BUDGET`] by [`boot`](Self::boot)/[`restore`]
+    /// (Self::restore) and overridable via [`set_watchdog_budget`](Self::set_watchdog_budget).
+    /// Every other `run_to_first_halt_with_*` entry point already carries its own deterministic
+    /// `max_exits`/`max_ticks` bound and does not consult this field at all.
+    watchdog_budget: Duration,
 }
+
+/// The default real wall-clock budget a booted or restored [`Multiverse`] gives its plain
+/// [`run_to_first_halt`](Multiverse::run_to_first_halt) — generous next to the sub-second cost a
+/// normal boot-to-halt takes even under this dev host's documented load contention (todo.md
+/// §14.1, `thousand_branches_are_independent_and_deterministic` averages ~200-250ms/branch), but
+/// still finite: this is what actually closes the "hangs forever" gap.
+pub const DEFAULT_WATCHDOG_BUDGET: Duration = Duration::from_secs(30);
 
 /// Where an injected interrupt actually landed (H4, specs/baud-vcpu.md §5): the instruction
 /// pointer and cumulative work-clock RCB at the moment `Multiverse::inject_timer_tick` delivered
@@ -711,7 +727,7 @@ impl Multiverse {
         let time = WorkClock::new(base, k, counter)
             .with_entropy_seed(entropy_seed)
             .with_rdseed_sites(rdseed_sites);
-        Ok(Multiverse { guest, bus, time, dirty_ring })
+        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -824,7 +840,7 @@ impl Multiverse {
             universe.clock.entropy_state,
             counter,
         );
-        Ok(Multiverse { guest, bus, time, dirty_ring })
+        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET })
     }
 
     /// Fork a new, independent continuation from a captured [`Universe`] on its own tape suffix
@@ -898,14 +914,27 @@ impl Multiverse {
     /// `double_boot_memory_identical`: "boot the hello image twice ... assert equal blake3 of guest
     /// RAM at first `Hlt`"). Every VM exit along the way is resolved by `dispatch_exit` through
     /// this `Multiverse`'s console `Bus` and work-clock `TimeSource` — any exit kind neither knows
-    /// how to serve is `Err(DeterminismHole)`, never a silent continue (specs/baud-vcpu.md §3).
-    pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, DeterminismHole> {
+    /// how to serve is `Err(RunLoopError::DeterminismHole)`, never a silent continue
+    /// (specs/baud-vcpu.md §3); a guest that never reaches `Hlt`/`Shutdown` at all is
+    /// `Err(RunLoopError::WatchdogKilled)` once [`watchdog_budget`](Self::watchdog_budget) real
+    /// milliseconds pass (todo.md §14.1 "Still open" item 1) instead of hanging this call forever.
+    pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, RunLoopError> {
         let observed = self.run_to_first_halt_without_ram_hash()?;
         Ok(HaltOutcome {
             console_output: observed.console_output,
             ram_hash: self.ram_hash(),
             exit_pc: observed.exit_pc,
         })
+    }
+
+    /// Override the real wall-clock budget [`run_to_first_halt`](Self::run_to_first_halt)/
+    /// [`run_to_first_halt_without_ram_hash`](Self::run_to_first_halt_without_ram_hash) give the
+    /// watchdog — [`boot`](Self::boot)/[`restore`](Self::restore) already set
+    /// [`DEFAULT_WATCHDOG_BUDGET`], so callers only need this to tighten it (a test proving the
+    /// watchdog actually fires without waiting 30 real seconds) or pass `Duration::ZERO` to
+    /// disable it outright (`watchdog::Watchdog::arm`'s doc).
+    pub fn set_watchdog_budget(&mut self, budget: Duration) {
+        self.watchdog_budget = budget;
     }
 
     /// [`run_to_first_halt`](Self::run_to_first_halt) without the guest-RAM hash: the identical run
@@ -922,8 +951,13 @@ impl Multiverse {
     /// exactly what [`run_to_first_halt`](Self::run_to_first_halt) would have put in
     /// [`HaltOutcome::ram_hash`] — which is precisely how `run_to_first_halt` itself is now
     /// implemented, on top of this.
-    pub fn run_to_first_halt_without_ram_hash(&mut self) -> Result<HaltObservation, DeterminismHole> {
-        baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
+    pub fn run_to_first_halt_without_ram_hash(&mut self) -> Result<HaltObservation, RunLoopError> {
+        baud_vcpu::linux::run_until_halted(
+            &mut self.guest.vcpu,
+            &mut self.bus,
+            &mut self.time,
+            self.watchdog_budget,
+        )?;
         Ok(HaltObservation {
             console_output: self.bus.console.output().to_vec(),
             exit_pc: self.current_rip()?,
@@ -1078,7 +1112,7 @@ impl Multiverse {
         period_rcb: u64,
         vector: u8,
         num_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         let mut ticks = Vec::with_capacity(num_ticks as usize);
         for _ in 0..num_ticks {
             ticks.push(self.inject_timer_tick(period_rcb, vector)?);
@@ -1607,7 +1641,7 @@ pub enum FleetError {
     #[error("VM on core {core_id} failed to boot: {source}")]
     Boot { core_id: usize, source: BootError },
     #[error("VM on core {core_id} failed to run: {source}")]
-    Run { core_id: usize, source: DeterminismHole },
+    Run { core_id: usize, source: RunLoopError },
     #[error("VM thread on core {core_id} panicked")]
     ThreadPanicked { core_id: usize },
 }
@@ -1723,6 +1757,57 @@ mod tests {
             second_outcome.ram_hash, first_outcome.ram_hash,
             "guest RAM at first Hlt must be byte-identical across two boots (boot nondeterminism is a bug)"
         );
+    }
+
+    /// `tests/fixtures/spin-guest/` (that directory's `BUILD.md`): a hand-assembled `1: jmp 1b`
+    /// payload that causes **zero** VM exits, ever — the one fixture in this repo with no way to
+    /// reach `Hlt`/`Shutdown` on its own, built specifically to exercise the wall-clock watchdog
+    /// (todo.md §14.1 "Still open" item 1, `crates/baud-vcpu/src/linux/watchdog.rs`) end-to-end
+    /// against a real, currently-running `KVM_RUN`.
+    fn spin_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spin-guest/bzImage")
+    }
+
+    /// The concrete fix for todo.md §14.1 "Still open" item 1: before the watchdog existed,
+    /// `run_to_first_halt()` against a guest that never exits (this project's subtractive machine
+    /// model has no APIC/PIT/host interrupts to force one) hung the calling thread forever. A
+    /// tight `set_watchdog_budget` proves the real fix without this test itself hanging: the call
+    /// must return, and specifically with `RunLoopError::WatchdogKilled`, well within a generous
+    /// wall-clock bound this test enforces on itself.
+    #[test]
+    fn wall_clock_watchdog_kills_a_truly_spinning_guest() {
+        let kernel = spin_guest_kernel_path();
+        let budget = std::time::Duration::from_millis(300);
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_watchdog_budget(budget);
+
+        let start = std::time::Instant::now();
+        let result = mv.run_to_first_halt();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the watchdog must reclaim a spinning guest promptly, not merely eventually (took {elapsed:?})"
+        );
+        match result {
+            Err(baud_vcpu::RunLoopError::WatchdogKilled { budget_ms }) => {
+                assert_eq!(budget_ms, budget.as_millis() as u64);
+            }
+            other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
+        }
+    }
+
+    /// The negative case alongside [`wall_clock_watchdog_kills_a_truly_spinning_guest`]: a guest
+    /// that halts well within its budget must succeed normally, proving the watchdog is not a
+    /// source of false-positive kills under an ordinary, fast boot-to-halt.
+    #[test]
+    fn wall_clock_watchdog_does_not_fire_on_a_normal_guest() {
+        let kernel = hello_guest_kernel_path();
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_watchdog_budget(std::time::Duration::from_secs(5));
+
+        let outcome = mv.run_to_first_halt().expect("a guest that halts well within its budget must succeed");
+        assert_eq!(String::from_utf8_lossy(&outcome.console_output), HELLO_GUEST_MARKER);
     }
 
     /// Reads the `SETUP_RNG_SEED` node's 32 seed bytes back out of a booted `Multiverse`'s real

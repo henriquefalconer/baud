@@ -404,7 +404,11 @@ fn boot_run_and_drain(
         (None, Some((_, rng_vector, max_exits))) => mv
             .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
             .map_err(|e| format!("determinism hole: {e}"))?,
-        (None, None) => mv.run_to_first_halt().map_err(|e| format!("determinism hole: {e}"))?,
+        // `run_to_first_halt` (unlike every arm above) has no deterministic `max_exits`/`max_ticks`
+        // bound of its own, so its error can also be `RunLoopError::WatchdogKilled` (todo.md §14.1
+        // "Still open" item 1) rather than a genuine determinism hole — reflect that in the message
+        // instead of always saying "determinism hole" for a failure that may not be one.
+        (None, None) => mv.run_to_first_halt().map_err(|e| format!("run failed: {e}"))?,
     };
     let records = mv.drain_tape_records();
     Ok(((halt.console_output, halt.ram_hash, None, None), records))

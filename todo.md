@@ -2273,6 +2273,48 @@ were made to assert something.
    mutation-verified. **Note this widens the per-quantum action draw to `draw_int(0, SPIN_ACTION)`, which
    changes how tape bytes map to actions and therefore changes stream hashes for existing tapes** — safe
    only because no golden hashes exist in-tree and `verify`/`replay` derive from the same simulation.
+
+   **Follow-up: the real-KVM-path half of this gap is now closed too, so VR2-M7 is closed everywhere, not
+   just in the simulation.** New `crates/baud-vcpu/src/linux/watchdog.rs`: a `Watchdog` struct spawns a
+   companion thread that, after a caller-supplied wall-clock `Duration` budget (or never, if
+   `Duration::ZERO`), sends `SIGUSR1` via `pthread_kill` to the vCPU thread that armed it (captured via
+   `libc::pthread_self()`), forcing a blocking `KVM_RUN` ioctl to return `-EINTR` even for a guest that
+   causes literally zero VM exits — this project's subtractive machine model has no APIC/PIT/host
+   interrupts to force one otherwise, so a tight `jmp $` loop never traps on its own. A `Once`-guarded
+   `sigaction` installs a real (non-`SIG_IGN`, non-`SA_RESTART`) no-op handler for `SIGUSR1` so the signal
+   actually interrupts the blocking syscall instead of being discarded or killing the process, and the
+   watchdog is always disarmed (cancelled + joined) before `run_until_halted` returns on every path, so a
+   late-firing signal can never land in unrelated future work on a reused thread (relevant because
+   `baud-server` runs boots on `tokio::task::spawn_blocking`'s reusable thread pool). This is
+   architecturally different from the abandoned PMU-overflow-signal approach that
+   `crates/baud-vcpu/src/linux/pmu.rs`'s own module doc documents (a guest-visible interrupt whose
+   delivery this host's nested-virt PMU emulation was found to drop) — a `pthread_kill`-delivered signal
+   uses the general Linux "kick a running task" IPI mechanism instead, independent of any guest-visible
+   interrupt controller, and was hardware-verified to work reliably here. New public
+   `baud_vcpu::RunLoopError` (`crates/baud-vcpu/src/lib.rs`): `DeterminismHole(DeterminismHole)`
+   (unchanged meaning) or `WatchdogKilled { budget_ms: u64 }` — kept a distinct variant rather than folded
+   into `DeterminismHole`'s fixed "unhandled exit reached the run-loop catch-all" wording, since a
+   watchdog kill is not an unmodeled exit. `baud_vcpu::linux::run_until_halted` now takes a
+   `watchdog_budget: Duration` parameter and returns `Result<(), RunLoopError>`.
+   `baud_multiverse::linux::Multiverse` gained a `watchdog_budget: Duration` field (new pub const
+   `DEFAULT_WATCHDOG_BUDGET = Duration::from_secs(30)`, set by `boot`/`restore`) and
+   `set_watchdog_budget(&mut self, Duration)` to override it (tests use a tight budget; `Duration::ZERO`
+   disables it). `run_to_first_halt`/`run_to_first_halt_without_ram_hash`/`run_with_timer_ticks` now
+   return `Result<_, RunLoopError>` instead of `Result<_, DeterminismHole>` — the only two real call sites
+   of the old signature (this crate's own tests and `crates/baud-server/src/routes/run_kvm.rs`'s
+   `boot_run_and_drain`) were updated; every other `run_to_first_halt_with_*` entry point
+   (periodic-timer/virtio-rng variants) already had its own deterministic `max_exits`/`max_ticks` budget
+   and is untouched by this change. New hand-assembled fixture
+   `crates/baud-multiverse/tests/fixtures/spin-guest/` (`payload.s` is exactly `1: jmp 1b`, no I/O, no way
+   to ever exit on its own — see that directory's `BUILD.md`) is the one fixture in the repo that can
+   actually exercise the watchdog's kill path end-to-end. Hardware-verified new tests, all passing on real
+   `/dev/kvm`: `wall_clock_watchdog_kills_a_truly_spinning_guest` (a 300ms budget against `spin-guest`
+   returns `RunLoopError::WatchdogKilled` within a bounded wall-clock window, not hanging) and
+   `wall_clock_watchdog_does_not_fire_on_a_normal_guest` (negative case, hello-guest, 5s budget, must
+   succeed normally) in `crates/baud-multiverse/src/linux/mod.rs`; plus three pure-Rust unit tests for the
+   `Watchdog` primitive itself (no `/dev/kvm` needed) in `crates/baud-vcpu/src/linux/watchdog.rs`'s own
+   `#[cfg(test)]` module covering: zero-budget disables it, it fires once its budget elapses, and
+   disarming before the budget elapses prevents it from ever firing.
 2. **VR2-M3 — `baud keys rotate` does not invalidate the old key.** `specs/baud-keys.md:111` specifies
    `baud keys rotate  # sops rotate to new recipients`, but `rotate_secrets`
    (`crates/baud-keys/src/lib.rs:449`) runs `sops --rotate --in-place`, whose own doc comment
@@ -2285,34 +2327,28 @@ were made to assert something.
 than quietly diverging from it; where it contradicts a claim in `ralph/progress.txt` (as items 1 and 2 above
 do), say so plainly in the new entry instead of leaving the old claim standing.
 
-1. **The real KVM path has no watchdog at all.** `baud_vcpu::linux::run_until_halted`
-   (`crates/baud-vcpu/src/linux/mod.rs:136`) is a bare unbounded `loop` with no wall-clock or exit budget,
-   and `linux::Multiverse::run_to_first_halt` sits directly on it — a guest that spins without exiting hangs
-   the vCPU thread forever. Other entry points use deterministic `max_exits` budgets, which is **not** the
-   non-deterministic wall-clock intervention `docs/determinism.md` "Known limits" §4 promises. VR2-M7 is
-   closed only in the simulation; it is open where it matters.
-2. **`ram_hash` is computed and discarded at scale.** `Multiverse::ram_hash`
+1. **`ram_hash` is computed and discarded at scale.** `Multiverse::ram_hash`
    (`crates/baud-multiverse/src/linux/mod.rs:1523`) blake3s all 256 MiB (`layout.rs:19`) and
    `run_to_first_halt` calls it unconditionally. `thousand_branches` stores 1000 hashes and reads 8;
    `crates/baud-server/src/routes/run_kvm.rs` computes ~90 (≈23 GiB of hashing) and asserts on 4. A
    hash-skipping variant or a lazy `HaltOutcome::ram_hash` would roughly halve `h5.sh` — the gate's critical
    path — with zero coverage change. This is the single biggest remaining lever.
-3. **`fleet_of_vms_run_in_parallel_without_interference` is the workspace's #1 flake source** (19 records in
+2. **`fleet_of_vms_run_in_parallel_without_interference` is the workspace's #1 flake source** (19 records in
    `ralph/progress.txt`): it asserts a timing ratio (`parallel_total < serial_one * n * 0.85`) while up to 7
    sibling KVM tests run on the same 8 threads, and pins to fixed cores 0/2/4. Same treatment as
    `thousand_branches` — `#[ignore]` with `drive/h/h6.sh` as sole runner.
-4. **`shell-into`'s timeout conflates two different things.** `crates/baud-cli/src/cmds/shell_into.rs:33`
+3. **`shell-into`'s timeout conflates two different things.** `crates/baud-cli/src/cmds/shell_into.rs:33`
    uses one `--idle-timeout-ms` as both the idle timeout *and* the first-byte deadline, so under concurrent
    guest boots it returns `ok=true` with an empty transcript (measured: 2000ms → empty 3/3; 8000ms → correct
    3/3). `drive/m/m10.sh` works around it at the call site (now 15000ms); splitting the two would fix every
    caller.
-5. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
+4. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
    `KVM_CREATE_VM`/vCPU/256 MiB/`perf_event` lifecycles (next largest anywhere is 6), but asserts nothing
    about resource growth — a leak surfaces only as an `Err` or an OOM kill. Its `NUM_BRANCHES = 1000` is a
    literal spec figure (`specs/baud-snapshot.md:191-193`, `todo.md` §5), not a tuned number, and its own
    comment wrongly claims it was "chosen to keep this test's real run time … in the tens-of-seconds range".
    Across 51 mentions in `ralph/progress.txt` it has caught **0** defects and flaked **0** times.
-6. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
+5. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
    `baud-keys`, whose `age_encrypt`/`age_decrypt` do the same job in-process. Switching would make the
    encrypted-journal path work and be testable on hosts without `age` (caveat: `baud_keys::age_encrypt`
    emits binary age, not the ASCII armor the journal writes today). Note `open_encrypted` has no callers
@@ -2341,6 +2377,11 @@ writes per-unit logs under `target/gate-logs/<run-id>/`. Exit code is non-zero i
   `rdtsc_guest_reproduces_high_bits_across_boots`, `fleet_of_vms_run_in_parallel_without_interference`, and
   `baud host probe` reporting `regime=rejected` under PMU contention. Report a flake as a flake, with both
   results; a failure that reproduces in isolation is real and must not be worked around.
+  `rdtsc_guest_reproduces_high_bits_across_boots` failed in all 4 consecutive `gate.sh` runs used to verify
+  the watchdog work in §14.1, every time only inside the 8-wide fan-out and passing cleanly every time it
+  was re-run in isolation; `ps aux` confirmed a second, independent `ralph/ralph` loop (a different PID
+  tree) was running against this same repo/host for the whole window, a concrete instance of "two concurrent
+  Ralph sessions sharing one host" amplifying this test's known PMU/RCB-counter contention sensitivity.
 - **The enforced-regime scripts (`drive/manual/h3-enforced-*.sh`, `drive/manual/h7-enforced-*.sh`) are deliberately not in
   the gate.** They `rmmod`/`insmod` the live `kvm_intel` and guard on `fuser /dev/kvm`, so they are mutually
   exclusive with every other baud process on the box — run them by hand, one at a time, and confirm the stock

@@ -114,6 +114,30 @@ pub struct EnforcedRdseedSite {
 #[error("determinism hole: unhandled exit `{0}` reached the run-loop catch-all")]
 pub struct DeterminismHole(pub String);
 
+/// What driving a guest to `Hlt`/`Shutdown` with no bound but a wall-clock watchdog
+/// (`linux::run_until_halted`) can fail with: either a genuine [`DeterminismHole`], or the
+/// watchdog itself killing a guest that spun for longer than its budget without ever reaching
+/// one. `docs/determinism.md`'s "Known limits" §4 names the watchdog kill as **the one
+/// deliberately non-deterministic intervention in the whole system** — unlike every other exit,
+/// its trigger depends on real wall-clock time, not the guest's own instruction stream, so it is
+/// logged (`tracing::warn!`, from the watchdog thread itself) rather than treated as a
+/// reproducible part of the run.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RunLoopError {
+    #[error(transparent)]
+    DeterminismHole(#[from] DeterminismHole),
+    /// The wall-clock watchdog fired: `budget_ms` real milliseconds passed with the guest never
+    /// reaching `Hlt`/`Shutdown` (todo.md §14.1 "Still open" item 1 — other run-loop entry points
+    /// already carry a deterministic `max_exits`/`max_ticks` budget; this is the one that had
+    /// none at all).
+    #[error(
+        "wall-clock watchdog killed the guest after {budget_ms}ms with no Hlt/Shutdown reached \
+         (docs/determinism.md \"Known limits\" §4: the one non-deterministic intervention — \
+         logged, not replayed)"
+    )]
+    WatchdogKilled { budget_ms: u64 },
+}
+
 /// What the dispatch loop should do after one exit was resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchOutcome {
