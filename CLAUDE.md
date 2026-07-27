@@ -130,6 +130,10 @@ every drive script), with a per-unit PASS/FAIL table and logs under `target/gate
 **If the gate's only failure is `rdtsc_guest_reproduces_high_bits_across_boots` and phase 6 reports it
 passing in isolation (unit marked `FLAKE`), the gate counts as passing — commit, do not re-run it.**
 
+**Under `claude -p` never start the gate with `run_in_background`** — ending the turn exits the
+process and kills every background task with it (measured: a 45s background job from a `-p` session
+that ended its turn at 6s never completed). Run it in the foreground with `timeout: 600000`.
+
 A second `ralph/ralph` plus `claude -p` pair in `ps` during a ralph iteration is the loop that launched the
 session, not a competing run — do not investigate it as contention.
 

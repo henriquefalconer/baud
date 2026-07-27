@@ -382,16 +382,62 @@ PY
   printf '%s\n' "$cost" >> "$COST_FILE"
 }
 
+# A `claude -p` turn that ends while a Bash task is still backgrounded takes that task
+# down with it. Measured two ways: a `-p` session told to start a 45-second background
+# job and end its turn immediately exited at 6s and the job's output file never appeared;
+# and across the 13 sessions of run 20260727T053631Z await_group never once found a
+# leftover process, while the gate runs those sessions had launched stopped dead at
+# `00-warmup-build`. So "I'll wait for the background gate and resume automatically" is
+# false under -p: the turn ending IS the process exiting, which kills the gate.
+#
+# The session is not broken, though — only stranded. `--resume` restores the whole
+# conversation headlessly (verified: same session_id, full recall of what it had run),
+# so it can re-run the one command in the foreground instead of redoing the iteration
+# from nothing. That matters: the sessions lost this way had already spent $4-7 each.
+resumable_session_id() { # <session-json> -> session id, if the run looks resumable
+  local j="${1:-}" sid
+  [ -f "$j" ] || return 1
+  [ "$(jsonfield "$j" is_error 2>/dev/null)" = "True" ] && return 1
+  sid="$(jsonfield "$j" session_id 2>/dev/null)" || return 1
+  [ -n "$sid" ] && printf '%s' "$sid"
+}
+
+write_resume_prompt() { # <file>
+  cat > "$1" <<'NUDGE'
+Your previous turn ended while a Bash task was still running in the background.
+
+Under `claude -p` there is no completion notification and no automatic resume: ending
+your turn exits the process, and every background task it owns is killed with it. The
+job you were waiting on did NOT finish and produced no result — do not wait for it, and
+do not check on it.
+
+Re-run that command now in the FOREGROUND: a normal Bash call, `run_in_background`
+omitted, with a generous `timeout` (600000 ms). Stay in this turn until it actually
+returns a result you can read. Never background a command whose result you intend to
+act on in this same iteration.
+
+Then finish the iteration exactly as the house protocol requires — progress block,
+`git add -A`, commit, push, post-push verification — and end your final message with
+the promise tag, `<promise>NEXT</promise>` or `<promise>COMPLETE</promise>`.
+NUDGE
+}
+
 # run_session <label> <prompt-file> — writes the session's final text to
 # $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
 run_session() {
-  local label="$1" pf="$2" out rc pid pgid t0
+  local label="$1" pf="$2" sid="${3:-}" out rc pid pgid t0
+  local -a resume_args=()
+  [ -n "$sid" ] && resume_args=( --resume "$sid" )
   SESSION_N=$((SESSION_N + 1))
   t0=$(date +%s)
   out="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.json"
   LAST_JSON="$out"
-  say "session $SESSION_N [$label] starting (model=$MODEL)"
-  claude "${CLAUDE_ARGS[@]}" < "$pf" > "$out" 2> "$out.err" &
+  if [ -n "$sid" ]; then
+    say "session $SESSION_N [$label] RESUMING $sid (model=$MODEL)"
+  else
+    say "session $SESSION_N [$label] starting (model=$MODEL)"
+  fi
+  claude "${CLAUDE_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
   pid=$!
   pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
   [ -n "$pgid" ] && SESSION_PGIDS="$SESSION_PGIDS $pgid"
@@ -463,8 +509,25 @@ build_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
     out="$(cat "$RESULT_FILE")"
     p="$(promise_of "$out")"
     if [[ -z "$p" ]]; then
+      # Before spending a fresh session on the same slot, try to rescue this one. A
+      # missing tag most often means the turn ended waiting on a backgrounded command
+      # that -p then killed; resuming costs one short turn and keeps everything the
+      # session already did, where a restart throws it away.
+      local sid rp
+      for _ in 1 2; do
+        sid="$(resumable_session_id "$LAST_JSON")" || break
+        [ -n "$sid" ] || break
+        rp="$RUNDIR/prompt-resume-$SESSION_N.txt"
+        write_resume_prompt "$rp"
+        run_session "$phase-$ITER-resume" "$rp" "$sid"
+        out="$(cat "$RESULT_FILE")"
+        p="$(promise_of "$out")"
+        [[ -n "$p" ]] && break
+      done
+    fi
+    if [[ -z "$p" ]]; then
       fails=$((fails + 1))
-      say "iteration $ITER [$phase]: no promise tag ($fails/3 consecutive) — retrying the slot"
+      say "iteration $ITER [$phase]: no promise tag after resume ($fails/3 consecutive) — retrying the slot"
       (( fails >= 3 )) && { say "aborting: 3 consecutive abnormal exits at iteration $ITER"; return 1; }
       continue
     fi

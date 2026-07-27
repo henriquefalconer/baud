@@ -303,6 +303,59 @@ JSON
 
 # ── run directory namespacing ─────────────────────────────────────────────────
 
+# ── resume-on-no-promise ─────────────────────────────────────────────────────
+#
+# A `claude -p` turn that ends while a Bash task is backgrounded kills that task, so a
+# session reporting "waiting for the gate" has already lost it. Resuming is what saves
+# the work it did before that point.
+
+@test "resumable_session_id reads the id from a successful session JSON" {
+    printf '{"is_error":false,"session_id":"abc-123","result":"waiting for the gate"}' > "$TMP/s.json"
+    run resumable_session_id "$TMP/s.json"
+    [ "$status" -eq 0 ]
+    [ "$output" = "abc-123" ]
+}
+
+@test "resumable_session_id refuses an errored, missing or truncated session JSON" {
+    printf '{"is_error":true,"session_id":"abc-123"}' > "$TMP/err.json"
+    run resumable_session_id "$TMP/err.json"
+    [ "$status" -ne 0 ]
+
+    run resumable_session_id "$TMP/does-not-exist.json"
+    [ "$status" -ne 0 ]
+
+    printf '{"is_error":false,' > "$TMP/trunc.json"
+    run resumable_session_id "$TMP/trunc.json"
+    [ "$status" -ne 0 ]
+}
+
+@test "run_session passes --resume only when given a session id" {
+    # run_session sits below the sourced region, so assert on its real text.
+    fn=$(sed -n '/^run_session() {/,/^}/p' "$RALPH")
+    [[ "$fn" == *'sid="${3:-}"'* ]]
+    [[ "$fn" == *'resume_args=( --resume "$sid" )'* ]]
+    # An empty array must not expand to a bogus empty argument under set -u.
+    [[ "$fn" == *'${resume_args[@]+"${resume_args[@]}"}'* ]]
+}
+
+@test "the resume nudge tells the session the background job is dead, not pending" {
+    write_resume_prompt "$TMP/nudge.txt"
+    run cat "$TMP/nudge.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"killed with it"* ]]
+    [[ "$output" == *"FOREGROUND"* ]]
+    [[ "$output" == *"promise"* ]]
+}
+
+@test "the build loop resumes before spending a fresh session on the slot" {
+    # Order matters: a restart throws away everything the stranded session did.
+    loop=$(sed -n '/no promise tag after resume/,+0p;/Before spending a fresh session/,/^    fi$/p' "$RALPH")
+    [[ "$loop" == *"resumable_session_id"* ]]
+    resume_line=$(grep -n 'resumable_session_id "\$LAST_JSON"' "$RALPH" | cut -d: -f1)
+    fail_line=$(grep -n 'fails=\$((fails + 1))' "$RALPH" | head -1 | cut -d: -f1)
+    [ "$resume_line" -lt "$fail_line" ]
+}
+
 @test "each invocation derives its own run directory" {
   grep -q 'RUN_ID="\$(date -u +%Y%m%dT%H%M%SZ)"' "$RALPH"
   grep -q 'RUNDIR="ralph/.run/\$RUN_ID"' "$RALPH"
