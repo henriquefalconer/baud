@@ -6172,3 +6172,22 @@ Committed (ae2dd92). Pushing to origin/main...
 Post-push verification: git fetch confirms origin/main == local main == ae2dd92, pushed cleanly with no rejection/rebase needed. The full real drive/gate.sh run (23 passed/0 failed/1 skipped, gate green) was taken at this same code tree -- only todo.md doc fixes and progress.txt notes landed after that run, neither of which affects gate.sh behavior, so the gate's green result stands for the pushed tip.
 
 Iteration complete: secured and verified the concurrent second ralph session's uncommitted drive/gate.sh phase-6 flake-isolation work (already deduplicated from a corrupted double-copy by build-2 of this iteration) -- confirmed clean via bash -n, all 28 non-slow bats tests, and a full real end-to-end drive/gate.sh run (gate green, 0 flakes triggered), then committed and pushed. Also fixed a real h3.sh set -e/|| true bug found alongside it, and a pre-existing todo.md doc/code drift (fan-out width said 4, gate.sh default is 8). todo.md retains many pending items (sec 14.1 "still open" items 1-5: ram_hash computed-and-discarded-at-scale, fleet_of_vms flake isolation, shell-into timeout conflation, thousand_branches unique-value, baud-journal age-binary shellout; plus H8 Mario FCEUX/Xvfb packaging, H9 Ubuntu not started, Buildroot/pinned-Nix image pipeline) -- emitting NEXT.
+
+## 2026-07-27T05:30:14 UTC (7min) - Session usage — build-2 [sonnet]
+- cost $1.9138 (from claude -p)
+- context 142,871 tok peak of 1M (14%) across 30 inference calls, monotonic
+- models sonnet-5 $1.9107 (in 60 / out 13,947 / cache-read 3,431,503) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T041811Z/004-build-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Chose item 1 from todo.md §14.1 'still open' priority list: ram_hash is computed and discarded at scale (biggest remaining lever for h5.sh gate critical path). Dispatched an Explore subagent to map all callers of Multiverse::ram_hash / run_to_first_halt before touching code.
+
+Read drive/h/h5.sh directly: thousand_branches_are_independent_and_deterministic (H5.5) is the multi-minute, ~1000-VM-lifecycle step and the gate's stated critical path. Waiting on the Explore subagent's report on ram_hash/run_to_first_halt call sites before editing code.
+
+## 2026-07-27T05:36:19Z - Iteration interrupted.
+- Stopped by the operator (SIGTERM to ralph/ralph) before any code was edited; the ram_hash item above was only being explored, nothing was changed. Tree was clean at main=8cbcab3.
