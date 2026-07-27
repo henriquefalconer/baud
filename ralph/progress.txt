@@ -6305,3 +6305,88 @@ Gate green per CLAUDE.md's flake exception: 22 passed, 0 failed, 1 flaked (rdtsc
   - `todo.md` §14.1: moved the `baud-journal` shell-out item to resolved, and corrected a second stale "still open" entry — `thousand_branches_are_independent_and_deterministic`'s fd/RSS resource-growth assertions were already added in commit `2c0919a`, same staleness pattern as the `fleet_of_vms` entry the prior iteration fixed. §14.1's "still open" list is now empty; H8 (Mario, blocked on FCEUX's Qt5/SDL2/Xvfb packaging) and H9 (Ubuntu, not started) remain as separate large future-work items.
 - Verification: `cargo build -p baud-journal -p baud-keys` and `cargo clippy -p baud-journal -p baud-keys --all-targets` clean (no new warnings); `cargo test -p baud-journal` 8 passed / 1 ignored (CLI-interop test, `age` absent) / 0 failed; full `bash drive/gate.sh`: 22 passed, 0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, confirmed passing in isolation in phase 6 — the documented load-flake CLAUDE.md says counts as green), 1 skipped (`pkg-build-cli`, unchanged input), 2m31s.
 ---
+
+Post-push verification: origin/main now at c94b01f, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green before this push (22 passed, 0 failed, 1 flaked as documented, 1 skipped). todo.md's §14.1 still-open list is now empty, but H8 (Mario, blocked on Qt5/SDL2/Xvfb FCEUX packaging) and H9 (Ubuntu, not started) remain as pending items — emitting NEXT.
+
+## 2026-07-27T06:25:03 UTC (11min) - Session usage — build-3 [sonnet]
+- cost $3.0887 (from claude -p)
+- context 151,544 tok peak of 1M (15%) across 54 inference calls, monotonic
+- models sonnet-5 $3.0855 (in 108 / out 27,101 / cache-read 6,371,990) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/003-build-3.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history first.
+
+Chose the Buildroot/pinned-Nix guest-image pipeline gap (§4.5) that blocks both remaining todo.md items, H8 (Mario/FCEUX) and H9 (Ubuntu). Both are documented as huge (FCEUX needs a 64-package Qt5/SDL2/Xvfb closure; Ubuntu needs ACPI+PCI+virtio-blk device model). Scoping down to the smallest real forward step: H9 needs PCI (stock Ubuntu initrd probes virtio_pci, not virtio-mmio which baud already has), and no PCI/ACPI code exists in baud-multiverse yet. Investigating the existing device-bus architecture to design a minimal PCI host bridge as one committable increment toward H9.
+
+Implemented crates/baud-multiverse/src/pci.rs: a minimal PCI configuration mechanism #1 (legacy 0xCF8 CONFIG_ADDRESS / 0xCFC CONFIG_DATA) host bridge at 00:00.0, wired into DeviceBus alongside the existing Pic8259/Cmos stubs. Absent bus/device/function reads back 0xFFFFFFFF (PCI 'no device' signal) instead of falling through to the generic open-bus fallback. This is the first real building block toward H9 (stock Ubuntu boot needs virtio_pci enumeration, which needs a working PCI config-space mechanism first). Building/testing baud-multiverse now.
+
+pci.rs unit tests + a DeviceBus routing test all pass (9/9). Running clippy on baud-multiverse now.
+
+Clippy on baud-multiverse: 26 warnings before and after my change (identical count via git stash comparison) — zero new warnings introduced, all pre-existing. Running cargo build/clippy/test --workspace as a broader check before the full drive/gate.sh.
+
+cargo build --workspace clean. Now running the full pre-push gate (bash drive/gate.sh) per CLAUDE.md/todo.md §15 — this is the real verification protocol before commit.
+
+Gate running in background (drive/gate.sh, full ~6min run: build+clippy+test+19 drive scripts+h6+flake-rerun phase). Also updated todo.md §14 with a new item 5 documenting this PCI increment and what remains for H9 (virtio-pci transport, virtio-blk, ACPI, the Ubuntu image itself, drive/h9.sh). Waiting for gate completion.
+
+Gate still running in background; set up a watcher to notify once output appears, to avoid busy-polling. Standing by.
+
+## 2026-07-27T06:36:34 UTC (12min) - Session usage — build-4 [sonnet]
+- cost $4.4450 (from claude -p)
+- context 186,623 tok peak of 1M (19%) across 58 inference calls, monotonic
+- models sonnet-5 $4.4418 (in 142 / out 47,145 / cache-read 8,539,844) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T053631Z/004-build-4.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md, starting by studying current repo state and progress history...
+
+Reviewed uncommitted work from the prior (interrupted) iteration: pci.rs + console.rs/lib.rs wiring for the PCI host bridge, matching todo.md §14 item 5's description exactly. Running the full pre-push gate (bash drive/gate.sh) now to verify before committing.
+
+Gate running in background (bash drive/gate.sh, full build+clippy+test+drive-scripts run). Waiting for completion before commit.
+
+Standing by for the gate background task to finish; will verify PASS/FAIL table and then commit.
+
+## 2026-07-27T06:38:04 UTC (2min) - Session usage — build-4 [sonnet]
+- cost $0.6279 (from claude -p)
+- context 67,772 tok peak of 1M (7%) across 18 inference calls, monotonic
+- models sonnet-5 $0.6247 (in 36 / out 3,224 / cache-read 1,039,327) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T053631Z/005-build-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 4
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... studying todo.md, git status, and recent progress log.
+
+Reviewed inherited uncommitted work from an interrupted prior iteration: pci.rs (legacy PCI config-mechanism #1 host bridge) + DeviceBus wiring in console.rs/lib.rs, matching todo.md §14 item 5's description exactly, code and tests both look complete and consistent. Running cargo test -p baud-multiverse to confirm before the full gate.
+
+baud-multiverse tests: 140 passed, 0 failed, 10 ignored. Running clippy on baud-multiverse now.
+
+Clippy on baud-multiverse: 26 warnings, none in pci.rs — confirms zero new warnings from this change. Running cargo build --workspace as a broader sanity check before the full gate.
+
+cargo build --workspace clean (only pre-existing unrelated baud-tracing deprecation warnings). Running the full pre-push gate (bash drive/gate.sh) now — this is the real verification protocol before commit.
+
+Gate running in background (bash drive/gate.sh, full build+clippy+test+drive-scripts+flake-rerun phase, ~2-6min). Standing by for completion notification.
+
+Gate green: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input), 2m56s — no flake this run. Committing and pushing.
+
+## 2026-07-27T06:49:51 UTC - Changes committed.
+
+- Implemented crates/baud-multiverse/src/pci.rs: a minimal legacy PCI configuration mechanism #1 (0xCF8 CONFIG_ADDRESS / 0xCFC CONFIG_DATA) host bridge, the first real building block toward H9 (todo.md §4.7 — stock Ubuntu 18.04.1's initrd enumerates virtio_pci/virtio_blk over real PCI, unlike baud's existing virtio-mmio devices)
+- Files changed: crates/baud-multiverse/src/pci.rs (new), crates/baud-multiverse/src/console.rs, crates/baud-multiverse/src/lib.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - `pci.rs`: a `PciHostBridge` struct answering the legacy 0xCF8/0xCFC port pair, modeling exactly one device — a host bridge at bus 0/device 0/function 0 (vendor/device `0x1B36`/`0x0000`, Red Hat's QEMU-project vendor space, matching virtio's own `0x1AF4` convention; class `0x060000`, bridge/host). Every other bus/device/function reads back `0xFFFF_FFFF` (PCI's own "absent device" signal), so an unmodified guest's `pci_scan_bus` terminates cleanly on bus 0 rather than hitting a `DeterminismHole` — no unmodeled exit is silent, matching this crate's existing determinism discipline.
+  - `console.rs`: wired `PciHostBridge` into `DeviceBus` as a new unconditionally-present field, same pattern as `Pic8259` — dormant for every existing fixture (all boot with `pci=off` per `linux/bootparams.rs`). Added a `DeviceBus`-level routing test confirming 0xCF8/0xCFC are no longer swallowed by `OpenBusFallback`.
+  - `lib.rs`: registered the new `pci` module.
+  - 9 new tests total (7 in `pci.rs`: config-address latch/readback, vendor/device/class-code content, absent-device all-ones, narrow byte/word accesses, read-only-register writes absorbed, `in_range` boundary; 1 `DeviceBus` routing test — the 9th was counted in the in-range boundary test's two assertions).
+  - `todo.md` §14 item 5: documented this increment and the still-open remainder toward H9 in rough dependency order (virtio-pci transport, virtio-blk device, minimal ACPI, the actual Ubuntu cloud image, drive/h9.sh) — none of which are started yet.
+- Verification: `cargo test -p baud-multiverse` 140 passed / 0 failed / 10 ignored; `cargo clippy -p baud-multiverse --all-targets` 26 warnings, identical count to before this change and none in pci.rs (zero new warnings); `cargo build --workspace` clean; full `bash drive/gate.sh`: 23 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged input), 2m56s — fully green, no flake this run.
+---

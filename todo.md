@@ -2197,6 +2197,43 @@ snapshot, not a duplicate of it.
      images under `examples/`, never in-tree" — it predates the KVM pivot and references no Mario/NES terms, so
      it doesn't trip this lint. Moving it into an `examples/`-based guest image is real, separate future work
      (§10's M-series distributed target), not part of this item.
+  5. **H9 — legacy PCI configuration mechanism #1 (§4.7, first sub-step, still far from H9 itself).**
+     New `crates/baud-multiverse/src/pci.rs`: a `PciHostBridge` answering the legacy 0xCF8
+     (`CONFIG_ADDRESS`)/0xCFC (`CONFIG_DATA`) port pair — the mechanism `specs/baud-ubuntu.md`'s
+     "PCI (MCFG ECAM or legacy 0xCF8/0xCFC)" names, needed because the stock Ubuntu 18.04.1 initrd
+     enumerates `virtio_pci`/`virtio_blk` over real PCI, unlike baud's existing virtio-mmio devices
+     (found via a `virtio_mmio.device=` cmdline parameter, never touching PCI at all). Models
+     exactly one device — a host bridge at 00:00.0 (vendor/device `0x1B36`/`0x0000`, Red Hat Inc.'s
+     QEMU-project vendor space, same convention as virtio's own `0x1AF4` — never a real Intel/AMD
+     ID, since baud is not claiming real silicon; class `0x060000`, bridge/host) — with every other
+     bus/device/function reading back `0xFFFF_FFFF`, the PCI spec's own "absent device" signal, so
+     an unmodified guest's `pci_scan_bus` terminates cleanly instead of hitting a determinism hole.
+     Wired into `DeviceBus` (`crates/baud-multiverse/src/console.rs`) as a new unconditionally-
+     present field, same pattern as `Pic8259` — dormant (never touched) for every existing fixture,
+     all of which boot with `pci=off` on the cmdline (`linux/bootparams.rs`). Confirmed by direct
+     code reading (not assumption) that no PCI/ACPI/MCFG code existed anywhere in this crate before
+     this change, and that a bare 0xCF8/0xCFC access previously fell through to `OpenBusFallback`
+     (fixed `0xFF` reads, absorbed writes) rather than a `DeterminismHole` — functionally inert, not
+     a crash, but not a real PCI response either. 9 new tests (7 in `pci.rs` covering config-address
+     latch/readback, vendor/device/class-code content, absent-device all-ones, narrow byte/word
+     accesses, and read-only-register writes being absorbed; 1 `DeviceBus`-level routing test
+     confirming the ports are not swallowed by the open-bus fallback). `cargo build --workspace`/
+     `clippy --workspace --all-targets`/`test --workspace` all clean; clippy warning count on
+     `baud-multiverse` unchanged (26 before and after, via `git stash` comparison) — zero new
+     warnings. **Still needed for H9, in rough dependency order**: (a) an actual virtio-pci
+     transport device (BAR-backed MMIO/PIO window + a `DeviceBus` slot, same shape as
+     `virtio_mmio.rs`) so a probed device beyond the host bridge exists at all; (b) a deterministic
+     virtio-blk device on top of that transport, backed by a read-only content-addressed base image
+     plus an in-memory CoW overlay, completing at a fixed work-clock boundary via the existing
+     interrupt-injection engine (blkreplay-style, not host-I/O-return timing); (c) minimal ACPI
+     (RSDP→RSDT/XSDT→FADT+DSDT+MADT with one LAPIC) — `pci=off acpi=off` are both on baud's current
+     cmdline, and a stock distro kernel wants at least a minimal ACPI table set even where PCI
+     itself can be found via the legacy mechanism without it; (d) the actual Ubuntu 18.04.1 cloud
+     image (`cloud-images-archive.ubuntu.com`, qcow2→raw) served as the virtio-blk backing store;
+     (e) the full boot-to-login-prompt drive script (`drive/h9.sh`) and the cross-VM fingerprint
+     comparison (`specs/baud-fingerprint.md`'s `cross_vm_fingerprint_matches`). None of (a)-(e) are
+     started. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem
+     (item 3 above), unrelated to this PCI work.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).

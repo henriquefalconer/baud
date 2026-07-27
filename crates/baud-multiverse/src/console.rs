@@ -21,6 +21,7 @@
 // hardware-independent and runs on this Windows dev machine with no KVM/perf, the same pattern
 // `cpuid.rs`/`layout.rs`/`baud-vcpu`'s `boundary.rs` use.
 
+use crate::pci::PciHostBridge;
 use crate::pic8259::Pic8259;
 use crate::tape_bus::TapeBus;
 use crate::virtio_mmio::VirtioMmioTransport;
@@ -219,13 +220,13 @@ impl Bus for Cmos {
 }
 
 /// Composes [`Console`] (COM1), [`Cmos`] (ports 0x70/0x71), [`Pic8259`] (ports
-/// 0x20/0x21/0xA0/0xA1, `crate::pic8259`), and [`TapeBus`] (the tape device,
-/// specs/baud-tape-device.md) with [`OpenBusFallback`] for every other address — the device bus
-/// the boot flow's run loop dispatches every exit through (`linux::Multiverse`). Matches todo.md
-/// §3.6's subtractive rule: "down to a console plus the tape device" (`Cmos`/`Pic8259` are not
-/// real devices in the same sense — neither reads real time/hardware or ever raises a real
-/// interrupt of its own; both exist only to satisfy a boot-time guest probe deterministically,
-/// see each type's own doc).
+/// 0x20/0x21/0xA0/0xA1, `crate::pic8259`), [`PciHostBridge`] (ports 0xCF8/0xCFC, `crate::pci`), and
+/// [`TapeBus`] (the tape device, specs/baud-tape-device.md) with [`OpenBusFallback`] for every
+/// other address — the device bus the boot flow's run loop dispatches every exit through
+/// (`linux::Multiverse`). Matches todo.md §3.6's subtractive rule: "down to a console plus the
+/// tape device" (`Cmos`/`Pic8259`/`PciHostBridge` are not real devices in the same sense — none
+/// reads real time/hardware or ever raises a real interrupt of its own; each exists only to
+/// satisfy a boot-time guest probe deterministically, see each type's own doc).
 #[derive(Default)]
 pub struct DeviceBus {
     pub console: Console,
@@ -239,6 +240,11 @@ pub struct DeviceBus {
     /// gate this on) since it is pure guest-write-derived bookkeeping with no side effects on any
     /// other device.
     pic: Pic8259,
+    /// The legacy PCI configuration-mechanism-#1 host bridge (`crate::pci`), present
+    /// unconditionally like [`Pic8259`] above — pure guest-write-derived bookkeeping with no side
+    /// effects on any other device, and dormant for any guest whose cmdline sets `pci=off` (every
+    /// existing fixture up to this point).
+    pci: PciHostBridge,
     /// The virtio-rng transport register block (`crate::virtio_mmio`), `None` until
     /// [`Self::enable_virtio_rng`] is called — every existing constructor (`Default`,
     /// [`Self::with_tape`], [`Self::restore`]) leaves it unset, so no existing boot path's MMIO
@@ -374,6 +380,7 @@ impl DeviceBus {
             tape: tape_bus,
             cmos: Cmos,
             pic: Pic8259::default(),
+            pci: PciHostBridge::default(),
             virtio_rng: None,
             #[cfg(target_os = "linux")]
             virtio_rng_queue: None,
@@ -394,6 +401,8 @@ impl Bus for DeviceBus {
             self.cmos.pio_read(port, data);
         } else if Pic8259::in_range(port) {
             self.pic.pio_read(port, data);
+        } else if PciHostBridge::in_range(port) {
+            self.pci.pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -408,6 +417,8 @@ impl Bus for DeviceBus {
             self.cmos.pio_write(port, data);
         } else if Pic8259::in_range(port) {
             self.pic.pio_write(port, data);
+        } else if PciHostBridge::in_range(port) {
+            self.pci.pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }
@@ -515,6 +526,22 @@ mod tests {
         let mut value = [0xFFu8];
         bus.pio_read(CMOS_DATA_PORT, &mut value);
         assert_eq!(value, [0], "CMOS data-port reads must not fall through to open-bus (0xFF)");
+    }
+
+    #[test]
+    fn device_bus_routes_pci_config_ports_to_the_host_bridge_not_open_bus() {
+        use crate::pci::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};
+
+        let mut bus = DeviceBus::default();
+        // Select bus 0 / device 0 / function 0 / register 0 (vendor/device ID), enable bit set.
+        bus.pio_write(PCI_CONFIG_ADDRESS, &(1u32 << 31).to_le_bytes());
+        let mut dword = [0u8; 4];
+        bus.pio_read(PCI_CONFIG_DATA, &mut dword);
+        assert_ne!(
+            u32::from_le_bytes(dword) & 0xFFFF,
+            0xFFFF,
+            "the host bridge at 00:00.0 must not read back as absent (open-bus 0xFFFFFFFF)"
+        );
     }
 
     #[test]
