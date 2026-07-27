@@ -63,6 +63,34 @@ L1 userspace, but the authoritative gate is guest-filtered counting across `KVM_
 WSL2 distro. If the guest-level check also passes, the H9 cross-VM fingerprint can run nested; only if it
 fails does the fingerprint move to bare-metal Intel.
 
+## Work-clock: raw event + KVM_RUN bracketing both required — 2026-07-27, enforced guest
+
+Measured on real `/dev/kvm` with the enforced (RDTSC/RDTSCP-trapping) module and an unmodified Linux guest
+(`tools/pauseresume_ab.sh`, `tools/exclude_probe.c`), isolating the two things that make the work-clock
+(`LinuxBranchCounter`, `crates/baud-multiverse/src/linux/mod.rs`) deterministic — the raw
+`BR_INST_RETIRED.COND` (`0x11c4`) event, and the pause/resume bracketing of the counter around every
+`KVM_RUN` (`run_and_convert_rcb_bracketed`):
+
+- **The raw event fixed `os_entropy_is_deterministic`, but did not make the bracketing redundant.** With the
+  raw event kept and the bracketing removed, `getrandom`/`/dev/urandom` stayed byte-identical across two boots
+  (20/20), yet `rdtsc_enforced_regime_is_bit_exact_across_boots` **failed** — the served enforced-RDTSC drifted
+  a few host-dispatch branches across boots (e.g. `0x161` vs `0x163`). `os_entropy` is too lenient to reveal a
+  small work-clock drift (its CRNG key is fixed before it matters); the bit-exact TSC check is what catches it.
+  So the bracketing is **load-bearing** for bit-exact work-clock time.
+- **`exclude_host` cannot substitute for the bracketing on this nested host.** Setting `exclude_host(true)`
+  instead (bracketing removed) makes the counter read `0` while the guest runs — the work-clock stalls, the
+  interrupt-stepper polls an RCB target that never advances, and the boot hangs. This confirms directly, during
+  real guest execution, the `exclude_host`-non-functional finding above (§ 2026-07-25): perf's guest/host
+  discrimination is inoperative under nested Hyper-V. (`tools/exclude_probe.c` shows the exclude bits are
+  honored for pure host work — `exclude_host=1` reads `0` there — but that case cannot distinguish "works" from
+  "attributes everything to host"; the guest-execution run does.)
+
+**Conclusion:** the shipping design — pinned raw `BR_INST_RETIRED.COND` **plus** the `KVM_RUN` pause/resume
+bracket, with `exclude_host` deliberately not used — is validated end to end on this host. Neither piece alone
+suffices: the raw event alone leaves the work-clock host-contaminated (bit-exact TSC fails), and `exclude_host`
+alone is degenerate (stalls). Revisit only on a host where perf registers `perf_guest_cbs` (e.g. bare metal),
+where `exclude_host` could replace the bracket.
+
 ---
 
 ## Prior art: Antithesis

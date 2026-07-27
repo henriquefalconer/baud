@@ -435,6 +435,16 @@ impl LinuxBranchCounter {
         // cause) the caller side pauses/resumes this counter around every `KVM_RUN` ioctl
         // (`run_and_convert_rcb_bracketed`), which achieves the same "guest-plus-vmexit time
         // only" property manually, without needing `exclude_host` to work at all.
+        //
+        // Both halves confirmed empirically on this host, real /dev/kvm (`tools/exclude_probe.c`,
+        // `tools/pauseresume_ab.sh`): (1) with `exclude_host(true)` set and the bracketing removed,
+        // the counter reads `0` while the guest runs — the work-clock stalls and the boot hangs (the
+        // interrupt-stepper polls an RCB target that never advances), so `exclude_host` genuinely
+        // cannot substitute here; (2) removing the bracketing while keeping this raw event leaves
+        // `os_entropy_is_deterministic` passing but breaks
+        // `rdtsc_enforced_regime_is_bit_exact_across_boots` — the served enforced-RDTSC drifts a few
+        // host-dispatch branches across two boots — so the bracketing is load-bearing for bit-exact
+        // work-clock time and is not made redundant by the raw event alone.
         let mut builder = Builder::new();
         builder.attrs_mut().type_ = PERF_TYPE_RAW;
         builder.attrs_mut().config = BR_INST_RETIRED_COND;
