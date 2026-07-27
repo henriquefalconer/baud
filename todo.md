@@ -2785,11 +2785,54 @@ snapshot, not a duplicate of it.
      warnings touching the new code, same pre-existing baseline otherwise; `bash drive/gate.sh` → 24 passed,
      0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_across_boots`, confirmed passing in isolation in
      phase 6 — the documented load-flake, not a regression), 0 skipped, 5m53s, `drive/h/h9.sh` itself PASSED
-     in 2s. **Still open for H9**: the true two-separate-OS-process cross-VM orchestration (this iteration's
-     route and drive script are still same-process-sequential, the same stand-in item 9's own test used —
-     `run_fleet` remains the closest existing per-process-style primitive, still per-thread not per-process
-     and still not wired to any route) and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e),
-     unstarted). H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem.
+     in 2s. **Still open for H9 at the time this item was written**: the true two-separate-OS-process
+     cross-VM orchestration and the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e),
+     unstarted) — **the former is now closed, see item 11 below.** H8 Mario remains separately blocked on
+     the FCEUX Qt5/SDL2/Xvfb packaging problem.
+
+  11. **H9 — the true two-separate-OS-process/two-core cross-VM orchestration item 10 named as still open
+     now exists, on top of items 8-10's capture/report/comparator/CLI/route layers.** `POST
+     /verify/fingerprint`'s `times` parameter was hard-floored at `.max(2)`, forcing every call into at
+     least two boots compared inside one Rust process — the same same-process-sequential shape every prior
+     H9 test used. Relaxed to `.max(1)`: `times: 1` captures exactly one fingerprint and returns
+     `verified: true`/`divergence: None` trivially (the `fingerprints[1..]` comparison loop has nothing to
+     iterate over one element — intentional, documented in the function's doc comment, not a vacuous check
+     mistaken for a real one), letting an external caller compare fingerprints from two *separate* captures
+     itself. New unit test `single_boot_capture_returns_one_fingerprint_with_no_comparison`
+     (`crates/baud-server/src/routes/verify_fingerprint.rs`) locks this in; `baud-cli`'s `--times` doc
+     comment updated to describe the new minimum of 1.
+     `drive/h/h9.sh` gained **H9.4**: two genuinely separate `baud-server` **OS processes** (own PID, own
+     ephemeral port, own SQLite DB, own snapshot-store directory — sharing nothing but the kernel image),
+     started via `taskset -c 0`/`taskset -c 1` when `taskset` and `nproc >= 2` are both available (true here,
+     8 cores), each hit with `baud verify fingerprint --times 1` for the identical `(kernel, cmdline,
+     tape_hex, target_rcb)`. The equality check — `events`/`rip`/`gpa`/`mem_hash`/banner — is performed by
+     the **bash script itself**, never delegated to any single Rust process, which is exactly what "two
+     independent VMs, separate processes on separate cores" (specs/baud-fingerprint.md, todo.md §10) requires
+     and what every previous same-process test could never prove by construction. **H9.5** guards H9.4
+     against being vacuous: it does *not* try to force a real state divergence by varying `target_rcb` (this
+     was attempted and empirically failed — `timer-guest`'s steady-state loop retires exactly one
+     conditional branch per iteration at the same instruction address and never writes guest RAM, so `rip`/
+     `mem_hash` are bitwise identical across the *entire* 100 to 200,000 `target_rcb` range tried; this is a
+     property of that fixture's loop shape, not a bug in the capture engine or item 8's RCB-exactness fix).
+     Instead H9.5 flips the last hex digit of a **copy** of vm1's own hash and asserts this script's own
+     `[[ == ]]` equality check reports the corruption as a mismatch — proving the comparison used by H9.4 is
+     a real inequality test, not `true == true` by construction (same anti-pattern §14.1 catalogs elsewhere
+     in this project: a check that cannot fail is not a check). Verified: `cargo build -p baud-server -p
+     baud-cli` clean; `cargo clippy -p baud-server -p baud-cli --all-targets` → 0 new warnings (grep
+     confirmed none touch `verify_fingerprint.rs`/`cmds/verify.rs`; remaining warnings are the pre-existing
+     baseline in unrelated `fuzz.rs`/`replay.rs`/`tracing.rs`); `cargo test -p baud-server
+     verify_fingerprint` → 3 passed (including the new `times: 1` test); `cargo test --workspace` → all
+     green, 0 failed (the documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake happened to
+     pass this run too); `bats drive/gate.test.bats --filter-tags '!slow'` (28 static checks, including
+     the concurrency-safety suite `drive/h9.sh` is already wired into) → 28/28 pass, no regressions from the
+     new second/third server per script; `bash drive/h/h9.sh` standalone → H9.1 through H9.5 all PASS on
+     real `/dev/kvm`, ~9s; full `bash drive/gate.sh` → 24 passed, 0 failed, 1 skipped
+     (`pkg-build-cli`, cached fingerprint unchanged since the last pass), 0 flaked, 3m29s, clean. **Still
+     open for full H9**: only the real Ubuntu 18.04.1 cloud-image acquisition/boot (H9 (d)/(e)) plus the
+     ACPI/PCI/virtio-blk machine additions §4.7 specifies — this iteration's cross-process orchestration is
+     real and hardware-verified, but still exercises the `timer-guest` fixture standing in for the
+     not-yet-acquired distro image. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging
+     problem, untouched by this iteration.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

@@ -47,8 +47,12 @@ pub struct VerifyFingerprintBody {
     /// Omit for a guest that prints no recognizable banner (every fixture in this workspace today).
     #[serde(default)]
     pub expected_banner_hex: Option<String>,
-    /// Number of independent boots to compare (minimum 2, default 2 — same convention as
-    /// `/verify/determinism`'s `times`).
+    /// Number of independent boots to compare (minimum 1, default 2 — same convention as
+    /// `/verify/determinism`'s `times`). `times: 1` captures a single fingerprint and skips
+    /// in-process comparison entirely (`verified`/`ok` are trivially `true`) — used by
+    /// `drive/h9.sh`'s true cross-process check, which calls this route once per separate
+    /// `baud-server` OS process and compares the two returned fingerprints itself, outside any
+    /// single Rust process.
     #[serde(default = "default_times")]
     pub times: u32,
     /// Path to a reproducible initramfs on this host's filesystem, same as `RunKvmBody::
@@ -96,7 +100,7 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
         None => None,
     };
 
-    let times = body.times.max(2);
+    let times = body.times.max(1);
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
     let target_rcb = body.target_rcb;
@@ -160,7 +164,11 @@ fn render_fingerprint_json(f: &Fingerprint) -> Value {
 /// at `target_rcb` from each boot; compares every fingerprint after the first against the first
 /// one (`baud_fingerprint::compare`), stopping at the first divergence. Returns every captured
 /// fingerprint alongside the first divergence found, if any — a caller wants the fingerprints
-/// either way (for a report), not just a bool.
+/// either way (for a report), not just a bool. `times == 1` captures exactly one fingerprint and
+/// returns `divergence: None` trivially (the `fingerprints[1..]` comparison loop has nothing to
+/// iterate) — this is intentional, not a vacuous check masquerading as a real one: a single-boot
+/// caller (e.g. one `baud-server` process in a true cross-process pair) is explicitly asking for
+/// one fingerprint to compare externally, not for this function to prove determinism by itself.
 #[allow(clippy::too_many_arguments)]
 fn boot_and_compare_fingerprints(
     kernel_path: &Path,
@@ -249,6 +257,28 @@ mod tests {
         assert_eq!(fingerprints.len(), 2);
         assert_ne!(fingerprints[0].label, fingerprints[1].label);
         assert!(divergence.is_none(), "two independent boots must not diverge: {divergence:?}");
+    }
+
+    /// `times: 1` must return exactly one fingerprint and no divergence, without silently
+    /// requiring a second boot — the contract `drive/h9.sh`'s true cross-process check depends on
+    /// (each of its two separate `baud-server` processes calls this route with `times: 1`).
+    #[test]
+    fn single_boot_capture_returns_one_fingerprint_with_no_comparison() {
+        let kernel = timer_guest_kernel_path();
+        let (fingerprints, divergence) = boot_and_compare_fingerprints(
+            &kernel,
+            "console=ttyS0",
+            vec![],
+            None,
+            100_000,
+            64,
+            None,
+            1,
+        )
+        .expect("boot_and_compare_fingerprints failed");
+
+        assert_eq!(fingerprints.len(), 1);
+        assert!(divergence.is_none());
     }
 
     /// The route must refuse to report a fingerprint for the wrong point rather than silently

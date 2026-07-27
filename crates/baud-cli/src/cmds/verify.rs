@@ -63,7 +63,10 @@ pub enum VerifyAction {
         /// Omit for a guest that prints no recognizable banner.
         #[arg(long)]
         expected_banner: Option<String>,
-        /// Number of independent boots to compare (minimum 2).
+        /// Number of independent boots to compare (minimum 1, default 2). Pass 1 to capture a
+        /// single fingerprint with no in-process comparison — used to compare fingerprints from
+        /// two separate `baud-server` OS processes externally (drive/h9.sh's true cross-process
+        /// check).
         #[arg(long, default_value_t = 2)]
         times: u32,
         /// Path to a reproducible initramfs on the server host's filesystem. Omit for a guest with
