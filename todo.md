@@ -2683,8 +2683,16 @@ snapshot, not a duplicate of it.
      above) are all still not started — this iteration closes only the previously-completely-missing
      capture-primitive gap underneath all of them, and surfaced a real precision bug in the shared
      stepping engine while doing so (§14.1, "`run_to_events`/`inject_at`'s single-step engine can overshoot
-     its target RCB" below) that is worth fixing before the exact "events = N" contract
-     `specs/baud-fingerprint.md` promises can be honestly implemented.
+     its target RCB" — **since fixed, see §14.1's Resolved list item 8**), which blocked the exact
+     "events = N" contract `specs/baud-fingerprint.md` promises; that contract can now be honestly
+     implemented. Separately found this same session, real but deliberately left open and out of scope:
+     `handle_baud_rdtsc_exit`'s (`kernel-module/baud-enforced/rdtsc-enforce.patch`) call to
+     `kvm_skip_emulated_instruction` returns 0 unconditionally, without checking for an active
+     `KVM_GUESTDBG_SINGLESTEP` window, so a trapped enforced-regime RDTSC that occurs *inside* a
+     single-step window surfaces as a `Debug` exit instead of completing normally, and its EDX:EAX
+     result is never actually served to the guest. This is narrow — it only affects the **enforced-
+     regime patched kernel module** (`kernel-module/baud-enforced/`), never the stock module every
+     normal test/drive-script uses — so it is real but not chased further here.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 
@@ -2742,41 +2750,6 @@ runner. Related: `drive/pkg/pkg-build-cli.sh` costs **143s**, not the "~4-5 min"
 `ralph/progress.txt` claim, and it rebuilds from scratch every run (`cp -a` of a 1.8G tree plus `mrproper`,
 no cache); it is now gated on a fingerprint that includes the out-of-tree kernel version and whether the
 enforced-regime patch is applied, since neither is visible to any `git diff`.
-
-**`run_to_events`/`inject_at`'s single-step engine can overshoot its target RCB — found while building
-the H9 fingerprint primitives (§14 item 8 above), not yet fixed.** `run_to_events`
-(`crates/baud-vcpu/src/boundary.rs`) — and, since it shares the same arm-early-then-single-step machinery,
-`inject_at`/`inject_timer_tick` too, which means every periodic-timer/virtio-rng/virtio-blk test in this
-workspace goes through the same code path — does not always land exactly on the requested `target_rcb`. It
-can overshoot by a variable, non-monotonic amount (empirically observed 6 to 43 branches, against
-`timer-guest`'s fixture) when a forced-diagnostic-exit instruction (`out 0x80, al`, the same harmless
-forced-exit `tests/fixtures/timer-guest/BUILD.md` documents) coincides with the single-step window.
-Root-cause hypothesis: `baud_vcpu::linux::pmu::LinuxPmuStepper::step` (`crates/baud-vcpu/src/linux/mod.rs`)
-re-enters `KVM_RUN` in a loop whenever an exit resolves to `DispatchOutcome::Continue` rather than
-`SingleStepBoundary`, and each such loop iteration still lets one more guest instruction retire — so when
-an intervening exit (e.g. the forced PIO write) competes with the pending single-step trap for several
-instructions in a row, more than one instruction, and potentially more than one retired conditional branch,
-can slip through a single call to `step()` before it returns. `run_to_events`'s own loop
-(`while point.rcb < target_rcb { point = stepper.step()?; ... }`) only checks the post-step count against
-the target, so a `step()` call that jumps clean past `target_rcb` is still reported as `Reached`, never
-detected as an overshoot.
-
-The landing point is still a fully deterministic, reproducible function of `(image, tape, target_rcb)` —
-the new `timed_exit_fingerprint_is_stable` test (§14 item 8) confirms two independent boots land the exact
-identical (overshot) point — so this is a *precision*, not a *determinism*, bug. But it directly
-contradicts `specs/baud-fingerprint.md` §4 step 1's "single-step to the exact count. events = N" and
-`specs/baud-ubuntu.md` §6's pseudocode (`assert_eq!(c, target)`), and it is very likely the true root cause
-the existing `RCB_HARDWARE_JITTER_TOLERANCE` (`crates/baud-multiverse/src/linux/mod.rs:2998`, used by
-`periodic_timer_injection_halts_gracefully_and_reproducibly`/`timer_tick_lands_at_identical_instruction`)
-has been attributing to raw hardware perf-counter read imprecision, rather than this stepping-loop
-interaction — worth revisiting those tests' own tolerance reasoning once this is fixed.
-`Multiverse::run_to_events`/`capture_fingerprint` were deliberately implemented to report the *actual*
-landed `rcb`, never the caller's requested `target_rcb` verbatim, specifically so a caller is never misled
-about which point was really observed (a correctness choice, not a workaround) — but a real fix to
-`LinuxPmuStepper::step` (making it retire strictly one guest instruction per call regardless of
-intervening non-debug exits) is real follow-up work needed before the exact "events = N" contract
-`specs/baud-fingerprint.md` promises can be honestly implemented, and is worth investigating before or
-during the eventual `baud-fingerprint` crate build-out.
 
 **Resolved.**
 
@@ -2927,6 +2900,58 @@ during the eventual `baud-fingerprint` crate build-out.
    self-consistency with its own decrypt. Verified: `cargo build -p baud-journal -p baud-keys` and `cargo
    clippy -p baud-journal -p baud-keys --all-targets` clean (no new warnings); `cargo test -p baud-journal`
    8 passed / 1 ignored (the CLI-interop test, `age` not installed on this host per `CLAUDE.md`) / 0 failed.
+8. **`run_to_events`/`inject_at`'s single-step engine overshooting its target RCB — fixed. The filed
+   hypothesis was wrong; the real root cause was a different bug entirely, found by direct hardware
+   instrumentation.** Filed while building H9's fingerprint capture primitives (§14 item 8):
+   `run_to_events` (`crates/baud-vcpu/src/boundary.rs`) and `inject_at`/`inject_timer_tick` (same
+   arm-early-then-single-step machinery, so every periodic-timer/virtio-rng/virtio-blk test goes
+   through the same path) could land 6 to 43 branches past the requested `target_rcb`, non-
+   monotonically, when a forced-diagnostic-exit instruction coincided with the single-step window.
+   The original hypothesis blamed `baud_vcpu::linux::pmu::LinuxPmuStepper::step`
+   (`crates/baud-vcpu/src/linux/pmu.rs`) — its inner loop re-entering `KVM_RUN` whenever an exit
+   resolves to `DispatchOutcome::Continue`, theorized to let more than one guest instruction retire
+   per call. That theory was investigated and **disproved** on real hardware: `step()` needed no
+   logic change at all. Its loop is architecturally correct, not a leak — every exit it loops past
+   (I/O-bitmap traps on `IN`/`OUT`, EPT-violation MMIO exits, `Rdmsr`/`Wrmsr`) is fault-like per
+   Intel SDM Vol. 3C §26.1.3/§27.1: taken *before* the trapping instruction retires, with KVM only
+   completing/retiring it on the *next* `KVM_RUN` entry, so returning early there would hand the
+   caller a non-instruction-boundary point. `step()` gained only an explanatory doc comment
+   recording this, so the loop is not "fixed" again by mistake.
+   The real root cause: `LinuxBranchCounter::new` (`crates/baud-multiverse/src/linux/mod.rs`) built
+   its `perf_event::Builder` without ever clearing the crate's own silent default
+   `exclude_kernel = 1`. Every baud guest runs at CPL 0, so a USR-only event select filtered the
+   guest's entire instruction stream out of the counter — what the "RCB" work clock actually
+   measured was host **userspace** branches retired inside each bracketed `KVM_RUN` ioctl call,
+   measured directly against `timer-guest` at a flat +54 per free-running exit and +44 per single
+   step regardless of how many branches the guest itself retired (confirmed by rebuilding the
+   fixture with 256x the inner-loop branch count and observing the identical +54/+44 quantum). That
+   coarse, host-noise-driven quantum is exactly why the engine could never land exactly on
+   `target_rcb` — the previously observed 6-to-43-branch overshoot is `quantum - (target mod
+   quantum)`. Fix: `builder.attrs_mut().set_exclude_kernel(0)` plus
+   `builder.attrs_mut().set_exclude_host(1)`, i.e. count only VMX non-root (guest-mode) branches.
+   This overturns a finding this same constructor's own comment (and `crates/baud-vcpu/src/lib.rs`'s
+   `resume_rcb` doc) previously recorded, that `exclude_host` "reads back 0 for the whole run" on
+   this project's nested-virtualized dev host: that was a misdiagnosis of this same bug —
+   `exclude_host(true)` was being layered on top of the crate's own default `exclude_kernel = 1`, so
+   the pair asked for "guest-mode CPL-3 branches only", of which a ring-0 guest retires none. With
+   `exclude_kernel` cleared, the same fd reads the guest's exact architectural branch count with
+   zero host contamination; the `resume_rcb`/`pause_rcb` bracketing around each `KVM_RUN` (kept as
+   defence in depth) now measures 0 cost per call, down from 11.
+   New real-hardware test `run_to_events_lands_exactly_on_target_rcb`
+   (`crates/baud-multiverse/src/linux/mod.rs`) sweeps 8 consecutive absolute RCB targets and asserts
+   each lands exactly (pre-fix, all 8 landed on the identical coarse quantum boundary, overshooting
+   by 42 down to 35 respectively); `timed_exit_fingerprint_is_stable`'s assertion tightened from
+   `>= TARGET_RCB` to `== TARGET_RCB`; `RCB_HARDWARE_JITTER_TOLERANCE` (used by
+   `timer_tick_lands_at_identical_instruction`/`periodic_timer_injection_halts_gracefully_and_
+   reproducibly`) tightened `8` → `0`, confirmed on 10/10 idle-host repetitions plus 20/20
+   repetitions with every logical core saturated by competing load — the ±1-4 (worst case ±34)
+   `rcb` disagreement this tolerance used to absorb was the same host-branch contamination, not
+   genuine hardware counter-read jitter as previously believed. Verified: `cargo clippy -p
+   baud-vcpu -p baud-multiverse --all-targets` at the exact pre-change warning baseline (0 new);
+   `cargo test -p baud-vcpu` 34 passed; `cargo test -p baud-multiverse --lib` 213 passed ×10
+   repeated runs; `cargo test --workspace` green; `drive/h/h0.sh`, `h4.sh`, `h5.sh`, `h7.sh`,
+   `drive/pkg/pkg-boot-cli.sh` all PASS; full `bash drive/gate.sh` — 23 passed, 0 failed, 1 skipped
+   (pkg-build-cli, fingerprint unchanged), 2m54s, clean, no flakes, no new clippy warnings.
 
 ## 15. Pre-push validation protocol
 

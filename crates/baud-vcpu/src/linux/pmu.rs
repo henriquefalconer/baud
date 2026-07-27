@@ -190,6 +190,38 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
         self.read_point().unwrap_or(ExecPoint { rip: 0, gp_regs: [0; 16], rcb, rcx: None, stack_checksum: None })
     }
 
+    /// Retire exactly one guest instruction under `KVM_GUESTDBG_SINGLESTEP | BLOCKIRQ`
+    /// (specs/baud-vcpu.md §5 step 3) and report the point landed on.
+    ///
+    /// **The inner `continue`-on-`DispatchOutcome::Continue` loop is required for correctness, not
+    /// a leak — do not "fix" it by returning to the caller after an I/O/MMIO/MSR exit.** todo.md
+    /// §14.1 hypothesised that this loop was what let more than one instruction retire per call and
+    /// so caused the filed `run_to_events`/`inject_at` landing-precision bug; direct instrumentation
+    /// on real `/dev/kvm` disproved that (the real cause was the work-clock counter filtering out
+    /// the CPL-0 guest entirely — see `baud_multiverse::linux::LinuxBranchCounter::new`), and the
+    /// architecture says the loop must stay:
+    ///
+    /// * Every exit `dispatch_exit` resolves to `Continue` here is either taken at an instruction
+    ///   boundary *before* the trapping instruction has retired, or is not an instruction event at
+    ///   all. Per the Intel SDM (Vol. 3C §26.1.3 and §27.1), a VM exit caused by an I/O-bitmap trap
+    ///   on `IN`/`OUT` is *fault-like*: it is taken before the instruction executes, and the saved
+    ///   guest RIP still points at the `IN`/`OUT` itself. Same for an EPT-violation-triggered MMIO
+    ///   exit, which is a fault on the memory operand. KVM finishes those instructions on the *next*
+    ///   `KVM_RUN` entry, via `complete_userspace_io` (`kvm_fast_pio_out`/`complete_emulated_mmio`
+    ///   → `kvm_skip_emulated_instruction`, which is also where RIP finally advances). `Rdmsr`/
+    ///   `Wrmsr` complete the same way; `IrqWindowOpen` is a pure control signal with no instruction
+    ///   attached.
+    /// * Returning after such an exit would therefore hand the caller an [`ExecPoint`] that is not
+    ///   an architectural instruction boundary at all: RIP would name an instruction whose
+    ///   device-visible side effect this dispatch has *already* performed (`bus.pio_write`) but
+    ///   which has not retired — precisely the state a fingerprint or a snapshot must never be
+    ///   taken in.
+    /// * That completion re-entry costs no work-clock time, so nothing is gained by cutting it
+    ///   short: the trapping instruction retires at most one conditional branch in total no matter
+    ///   how many `KVM_RUN` calls it took to get there.
+    /// * The `ServeEnforced*`/`ReinjectUd` arms loop for the stronger reason the trait doc already
+    ///   implies: the guest's trapped instruction is still waiting on the register value being
+    ///   written, so it provably has not retired.
     fn step(&mut self) -> io::Result<ExecPoint> {
         super::set_singlestep(self.vcpu, true, true)?;
         let result = loop {

@@ -7051,3 +7051,37 @@ todo.md updated cleanly (2901->2973 lines): new item 8 under section 14's Next a
 Post-push verification: origin/main now at 2333852, identical to local HEAD; working tree clean. Pre-push gate (§15) was already green (22 passed, 0 failed, 1 flaked/confirmed-in-isolation, 1 skipped, 3m24s) before this push.
 
 todo.md still has pending items: the full baud-fingerprint crate/CLI/drive/h9.sh/cross-VM orchestration and the real Ubuntu 18.04.1 cloud-image boot (H9 (d)/(e)); H8 Mario blocked on FCEUX Qt5/SDL2/Xvfb packaging; the newly-documented single-step overshoot bug in LinuxPmuStepper::step; the Buildroot/pinned-Nix guest-image pipeline (§4.5) -- emitting NEXT.
+
+## 2026-07-27T14:14:43 UTC (28min) - Session usage — build-10 [sonnet]
+- cost $9.6872 (from claude -p)
+- context 267,151 tok peak of 1M (27%) across 110 inference calls, monotonic
+- models sonnet-5 $9.6840 (in 316 / out 99,349 / cache-read 20,229,398) · haiku-4-5 $0.0032
+- subagents (4) sonnet-5 x4
+- transcript: ralph/.run/20260727T104433Z/011-build-10.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 11
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent progress history to pick up where iteration 10 left off.
+
+Chose to fix the run_to_events/inject_at single-step overshoot bug documented in todo.md §14.1 (found last iteration while building H9 fingerprint primitives, not yet fixed) — it's the last precision gap before the fingerprint 'events = N' contract can be honestly implemented, and blocks further H9 work.
+
+Read crates/baud-vcpu/src/linux/pmu.rs and boundary.rs: LinuxPmuStepper::step() loops internally on DispatchOutcome::Continue (re-entering KVM_RUN without returning), so a single step() call can silently retire more than one guest instruction whenever a non-debug exit (e.g. the timer-guest's forced 'out 0x80,al' diagnostic write) lands adjacent to the single-step boundary — run_to_events'/inject_at's while loop only checks rcb after step() returns, so it can jump clean past target_rcb. Dispatching an Opus subagent to root-cause-confirm and implement a real-hardware-verified fix.
+
+Opus subagent found the real root cause: LinuxBranchCounter left perf_event::Builder's default exclude_kernel=1 in place, so the RCB work-clock counted zero guest branches (guests run at CPL0) and was actually measuring ~44-54 host-userspace branches per KVM_RUN ioctl -- the step() internal-loop hypothesis was wrong and disproved on real hardware. Fix: clear exclude_kernel, set exclude_host=1 (confirmed working now, unlike the prior misdiagnosis). Tightened RCB_HARDWARE_JITTER_TOLERANCE 8->0, added a real-hardware sweep test pinning exact landing. Verified extensively (34+213x10 unit tests, drive/h0,h4,h5,h7.sh, pkg-boot-cli.sh all green). Now running the full pre-push gate per todo.md §15.
+
+Full pre-push gate: 23 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m54s -- clean, no flakes. Updating todo.md to record the fix and move the item to resolved.
+
+## 2026-07-27T15:03:46 UTC - Changes committed.
+- Fixed the run_to_events/inject_at single-step RCB-overshoot bug filed in todo.md §14.1 last iteration, and disproved the hypothesis that filed it.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-vcpu/src/lib.rs, crates/baud-vcpu/src/linux/pmu.rs, todo.md
+- **Brief description of changes:**
+  - Direct hardware instrumentation (Opus subagent) disproved the filed hypothesis that LinuxPmuStepper::step()'s internal continue-on-Continue loop let more than one guest instruction retire per call -- that loop is architecturally required (I/O-bitmap and MMIO exits are fault-like, retiring only on the *next* KVM_RUN entry per Intel SDM Vol 3C §26.1.3/§27.1), and pmu.rs gained only an explanatory doc, no logic change.
+  - Real root cause: LinuxBranchCounter::new left perf_event::Builder's silent default exclude_kernel=1 in place; every baud guest runs at CPL0, so the work-clock counter measured zero guest branches and was actually counting ~44-54 host-userspace branches per KVM_RUN ioctl -- explaining the previously-observed 6-to-43-branch, non-monotonic overshoot exactly (quantum - (target mod quantum)).
+  - Fix: set_exclude_kernel(0) + set_exclude_host(1) in LinuxBranchCounter::new -- this reverses a prior misdiagnosis that exclude_host "reads back 0" on this host (that finding was exclude_host layered on top of the still-set exclude_kernel default, asking for guest-mode CPL-3-only branches, of which a ring-0 guest has none).
+  - New real-hardware test run_to_events_lands_exactly_on_target_rcb (8-target sweep, exact landing + constant rip); timed_exit_fingerprint_is_stable tightened >= to ==; RCB_HARDWARE_JITTER_TOLERANCE tightened 8 -> 0, confirmed 10/10 idle + 20/20 under full-core load.
+  - Verified: cargo clippy -p baud-vcpu -p baud-multiverse (0 new warnings), cargo test -p baud-vcpu (34 passed), cargo test -p baud-multiverse --lib x10 (213 passed each), cargo test --workspace green, drive/h0/h4/h5/h7.sh + pkg-boot-cli.sh green, full bash drive/gate.sh: 23 passed, 0 failed, 1 skipped, 2m54s.
+  - Found and documented (not fixed, out of scope, patched-module-only): handle_baud_rdtsc_exit's kvm_skip_emulated_instruction ignores an active KVM_GUESTDBG_SINGLESTEP window, so an enforced-regime RDTSC trapped mid-single-step never gets its EDX:EAX served.
+  - todo.md §14.1 updated: overshoot entry moved from open-defects prose to the Resolved numbered list (new item 8); §14 item 8 (H9 fingerprint primitives) closing language updated to reflect the fix; new narrow open finding recorded for the enforced-regime RDTSC/singlestep interaction.
+---

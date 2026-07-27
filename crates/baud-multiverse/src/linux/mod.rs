@@ -454,31 +454,51 @@ pub struct LinuxBranchCounter {
 
 impl LinuxBranchCounter {
     pub fn new() -> io::Result<Self> {
-        // NOTE (specs/baud-multiverse.md §3.3's "guest-filtered" requirement, todo.md §14): the
-        // textbook fix here is `exclude_host(true)` (count only branches retired in VMX guest
-        // mode), which would also make the RCB space host-jitter-proof by construction. Tried for
-        // real on this project's own nested-virtualized dev host and found non-functional: with
-        // it set, the counter reads back `0` for the whole run (perf's guest/host execution-mode
-        // discrimination needs the KVM module to register `perf_guest_cbs`, which this host
-        // apparently does not do under nested virtualization — the same family of limitation as
-        // `LinuxPmuStepper`'s already-documented PMI-in-guest-mode signal gap). Left off; instead
-        // (todo.md §14 next-actions item 2, the `os_entropy_is_deterministic` flakiness root
-        // cause) the caller side pauses/resumes this counter around every `KVM_RUN` ioctl
-        // (`run_and_convert_rcb_bracketed`), which achieves the same "guest-plus-vmexit time
-        // only" property manually, without needing `exclude_host` to work at all.
-        //
-        // Both halves confirmed empirically on this host, real /dev/kvm (`tools/exclude_probe.c`,
-        // `tools/pauseresume_ab.sh`): (1) with `exclude_host(true)` set and the bracketing removed,
-        // the counter reads `0` while the guest runs — the work-clock stalls and the boot hangs (the
-        // interrupt-stepper polls an RCB target that never advances), so `exclude_host` genuinely
-        // cannot substitute here; (2) removing the bracketing while keeping this raw event leaves
-        // `os_entropy_is_deterministic` passing but breaks
-        // `rdtsc_enforced_regime_is_bit_exact_across_boots` — the served enforced-RDTSC drifts a few
-        // host-dispatch branches across two boots — so the bracketing is load-bearing for bit-exact
-        // work-clock time and is not made redundant by the raw event alone.
         let mut builder = Builder::new();
         builder.attrs_mut().type_ = PERF_TYPE_RAW;
         builder.attrs_mut().config = BR_INST_RETIRED_COND;
+        // specs/baud-multiverse.md §3.3's "guest-filtered" requirement, and the real root cause of
+        // the single-step landing-precision bug todo.md §14.1 filed against
+        // `run_to_events`/`inject_at` ("can overshoot its target RCB", empirically 6-43 branches).
+        //
+        // **`exclude_kernel(false)` is load-bearing and must never be dropped.**
+        // `perf_event::Builder::new()` silently defaults `exclude_kernel = 1` (see that crate's
+        // `Builder::default`, which sets `exclude_kernel`/`exclude_hv` before this code ever gets
+        // the builder). Every baud guest runs in 64-bit long mode at **CPL 0**, so a USR-only event
+        // select filters out the guest's entire instruction stream: with the default left in place
+        // this counter counted *zero* guest branches for the whole run and what it actually
+        // measured was host **userspace** branches retired inside the bracketed `KVM_RUN` ioctl
+        // window — i.e. a VM-exit counter scaled by ~54 counts/exit, not a work clock.
+        //
+        // Measured directly on this host, real /dev/kvm, against `timer-guest` (whose busy loop
+        // retires a known 17 conditional branches per forced `out 0x80, al` exit): with the
+        // defaults, every free-running `KVM_RUN` advanced this counter by exactly +54 and every
+        // single-stepped instruction by exactly +44 — *including* instructions that are not
+        // branches at all (`dec ecx`) — and rebuilding the same fixture with 4096 inner iterations
+        // instead of 16 (256x the guest branches per exit) still produced exactly +54 per exit,
+        // proving guest branches contributed nothing. That ~44-count quantum per single step is
+        // precisely why the arm-early-then-single-step engine could never land on an exact
+        // `target_rcb`: the clock it steers by had no resolution finer than one VM exit.
+        //
+        // `exclude_host(true)` (count only VMX non-root / guest mode) **does** work on this
+        // nested-virtualized dev host. The previously-documented finding that it "reads back 0 for
+        // the whole run" was a misdiagnosis of exactly the bug above: `exclude_host = 1` was being
+        // set *on top of* the crate's default `exclude_kernel = 1`, so the pair asked for
+        // "guest-mode CPL-3 branches only" — of which a ring-0 bare-metal payload retires none.
+        // With `exclude_kernel` cleared, the same fixture reads exactly 17 branches per exit (4097
+        // for the 4096-iteration rebuild): the guest's own architectural conditional-branch count,
+        // bit-exact, with no host contamination at all.
+        //
+        // `exclude_hv` is left at the crate's default `1`; measured to make no difference here
+        // either way, so it is not disturbed.
+        //
+        // The `resume_rcb`/`pause_rcb` bracketing (`run_and_convert_rcb_bracketed`,
+        // `crates/baud-vcpu/src/linux/mod.rs`) is kept: it now costs 0 counts per pair (measured;
+        // it was 11 before this fix, all of it host userspace inside the two perf ioctls), so it is
+        // free, and it remains a second line of defence for any host where `exclude_host` really is
+        // inoperative.
+        builder.attrs_mut().set_exclude_kernel(0);
+        builder.attrs_mut().set_exclude_host(1);
         // `pinned(true)`: same fix as `crates/baud-host/src/linux.rs`'s
         // `measure_fixed_loop_branches` (todo.md §14/H3) — keeps this counter resident on the PMU
         // instead of occasionally being multiplexed off mid-measurement under this project's own
@@ -1983,19 +2003,17 @@ impl Multiverse {
     /// methods' `period_rcb`, which is relative to a per-call baseline), since the whole point of a
     /// fingerprint is that a fixed `N` names the same machine state across independent boots.
     ///
-    /// **Known real-hardware finding, not yet fixed (todo.md §14.1)**: the returned
-    /// [`ExecPoint`](baud_vcpu::boundary::ExecPoint)'s `rcb` is not always exactly `target_rcb` —
-    /// it can land tens of branches past it when a forced-diagnostic-exit instruction (e.g.
-    /// `timer-guest`'s periodic `out 0x80, al`) coincides with the single-step window, because
-    /// `LinuxPmuStepper::step`'s inner "keep single-stepping past any non-debug exit" loop can
-    /// silently retire more than one guest instruction per call in that case. The landing is still
-    /// a deterministic, reproducible function of `(image, tape, target_rcb)` (verified by
-    /// `timed_exit_fingerprint_is_stable` below) — this primitive reports the *actual* landed
-    /// `rcb`, never the caller's requested value, specifically so a caller can never be misled
-    /// about which point was really observed. This is very likely the same root cause the
-    /// existing periodic-timer/interrupt-injection tests have been attributing to raw hardware
-    /// counter-read jitter (`RCB_HARDWARE_JITTER_TOLERANCE` below) — worth revisiting once this is
-    /// fixed, since a real fix would also tighten those guarantees, not just this one.
+    /// This lands **exactly** on `target_rcb` (`run_to_events_lands_exactly_on_target_rcb` below
+    /// pins it on real hardware). It did not always: todo.md §14.1 filed a real, reproducible
+    /// 6-to-43-branch overshoot here, whose root cause turned out to be the work-clock counter
+    /// itself rather than the stepping engine — [`LinuxBranchCounter::new`] was leaving
+    /// `perf_event::Builder`'s default `exclude_kernel = 1` in place, which filters out a CPL-0
+    /// guest entirely, so the "RCB" this engine steered by was really host-userspace branches
+    /// retired per `KVM_RUN` (~44 counts per single step, guest branches contributing nothing) and
+    /// had no resolution finer than one VM exit. See that constructor's own comment for the
+    /// measurements. The returned [`ExecPoint`](baud_vcpu::boundary::ExecPoint) still reports the
+    /// *actual* landed `rcb`, never the caller's requested value, so a caller can never be misled
+    /// about which point was really observed.
     pub fn run_to_events(
         &mut self,
         target_rcb: u64,
@@ -2027,8 +2045,8 @@ impl Multiverse {
     }
 
     /// Capture the full four-field timed-exit fingerprint (specs/baud-fingerprint.md §4): stop at
-    /// or past `target_rcb` via [`run_to_events`](Self::run_to_events) (see that method's doc for
-    /// the known "may overshoot `target_rcb`" real-hardware finding), then read `guest RIP`,
+    /// `target_rcb` via [`run_to_events`](Self::run_to_events) (see that method's doc for the
+    /// landing-precision history), then read `guest RIP`,
     /// translate it to `guest physical`, and hash guest RAM. `events` is the *actual* landed `rcb`,
     /// not `target_rcb` verbatim. Errors (rather than silently fingerprinting the wrong state) if
     /// the guest halted on its own before `target_rcb` — the same "did not reach the requested
@@ -2975,27 +2993,30 @@ mod tests {
     const TIMER_VECTOR: u8 = 0x30;
     const TIMER_MARKER: u8 = b'T';
 
-    /// The largest `rcb` disagreement between two otherwise-identical runs this test tolerates.
-    /// **Not a determinism escape hatch** — `rip` below is still required to be bit-identical,
-    /// which is the guarantee that actually matters (the interrupt lands on the same instruction).
-    /// Real investigation this iteration (todo.md §14) tracked a residual ±1-4 `rcb` disagreement
-    /// to the `perf_event` branch counter's own hardware read precision on this project's nested-
-    /// virtualized dev host: three genuine bugs were found and fixed along the way (a stale-signal
-    /// misattribution across superseded `LinuxPmuStepper` instances; `kvm_run.immediate_exit` and
-    /// `request_interrupt_window` both being sticky kernel fields nothing ever cleared, each
-    /// capable of wedging every future `KVM_RUN` on the vCPU; a fixture forced-exit interval
-    /// coarser than `boundary::MARGIN`, which silently skipped the single-step phase every time),
-    /// and `exclude_host`/`.pinned(true)` were both tried and ruled out or found insufficient (see
-    /// `LinuxBranchCounter::new`'s doc — the only pinned RCB fd left after todo.md §14 next-actions
-    /// item 2(c)'s counter-reconciliation fix removed `LinuxPmuStepper`'s own separate one). What
-    /// remains is
-    /// consistent with the same *precision*, not *determinism*, limitation this project already
-    /// hardened around once before (`crates/baud-host/src/linux.rs`'s `rcb_deterministic`'s own
-    /// majority-of-3 vote, "still a heuristic, not a proof"): guest RAM and console output below
-    /// are still required exactly equal, proving the tolerance is real measurement noise, not an
-    /// actual state divergence (the injected interrupt provably lands on the identical instruction
-    /// and produces identical guest-visible effects either way).
-    const RCB_HARDWARE_JITTER_TOLERANCE: u64 = 8;
+    /// The largest `rcb` disagreement between two otherwise-identical runs the tests below
+    /// tolerate. **This is now `0` — two boots of the same image+tape must agree on the landing
+    /// `rcb` exactly.**
+    ///
+    /// It was `8` for as long as the work-clock counter was contaminated by host branches. The
+    /// residual ±1-4 (and, in the worst measured case, ±34) disagreement this constant used to
+    /// absorb was never "the `perf_event` branch counter's own hardware read precision", as its
+    /// previous doc concluded, and `exclude_host` was never actually ruled out: the counter was
+    /// being built with `perf_event::Builder`'s default `exclude_kernel = 1` still set, which
+    /// filters out a CPL-0 guest entirely, so what this "RCB" measured was host **userspace**
+    /// branches retired inside each `KVM_RUN` ioctl (~54 per exit) — a host-scheduling-sensitive
+    /// quantity with no guest meaning at all. `LinuxBranchCounter::new`'s comment carries the
+    /// measurements; the same root cause is what made `run_to_events` overshoot its target
+    /// (todo.md §14.1).
+    ///
+    /// With the counter counting the guest's own retired conditional branches and nothing else, the
+    /// landing `rcb` is a pure function of the guest's instruction stream, so there is no host term
+    /// left for a tolerance to absorb. Tightened to `0` only on real-hardware evidence, not
+    /// speculatively: 10/10 idle repetitions plus 20/20 repetitions with every logical core
+    /// saturated by competing busy loops, of both tests that use it, all exactly equal.
+    /// Deliberately kept as a named constant (rather than inlining `assert_eq!`) so this history
+    /// stays attached to the assertion and a future regression that reintroduces host contamination
+    /// has an obvious, documented place to be caught rather than accommodated.
+    const RCB_HARDWARE_JITTER_TOLERANCE: u64 = 0;
 
     /// H4's named test (specs/baud-vcpu.md §5, todo.md §10): `Multiverse::inject_timer_tick`
     /// wired for the first time against a real guest and real KVM hardware. Drives the same
@@ -3035,11 +3056,16 @@ mod tests {
                  timer_tick_lands_at_identical_instruction"
             );
             let rcb_diff = a.rcb.abs_diff(b.rcb);
+            // Bound read through a binding, not compared against the constant directly: the
+            // tolerance is `0` now, and a literal `x <= 0` on a `u64` is what
+            // `clippy::absurd_extreme_comparisons` (deny-by-default in this workspace's gate)
+            // rejects. Keeping it a real `<=` bound rather than an `assert_eq!` means raising the
+            // constant again, should some future host ever need it, still does the right thing.
+            let tolerance = RCB_HARDWARE_JITTER_TOLERANCE;
             assert!(
-                rcb_diff <= RCB_HARDWARE_JITTER_TOLERANCE,
-                "tick {i}: rcb disagreement {rcb_diff} (a={}, b={}) exceeds the documented \
-                 hardware counter-read jitter tolerance of {RCB_HARDWARE_JITTER_TOLERANCE} — see \
-                 RCB_HARDWARE_JITTER_TOLERANCE's doc",
+                rcb_diff <= tolerance,
+                "tick {i}: rcb disagreement {rcb_diff} (a={}, b={}) exceeds the tolerance of \
+                 {tolerance} — see RCB_HARDWARE_JITTER_TOLERANCE's doc",
                 a.rcb,
                 b.rcb
             );
@@ -3120,10 +3146,13 @@ mod tests {
                  two boots of the same image+tape"
             );
             let rcb_diff = a.rcb.abs_diff(b.rcb);
+            // See the identically-shaped bound in `timer_tick_lands_at_identical_instruction` for
+            // why the tolerance is read through a binding rather than compared against directly.
+            let tolerance = RCB_HARDWARE_JITTER_TOLERANCE;
             assert!(
-                rcb_diff <= RCB_HARDWARE_JITTER_TOLERANCE,
-                "tick {i}: rcb disagreement {rcb_diff} (a={}, b={}) exceeds the documented \
-                 hardware counter-read jitter tolerance of {RCB_HARDWARE_JITTER_TOLERANCE}",
+                rcb_diff <= tolerance,
+                "tick {i}: rcb disagreement {rcb_diff} (a={}, b={}) exceeds the tolerance of \
+                 {tolerance} — see RCB_HARDWARE_JITTER_TOLERANCE's doc",
                 a.rcb,
                 b.rcb
             );
@@ -3175,10 +3204,13 @@ mod tests {
         let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_fp = second.capture_fingerprint(TARGET_RCB).expect("second capture failed");
 
-        assert!(
-            first_fp.events >= TARGET_RCB,
-            "must land at or past the requested target, never short of it (landed {})",
-            first_fp.events
+        assert_eq!(
+            first_fp.events, TARGET_RCB,
+            "must land on exactly the requested target -- specs/baud-fingerprint.md §4 step 1's \
+             \"events = N\". This was `>= TARGET_RCB` while todo.md §14.1's landing-precision bug \
+             was open; see `Multiverse::run_to_events`' doc and `LinuxBranchCounter::new` for the \
+             root cause (a CPL-0 guest filtered out of the work-clock counter by \
+             `perf_event::Builder`'s default `exclude_kernel = 1`)"
         );
         assert_eq!(first_fp.gpa, Some(first_fp.rip), "timer-guest never leaves the fixed identity map");
         assert_eq!(
@@ -3189,6 +3221,55 @@ mod tests {
         );
     }
 
+    /// The direct regression pin for todo.md §14.1's landing-precision bug
+    /// ("`run_to_events`/`inject_at`'s single-step engine can overshoot its target RCB"): a *sweep*
+    /// of consecutive absolute targets must each be landed on **exactly**, not merely at-or-past.
+    ///
+    /// A sweep, not a single target, is what makes this a real pin. Before the fix
+    /// (`LinuxBranchCounter::new` leaving `perf_event::Builder`'s default `exclude_kernel = 1` in
+    /// place, filtering this CPL-0 guest's entire instruction stream out of the work clock) the
+    /// engine's finest reachable step was one whole `KVM_RUN`'s worth of *host* branches — measured
+    /// at exactly +44 per single step against this fixture — so every one of these eight targets
+    /// landed on the identical `rcb` 100_042, overshooting by 42, 41, 40, ... 35 respectively. Any
+    /// regression that reintroduces a coarse-grained work clock therefore fails here on the first
+    /// target that is not congruent to the quantum, whichever it happens to be.
+    ///
+    /// The landing `rip` is also asserted constant across the sweep, and equal to `timer-guest`'s
+    /// `dec ebx` at the top of its inner `dec`/`jnz` loop (BUILD.md): every retired conditional
+    /// branch inside that loop *is* the `jnz`, so the instruction boundary immediately after the
+    /// N-th one is always the following `dec` — a second, independent check that the engine is
+    /// stopping one guest instruction at a time rather than at some coarser exit boundary.
+    #[test]
+    fn run_to_events_lands_exactly_on_target_rcb() {
+        let kernel = timer_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const BASE_RCB: u64 = 100_000;
+
+        let mut landed_rips = Vec::new();
+        for offset in 0..8u64 {
+            let target = BASE_RCB + offset;
+            let mut m = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+            let outcome = m.run_to_events(target).expect("run_to_events failed");
+            assert!(
+                outcome.was_reached(),
+                "target {target} is well inside timer-guest's busy loop; the guest must not have halted"
+            );
+            let point = outcome.point();
+            assert_eq!(
+                point.rcb, target,
+                "run_to_events({target}) must land on exactly {target} retired conditional \
+                 branches, never past it -- specs/baud-fingerprint.md §4 step 1 / \
+                 specs/baud-ubuntu.md §6's `assert_eq!(c, target)`. Landing past it means the work \
+                 clock has lost single-guest-instruction resolution again (todo.md §14.1)"
+            );
+            landed_rips.push(point.rip);
+        }
+        assert!(
+            landed_rips.windows(2).all(|w| w[0] == w[1]),
+            "every boundary inside timer-guest's `dec ebx`/`jnz inner` loop is the `jnz`, so the \
+             instruction landed on after each one must be the same `dec ebx`; got {landed_rips:#x?}"
+        );
+    }
 
     /// `tests/fixtures/virtio-rng-guest/`'s payload: a real (hand-assembled) virtio-rng driver
     /// sequence -- negotiate, set up one queue, post one writable descriptor, notify -- against the

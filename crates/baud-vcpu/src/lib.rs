@@ -210,15 +210,16 @@ pub trait TimeSource {
     fn serve_enforced_rdseed(&mut self) -> u64;
 
     /// Resume RCB-counter accumulation for the imminent `KVM_RUN` call (todo.md §14 next-actions
-    /// item 2: the `os_entropy_is_deterministic` flakiness investigation). The real RCB-backed
-    /// implementation's underlying counter also accumulates host-side branches, since
-    /// `exclude_host` does not work on this project's own nested-virtualized dev host
-    /// (`baud_multiverse::linux::LinuxBranchCounter::new`'s doc) — so pausing it for every stretch
-    /// of userspace dispatch code between exits, and resuming it only for the actual
-    /// `KVM_RUN` ioctl window, keeps a served RCB/virtual-TSC value a function of guest-plus-
-    /// kernel-vmexit execution only, never of how much (data-dependent, run-varying) Rust dispatch
-    /// code happened to run since the previous exit. A no-op default: every `TimeSource`
-    /// implementor that is not RCB-backed (every test double) needs no change.
+    /// item 2: the `os_entropy_is_deterministic` flakiness investigation). This bracketing was
+    /// introduced when the real RCB-backed counter still accumulated host-side branches, to keep a
+    /// served RCB/virtual-TSC value free of however much (data-dependent, run-varying) Rust
+    /// dispatch code happened to run since the previous exit. That contamination is gone at the
+    /// source now — `baud_multiverse::linux::LinuxBranchCounter::new` counts VMX-non-root branches
+    /// only (`exclude_host`, which does work here once `perf_event::Builder`'s default
+    /// `exclude_kernel = 1` is cleared; see that constructor's comment) — so this pair is measured
+    /// to cost exactly zero counts and is kept as defence in depth for any host where the
+    /// guest/host filter really is inoperative. A no-op default: every `TimeSource` implementor
+    /// that is not RCB-backed (every test double) needs no change.
     fn resume_rcb(&mut self) {}
     /// The other half of [`resume_rcb`](Self::resume_rcb) — called the instant a `KVM_RUN` call
     /// returns, before any dispatch/userspace code runs.
