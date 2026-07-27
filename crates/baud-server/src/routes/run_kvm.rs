@@ -109,6 +109,28 @@ pub struct RunKvmBody {
     /// exactly like every existing `boot`/`restore` call site before this field existed.
     #[serde(default)]
     pub virtio_blk: Option<VirtioBlkSpec>,
+    /// H9's last recorded open blocker (todo.md §14 item 12) — hex-encoded target byte pattern
+    /// for `Multiverse::run_until_console_pattern_with_periodic_timer_and_devices`: the guest's
+    /// first idle `Hlt` is no longer terminal, the run instead resumes across repeated idle halts
+    /// (staging the periodic timer interrupt directly, exactly like a real LAPIC timer would)
+    /// until the console byte stream contains this pattern, or `periodic_timer.max_ticks`/
+    /// `halt_max_exits_per_burst` are exhausted. Requires `periodic_timer` to also be set — the
+    /// primitive needs a period/vector to drive resumption. Not yet combinable with `run_id`
+    /// persistence: rejected with a clear error rather than silently persisting replay metadata
+    /// that would reboot through the wrong run loop (todo.md tracks the persistence gap as a
+    /// follow-up). `None` (the default) preserves this route's exact prior behavior.
+    #[serde(default)]
+    pub halt_console_pattern_hex: Option<String>,
+    /// Bound on host-side exits allowed within one delivered tick's burst before the guest must
+    /// halt again or produce `halt_console_pattern_hex` — see `run_until_console_pattern_with_
+    /// periodic_timer_and_devices`'s `max_exits_per_burst` doc. Only used when `halt_console_
+    /// pattern_hex` is set.
+    #[serde(default = "default_halt_max_exits_per_burst")]
+    pub halt_max_exits_per_burst: u32,
+}
+
+fn default_halt_max_exits_per_burst() -> u32 {
+    200_000
 }
 
 /// See [`RunKvmBody::virtio_blk`]'s doc for why this exists at all.
@@ -236,6 +258,22 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
     let virtio_blk_meta = body.virtio_blk.as_ref().map(|s| (s.vector, s.max_exits));
     let acpi = body.acpi;
+    if body.halt_console_pattern_hex.is_some() && body.run_id.is_some() {
+        return Json(json!({
+            "error": "halt_console_pattern_hex is not yet combinable with run_id persistence"
+        }));
+    }
+    if body.halt_console_pattern_hex.is_some() && periodic_timer.is_none() {
+        return Json(json!({ "error": "halt_console_pattern_hex requires periodic_timer to also be set" }));
+    }
+    let halt_console_pattern = match &body.halt_console_pattern_hex {
+        Some(hex) => match hex_decode(hex) {
+            Some(bytes) if !bytes.is_empty() => Some((bytes, body.halt_max_exits_per_burst)),
+            Some(_) => return Json(json!({ "error": "halt_console_pattern_hex must not be empty" })),
+            None => return Json(json!({ "error": "halt_console_pattern_hex must be a valid hex string" })),
+        },
+        None => None,
+    };
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
     let tape_hex = body.tape_hex.clone();
@@ -255,6 +293,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
             virtio_rng,
             virtio_blk,
             acpi,
+            halt_console_pattern.as_ref().map(|(p, m)| (p.as_slice(), *m)),
         )
     })
     .await
@@ -463,17 +502,21 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false, None)
         .map(|(outcome, _records)| outcome)
 }
 
 /// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`/`virtio_blk`/
-/// `acpi`, see [`RunKvmBody`]'s doc for why each exists), run to first `Hlt`/`Shutdown`, then drain
-/// every tape-device record the guest emitted along the way (`Multiverse::drain_tape_records`) —
-/// the same boot `boot_and_run` does, plus the drain `/run/kvm`'s `run()` handler needs to persist
-/// real `Msg::Frame` records (previously captured in-process and immediately dropped, todo.md
-/// §14's eighteenth-brick gap). `virtio_blk` is `(base_image_bytes, vector, max_exits)`, mirroring
-/// `initramfs`'s "caller resolves the path, this function only sees bytes" convention.
+/// `acpi`/`halt_console_pattern`, see [`RunKvmBody`]'s doc for why each exists), run to first
+/// `Hlt`/`Shutdown` (or, with `halt_console_pattern` set, to the first idle halt *after* the
+/// console shows that pattern — H9 todo.md §14 item 12), then drain every tape-device record the
+/// guest emitted along the way (`Multiverse::drain_tape_records`) — the same boot `boot_and_run`
+/// does, plus the drain `/run/kvm`'s `run()` handler needs to persist real `Msg::Frame` records
+/// (previously captured in-process and immediately dropped, todo.md §14's eighteenth-brick gap).
+/// `virtio_blk` is `(base_image_bytes, vector, max_exits)`, mirroring `initramfs`'s "caller
+/// resolves the path, this function only sees bytes" convention. `halt_console_pattern` is
+/// `(pattern_bytes, max_exits_per_burst)`; `None` preserves this function's exact prior behavior
+/// (a guest's first `Hlt` is always terminal).
 #[allow(clippy::too_many_arguments)]
 fn boot_run_and_drain(
     kernel_path: &Path,
@@ -484,6 +527,7 @@ fn boot_run_and_drain(
     virtio_rng: Option<(u64, u8, u32)>,
     virtio_blk: Option<(&[u8], u8, u32)>,
     acpi: bool,
+    halt_console_pattern: Option<(&[u8], u32)>,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
@@ -507,8 +551,27 @@ fn boot_run_and_drain(
     if let Some((base_image, _, _)) = virtio_blk {
         mv.enable_virtio_pci_blk(base_image.to_vec());
     }
-    let halt = match periodic_timer {
-        Some((period_rcb, timer_vector, max_ticks)) if virtio_rng.is_some() || virtio_blk.is_some() => {
+    let halt = match (periodic_timer, halt_console_pattern) {
+        (Some((period_rcb, timer_vector, max_ticks)), Some((pattern, max_exits_per_burst))) => {
+            let rng_vector = virtio_rng.map(|(_, v, _)| v);
+            let blk_vector = virtio_blk.map(|(_, v, _)| v);
+            let (_ticks, halt) = mv
+                .run_until_console_pattern_with_periodic_timer_and_devices(
+                    period_rcb,
+                    timer_vector,
+                    rng_vector,
+                    blk_vector,
+                    pattern,
+                    max_ticks,
+                    max_exits_per_burst,
+                )
+                .map_err(|e| format!("determinism hole: {e}"))?;
+            halt
+        }
+        (None, Some(_)) => {
+            return Err("halt_console_pattern requires periodic_timer to also be set".to_string())
+        }
+        (Some((period_rcb, timer_vector, max_ticks)), None) if virtio_rng.is_some() || virtio_blk.is_some() => {
             let rng_vector = virtio_rng.map(|(_, v, _)| v).unwrap_or(0);
             let blk_vector = virtio_blk.map(|(_, v, _)| v).unwrap_or(0);
             let (_ticks, halt) = mv
@@ -522,13 +585,13 @@ fn boot_run_and_drain(
                 .map_err(|e| format!("determinism hole: {e}"))?;
             halt
         }
-        Some((period_rcb, vector, max_ticks)) => {
+        (Some((period_rcb, vector, max_ticks)), None) => {
             let (_ticks, halt) = mv
                 .run_to_first_halt_with_periodic_timer(period_rcb, vector, max_ticks)
                 .map_err(|e| format!("determinism hole: {e}"))?;
             halt
         }
-        None => match (virtio_rng, virtio_blk) {
+        (None, None) => match (virtio_rng, virtio_blk) {
             (Some((_, rng_vector, max_exits)), None) => mv
                 .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
                 .map_err(|e| format!("determinism hole: {e}"))?,
@@ -587,6 +650,7 @@ pub(crate) fn boot_and_drain_frames(
         virtio_rng,
         virtio_blk,
         acpi,
+        None,
     )?;
     Ok(records
         .into_iter()
@@ -2011,7 +2075,7 @@ mod tests {
         assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(
@@ -2052,7 +2116,7 @@ mod tests {
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 3);
@@ -2130,6 +2194,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .expect("real linux-guest boot through boot_run_and_drain failed");
 
@@ -2176,6 +2241,7 @@ mod tests {
                 None,
                 None,
                 true, // acpi
+                None,
             )
             .unwrap_or_else(|e| panic!("run {i}: acpi-enabled boot through boot_run_and_drain failed: {e}"));
             let console = String::from_utf8_lossy(&console_output).to_string();
@@ -2188,6 +2254,48 @@ mod tests {
         assert_eq!(
             consoles[0], consoles[1],
             "an acpi-enabled boot through this route must stay exactly as reproducible as every other guest here"
+        );
+    }
+
+    fn idle_halt_guest_kernel_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/idle-halt-guest/bzImage")
+    }
+
+    /// Route-level counterpart to `baud_multiverse::linux::
+    /// run_until_console_pattern_resumes_across_repeated_idle_halts` — H9's last recorded open
+    /// blocker (todo.md §14 item 12: a real Ubuntu boot reached `Freeing unused kernel memory`
+    /// and then stopped there, because every prior run mode treats a guest's first idle `Hlt` as
+    /// terminal). Exercises `boot_run_and_drain`'s new `halt_console_pattern` parameter — the
+    /// exact code `POST /run/kvm`'s `halt_console_pattern_hex`/`halt_max_exits_per_burst` fields
+    /// drive, minus only the axum/JSON plumbing.
+    #[test]
+    fn run_kvm_resumes_past_idle_halts_until_console_pattern_found() {
+        let kernel = idle_halt_guest_kernel_path();
+        const PERIOD_RCB: u64 = 100_000;
+        const TIMER_VECTOR: u8 = 0x30;
+        const MAX_TICKS: u32 = 20;
+        const MAX_EXITS_PER_BURST: u32 = 4096;
+        let pattern = b"ubuntu login:";
+
+        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
+            &kernel,
+            "console=ttyS0",
+            vec![],
+            None,
+            Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+            None,
+            None,
+            false,
+            Some((pattern, MAX_EXITS_PER_BURST)),
+        )
+        .expect("idle-halt-guest boot through boot_run_and_drain did not reach the target console pattern");
+
+        let console = String::from_utf8_lossy(&console_output);
+        assert!(
+            console.ends_with("ubuntu login:"),
+            "the route-level run must resume past every silent idle halt and stop only once the \
+             pattern appears; got:\n{console}"
         );
     }
 
@@ -2234,6 +2342,7 @@ mod tests {
             None,
             Some((&base_image, virtio_blk_vector, 200_000)),
             false,
+            None,
         )
         .expect("real linux-guest boot with virtio_blk through boot_run_and_drain failed");
 
@@ -2585,7 +2694,7 @@ mod tests {
                 .expect("resume_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(resumed_outcomes.len(), 3);

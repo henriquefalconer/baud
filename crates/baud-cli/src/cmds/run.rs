@@ -138,6 +138,19 @@ pub enum RunAction {
         /// set. Only used when `--virtio-blk-image` is set.
         #[arg(long, default_value_t = 200_000)]
         virtio_blk_max_exits: u32,
+        /// H9's last recorded open blocker (todo.md §14 item 12) — hex-encoded target byte
+        /// pattern. The guest's first idle `Hlt` is no longer terminal: the run resumes across
+        /// repeated idle halts (staging the periodic timer interrupt directly, like a real LAPIC
+        /// timer would) until the console output contains this pattern, or
+        /// `--periodic-timer-max-ticks`/`--halt-max-exits-per-burst` are exhausted. Requires
+        /// `--periodic-timer-period-rcb` to also be set.
+        #[arg(long)]
+        halt_console_pattern_hex: Option<String>,
+        /// Bound on host-side exits allowed within one delivered tick's burst before the guest
+        /// must halt again or produce `--halt-console-pattern-hex`. Only used when that flag is
+        /// set.
+        #[arg(long, default_value_t = 200_000)]
+        halt_max_exits_per_burst: u32,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
     /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
@@ -359,6 +372,8 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             virtio_blk_image,
             virtio_blk_vector,
             virtio_blk_max_exits,
+            halt_console_pattern_hex,
+            halt_max_exits_per_burst,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -389,6 +404,10 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                     "vector": virtio_blk_vector,
                     "max_exits": virtio_blk_max_exits,
                 });
+            }
+            if let Some(pattern_hex) = halt_console_pattern_hex {
+                body["halt_console_pattern_hex"] = json!(pattern_hex);
+                body["halt_max_exits_per_burst"] = json!(halt_max_exits_per_burst);
             }
             let v = c.post("/run/kvm", &body).await?;
             fmt::print(&v, json);

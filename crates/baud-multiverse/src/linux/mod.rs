@@ -720,6 +720,17 @@ mod rng_seed_from_tape_tests {
     }
 }
 
+/// The last (up to) 200 bytes of `console`, lossily decoded — attached to
+/// [`Multiverse::run_to_first_halt_with_periodic_timer_and_devices`]'s timeout errors so a caller
+/// tuning `max_ticks`/`halt_console_pattern` against a real, slow-booting guest (H9's Ubuntu boot,
+/// todo.md §14 item 12) can see how far the console actually got without a separate debug build —
+/// a bare "guest did not halt"/"pattern not found" message gives no way to tell "stuck at the very
+/// start" from "one byte short of the target" from the error alone.
+fn console_tail(console: &[u8]) -> String {
+    let tail = &console[console.len().saturating_sub(200)..];
+    String::from_utf8_lossy(tail).into_owned()
+}
+
 /// One virtio device serviceable from inside
 /// [`Multiverse::run_to_first_halt_with_periodic_timer_and_devices`]'s tick loop — the "poll N
 /// devices" abstraction todo.md §14 item 5(b)'s note on `run_to_first_halt_with_virtio_pci_blk`
@@ -1674,13 +1685,48 @@ impl Multiverse {
     /// single-device (virtio-rng-only) loop this replaces — with exactly one device in the slice
     /// this is behaviorally identical to that hand-written loop, so every existing caller/test is a
     /// regression check on the refactor itself, not just on the new multi-device case.
+    ///
+    /// `pattern`, when `Some` (H9 todo.md §14 item 12's "run until console contains X, resuming
+    /// across idle halts" gap — a real kernel's idle loop halts the instant nothing is runnable,
+    /// long before any device necessarily has pending work again), changes what a halt with no
+    /// device work pending means: instead of being terminal, the timer channel itself is always
+    /// serviced (there is always a next tick, unlike a device that can run out of work) via the
+    /// same directly-staged-while-halted idiom
+    /// [`service_virtio_rng_interrupt_while_halted`](Self::service_virtio_rng_interrupt_while_halted)
+    /// established for one device, then the guest is driven natively
+    /// ([`step_exit`](Self::step_exit)) until it halts again or `pattern` appears in the console
+    /// stream, whichever comes first (bounded by `max_exits_per_burst`, since one delivered tick's
+    /// burst of guest work can take far more than one host-side exit). `pattern` is checked after
+    /// every single exit, not just at each halt, so a match produced mid-burst is never missed.
+    /// `None` preserves this function's exact prior behavior (a halt with no device work pending
+    /// is terminal) — every existing caller below passes `None`.
+    #[allow(clippy::too_many_arguments)]
     fn run_to_first_halt_with_periodic_timer_and_devices(
         &mut self,
         period_rcb: u64,
         timer_vector: u8,
         devices: &[TickPolledDevice],
         max_ticks: u32,
+        pattern: Option<&[u8]>,
+        max_exits_per_burst: u32,
     ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        if let Some(p) = pattern {
+            if p.is_empty() {
+                return Err(DeterminismHole(
+                    "run_to_first_halt_with_periodic_timer_and_devices: pattern must not be empty"
+                        .to_string(),
+                ));
+            }
+        }
+        let contains_pattern =
+            |console: &[u8], p: &[u8]| !p.is_empty() && console.windows(p.len()).any(|w| w == p);
+        let halt_outcome = |this: &mut Self| -> Result<HaltOutcome, DeterminismHole> {
+            Ok(HaltOutcome {
+                console_output: this.bus.console.output().to_vec(),
+                ram_hash: this.ram_hash(),
+                exit_pc: this.current_rip()?,
+            })
+        };
         let mut ticks = Vec::new();
         let mut last_notify: Vec<u64> =
             devices.iter().map(|d| (d.notify_count)(self).unwrap_or(0)).collect();
@@ -1699,6 +1745,11 @@ impl Multiverse {
                         if notify_count != last_notify[i] {
                             last_notify[i] = notify_count;
                             (dev.service_running)(self, dev.vector)?;
+                        }
+                    }
+                    if let Some(p) = pattern {
+                        if contains_pattern(self.bus.console.output(), p) {
+                            return Ok((ticks, halt_outcome(self)?));
                         }
                     }
                 }
@@ -1720,21 +1771,144 @@ impl Multiverse {
                         }
                     }
                     if serviced_any {
+                        if let Some(p) = pattern {
+                            if contains_pattern(self.bus.console.output(), p) {
+                                return Ok((ticks, halt_outcome(self)?));
+                            }
+                        }
                         continue;
                     }
-                    let halt = HaltOutcome {
-                        console_output: self.bus.console.output().to_vec(),
-                        ram_hash: self.ram_hash(),
-                        exit_pc: self.current_rip()?,
+                    let Some(p) = pattern else {
+                        return Ok((ticks, halt_outcome(self)?));
                     };
-                    return Ok((ticks, halt));
+                    // No device has pending work, but the caller wants to keep going until the
+                    // console shows `p` -- the timer channel always has a next tick to offer
+                    // (unlike a device), so deliver it directly (safe: `safe_halt()` guarantees
+                    // `RFLAGS.IF=1` right here) and drain forced exits until the guest halts again
+                    // or `p` appears.
+                    let mut events =
+                        self.guest.vcpu.get_vcpu_events().map_err(|e| DeterminismHole(e.to_string()))?;
+                    events.interrupt.injected = 1;
+                    events.interrupt.nr = timer_vector;
+                    events.interrupt.soft = 0;
+                    self.guest.vcpu.set_vcpu_events(&events).map_err(|e| DeterminismHole(e.to_string()))?;
+                    let mut burst_exits = 0u32;
+                    loop {
+                        if contains_pattern(self.bus.console.output(), p) {
+                            return Ok((ticks, halt_outcome(self)?));
+                        }
+                        if burst_exits >= max_exits_per_burst {
+                            return Err(DeterminismHole(format!(
+                                "run_to_first_halt_with_periodic_timer_and_devices: guest did not \
+                                 halt again within {max_exits_per_burst} exits of one delivered tick \
+                                 (console tail: {:?})",
+                                console_tail(self.bus.console.output())
+                            )));
+                        }
+                        let dispatch = self.step_exit()?;
+                        burst_exits += 1;
+                        if matches!(dispatch, baud_vcpu::DispatchOutcome::Halted) {
+                            break;
+                        }
+                    }
                 }
             }
         }
-        Err(DeterminismHole(format!(
-            "run_to_first_halt_with_periodic_timer_and_devices: guest did not halt within \
-             {max_ticks} periodic ticks"
-        )))
+        Err(DeterminismHole(match pattern {
+            Some(_) => format!(
+                "run_to_first_halt_with_periodic_timer_and_devices: pattern not found within \
+                 {max_ticks} periodic ticks (console tail: {:?})",
+                console_tail(self.bus.console.output())
+            ),
+            None => format!(
+                "run_to_first_halt_with_periodic_timer_and_devices: guest did not halt within \
+                 {max_ticks} periodic ticks"
+            ),
+        }))
+    }
+
+    /// H9's last recorded open blocker (todo.md §14 item 12): every `run_to_first_halt_with_*`
+    /// combinator treats a guest's own `Hlt` as terminal the instant no polled device has pending
+    /// work — correct for every fixture built so far (each halts for good, once), but wrong for a
+    /// real multi-tasking kernel, whose idle loop calls `hlt` (via `safe_halt()`, i.e. with
+    /// `RFLAGS.IF=1`) the moment nothing is runnable and relies on the *next* periodic timer
+    /// interrupt alone to reschedule — observed for real booting the actual Ubuntu 18.04.1 image
+    /// (item 12): the boot reached `Freeing unused kernel memory` and then stopped, not because it
+    /// crashed, but because `/init` blocked on its first disk read and the idle loop's very first
+    /// `hlt` was reported as the run's terminal halt.
+    ///
+    /// A thin wrapper over [`run_to_first_halt_with_periodic_timer_and_devices`]
+    /// (Self::run_to_first_halt_with_periodic_timer_and_devices)'s new `pattern` parameter (see its
+    /// doc for the actual halted-timer-wake mechanism) with an empty device list — the bare
+    /// periodic-timer case, for a guest that needs no virtio-rng/virtio-blk. See
+    /// [`run_until_console_pattern_with_periodic_timer_and_devices`]
+    /// (Self::run_until_console_pattern_with_periodic_timer_and_devices) for the combined-device
+    /// sibling a real Ubuntu boot (which also needs virtio-blk for its root filesystem) requires.
+    pub fn run_until_console_pattern_with_periodic_timer(
+        &mut self,
+        period_rcb: u64,
+        vector: u8,
+        pattern: &[u8],
+        max_ticks: u32,
+        max_exits_per_burst: u32,
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        self.run_to_first_halt_with_periodic_timer_and_devices(
+            period_rcb,
+            vector,
+            &[],
+            max_ticks,
+            Some(pattern),
+            max_exits_per_burst,
+        )
+    }
+
+    /// [`run_until_console_pattern_with_periodic_timer`]
+    /// (Self::run_until_console_pattern_with_periodic_timer)'s combined-device sibling — the entry
+    /// point a real Ubuntu 18.04.1 boot (`specs/baud-ubuntu.md`) needs to reach the console login
+    /// prompt, since that guest needs the periodic-timer engine for `calibrate_delay` regardless,
+    /// optionally reads entropy from virtio-rng, and optionally mounts its root filesystem from
+    /// virtio-blk. `virtio_rng_vector`/`virtio_blk_vector` are each `Some` exactly when the
+    /// corresponding device was enabled (mirrors `boot_run_and_drain`'s existing dispatch
+    /// convention for the non-pattern combinators) — `None` for both is exactly
+    /// [`run_until_console_pattern_with_periodic_timer`]
+    /// (Self::run_until_console_pattern_with_periodic_timer)'s own bare case, reimplemented here on
+    /// the same shared engine rather than duplicated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_until_console_pattern_with_periodic_timer_and_devices(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        virtio_rng_vector: Option<u8>,
+        virtio_blk_vector: Option<u8>,
+        pattern: &[u8],
+        max_ticks: u32,
+        max_exits_per_burst: u32,
+    ) -> Result<(Vec<TimerTick>, HaltOutcome), DeterminismHole> {
+        let mut devices = Vec::new();
+        if let Some(vector) = virtio_rng_vector {
+            devices.push(TickPolledDevice {
+                vector,
+                notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
+                service_running: Multiverse::service_virtio_rng_interrupt,
+                service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
+            });
+        }
+        if let Some(vector) = virtio_blk_vector {
+            devices.push(TickPolledDevice {
+                vector,
+                notify_count: |mv| mv.virtio_pci_blk().map(|t| t.notify_count()),
+                service_running: Multiverse::service_virtio_blk_interrupt,
+                service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,
+            });
+        }
+        self.run_to_first_halt_with_periodic_timer_and_devices(
+            period_rcb,
+            timer_vector,
+            &devices,
+            max_ticks,
+            Some(pattern),
+            max_exits_per_burst,
+        )
     }
 
     /// [`run_to_first_halt_with_periodic_timer`](Self::run_to_first_halt_with_periodic_timer)'s
@@ -1765,6 +1939,8 @@ impl Multiverse {
                 service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
             }],
             max_ticks,
+            None,
+            0,
         )
     }
 
@@ -1807,6 +1983,8 @@ impl Multiverse {
                 },
             ],
             max_ticks,
+            None,
+            0,
         )
     }
 
@@ -3171,6 +3349,107 @@ mod tests {
         assert_eq!(
             second_halt.ram_hash, first_halt.ram_hash,
             "guest RAM at the guest's own natural halt must be byte-identical across two boots"
+        );
+    }
+
+    /// `tests/fixtures/idle-halt-guest/`'s payload: halts immediately (no busy loop at all,
+    /// unlike `timer-guest`), and its IDT handler only emits the target message once it has been
+    /// woken `WAKES_BEFORE_MESSAGE` (5) times. See that directory's `BUILD.md` for why this
+    /// fixture exists: proving `run_until_console_pattern_with_periodic_timer` actually resumes
+    /// across repeated idle halts, the gap H9's real-Ubuntu-boot attempt found (todo.md §14 item
+    /// 12).
+    fn idle_halt_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/idle-halt-guest/bzImage")
+    }
+
+    /// `tests/fixtures/idle-halt-guest/payload.s`'s target message, written to COM1 only on the
+    /// fixture's fifth wake.
+    const IDLE_HALT_TARGET: &[u8] = b"ubuntu login:";
+
+    /// H9's last recorded open blocker (todo.md §14 item 12), closed in isolation: every prior
+    /// `run_to_first_halt_with_*` combinator terminates the instant the guest halts with no
+    /// device work pending, which made a real kernel's idle loop (halt immediately, wait for the
+    /// next timer tick, halt again) indistinguishable from a guest that shut down for good.
+    /// `idle-halt-guest` halts before its very first instruction has any chance to retire a
+    /// branch (so `inject_at`'s arm-early-then-single-step engine can never deliver to it —
+    /// every tick must go through the new directly-staged-while-halted path), and only emits the
+    /// target text after 4 silent wakes — proving the primitive actually resumes past more than
+    /// one idle halt, not just one, and that a caller cannot get the right answer by accident
+    /// (e.g. treating the first halt as terminal would return with the pattern never having
+    /// appeared at all).
+    #[test]
+    fn run_until_console_pattern_resumes_across_repeated_idle_halts() {
+        let kernel = idle_halt_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        const PERIOD_RCB: u64 = 100_000;
+        const MAX_TICKS: u32 = 20;
+        const MAX_EXITS_PER_BURST: u32 = 4096;
+
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let (first_ticks, first_halt) = first
+            .run_until_console_pattern_with_periodic_timer(
+                PERIOD_RCB,
+                TIMER_VECTOR,
+                IDLE_HALT_TARGET,
+                MAX_TICKS,
+                MAX_EXITS_PER_BURST,
+            )
+            .expect("first run did not reach the target console pattern");
+
+        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let (second_ticks, second_halt) = second
+            .run_until_console_pattern_with_periodic_timer(
+                PERIOD_RCB,
+                TIMER_VECTOR,
+                IDLE_HALT_TARGET,
+                MAX_TICKS,
+                MAX_EXITS_PER_BURST,
+            )
+            .expect("second run did not reach the target console pattern");
+
+        assert!(
+            first_halt.console_output.windows(IDLE_HALT_TARGET.len()).any(|w| w == IDLE_HALT_TARGET),
+            "the run must stop only once the target pattern actually appears in the console \
+             output, not on an earlier idle halt: got {:?}",
+            String::from_utf8_lossy(&first_halt.console_output)
+        );
+        assert_eq!(
+            first_halt.console_output, second_halt.console_output,
+            "console output up to the matched pattern must be identical across two boots"
+        );
+        assert_eq!(
+            first_ticks.len(),
+            second_ticks.len(),
+            "the number of arm-early-then-single-step ticks actually delivered (as opposed to \
+             directly staged while halted) must be deterministic across two boots"
+        );
+        assert_eq!(
+            first_halt.ram_hash, second_halt.ram_hash,
+            "guest RAM at the moment the pattern is observed must be byte-identical across two boots"
+        );
+    }
+
+    /// Negative case for [`run_until_console_pattern_resumes_across_repeated_idle_halts`]:
+    /// `idle-halt-guest`'s handler never emits a pattern this run never asks it to, so
+    /// `max_ticks` must be exhausted and reported as a `DeterminismHole`, not silently return
+    /// `Ok` with a partial or empty match — the same "no silent non-termination" convention every
+    /// other run loop in this file follows.
+    #[test]
+    fn run_until_console_pattern_reports_determinism_hole_when_never_found() {
+        let kernel = idle_halt_guest_kernel_path();
+        let cmdline = "console=ttyS0";
+        let mut vm = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+        let result = vm.run_until_console_pattern_with_periodic_timer(
+            100_000,
+            TIMER_VECTOR,
+            b"this pattern is never written by idle-halt-guest",
+            5,
+            4096,
+        );
+        assert!(
+            result.is_err(),
+            "a pattern the guest never writes must exhaust max_ticks and report an error, not \
+             silently succeed"
         );
     }
 

@@ -7269,3 +7269,40 @@ Wrote examples/ubuntu/fetch.sh + BUILD.md (reusable, idempotent download/verify/
   - With the fix, a full real boot (kernel + initrd + real 2.2 GiB rootfs.raw via virtio-blk + ACPI + PCI) now reaches "Freeing unused kernel memory" (end of kernel init) -- confirmed the remaining blocker is that run_to_first_halt_with_periodic_timer stops at the guest's first idle HLT, not a truncation (byte-identical console at 200 vs 3000 ticks)
   - Updated todo.md §14 item 12 with the full narrative and the precise remaining gap for the next iteration
 ---
+
+Push verified: local HEAD 9cda4f1 matches origin/main exactly, working tree clean. Gate was green (24 passed, 0 failed, 1 skipped) before commit. todo.md still has pending items (H9's idle-halt gap, H8 Mario's FCEUX blocker, Buildroot/pinned-Nix pipeline) -- emitting NEXT.
+
+## 2026-07-27T16:38:20 UTC (41min) - Session usage — build-15 [sonnet]
+- cost $14.4725 (from claude -p)
+- context 320,973 tok peak of 1M (32%) across 171 inference calls, monotonic
+- models sonnet-5 $14.4693 (in 342 / out 125,712 / cache-read 35,996,355) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T104433Z/016-build-15.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 16
+
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and studying specs/ to pick the next forward step.
+
+Chose to close H9's remaining blocker: booting a real multi-tasking kernel needs a new run-loop primitive that resumes across repeated idle HLTs until the console shows a target pattern (e.g. "ubuntu login:"), since the existing run_to_first_halt_* combinators all stop at the guest's first HLT. Dispatched an Explore subagent to map the exact primitives/console-buffer/timer-tick machinery before writing code.
+
+New primitive Multiverse::run_until_console_pattern_with_periodic_timer (crates/baud-multiverse/src/linux/mod.rs) resumes across repeated idle HLTs by staging the timer interrupt directly (KVM_SET_VCPU_EVENTS) whenever the guest halts, then draining exits until it halts again or the target console pattern appears. New fixture tests/fixtures/idle-halt-guest (halts immediately, wakes silently 4 times, emits 'ubuntu login:' on the 5th) proves it in isolation -- both new tests (positive match across two boots + negative DeterminismHole-on-exhaustion) pass on real /dev/kvm. Now wiring this into boot_run_and_drain/CLI/HTTP route so the real Ubuntu image can actually use it.
+
+Wired the new primitive end to end: RunKvmBody gained halt_console_pattern_hex/halt_max_exits_per_burst (crates/baud-server/src/routes/run_kvm.rs), boot_run_and_drain dispatches to the new Multiverse::run_until_console_pattern_with_periodic_timer_and_devices when both periodic_timer and a pattern are set (rejects run_id+pattern combos and pattern-without-periodic_timer loudly rather than silently), and baud-cli's 'run kvm' gained --halt-console-pattern-hex/--halt-max-exits-per-burst flags. Route-level test run_kvm_resumes_past_idle_halts_until_console_pattern_found passes on real /dev/kvm using idle-halt-guest. Full workspace build clean, clippy clean on touched crates (baud-multiverse/baud-server/baud-cli), baud-server run_kvm test module 28/28 pass. Now attempting the real Ubuntu 18.04.1 boot with this new run mode to see how far it gets past 'Freeing unused kernel memory'.
+
+Found and fixed a real bug in examples/ubuntu/fetch.sh: fetch_and_verify's checksum grep compared against the LOCAL shortened filename (e.g. 'vmlinuz-generic') but SHA256SUMS.unpacked lists the REMOTE basename ('ubuntu-18.04-server-cloudimg-amd64-vmlinuz-generic') -- the grep never matched, so 'expected' was always empty and the whole script died silently under set -e/pipefail (grep's exit 1 propagating through the command substitution) with no diagnostic. Fixed by deriving the lookup key from basename(url) instead of $out. Re-ran fetch.sh: qcow2/vmlinuz/initrd all verified, rootfs.raw converted, tune2fs pinned. ~/.baud-tmp/ubuntu-1804 is now fully ready. Proceeding to attempt the real Ubuntu boot with the new run_until_console_pattern_with_periodic_timer_and_devices primitive.
+
+Attempted the real Ubuntu boot using the new resume-past-idle-halt primitive (--periodic-timer-max-ticks up to 8,000,000, --halt-console-pattern-hex for 'ubuntu login:'). Made zero progress past a point despite 8M delivered ticks over ~8min wall-clock: the new console-tail diagnostic (added to the DeterminismHole message) revealed the guest is stuck repeating 'do_IRQ: 0.236 No irq handler for vector' (236 decimal = 0xec, this project's own documented/injected LOCAL_TIMER_VECTOR) forever -- meaning every injected timer tick is being routed through the GENERIC do_IRQ dispatch (which only happens for a vector with no real IDT gate/gate not wired to the dedicated apic_timer_interrupt asm stub), not actually reaching the kernel's real LAPIC timer ISR, so jiffies never legitimately advances once /init blocks and userspace tries to actually rely on it. This is a NEW, deeper blocker than the one this iteration closed (resume-past-idle-halt itself works, verified on the idle-halt-guest fixture and the route-level test) -- confirmed ~/wsl-kernel-src's own arch/x86/include/asm/irq_vectors.h defines LOCAL_TIMER_VECTOR=0xec, so the vector NUMBER is right; the mismatch must be in how/when the interrupt is delivered relative to this guest's own IDT/APIC initialization, not the vector choice itself. Documenting this precisely in todo.md as H9's new concrete next blocker, then running the full pre-push gate.
+
+## 2026-07-27T17:31:57 UTC - Changes committed.
+- Built and hardware-verified the resume-past-idle-halt run-loop primitive H9 item 12 identified as missing; wired it end to end (Multiverse -> baud-server route -> baud-cli); fixed a real fetch.sh bug; attempted the real Ubuntu boot and diagnosed a new, deeper do_IRQ/vector-0xec blocker.
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/idle-halt-guest/{payload.s,build.py,BUILD.md,bzImage}, crates/baud-server/src/routes/run_kvm.rs, crates/baud-cli/src/cmds/run.rs, examples/ubuntu/fetch.sh, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - New Multiverse::run_to_first_halt_with_periodic_timer_and_devices pattern/max_exits_per_burst params + two new pub wrappers (run_until_console_pattern_with_periodic_timer[_and_devices]): a guest halt is no longer terminal when hunting for a console pattern -- the timer vector is staged directly while halted and drained via step_exit until it halts again or the pattern appears.
+  - New idle-halt-guest fixture + 2 hardware-verified Multiverse tests (positive resume-across-5-halts, negative determinism-hole-on-exhaustion).
+  - RunKvmBody/boot_run_and_drain/baud-cli 'run kvm' wired with halt_console_pattern_hex/halt_max_exits_per_burst; new route-level test.
+  - Fixed examples/ubuntu/fetch.sh: checksum grep compared local vs remote basenames, causing a silent set -e death on any re-run.
+  - Added console_tail diagnostic to the primitive's timeout errors; used it to find the real Ubuntu boot is stuck spinning on do_IRQ: no irq handler for vector 236 (0xec) -- a distinct APIC/interrupt-routing gap, documented as todo.md item 13's next concrete step.
+---

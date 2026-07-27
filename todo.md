@@ -2892,6 +2892,85 @@ snapshot, not a duplicate of it.
      `MARK_BRANCH`, or a fixed console-byte-length target — none of those is "keep resuming across repeated
      idle halts until a byte pattern appears"). H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/
      Xvfb packaging problem, untouched by this iteration.
+  13. **H9 — the resume-past-idle-halt primitive item 12 found missing now exists and is hardware-verified;
+     booting the real Ubuntu 18.04.1 image with it made zero forward progress, but exposed a distinct, deeper
+     APIC/interrupt-routing bug in the guest, not a flaw in the new primitive.** New
+     `Multiverse::run_to_first_halt_with_periodic_timer_and_devices` (`crates/baud-multiverse/src/linux/mod.rs`,
+     the engine originally around line 1677, now generalized) gained a `pattern: Option<&[u8]>` parameter plus
+     `max_exits_per_burst: u32`: when `Some`, a guest halt with no device work pending is no longer terminal —
+     the periodic timer vector is staged directly via `KVM_SET_VCPU_EVENTS` (the same "safe because
+     `safe_halt()` guarantees `RFLAGS.IF=1`" idiom `service_virtio_rng_interrupt_while_halted` established for
+     one device) and the guest is driven via `step_exit()` until it halts again or the console output contains
+     `pattern`. Two new public wrappers: `run_until_console_pattern_with_periodic_timer` (bare, no devices) and
+     `run_until_console_pattern_with_periodic_timer_and_devices` (adds optional virtio-rng/virtio-blk vectors) —
+     the latter is what a real Ubuntu boot needs since it also needs virtio-blk. Every existing caller of the
+     underlying private engine passes `pattern: None` and is unaffected: regression-tested,
+     `cargo test -p baud-multiverse --lib` → 217 passed, 0 failed, 10 ignored, no change from before this
+     iteration. New fixture `tests/fixtures/idle-halt-guest/` (`payload.s`/`build.py`/`BUILD.md`, mirroring
+     `../timer-guest/`'s wrapping mechanics) halts immediately at boot with no busy loop at all — the shape
+     that breaks every prior combinator, since `inject_at`'s arm-early-then-single-step engine can never
+     deliver to an already-halted vCPU — and its IDT handler only writes `"ubuntu login:"` to COM1 on its 5th
+     wake (silent on the first 4). Two new hardware-verified tests in
+     `crates/baud-multiverse/src/linux/mod.rs`: `run_until_console_pattern_resumes_across_repeated_idle_halts`
+     (positive: two independent boots produce byte-identical console output/ram_hash/tick-count, proving the
+     resume-past-idle-halt path is itself deterministic) and
+     `run_until_console_pattern_reports_determinism_hole_when_never_found` (negative: a pattern the guest never
+     writes exhausts `max_ticks` and errors, never silently "succeeds"). Wired end-to-end: `RunKvmBody`
+     (`crates/baud-server/src/routes/run_kvm.rs`) gained `halt_console_pattern_hex`/`halt_max_exits_per_burst`;
+     `boot_run_and_drain` dispatches to the new devices-aware primitive when both `periodic_timer` and a
+     pattern are set; the route rejects (loud error, not silent data loss) combining this with `run_id`
+     persistence (not yet supported — a real, recorded follow-up gap, not a stub) or setting a pattern without
+     `periodic_timer`. `baud-cli`'s `run kvm` subcommand gained
+     `--halt-console-pattern-hex`/`--halt-max-exits-per-burst`. New route-level test
+     `run_kvm_resumes_past_idle_halts_until_console_pattern_found` (`crates/baud-server/src/routes/run_kvm.rs`)
+     exercises the exact function the HTTP handler calls, using `idle-halt-guest`. Verified: `cargo build
+     --workspace` clean; `cargo clippy -p baud-multiverse -p baud-server -p baud-cli --all-targets` — 0 new
+     warnings (all pre-existing warnings are in unrelated files: `baud-tracing`'s deprecated `aya::Bpf`,
+     `baud-driver`, `cmds/net.rs`, `cmds/tape.rs`, `timesource.rs`, `fuzz.rs`, `replay.rs`, `tracing.rs`);
+     `cargo test -p baud-server` run_kvm module → 28 passed, 0 failed (was 27 before, +1 new test). **Real bug
+     found and fixed in `examples/ubuntu/fetch.sh`**: `fetch_and_verify`'s checksum-lookup grep compared
+     against the LOCAL shortened output filename (e.g. `vmlinuz-generic`) but `SHA256SUMS.unpacked` lists the
+     REMOTE basename (`ubuntu-18.04-server-cloudimg-amd64-vmlinuz-generic`) — the grep pattern
+     `" \*${out}\$"` never matched (confirmed directly: `grep " \*vmlinuz-generic\$" SHA256SUMS.unpacked`
+     returns nothing, exit 1), so `expected` was always empty and the script died silently under
+     `set -euo pipefail` (grep's exit 1 propagating through the command substitution) with zero diagnostic
+     output, as soon as a previously-partially-downloaded `vmlinuz-generic`/`initrd-generic` file was checked
+     against on any re-run. Fixed by deriving the lookup key from `basename "$url"` (the real remote name)
+     instead of `$out`; confirmed fixed by re-running `bash examples/ubuntu/fetch.sh`, which correctly reported
+     `vmlinuz-generic already present and verified, skipping` / `initrd-generic already present and verified,
+     skipping` and proceeded to `rootfs.raw`/tune2fs. **A real Ubuntu boot attempt with the new primitive made
+     zero forward progress, but found a NEW, deeper, precisely-diagnosed blocker.** Fetched the real artifacts
+     fresh (`~/.baud-tmp/ubuntu-1804`, per `fetch.sh`), started `baud-server`, and ran the exact
+     `examples/ubuntu/BUILD.md` invocation plus `--halt-console-pattern-hex <hex of "ubuntu login:">
+     --halt-max-exits-per-burst 200000`, escalating `--periodic-timer-max-ticks` from 3,000 → 30,000 →
+     1,500,000 → 8,000,000 (the last took ~7m50s wall-clock, real `/dev/kvm`). Every attempt exhausted its
+     tick budget with **zero** progress past a fixed point. To debug this, added a `console_tail` helper
+     (`crates/baud-multiverse/src/linux/mod.rs`) attaching the last 200 bytes of console output to both of
+     `run_to_first_halt_with_periodic_timer_and_devices`'s timeout `DeterminismHole` messages (previously bare
+     "guest did not halt"/pattern-not-found with no diagnostic at all — a real, separate, now-fixed gap). The
+     console tail revealed the guest endlessly repeating `do_IRQ: 0.236 No irq handler for vector` (236 decimal
+     = `0xec`, this project's own injected/documented `LOCAL_TIMER_VECTOR`) — i.e. **every injected timer
+     interrupt is being routed through the kernel's generic `do_IRQ` dispatch (only reachable for a vector with
+     no real dedicated IDT gate), never reaching the real LAPIC timer ISR** — so `jiffies` never legitimately
+     advances once `/init` blocks and userspace tries to depend on it, and the guest spins forever making no
+     real progress while our primitive faithfully keeps "waking" it into the same dead end. Ruled out "wrong
+     vector number": `~/wsl-kernel-src/src/arch/x86/include/asm/irq_vectors.h` (already set up per CLAUDE.md)
+     confirms `LOCAL_TIMER_VECTOR` really is `0xec` in a modern kernel tree, so 236 is the intended number — the
+     mismatch must be in *how/when* the interrupt is delivered relative to this real Ubuntu 4.15 kernel's own
+     IDT/LAPIC initialization (e.g., possibly this guest runs in a legacy-PIC-only or no-LAPIC-detected mode
+     given the minimal one-LAPIC-only MADT and `nosmp`/`maxcpus=1`, so vector `0xec` was never actually wired to
+     the dedicated `apic_timer_interrupt` gate at all), not simply "pick a different vector." **Still open, the
+     next concrete step**: determine why this real kernel's IDT does not have vector `0xec` bound to a real
+     LAPIC timer handler in this environment — check whether the guest actually enables/detects a local APIC at
+     all (dmesg for "Not using local APIC timer" or similar, which needs raising `loglevel`/dropping `quiet`
+     from the cmdline to see, currently suppressed), whether ACPI's MADT needs an IOAPIC entry too (this
+     project's `write_acpi_tables` writes only RSDP→XSDT→FADT+DSDT+MADT-with-one-LAPIC — no IOAPIC — per §4
+     above), or whether the kernel needs `lapic`/`no_ioapic`-style cmdline hints to accept this minimal topology
+     instead of falling back to legacy do_IRQ-routed vector dispatch. The resume-past-idle-halt primitive
+     itself is proven correct and complete on its own terms (idle-halt-guest fixture, both directions); this is
+     a distinct, deeper gap in the real distro's interrupt/APIC bring-up, not a flaw in the new run-loop
+     combinator. H8 Mario remains separately blocked on the FCEUX Qt5/SDL2/Xvfb packaging problem, untouched by
+     this iteration.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

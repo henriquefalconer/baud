@@ -38,11 +38,23 @@ log "output dir: $OUT_DIR (build: $BUILD)"
 
 fetch_and_verify() {
     local url="$1" out="$2" sums_file="$3"
+    # The SHA256SUMS files list the *remote* basename (e.g.
+    # "ubuntu-18.04-server-cloudimg-amd64-vmlinuz-generic"), not `$out`'s shortened local name
+    # ("vmlinuz-generic") -- grepping on `$out` directly (as this function used to) never matches
+    # for vmlinuz-generic/initrd-generic (only the qcow2 image's `$out` happens to equal its own
+    # remote name), so `expected` always came back empty and the whole script died silently right
+    # here under `set -eo pipefail` (grep's exit 1 on no-match propagating through the command
+    # substitution), before ever logging a mismatch -- found for real re-running this script after
+    # an interrupted first attempt had already downloaded (and correctly verified, since that
+    # first attempt's `[[ -f "$out" ]]` was false and it happened to exit during download, before
+    # ever reaching this comparison) vmlinuz-generic.
+    local remote_name
+    remote_name="$(basename "$url")"
     if [[ -f "$out" ]]; then
         local existing
         existing="$(sha256sum "$out" | cut -d' ' -f1)"
         local expected
-        expected="$(grep " \*${out}\$" "$sums_file" | cut -d' ' -f1)"
+        expected="$(grep " \*${remote_name}\$" "$sums_file" | cut -d' ' -f1)"
         if [[ "$existing" == "$expected" ]]; then
             log "$out already present and verified, skipping"
             return
@@ -53,7 +65,7 @@ fetch_and_verify() {
     curl -sS -L -o "$out" "$url"
     local got expected
     got="$(sha256sum "$out" | cut -d' ' -f1)"
-    expected="$(grep " \*${out}\$" "$sums_file" | cut -d' ' -f1)"
+    expected="$(grep " \*${remote_name}\$" "$sums_file" | cut -d' ' -f1)"
     if [[ "$got" != "$expected" ]]; then
         echo "SHA256 mismatch for $out: got $got, expected $expected" >&2
         exit 1
