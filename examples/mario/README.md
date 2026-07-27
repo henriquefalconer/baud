@@ -45,7 +45,7 @@ baud run start \
     --tactics stateful-mask
 ```
 
-CI uses a homebrew ROM (public domain replacement). See `drive/m8.sh` for the
+CI uses a homebrew ROM (public domain replacement). See `drive/m/m8.sh` for the
 CI variant which accepts `world >= 2` as the success threshold.
 
 ## Strategy

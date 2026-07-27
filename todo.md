@@ -546,32 +546,32 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   VT-x, `KVM_SET_CPUID2`, TSC-khz/offset control, `KVM_X86_SET_MSR_FILTER`, `KVM_SET_GUEST_DEBUG`
   single-step, branch-counter determinism (`rcb_is_deterministic_on_this_cpu`), host TSC stability
   (`host_tsc_is_stable`), and whether `rdseed`-exiting is available (`rdmsr -f 48:48 0x48B`). Record results
-  in `docs/determinism.md`. Drive `drive/h0.sh`: `baud host probe --json` asserts each capability; a failing
+  in `docs/determinism.md`. Drive `drive/h/h0.sh`: `baud host probe --json` asserts each capability; a failing
   capability is recorded, never hidden.
 - **H1 — boot a guest.** The run loop boots a minimal guest kernel that prints to the serial console; clean
-  `Hlt`/`Shutdown`. Drive `drive/h1.sh`: boot the hello image, assert expected console output;
+  `Hlt`/`Shutdown`. Drive `drive/h/h1.sh`: boot the hello image, assert expected console output;
   `double_boot_memory_identical` passes.
 - **H2 — deterministic double-run.** Same image + tape twice ⇒ byte-identical observation stream
-  (console + probes + final memory hash), CPUID masked, work-clock TSC. Drive `drive/h2.sh`:
+  (console + probes + final memory hash), CPUID masked, work-clock TSC. Drive `drive/h/h2.sh`:
   `cpuid_leaves_are_fixed`, `work_clock_is_monotone_and_reproducible`, `all_input_is_tape_derived`,
   `no_unmodeled_exit_is_silent`.
 - **H3 — randomness + time control.** OS entropy is a function of the tape (the kernel's seeding inputs are
   hypervisor-controlled — pinned `SETUP_RNG_SEED`, trapped `rdtsc`/`rdrand`, deterministic interrupts, tape-fed
   or omitted virtio-rng; `rdseed` rewritten); timestamps are the work-clock; a guest reading
-  `getrandom`/`/dev/urandom` and issuing raw `rdrand` is double-run identical. Drive `drive/h3.sh`:
+  `getrandom`/`/dev/urandom` and issuing raw `rdrand` is double-run identical. Drive `drive/h/h3.sh`:
   `entropy_guest_is_deterministic`, `initial_crng_state_is_reproducible`, `virtio_rng_reseed_is_deterministic`,
   `rdrand_guest_is_deterministic`, `no_rdseed_opcode_survives_in_image`.
 - **H4 — interrupt at an exact boundary.** Deliver a timer tick at a chosen work-count via
-  arm-early-then-single-step; identical instruction across a double-run. Drive `drive/h4.sh`:
+  arm-early-then-single-step; identical instruction across a double-run. Drive `drive/h/h4.sh`:
   `timer_tick_lands_at_identical_instruction`.
 - **H5 — snapshot / branch / restore.** Capture, fork thousands sharing memory, rewind, restore into a live
-  shell. Drive `drive/h5.sh`: `snapshot_roundtrip_is_bit_identical`,
+  shell. Drive `drive/h/h5.sh`: `snapshot_roundtrip_is_bit_identical`,
   `thousand_branches_are_independent_and_deterministic`, `reset_cost_scales_with_write_set`,
   `shell_into_universe_resumes`, `restore_refuses_mismatched_cpu`.
 - **H6 — multi-VM fleet.** Many single-vCPU VMs pinned across cores explore in parallel on one host. Drive
-  `drive/h6.sh`: aggregate throughput, `capacity_refuses_sibling_split`, no cross-VM interference.
+  `drive/h/h6.sh`: aggregate throughput, `capacity_refuses_sibling_split`, no cross-VM interference.
 - **H7 — real Linux guest: boot → double-boot → OS-entropy.** Build a real Linux image (§4) and boot it on
-  the deterministic machine, then walk the validation ladder. Drive `drive/h7.sh`:
+  the deterministic machine, then walk the validation ladder. Drive `drive/h/h7.sh`:
   `guest_kernel_boots_to_userspace` (reaches `/init`, prints a marker, clean shutdown);
   `double_boot_ram_hash_identical` (two boots on the same tape hash the same guest RAM + vCPU state at a
   **guest-driven checkpoint** — the workload issues an `outb`/hypercall the VMM traps and hashes there, never
@@ -844,7 +844,7 @@ snapshot, not a duplicate of it.
   `handle_exception_nmi`'s existing `is_invalid_opcode` branch (stock KVM already traps `#UD` unconditionally
   for its own emulation fallback, so no exception-bitmap change was needed), forwards a confirmed rewritten
   site as `KVM_EXIT_BAUD_DETERMINISM`, and tail-calls the original `handle_ud` for anything else (so kernel
-  `BUG()`/`WARN_ON()` and genuine invalid opcodes are untouched). `drive/h3-enforced-rdseed.sh` hardware-
+  `BUG()`/`WARN_ON()` and genuine invalid opcodes are untouched). `drive/manual/h3-enforced-rdseed.sh` hardware-
   validated both halves on real `/dev/kvm`: `rdseed_enforced_regime_is_bit_exact_across_boots` (a registered
   site serves a tape-seeded value into the destination GPR, bit-exact across two boots) and
   `ud2_outside_the_rdseed_site_table_reinjects_ud` (an unregistered `UD2` re-injects `#UD` verbatim, never
@@ -870,7 +870,7 @@ snapshot, not a duplicate of it.
   sidecar automatically.
   **`Regime` enum cleanup is done**: the tri-state `Regime` enum and its `Probe::regime` field are gone from
   `baud-host`, replaced by capability booleans plus `Probe::is_runnable()` / `Probe::is_enforced_capable()`;
-  `GET /host/probe` and all 7 `drive/h0.sh`-`h6.sh` scripts now read the renamed JSON fields
+  `GET /host/probe` and all 7 `drive/h/h0.sh`-`h6.sh` scripts now read the renamed JSON fields
   (`enforced_module_present`/`runnable`/`enforced_capable`) instead of a `"regime"` string.
   **`SETUP_RNG_SEED` boot-RNG-seed `setup_data` node is wired end-to-end**: `crates/baud-multiverse/src/layout.rs`
   adds `RNG_SEED_SETUP_DATA_ADDR` (right after the zero page) and `RNG_SEED_SETUP_DATA_LEN`, plus a static
@@ -927,7 +927,7 @@ snapshot, not a duplicate of it.
   reads fall through to baud's existing open-bus fallback, the kernel concludes "No local APIC present"
   and falls back to `Using NULL legacy PIC`, and H4's `KVM_INTERRUPT`-based injection still delivers
   `LOCAL_TIMER_VECTOR` (`0xec`) regardless, logged as (harmless) "Spurious LAPIC timer interrupt". New
-  drive script `drive/h7.sh` runs this as a partial H7 (boot-to-userspace leg only; OS-entropy and the
+  drive script `drive/h/h7.sh` runs this as a partial H7 (boot-to-userspace leg only; OS-entropy and the
   double-boot RAM-hash comparison remain open, see item 2 below). Getting here required fixing three real
   bugs, all documented in `tests/fixtures/linux-guest/BUILD.md`: (1) `baud-vcpu`'s `VcpuExit::IrqWindowOpen`
   was mapped to `Exit::Unmodeled` (`crates/baud-vcpu/src/linux/mod.rs`) instead of ever reaching
@@ -980,7 +980,7 @@ snapshot, not a duplicate of it.
      (`crates/baud-multiverse/tests/fixtures/linux-guest/`, built by hand per that directory's `BUILD.md`,
      not yet by an automated pipeline) boots through this open-ended engine all the way to a real `/init`
      process, hardware-verified twice for matching tick counts (`crates/baud-multiverse/src/linux/mod.rs`;
-     partial drive coverage in `drive/h7.sh`). Three real bugs fixed to get there — a `baud-vcpu`
+     partial drive coverage in `drive/h/h7.sh`). Three real bugs fixed to get there — a `baud-vcpu`
      `IrqWindowOpen` dispatch bug, e820's missing sub-1MiB usable memory (Linux's `reserve_real_mode()`
      panics without it), and a missing `CONFIG_X86_IOPL_IOPERM=y` guest kernel config — are detailed in the
      bullet above and in that `BUILD.md`.
@@ -1011,14 +1011,14 @@ snapshot, not a duplicate of it.
      copies of `~/wsl-kernel-src/src` (the same tree CLAUDE.md already documents for the enforced-module
      work, copied first per that `BUILD.md`'s own warning never to build in the shared tree directly) and
      asserts the two `arch/x86/boot/bzImage` outputs are byte-for-byte identical. New drive script
-     `drive/pkg-image-build.sh` runs it, opt-in like `drive/h3-enforced-*.sh` (not part of the standard
+     `drive/pkg/pkg-image-build.sh` runs it, opt-in like `drive/manual/h3-enforced-*.sh` (not part of the standard
      h0-h7 gate — two full kernel compiles take several minutes). **Real-hardware result: PASSED** — two
      independent ~4.5-minute from-source kernel builds (real gcc-13, real `~/wsl-kernel-src/src`)
      produced a byte-identical `bzImage`, ~546s total; this is the first time
      `image_build_is_reproducible` has been proven true on this project, not just specified. One real bug
      was found and fixed while getting the drive script working: `/tmp` on this WSL2 dev host is a small
      (3.9G) RAM-backed tmpfs, nowhere near enough for two copies of a kernel source tree plus build output
-     (`cp -a` failed mid-copy with ENOSPC); fixed by having `drive/pkg-image-build.sh` set `TMPDIR` to a
+     (`cp -a` failed mid-copy with ENOSPC); fixed by having `drive/pkg/pkg-image-build.sh` set `TMPDIR` to a
      directory on the real disk (`~/.baud-tmp`, cleaned up via a `trap ... EXIT`) before invoking the
      test — `tempfile::tempdir()` (used by the Rust test) honors `$TMPDIR`, worth remembering for any
      other drive script that stages large scratch data.
@@ -1039,15 +1039,15 @@ snapshot, not a duplicate of it.
      `--initramfs-entry`, e.g. `init:755:/path/to/init`) in `crates/baud-cli/src/cmds/image.rs`. All
      paths are resolved on the server host, not transferred as content — a kernel source tree is far too
      large to shuttle as `/image/rewrite-rdseed`-style base64.
-     **Hardware-verified end-to-end** via new `drive/pkg-build-cli.sh`: starts a real `baud-server`,
+     **Hardware-verified end-to-end** via new `drive/pkg/pkg-build-cli.sh`: starts a real `baud-server`,
      musl-gcc-compiles the `linux-guest` fixture's real `init.c`, then drives the *entire* build through
      `baud image build --json` alone (real `gcc-13`, real `~/wsl-kernel-src/src` scratch-copied tree,
      ~4-5 min) — real result: `ok=true`, a real 1,913,856-byte `bzImage` and a real 2,257-byte
      `initramfs.cpio.gz` written to disk, and well-formed 64-hex-char `bzimage_sha256`/
      `initramfs_sha256`/`image_hash` all present in the response. Not part of the standard h0-h7 gate
-     (opt-in, same convention as `drive/pkg-image-build.sh` and the enforced-regime scripts — one real
+     (opt-in, same convention as `drive/pkg/pkg-image-build.sh` and the enforced-regime scripts — one real
      kernel compile takes several minutes). `cargo build`/`clippy`/`test --workspace` all clean; `drive/
-     h0.sh` through `drive/h7.sh` (stock module) all still PASS on real `/dev/kvm` (one incidental
+     h0.sh` through `drive/h/h7.sh` (stock module) all still PASS on real `/dev/kvm` (one incidental
      finding: `linux::tests::rdtsc_guest_reproduces_high_bits_across_boots`, an unrelated pre-existing
      real-hardware TSC test in `baud-multiverse` this iteration never touched, flaked once under full
      `cargo test --workspace` parallel load — high=0x5a768 vs 0x32659f — then passed clean both in
@@ -1060,7 +1060,7 @@ snapshot, not a duplicate of it.
      `kvm_run_meta`, so a persisted `/run/kvm` boot can be replayed exactly. `RunKvmBody`
      (`crates/baud-server/src/routes/run_kvm.rs`) gained `initramfs_path: Option<String>` and
      `periodic_timer: Option<PeriodicTimerSpec>` (`period_rcb: u64`, `vector: u8` default `0xec`,
-     `max_ticks: u32` default `2000`), both `#[serde(default)]` so every existing caller (`drive/m9.sh`/
+     `max_ticks: u32` default `2000`), both `#[serde(default)]` so every existing caller (`drive/m/m9.sh`/
      `m10.sh`/`m11.sh`) is unaffected; a new `read_initramfs` helper is shared by `run()` and
      `stream::render_frames_from_real_replay`. `boot_run_and_drain` — the exact function the `/run/kvm`
      handler calls — plus `boot_and_run` and `boot_and_drain_frames` all thread through new
@@ -1076,7 +1076,7 @@ snapshot, not a duplicate of it.
      `KvmBootParams<'a>` struct to stay under clippy's `too_many_arguments`. `stream::render`'s
      real-replay path (`crates/baud-server/src/routes/stream.rs`) now selects the four new
      `kvm_run_meta` columns and reconstructs `periodic_timer` only when all three sub-columns are
-     non-NULL; `drive/m11.sh` (the all-NULL, no-initramfs/no-timer path) still passes, confirming no
+     non-NULL; `drive/m/m11.sh` (the all-NULL, no-initramfs/no-timer path) still passes, confirming no
      regression. `crates/baud-cli/src/cmds/run.rs`'s `RunAction::Kvm` gained `--initramfs`,
      `--periodic-timer-period-rcb` (opt-in — this is what enables periodic-timer injection at all),
      `--periodic-timer-vector` (default `0xec`), `--periodic-timer-max-ticks` (default `2000`). New test
@@ -1084,16 +1084,16 @@ snapshot, not a duplicate of it.
      `tests/fixtures/linux-guest/` kernel+initramfs through `boot_run_and_drain` directly with
      `period_rcb=500_000`, `vector=0xec`, `max_ticks=2000`, `cmdline=bootparams::DETERMINISTIC_CMDLINE`,
      asserting the `/init` marker in the console output — **passed on real `/dev/kvm`**. New
-     `drive/pkg-boot-cli.sh` boots the same checked-in fixture through a real `baud run kvm --initramfs
+     `drive/pkg/pkg-boot-cli.sh` boots the same checked-in fixture through a real `baud run kvm --initramfs
      ... --periodic-timer-period-rcb 500000 --periodic-timer-vector 236 --periodic-timer-max-ticks 2000
      --cmdline "<DETERMINISTIC_CMDLINE>" --json` CLI invocation against a live `baud-server` over real
      HTTP — **real result: `ok=true`, console output contains `baud-guest: minimal kernel reached
      /init`**, the project's first real, end-to-end "spec in, guest booted" proof through the actual CLI
      binary + HTTP server, not a Rust test calling `Multiverse` directly. It runs in seconds (reuses the
-     already-built fixture, no kernel compile), unlike `drive/pkg-build-cli.sh`/`drive/pkg-image-build.sh`
+     already-built fixture, no kernel compile), unlike `drive/pkg/pkg-build-cli.sh`/`drive/pkg/pkg-image-build.sh`
      — still opt-in, for consistency with that script family, not part of the standard h0-h7 gate.
      `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings, including from the widened
-     `persist_kvm_run` signature); `drive/h0.sh` through `drive/h7.sh` (8/8) and `drive/m9.sh`/
+     `persist_kvm_run` signature); `drive/h/h0.sh` through `drive/h/h7.sh` (8/8) and `drive/m/m9.sh`/
      `m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no regressions from the schema/signature
      changes.
      **The initramfs builder's multi-file capacity is now real-hardware-verified, closed in ralph
@@ -1104,7 +1104,7 @@ snapshot, not a duplicate of it.
      initramfs.rs`) round-trips 3 distinct files (including a nested `bin/tool` path) through
      `build_reproducible_initramfs`. More importantly, new `#[ignore]`d real-hardware test
      `guest_boots_a_pipeline_built_multi_file_initramfs` (`crates/baud-multiverse/src/linux/mod.rs`,
-     driven by new `drive/pkg-multifile-initramfs.sh`) builds a genuine 2-file initramfs
+     driven by new `drive/pkg/pkg-multifile-initramfs.sh`) builds a genuine 2-file initramfs
      (`multifile_init.c` execs a bundled `helper.c`) via `build_reproducible_initramfs` **at test
      time** — not a hand-`cpio`'d fixture — and boots it twice against the already-built, checked-in
      `linux-guest` bzImage (no kernel rebuild) on real `/dev/kvm`: both files' markers present on
@@ -1138,8 +1138,8 @@ snapshot, not a duplicate of it.
      (`crates/baud-server/src/routes/run_kvm.rs`) asserts both body types default correctly. Every
      existing caller that already passes an explicit `cmdline` (every drive script, every hand-assembled
      fixture test) is unaffected — confirmed via a full `cargo build`/`clippy`/`test --workspace` (0
-     failures) plus `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m12.sh` (4/4), and
-     `drive/pkg-boot-cli.sh` (which exercises the CLI's explicit `--cmdline` path directly), all PASS on
+     failures) plus `drive/h/h0.sh`-`h7.sh` (8/8), `drive/m/m9.sh`-`m12.sh` (4/4), and
+     `drive/pkg/pkg-boot-cli.sh` (which exercises the CLI's explicit `--cmdline` path directly), all PASS on
      real `/dev/kvm` with no regressions. Three other candidate next-steps were researched and ruled out
      as out-of-scope for one iteration: virtio-rng (no `virtqueue`/feature-negotiation infra exists
      anywhere — genuinely multi-day, and even a simpler non-virtio MMIO device would still need an
@@ -1173,8 +1173,8 @@ snapshot, not a duplicate of it.
      rather than halting or hanging — **passed on real `/dev/kvm`**. CLI: `RunAction::KvmBranch` gained
      the same four `--initramfs`/`--periodic-timer-*` flags as `RunAction::Kvm`; `RunAction::KvmResume`
      gained the three `--periodic-timer-*` flags only (no `--initramfs`, matching the resume body).
-     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h0.sh` through
-     `drive/h7.sh` (8/8) and `drive/m9.sh`/`m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no
+     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h/h0.sh` through
+     `drive/h/h7.sh` (8/8) and `drive/m/m9.sh`/`m10.sh`/`m11.sh` all still PASS on real `/dev/kvm` — no
      regressions from the widened `RunKvmBranchBody`/`RunKvmResumeBody`/`boot_and_snapshot`/
      `run_branches`/`run_driver_generated_branches_with_persist` signatures. **Follow-up closed for
      `/run/kvm/branch` in iteration 16, still open for `/run/kvm/resume`**: `boot_and_snapshot` always
@@ -1184,7 +1184,7 @@ snapshot, not a duplicate of it.
      `tape_hex = branch_tapes_hex[i]` (fixed-tape) or `outcome.tape_hex` (generate mode), via a new
      `persist_branch_frames` helper and opt-in `RunKvmBranchBody.frame_run_ids` /
      `DriverGenerateSpec.frame_run_id_prefix` fields (both `#[serde(default)]`); `stream::render`'s
-     real-replay path now replays a branch-originated run's frames (new `drive/m12.sh`, 4/4, real
+     real-replay path now replays a branch-originated run's frames (new `drive/m/m12.sh`, 4/4, real
      `/dev/kvm`). `/run/kvm/resume` still won't get a `kvm_run_meta` row: resume reconstructs a `Universe`
      from `SnapshotStore`, not from a kernel image, so there's no `kernel_path`/`cmdline` to reboot from
      for a real replay — closing it needs `SnapshotStore` to additionally track each node's full
@@ -1215,17 +1215,17 @@ snapshot, not a duplicate of it.
      restore` (`crates/baud-server/src/routes/run_kvm.rs`) proves the mechanism directly: an independent
      `reconstruct_universe`+`Multiverse::branch` call reproduces byte-identical `Msg::Frame` records to the
      original live `resume_and_branch` call over the same persisted point + suffix. New drive script
-     `drive/m13.sh` (mirroring `drive/m12.sh`'s structure) proves it end-to-end over real HTTP against a
+     `drive/m/m13.sh` (mirroring `drive/m/m12.sh`'s structure) proves it end-to-end over real HTTP against a
      real `baud-server` on real `/dev/kvm`: `/run/kvm/branch { persist_run_id }` (persist-only, no fork)
      establishes a checkpoint, `/run/kvm/resume { frame_run_ids }` restores+forks it with **no kernel
      reboot** and persists a real `Frame` record, `GET /runs/:id/frames` shows the row, `POST /runs/:id/
      stream/render` decodes the guest's real pixels (the same `(10,10,10),(20,20,20),(30,30,30),(40,40,40)`
-     framebuffer-guest pixel sequence `drive/m11.sh`'s plain-boot path and `drive/m12.sh`'s branch path
+     framebuffer-guest pixel sequence `drive/m/m11.sh`'s plain-boot path and `drive/m/m12.sh`'s branch path
      both prove), and re-rendering reproduces byte-identically. CLI: `baud run kvm-resume` gained
      `--frame-run-id` (repeatable) and `--frame-run-id-prefix`, mirroring `kvm-branch`'s flags. `cargo
      build`/`clippy`/`test --workspace` all clean (0 failures; `baud-server` 26/26, including the new
-     unit test); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`,
-     including `drive/m11.sh`'s pre-existing synthetic-fallback check (a `kvm_run_meta`-less run still
+     unit test); `drive/h/h0.sh`-`h7.sh` (8/8) and `drive/m/m9.sh`-`m13.sh` (5/5) all PASS on real `/dev/kvm`,
+     including `drive/m/m11.sh`'s pre-existing synthetic-fallback check (a `kvm_run_meta`-less run still
      renders via the old gradient path — confirms the widened `kvm_run_meta` schema/query is additive,
      not a regression). This closes matrix row … n/a (this gap was surfaced during build, not §12-listed)
      — the FCEUX/Qt5 packaging-footprint finding above (item 3, H8) remains the actual next blocker for
@@ -1253,8 +1253,8 @@ snapshot, not a duplicate of it.
      **passed on real `/dev/kvm`** (`init_powers_off_deterministically` re-run 5x clean, no jitter
      observed — it compares only the halt RIP, not raw console text or full RAM, so it doesn't hit the
      residual RCB/`perf_event`-read-jitter floor documented in item 2 below).
-     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h0.sh`-`h7.sh`
-     (8/8) and `drive/m9.sh`-`m12.sh` (4/4) all still PASS on real `/dev/kvm` — no regressions from the
+     `cargo build`/`clippy`/`test --workspace` all clean (zero new warnings); `drive/h/h0.sh`-`h7.sh`
+     (8/8) and `drive/m/m9.sh`-`m12.sh` (4/4) all still PASS on real `/dev/kvm` — no regressions from the
      widened `HaltOutcome`. Closes matrix row 26's two remaining named tests (§12); `guest_kernel_boots_
      to_userspace` and `image_build_is_reproducible` were already done. H8 (Mario, item 3 below) is still
      blocked on the rest of item 1, not just this piece.
@@ -1283,15 +1283,15 @@ snapshot, not a duplicate of it.
      `../lib/x86_64-linux-gnu/ld-linux-x86-64.so.2` matching the compiled binary's own `PT_INTERP`;
      boots twice against the already-built, checked-in `linux-guest` bzImage (no kernel rebuild).
      **Real-hardware result: 5/5 clean, no jitter** (run manually plus via new drive script
-     `drive/pkg-dynamic-link.sh`, opt-in like `drive/pkg-multifile-initramfs.sh`, not part of the
+     `drive/pkg/pkg-dynamic-link.sh`, opt-in like `drive/pkg/pkg-multifile-initramfs.sh`, not part of the
      standard h0-h7 gate). This is the first dynamically-linked binary ever booted through
      baud-multiverse (every prior fixture was statically linked via musl-gcc) and the first real
      (non-unit-test) exercise of the new symlink support. `cargo build`/`clippy`/`test --workspace`
      all clean (0 new warnings — a handful of pre-existing clippy warnings in
      `crates/baud-multiverse/src/timesource.rs`, `crates/baud-tape-agent/src/transport.rs`,
      `crates/baud-server/src/routes/{fuzz,replay,tracing}.rs` predate this iteration, confirmed via
-     `git status`); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m12.sh` (4/4) all still PASS on
-     real `/dev/kvm`, no regressions; `drive/pkg-multifile-initramfs.sh` (opt-in, shares
+     `git status`); `drive/h/h0.sh`-`h7.sh` (8/8) and `drive/m/m9.sh`-`m12.sh` (4/4) all still PASS on
+     real `/dev/kvm`, no regressions; `drive/pkg/pkg-multifile-initramfs.sh` (opt-in, shares
      `initramfs.rs`) re-run as a regression check, still PASSED. **Still open, not attempted this
      iteration**: the real FCEUX + Lua rootfs itself (`examples/mario/` still has the old pre-KVM-
      pivot `nes_bridge.c`/stdin-stub design flagged elsewhere as needing a full rebuild); the
@@ -1354,7 +1354,7 @@ snapshot, not a duplicate of it.
      resolves the interrupt-routing question above. `cargo build`/`clippy`/`test --workspace` all
      clean (0 failures; confirmed zero *new* clippy warnings via a `grep` over the new files
      specifically, distinct from the pre-existing warning list already documented in prior
-     iterations); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all still PASS on
+     iterations); `drive/h/h0.sh`-`h7.sh` (8/8) and `drive/m/m9.sh`-`m13.sh` (5/5) all still PASS on
      real `/dev/kvm`, no regressions from the widened `DeviceBus`.
      **This iteration (ralph iteration 24): the next slice of the gap iteration 23 explicitly scoped
      out — real split-virtqueue descriptor-chain/avail-ring/used-ring parsing over `vm-memory` — is
@@ -1404,7 +1404,7 @@ snapshot, not a duplicate of it.
      pre-existing, in unrelated files: `baud-tracing`'s deprecated `aya::Bpf`,
      `baud-multiverse/src/lib.rs`'s `EntropyDevice`/`InputDevice`/`NetDevice`/`ExitDevice` derivable-
      impl suggestions, `baud-tape-agent/src/transport.rs`,
-     `baud-server/src/routes/{fuzz,replay,tracing}.rs`); `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-
+     `baud-server/src/routes/{fuzz,replay,tracing}.rs`); `drive/h/h0.sh`-`h7.sh` (8/8) and `drive/m/m9.sh`-
      `m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions from the widened
      `VirtioMmioTransport`/`DeviceBus` public surface.
      **This iteration (ralph iteration 25): the "nothing wires notify to ring-draining" gap iteration 24
@@ -1436,8 +1436,8 @@ snapshot, not a duplicate of it.
      addresses regression test for the `config()`-comparison rebuild logic specifically. `cargo build`
      clean; `clippy --workspace --all-targets` 0 new warnings (the full warning list is unchanged from
      prior iterations' documented list, none in files touched here); `cargo test --workspace` 0 failures
-     (baud-multiverse alone: 113 passed, 0 failed, 8 ignored); `drive/h0.sh`-`h7.sh` (8/8) and
-     `drive/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions. The in-kernel-irqchip
+     (baud-multiverse alone: 113 passed, 0 failed, 8 ignored); `drive/h/h0.sh`-`h7.sh` (8/8) and
+     `drive/m/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions. The in-kernel-irqchip
      question (this host never calls `KVM_CREATE_IRQCHIP`/`KVM_IOEVENTFD`, so which vector a
      `virtio_mmio.device=` cmdline IRQ resolves to remains unverified) was again explicitly out of scope.
      **This iteration: the "interrupt delivery" half of this gap is now closed too — boot/cmdline/CLI
@@ -1490,7 +1490,7 @@ snapshot, not a duplicate of it.
      --workspace` — one test (`linux::tests::rdtsc_guest_reproduces_high_bits_across_boots`) failed once
      under full parallel load but passed clean both in isolation and on a full-suite rerun (0 failures),
      the same one-off real-hardware jitter flake iteration 13 already documented for this exact test,
-     not a regression, not chased further; `drive/h0.sh`-`h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5)
+     not a regression, not chased further; `drive/h/h0.sh`-`h7.sh` (8/8) and `drive/m/m9.sh`-`m13.sh` (5/5)
      all still PASS on real `/dev/kvm`, no regressions from the widened `DeviceBus`/`Multiverse`/
      `layout` surfaces.
   2. **H7 — OS-entropy end-to-end (rides on #1) — the `EXIT_REASON_RDTSCP` crash is fixed; the
@@ -1508,7 +1508,7 @@ snapshot, not a duplicate of it.
      - **Requires the enforced (RDTSC-trapping) `kvm_intel.ko`** — under the *stock* module,
        `random_init()` unconditionally mixes the real (untrapped) TSC into the CRNG pool after the
        pinned `SETUP_RNG_SEED` boot seed already credited it. Stays `#[ignore]`d for this reason (same
-       as every enforced-regime test); `drive/h7-enforced-entropy.sh` runs it with `--ignored`.
+       as every enforced-regime test); `drive/manual/h7-enforced-entropy.sh` runs it with `--ignored`.
      - **`EXIT_REASON_RDTSCP` gap — fixed, verified not to regress.** Booting the same kernel +
        `entropy_init.c` under the enforced module used to hit `KVM_EXIT_INTERNAL_ERROR` immediately
        (dmesg: `vmx: unexpected exit reason 0x33` = `EXIT_REASON_RDTSCP`) because
@@ -1520,7 +1520,7 @@ snapshot, not a duplicate of it.
        tsc_aux }`, threaded through all three `linux::pmu` `KVM_RUN` loops and `linux::run_one_exit`,
        writing EDX:EAX from the same work-clock `RDTSC` already uses plus ECX from a new
        `TimeSource::serve_enforced_tsc_aux`. The crash itself is gone for good — confirmed across 15+
-       real-hardware boots this iteration, zero recurrences — and `drive/h3-enforced-rdseed.sh`'s full
+       real-hardware boots this iteration, zero recurrences — and `drive/manual/h3-enforced-rdseed.sh`'s full
        regression (rdtsc/rdrand/rdseed all bit-exact) still passes with RDTSCP layered underneath.
      - **Deeper finding, root-caused and partially fixed this iteration: `getrandom()`/`/dev/urandom`
        output itself diverges between the two boots at a real, non-trivial rate even with the crash
@@ -1561,7 +1561,7 @@ snapshot, not a duplicate of it.
        *not* a full fix. `cargo build`/`clippy`/`test --workspace` all clean (0 failures, 87 passed in
        `baud-multiverse` alone); `rdtsc_enforced_regime_is_bit_exact_across_boots`,
        `rdrand_enforced_regime_is_bit_exact_across_boots`, `rdseed_enforced_regime_is_bit_exact_across_
-       boots` all still pass (no regression); `drive/h4.sh`/`h5.sh`/`h7.sh` all still pass clean on the
+       boots` all still pass (no regression); `drive/h/h4.sh`/`h5.sh`/`h7.sh` all still pass clean on the
        stock module (including the 1000-branch and snapshot-restore real-hardware proofs).
        (c) **Residual ~25% divergence — ROOT-CAUSED this iteration by direct instrumentation, still
        not fixed.** Added a tick-level diagnostic to `os_entropy_is_deterministic`
@@ -1569,7 +1569,7 @@ snapshot, not a duplicate of it.
        returned per-tick `rip`+cumulative-`rcb`, previously discarded as `_ticks`) that on a byte-diff
        reports whether the two boots' tick streams differ in *count* (control-flow divergence) or
        have a per-tick RCB-delta disagreement at a specific tick (landing-precision jitter) or
-       neither. `drive/h7-enforced-entropy.sh` gained an `H7_ENTROPY_REPEATS=N` knob to rerun the
+       neither. `drive/manual/h7-enforced-entropy.sh` gained an `H7_ENTROPY_REPEATS=N` knob to rerun the
        double-boot test N times against one module swap, to gather diverging pairs efficiently. A
        real-hardware batch (`H7_ENTROPY_REPEATS=6`) caught one: **same tick count (13==13) and the
        same landing `rip` on both boots, but a 34-count disagreement in the landing RCB overshoot
@@ -1605,7 +1605,7 @@ snapshot, not a duplicate of it.
        write get hit by this interleaving far more consistently (10/10 in one batch) than before,
        surfacing it as a 100%-reproducible `hex.len() == 64` assertion failure rather than the
        intended byte-diff panic. Fixed by correcting the constant to end `\r\n`. With both fixes
-       landed, a real-hardware `H7_ENTROPY_REPEATS=10` batch (`drive/h7-enforced-entropy.sh`) passed
+       landed, a real-hardware `H7_ENTROPY_REPEATS=10` batch (`drive/manual/h7-enforced-entropy.sh`) passed
        **7/10**, and all 3 failures showed the *same* tick count with only a **1-2 count** RCB-delta
        disagreement (down from the pre-fix 34) and a bit-identical landing `rip` — squarely inside
        the already-documented `RCB_HARDWARE_JITTER_TOLERANCE` (±8) single-fd hardware-read-precision
@@ -1616,7 +1616,7 @@ snapshot, not a duplicate of it.
        zero tolerance for *any* nonzero jitter, so `os_entropy_is_deterministic` may never reach
        100% on this real-hardware host without a lower-jitter `perf_event` read technique or a
        different entropy-seeding mechanism entirely; `cargo build`/`clippy`/`test --workspace` all
-       clean (0 failures, 87 passed in `baud-multiverse`) and `drive/h4.sh`/`h5.sh`/`h7.sh` and the
+       clean (0 failures, 87 passed in `baud-multiverse`) and `drive/h/h4.sh`/`h5.sh`/`h7.sh` and the
        `h7-enforced-entropy.sh`-internal `rdtsc_enforced_regime_is_bit_exact_across_boots` regression
        check all still pass clean.
        **RESOLVED this iteration (ralph iteration 20): the residual single-fd `perf_event`-read jitter
@@ -1646,11 +1646,11 @@ snapshot, not a duplicate of it.
        `PERIOD_RCB = 200_000`, which reliably produces 5 ticks before natural halt, stable across 4
        repeated real `/dev/kvm` runs — the only test whose numeric expectations needed to change.
        **Real-hardware verification**: `cargo build`/`clippy`/`test --workspace` all clean (0 failures)
-       after the recalibration above; `drive/h0.sh`-`h7.sh` (8/8 — h0 specifically now measures
-       `rcb_deterministic: true` with the corrected event) and `drive/m9.sh`-`m12.sh` (4/4) all PASS;
-       `drive/pkg-boot-cli.sh`/`drive/pkg-multifile-initramfs.sh` PASS (the multi-minute from-source
+       after the recalibration above; `drive/h/h0.sh`-`h7.sh` (8/8 — h0 specifically now measures
+       `rcb_deterministic: true` with the corrected event) and `drive/m/m9.sh`-`m12.sh` (4/4) all PASS;
+       `drive/pkg/pkg-boot-cli.sh`/`drive/pkg/pkg-multifile-initramfs.sh` PASS (the multi-minute from-source
        kernel-compile scripts `pkg-image-build.sh`/`pkg-build-cli.sh` were skipped as out of scope, since
-       this change touches no kernel-build code); `drive/h7-enforced-entropy.sh` with
+       this change touches no kernel-build code); `drive/manual/h7-enforced-entropy.sh` with
        `H7_ENTROPY_REPEATS=10` passed **10/10** on a fresh real-hardware batch, plus a clean default
        single-run pass afterward (11/11 total); the RDTSC regression check inside that script is
        unaffected. The doc comment on `os_entropy_is_deterministic`
@@ -1673,8 +1673,8 @@ snapshot, not a duplicate of it.
      sequence fits inside a single tick's window (as this fixture's does) never surfaced its
      `MARK_BRANCH` record at all — fixed by draining/checking for `MARK_BRANCH` before branching on
      the tick outcome, on every iteration. The new `#[ignore]`d test, `double_boot_ram_hash_
-     identical`, is driven by a new script, `drive/h7-enforced-checkpoint.sh` (same swap-in/swap-out
-     dance as `drive/h7-enforced-entropy.sh`).
+     identical`, is driven by a new script, `drive/manual/h7-enforced-checkpoint.sh` (same swap-in/swap-out
+     dance as `drive/manual/h7-enforced-entropy.sh`).
      **Real-hardware result: 0/8 across two batches (16 real double-boots), unlike
      `os_entropy_is_deterministic`'s ~70-90% pass rate on the identical enforced-regime machinery —
      root-caused via a one-off byte-diff diagnostic** (booted twice, kept both `Multiverse`s alive,
@@ -1693,7 +1693,7 @@ snapshot, not a duplicate of it.
      not. Driving this to 100% needs either eliminating the residual single-fd `perf_event`-read
      jitter to exactly zero (already open per the finding above) or identifying and pinning the
      specific static-call site — both future work, not attempted this iteration.
-     At the time, `drive/h7-enforced-checkpoint.sh` did **not** gate the standard verification protocol
+     At the time, `drive/manual/h7-enforced-checkpoint.sh` did **not** gate the standard verification protocol
      on this test's own pass/fail (only on its RDTSC regression check), since it was expected to fail
      every run until one of those two fixes landed — see the ralph-iteration-20 closing note below,
      which changed this once the underlying flakiness was fixed; the checkpoint *mechanism* itself (the
@@ -1731,11 +1731,11 @@ snapshot, not a duplicate of it.
      `0x11c4`), not a further static-call-site-specific fix — pinning the specific static-call site
      (the other candidate fix discussed above) turned out not to be necessary once the underlying RCB
      read jitter was eliminated at the source. **Real-hardware verification**:
-     `drive/h7-enforced-checkpoint.sh` with `H7_CHECKPOINT_REPEATS=10` then `=15` passed **25/25** across
+     `drive/manual/h7-enforced-checkpoint.sh` with `H7_CHECKPOINT_REPEATS=10` then `=15` passed **25/25** across
      two real-hardware batches, plus a clean default single-run pass afterward (26/26 total); the RDTSC
-     regression check inside that script is unaffected. `drive/h7-enforced-checkpoint.sh` was changed
+     regression check inside that script is unaffected. `drive/manual/h7-enforced-checkpoint.sh` was changed
      from "informational only, does not gate the script" (as described above) to a real hard pass/fail
-     gate on this test, matching `drive/h7-enforced-entropy.sh`'s existing convention, since the
+     gate on this test, matching `drive/manual/h7-enforced-entropy.sh`'s existing convention, since the
      underlying flakiness is now believed fixed rather than a known, tracked residual. The doc comment
      on `double_boot_ram_hash_identical` (`crates/baud-multiverse/src/linux/mod.rs`) got a RESOLVED
      addendum recording this, appended after the existing (kept) investigation narrative rather than
@@ -1802,17 +1802,17 @@ snapshot, not a duplicate of it.
      (default `0x31`), `--virtio-rng-max-exits` (default `200_000`) — `KvmBranch`/`KvmResume` were
      deliberately left unchanged (server-side branch/resume routes don't accept `virtio_rng` yet,
      kept out of scope this iteration to stay focused). **Real-hardware-verified end-to-end** via new
-     `drive/pkg-virtio-rng-cli.sh` (opt-in, mirrors `drive/pkg-boot-cli.sh`'s structure): boots the
+     `drive/pkg/pkg-virtio-rng-cli.sh` (opt-in, mirrors `drive/pkg/pkg-boot-cli.sh`'s structure): boots the
      already-checked-in `tests/fixtures/virtio-rng-guest/bzImage` fixture through a real `baud run kvm
      --virtio-rng-seed 42 --virtio-rng-vector 49 --json` CLI invocation against a live `baud-server`
      over real HTTP — **real result: `ok=true`, `console_output_hex="5295"`** (the guest's own ISR's
      `'R'` marker plus the real tape-seeded entropy byte, proving the interrupt was delivered through
      the actual CLI/server path, not just a Rust test calling `Multiverse` directly). `cargo build`/
      `clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new warnings —
-     confirmed via a targeted grep restricted to the files this iteration touched); `drive/h0.sh`-
-     `h7.sh` (8/8) and `drive/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions
+     confirmed via a targeted grep restricted to the files this iteration touched); `drive/h/h0.sh`-
+     `h7.sh` (8/8) and `drive/m/m9.sh`-`m13.sh` (5/5) all still PASS on real `/dev/kvm`, no regressions
      from the widened `kvm_run_meta` schema or `boot_run_and_drain`/`KvmBootParams` signatures;
-     `drive/pkg-boot-cli.sh` re-run clean as a regression check. **Still open**: `stream::render`'s
+     `drive/pkg/pkg-boot-cli.sh` re-run clean as a regression check. **Still open**: `stream::render`'s
      real-replay path (`boot_and_drain_frames`/`render_frames_from_real_replay`) does not read the new
      `virtio_rng_*` columns back yet, so a virtio-rng-enabled run's frames always replay with the
      device disabled (harmless unless a guest's frame emission itself depends on entropy content — no
@@ -1846,7 +1846,7 @@ snapshot, not a duplicate of it.
      virtio_rng-disabled baseline and identical to each other — proving enabling the device is a real
      no-op for a guest that never touches the virtio-mmio window, and that the replay path stays
      double-run deterministic with it enabled. **Real-hardware-verified end-to-end** via new
-     `drive/pkg-virtio-rng-replay-cli.sh` (opt-in, same convention as `drive/pkg-virtio-rng-cli.sh`):
+     `drive/pkg/pkg-virtio-rng-replay-cli.sh` (opt-in, same convention as `drive/pkg/pkg-virtio-rng-cli.sh`):
      boots framebuffer-guest via a real `POST /run/kvm { run_id, virtio_rng }` HTTP call, reads the
      real sqlite `kvm_run_meta` row directly (Python's `sqlite3` module, not through the API) to
      confirm all three `virtio_rng_*` columns round-tripped exactly as sent, then calls `POST
@@ -1855,8 +1855,8 @@ snapshot, not a duplicate of it.
      across the two renders, over real HTTP against a live `baud-server`, on real `/dev/kvm` hardware.
      `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new
      warnings — confirmed via a targeted check of the touched files `stream.rs`/`run_kvm.rs` only);
-     `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`, and
-     `drive/pkg-virtio-rng-cli.sh` all still PASS on real `/dev/kvm`, no regressions from the widened
+     `drive/h/h0.sh`-`h7.sh` (8/8), `drive/m/m9.sh`-`m13.sh` (5/5), `drive/pkg/pkg-boot-cli.sh`, and
+     `drive/pkg/pkg-virtio-rng-cli.sh` all still PASS on real `/dev/kvm`, no regressions from the widened
      `boot_and_drain_frames` signature or the `RealReplayParams` refactor.
      **This iteration closes the missing `run_until_branch_or_halt_with_virtio_rng`-family
      combinator and wires it everywhere the prior note flagged as blocked on it.**
@@ -1889,7 +1889,7 @@ snapshot, not a duplicate of it.
      `resume_and_branch_with_virtio_rng_delivers_interrupt_and_restore_reproduces_it` (the latter
      also independently re-derives `render_frames_from_real_restore`'s own logic inline and confirms
      it reproduces the live resume's console output). New drive script
-     `drive/pkg-virtio-rng-branch-resume-cli.sh` proves the whole thing end-to-end over real HTTP
+     `drive/pkg/pkg-virtio-rng-branch-resume-cli.sh` proves the whole thing end-to-end over real HTTP
      against a live `baud-server` on real `/dev/kvm`: a fresh `/run/kvm/branch { virtio_rng }`
      delivers the interrupt (`virtio-rng-guest` fixture, console=`5295`, seed 42); `/run/kvm/resume
      { virtio_rng }` reproduces it with no re-boot; a `framebuffer-guest` restore-based row persisted
@@ -1897,9 +1897,9 @@ snapshot, not a duplicate of it.
      and `POST /runs/:id/stream/render` decodes the guest's real, unperturbed pixels via the restore
      path with virtio_rng re-enabled, byte-identical across two renders.
      `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new
-     warnings in any touched file); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5),
-     `drive/pkg-boot-cli.sh`, `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`, and
-     the new `drive/pkg-virtio-rng-branch-resume-cli.sh` all PASS on real `/dev/kvm`, no regressions.
+     warnings in any touched file); `drive/h/h0.sh`-`h7.sh` (8/8), `drive/m/m9.sh`-`m13.sh` (5/5),
+     `drive/pkg/pkg-boot-cli.sh`, `drive/pkg/pkg-virtio-rng-cli.sh`, `drive/pkg/pkg-virtio-rng-replay-cli.sh`, and
+     the new `drive/pkg/pkg-virtio-rng-branch-resume-cli.sh` all PASS on real `/dev/kvm`, no regressions.
      **This iteration closes the last-open half of the virtio-rng gap: `generate` mode.**
      `/run/kvm/branch`'s and `/run/kvm/resume`'s `DriverGenerateSpec` path
      (`run_driver_generated_branches_with_persist`, `crates/baud-server/src/routes/run_kvm.rs`) used
@@ -1927,7 +1927,7 @@ snapshot, not a duplicate of it.
      matching console output across all 3 differently-generated tapes proves the interrupt was
      delivered, not that the tape happened to match) and confirms every one's console output matches
      a direct `boot_run_and_drain` boot with the identical seed. New drive script
-     `drive/pkg-virtio-rng-generate-cli.sh` proves it end-to-end through the real `baud` CLI (not just
+     `drive/pkg/pkg-virtio-rng-generate-cli.sh` proves it end-to-end through the real `baud` CLI (not just
      the library level) against a live `baud-server` on real `/dev/kvm`: `kvm-branch --generate-seed
      --generate-count 3 --virtio-rng-seed 42` delivers the interrupt to all 3 branches, and
      `kvm-resume --generate-seed --generate-count 2 --virtio-rng-seed 42` against the persisted point
@@ -1935,10 +1935,10 @@ snapshot, not a duplicate of it.
      above, since it drives the real CLI binary end-to-end rather than constructing the JSON body
      directly.
      `cargo build`/`clippy --workspace --all-targets`/`test --workspace` all clean (0 failures, 0 new
-     warnings); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`,
-     `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`,
-     `drive/pkg-virtio-rng-branch-resume-cli.sh`, and the new
-     `drive/pkg-virtio-rng-generate-cli.sh` all PASS on real `/dev/kvm`, no regressions.
+     warnings); `drive/h/h0.sh`-`h7.sh` (8/8), `drive/m/m9.sh`-`m13.sh` (5/5), `drive/pkg/pkg-boot-cli.sh`,
+     `drive/pkg/pkg-virtio-rng-cli.sh`, `drive/pkg/pkg-virtio-rng-replay-cli.sh`,
+     `drive/pkg/pkg-virtio-rng-branch-resume-cli.sh`, and the new
+     `drive/pkg/pkg-virtio-rng-generate-cli.sh` all PASS on real `/dev/kvm`, no regressions.
      **Still open (at the time of the above)**: the "which vector would an unmodified Linux guest's
      real `virtio_mmio` driver bind to" research question remained untouched; `virtio_rng_reseed_
      is_deterministic` (the spec-named test) still needed a real Linux guest that actually
@@ -2005,11 +2005,11 @@ snapshot, not a duplicate of it.
      --all-targets`/`test --workspace` all clean (0 failures; one clippy `identity_op` warning my
      own new unit test introduced was found and fixed before commit, not left as a new warning);
      `baud-multiverse` went from 119 to 128 passed (8 ignored, unchanged) — the 9 new tests (8
-     pure-Rust + 1 real-hardware); `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5),
-     `drive/pkg-boot-cli.sh` (including a real Linux 6.18 kernel boot to `/init`, confirming the
+     pure-Rust + 1 real-hardware); `drive/h/h0.sh`-`h7.sh` (8/8), `drive/m/m9.sh`-`m13.sh` (5/5),
+     `drive/pkg/pkg-boot-cli.sh` (including a real Linux 6.18 kernel boot to `/init`, confirming the
      unconditionally-wired `Pic8259` introduces no regression even on the non-hand-assembled boot
-     path), `drive/pkg-virtio-rng-cli.sh`, `drive/pkg-virtio-rng-replay-cli.sh`, `drive/pkg-virtio-
-     rng-branch-resume-cli.sh`, and `drive/pkg-virtio-rng-generate-cli.sh` all still PASS on real
+     path), `drive/pkg/pkg-virtio-rng-cli.sh`, `drive/pkg/pkg-virtio-rng-replay-cli.sh`, `drive/pkg/pkg-virtio-
+     rng-branch-resume-cli.sh`, and `drive/pkg/pkg-virtio-rng-generate-cli.sh` all still PASS on real
      `/dev/kvm`, no regressions.
      **What this still does not do**: it does not boot an actual unmodified Linux kernel far enough
      to exercise its real `drivers/virtio/virtio_mmio.c` + `drivers/char/hw_random/virtio-rng.c`
@@ -2081,13 +2081,13 @@ snapshot, not a duplicate of it.
      asserts the entire console output — including the real driver-sourced entropy bytes — is
      byte-identical). `cargo build --workspace`, `cargo clippy --workspace --all-targets` (zero new
      warnings — `linux/mod.rs` has zero clippy hits), and `cargo test --workspace` all clean;
-     `baud-multiverse` now 130 passed/8 ignored (up from 128); `drive/h0.sh`-`h7.sh` (8/8),
-     `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`, `drive/pkg-multifile-initramfs.sh`,
-     `drive/pkg-dynamic-link.sh` (all three boot the shared rebuilt `linux-guest` bzImage — no
-     regressions from the Kconfig change), `drive/pkg-build-cli.sh` (confirms the automated
+     `baud-multiverse` now 130 passed/8 ignored (up from 128); `drive/h/h0.sh`-`h7.sh` (8/8),
+     `drive/m/m9.sh`-`m13.sh` (5/5), `drive/pkg/pkg-boot-cli.sh`, `drive/pkg/pkg-multifile-initramfs.sh`,
+     `drive/pkg/pkg-dynamic-link.sh` (all three boot the shared rebuilt `linux-guest` bzImage — no
+     regressions from the Kconfig change), `drive/pkg/pkg-build-cli.sh` (confirms the automated
      from-source kernel-build pipeline still works with the new Kconfig fragment), and all four
-     `drive/pkg-virtio-rng-*-cli.sh` scripts (different fixture, shares `console.rs`/`Pic8259` code —
-     no regressions) all PASS on real `/dev/kvm`. `drive/pkg-image-build.sh` (the
+     `drive/pkg/pkg-virtio-rng-*-cli.sh` scripts (different fixture, shares `console.rs`/`Pic8259` code —
+     no regressions) all PASS on real `/dev/kvm`. `drive/pkg/pkg-image-build.sh` (the
      two-independent-builds reproducibility check) was not re-run this iteration to save time — it
      shares the exact same build path `pkg-build-cli.sh` already exercised successfully, so this is
      a low-risk, documented gap, not a skipped requirement.
@@ -2128,10 +2128,10 @@ snapshot, not a duplicate of it.
      `guest_virtio_mmio_rng_driver_reads_real_entropy_through_virtio_rng` and
      `guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots` were re-run against the
      updated four-read fixture and both still pass — no regression from the fixture change.
-     `drive/h0.sh`-`h7.sh` (8/8), `drive/m9.sh`-`m13.sh` (5/5), `drive/pkg-boot-cli.sh`,
-     `drive/pkg-multifile-initramfs.sh`, `drive/pkg-dynamic-link.sh` (all three boot the shared
+     `drive/h/h0.sh`-`h7.sh` (8/8), `drive/m/m9.sh`-`m13.sh` (5/5), `drive/pkg/pkg-boot-cli.sh`,
+     `drive/pkg/pkg-multifile-initramfs.sh`, `drive/pkg/pkg-dynamic-link.sh` (all three boot the shared
      `linux-guest` `bzImage`, confirming the fixture change caused no regressions), and all four
-     `drive/pkg-virtio-rng-*-cli.sh` scripts (`pkg-virtio-rng-cli.sh`,
+     `drive/pkg/pkg-virtio-rng-*-cli.sh` scripts (`pkg-virtio-rng-cli.sh`,
      `pkg-virtio-rng-replay-cli.sh`, `pkg-virtio-rng-branch-resume-cli.sh`,
      `pkg-virtio-rng-generate-cli.sh` — these use a separate, untouched hand-assembled
      `tests/fixtures/virtio-rng-guest/` fixture) all PASS on real `/dev/kvm`; no regressions anywhere.
@@ -2191,7 +2191,7 @@ snapshot, not a duplicate of it.
      `crates/` (skipping `target/` and its own defining file) for case-insensitive hits, exposed from
      `crates/baud-packages/src/lib.rs`. 4 new tests pass, including the spec-named `no_workload_specifics_in_core`
      itself, which scans the real `crates/` tree and currently finds zero leaks. Closes test #29 in the §12
-     matrix. `cargo build`/`clippy`/`test --workspace` clean; `drive/h0.sh`-`h7.sh` all PASS (stock module; this
+     matrix. `cargo build`/`clippy`/`test --workspace` clean; `drive/h/h0.sh`-`h7.sh` all PASS (stock module; this
      change touches no KVM/VMM runtime code). **Known pre-existing gap this lint does not catch**:
      `crates/baud-raftlet` already lives directly under `crates/` in violation of §8's "targets live as guest
      images under `examples/`, never in-tree" — it predates the KVM pivot and references no Mario/NES terms, so
@@ -2200,3 +2200,150 @@ snapshot, not a duplicate of it.
 - **Specs to update alongside**: `specs/baud-packages.md` (the real kernel + initramfs pipeline, §4), a new
   `specs/baud-stream.md` note (the framebuffer frame path + the ~25% live window), and `specs/README.md` /
   `specs/baud-multiverse.md` (the one determinism model + entropy-by-input-control).
+
+### 14.1 Defects found in the test suite and the drive scripts
+
+Latent defects, each of which let a test or script report success it had not earned. The pre-push gate is
+now `drive/gate.sh` (§15), covered by `drive/gate.test.bats`.
+
+**Tests that passed while asserting nothing.** Each of these was green in every run of the suite, and none
+of them could have failed for the reason its name implies:
+
+- `quantum_overrun_guest_is_killed` (`crates/baud-multiverse/src/lib.rs`) — computed `crash_obs` and then
+  discarded it (`let _ = crash_obs;`). Its only surviving assertion was that two runs of one tape hash
+  equally, which is exactly `double_run_is_bit_identical`'s property. The test named for the wall-clock
+  watchdog asserted nothing about the watchdog. See VR2-M7 below for what this concealed.
+- `different_tapes_may_diverge` (`crates/baud-multiverse/src/lib.rs:1172`) — asserted only that two stream
+  hashes were non-empty; its own comment declined to check divergence. The name described a property the
+  body did not verify.
+- `duplicate_detection` (`crates/baud-stream/src/frame.rs:98`) — reduced to `assert!(x == x)`. The negative
+  case (a non-duplicate frame) was untested anywhere in the crate.
+- `show_redacted_hides_value` (`crates/baud-keys/src/lib.rs:537`) — dead code. `secrets_file()` resolves
+  workspace-relative, but `cargo test`'s CWD is the package root, so the `!exists()` early-return always
+  fired and the body never ran.
+- `crates/baud-keys/src/lib.rs:522` and `:530` — no assertions at all (`let _ = age_key_path();` and
+  `doctor_does_not_panic`).
+- `shrink_reduces_tape` (`crates/baud-driver/src/lib.rs:817`) — asserted `len <= best.len() + 1`, which a
+  shrink that removed nothing satisfies.
+- `unmodified_agent_runs_a_new_workload` (`crates/baud-tape-agent/src/agent.rs:283`) — called no function
+  from `baud-tape-agent`; it exercised only `baud_init::lint`.
+- `rotate_invalidates_old_key` (`crates/baud-keys/src/lib.rs:567`, 147 lines) and
+  `chunk_bodies_are_ciphertext` (`crates/baud-journal/src/lib.rs:516`, 93 lines) — silently no-op on any host
+  without `sops`/`age`/`age-keygen`/`nix` (all absent here): they hit `.is_err()` guards and return having
+  asserted nothing, which is indistinguishable from passing. `rotate_invalidates_old_key` additionally shells
+  out to `sops updatekeys` directly and never calls this crate's `rotate_secrets` — see VR2-M3 below.
+
+**False passes in the drive scripts.** `pkill -f "baud-server"` (17 scripts) matched whole command lines, so
+it also killed sibling `cargo build -p baud-server` runs and the `rustc` compiling them — one script's
+startup could fail another script's **build**. A hardcoded `127.0.0.1:7734` combined with a bare `sleep 1`
+meant a script whose own server lost the bind silently drove **another server and passed**; now an ephemeral
+port via `BAUD_ADDR` plus a `/health` poll (`baud-server` still defaults to `7734` when unset). `m11.sh`
+omitted `"out"` on its M11.5 render call, so the server wrote a repo-root `output.y4m`
+(`crates/baud-server/src/routes/stream.rs:148`) — invisible in `git status` because of `.gitignore:33`.
+`h3.sh` wrote fixed `/tmp/h3-require-enforced.*`. Every server shared one `baud-snapshots/` root, with a
+write-then-read race on `.age-identity.txt` (`crates/baud-server/src/state.rs:64-72`). `trap cleanup EXIT`
+does not run on an untrapped signal, so interrupted scripts stranded servers holding `/dev/kvm` and leaked
+temp SQLite files; scripts now trap `INT`/`TERM`, and `gate.sh` reaps by process group, never by name, so
+unrelated `baud` invocations are untouched.
+
+**`--ignored` silently passes a non-ignored test.** `cargo test -- --ignored <filter>` against a test that is
+*not* `#[ignore]`d reports `test result: ok. 0 passed`, which a `grep -q "test result: ok"` accepts as
+success. Drive scripts that gate on that string must use `--include-ignored` and additionally assert a
+non-zero pass count (`drive/h/h5.sh:157-159`), or they pass while running nothing.
+
+**`thousand_branches_are_independent_and_deterministic` ran twice per verification round** — once in
+`cargo test --workspace`, once in `drive/h/h5.sh` — at ~244s each. Now `#[ignore]`d with `drive/h/h5.sh` as sole
+runner. Related: `drive/pkg/pkg-build-cli.sh` costs **143s**, not the "~4-5 min" its own header and
+`ralph/progress.txt` claim, and it rebuilds from scratch every run (`cp -a` of a 1.8G tree plus `mrproper`,
+no cache); it is now gated on a fingerprint that includes the out-of-tree kernel version and whether the
+enforced-regime patch is applied, since neither is visible to any `git diff`.
+
+**Two spec items are recorded as satisfied but are not.** Both surfaced only when tests that asserted nothing
+were made to assert something.
+
+1. **VR2-M7 (wall-clock watchdog for spinning guests) — `ralph/progress.txt:602` records "FIXED"; it was
+   not.** `Multiverse::run` incremented `guest_quantum_steps[g]` at the top of each quantum and reset it to
+   `0` at the bottom of the *same* iteration, because the simulation modelled no outcome other than "guest
+   reaches a syscall". The counter could never exceed 1, while `quantum_step_limit` is ≥ 1 and the kill is
+   `> limit` — **the kill branch was unreachable for every tape and every `quantum_limit_ms`.**
+   `quantum_overrun_guest_is_killed` hid this by discarding its own observation (`let _ = crash_obs;`).
+   Fixed by adding `SPIN_ACTION` (`crates/baud-multiverse/src/lib.rs:615`) so a guest burning a whole
+   quantum is modelled and the watchdog is reachable; the test now asserts SIGKILL + `"quantum-overrun"` at
+   the exact quantum, plus a negative case and a `quantum_limit_ms = 0` disable case, and was
+   mutation-verified. **Note this widens the per-quantum action draw to `draw_int(0, SPIN_ACTION)`, which
+   changes how tape bytes map to actions and therefore changes stream hashes for existing tapes** — safe
+   only because no golden hashes exist in-tree and `verify`/`replay` derive from the same simulation.
+2. **VR2-M3 — `baud keys rotate` does not invalidate the old key.** `specs/baud-keys.md:111` specifies
+   `baud keys rotate  # sops rotate to new recipients`, but `rotate_secrets`
+   (`crates/baud-keys/src/lib.rs:449`) runs `sops --rotate --in-place`, whose own doc comment
+   (`lib.rs:435-438`) states it "refreshes the data key while keeping the same recipient set… the age
+   identity (private key) is unchanged". `rotate_invalidates_old_key` appeared to cover this but shelled out
+   to `sops updatekeys` directly, never calling `rotate_secrets`, and silently no-op'd anyway because
+   `sops`/`age`/`age-keygen`/`nix` are absent on this host (it hit `.is_err()` guards and asserted nothing).
+
+**Still open, in priority order.** Where a fix contradicts a spec, amend the spec in the same commit rather
+than quietly diverging from it; where it contradicts a claim in `ralph/progress.txt` (as items 1 and 2 above
+do), say so plainly in the new entry instead of leaving the old claim standing.
+
+1. **The real KVM path has no watchdog at all.** `baud_vcpu::linux::run_until_halted`
+   (`crates/baud-vcpu/src/linux/mod.rs:136`) is a bare unbounded `loop` with no wall-clock or exit budget,
+   and `linux::Multiverse::run_to_first_halt` sits directly on it — a guest that spins without exiting hangs
+   the vCPU thread forever. Other entry points use deterministic `max_exits` budgets, which is **not** the
+   non-deterministic wall-clock intervention `docs/determinism.md` "Known limits" §4 promises. VR2-M7 is
+   closed only in the simulation; it is open where it matters.
+2. **`ram_hash` is computed and discarded at scale.** `Multiverse::ram_hash`
+   (`crates/baud-multiverse/src/linux/mod.rs:1523`) blake3s all 256 MiB (`layout.rs:19`) and
+   `run_to_first_halt` calls it unconditionally. `thousand_branches` stores 1000 hashes and reads 8;
+   `crates/baud-server/src/routes/run_kvm.rs` computes ~90 (≈23 GiB of hashing) and asserts on 4. A
+   hash-skipping variant or a lazy `HaltOutcome::ram_hash` would roughly halve `h5.sh` — the gate's critical
+   path — with zero coverage change. This is the single biggest remaining lever.
+3. **`fleet_of_vms_run_in_parallel_without_interference` is the workspace's #1 flake source** (19 records in
+   `ralph/progress.txt`): it asserts a timing ratio (`parallel_total < serial_one * n * 0.85`) while up to 7
+   sibling KVM tests run on the same 8 threads, and pins to fixed cores 0/2/4. Same treatment as
+   `thousand_branches` — `#[ignore]` with `drive/h/h6.sh` as sole runner.
+4. **`shell-into`'s timeout conflates two different things.** `crates/baud-cli/src/cmds/shell_into.rs:33`
+   uses one `--idle-timeout-ms` as both the idle timeout *and* the first-byte deadline, so under concurrent
+   guest boots it returns `ok=true` with an empty transcript (measured: 2000ms → empty 3/3; 8000ms → correct
+   3/3). `drive/m/m10.sh` works around it at the call site (now 15000ms); splitting the two would fix every
+   caller.
+5. **`thousand_branches`' unique value is implicit.** It is the only place doing ~1008 sequential
+   `KVM_CREATE_VM`/vCPU/256 MiB/`perf_event` lifecycles (next largest anywhere is 6), but asserts nothing
+   about resource growth — a leak surfaces only as an `Err` or an OOM kill. Its `NUM_BRANCHES = 1000` is a
+   literal spec figure (`specs/baud-snapshot.md:191-193`, `todo.md` §5), not a tuned number, and its own
+   comment wrongly claims it was "chosen to keep this test's real run time … in the tens-of-seconds range".
+   Across 51 mentions in `ralph/progress.txt` it has caught **0** defects and flaked **0** times.
+6. **`crates/baud-journal`'s encrypted path shells out to the `age` binary** while already depending on
+   `baud-keys`, whose `age_encrypt`/`age_decrypt` do the same job in-process. Switching would make the
+   encrypted-journal path work and be testable on hosts without `age` (caveat: `baud_keys::age_encrypt`
+   emits binary age, not the ASCII armor the journal writes today). Note `open_encrypted` has no callers
+   outside tests.
+
+## 15. Pre-push validation protocol
+
+Run **`bash drive/gate.sh`** — one Bash call, `timeout: 600000`. That is the whole pre-push gate.
+
+It runs, in order: a warm-up `cargo build --workspace --tests --bins` (which then lets every drive script
+skip its own no-op `cargo build` via `BAUD_GATE_PREBUILT`), `cargo clippy --workspace --all-targets`,
+`cargo test --workspace`, the 19 fan-out drive scripts 4-wide, `drive/h/h6.sh` on an otherwise-idle host, and
+`drive/pkg/pkg-build-cli.sh` only when its fingerprint changed. It prints a per-unit PASS/FAIL/duration table and
+writes per-unit logs under `target/gate-logs/<run-id>/`. Exit code is non-zero iff some unit failed.
+
+- **Do not run the units by hand instead.** The old sequence (`cargo build`, then `cargo clippy`, then
+  `cargo test`, then each `drive/*.sh` one at a time) takes ~16 min against the gate's ~6 min, and re-runs
+  `pkg-build-cli.sh` and `thousand_branches` every time for no added coverage.
+- **A failing unit does not abort the gate**, so one run reports the state of everything rather than stopping
+  at the first problem.
+- **If it exceeds the call timeout**, re-run with `run_in_background: true`. Do not split it into pieces.
+- **`--jobs N`** changes fan-out width (default 4); `--jobs 1` is the serial equivalent. `--force-build-cli`
+  runs the gated kernel-build script regardless of its fingerprint.
+- **Before treating a failure as a regression, re-run that one script in isolation.** This host has a
+  documented load-flake history in `timer_tick_lands_at_identical_instruction`,
+  `rdtsc_guest_reproduces_high_bits_across_boots`, `fleet_of_vms_run_in_parallel_without_interference`, and
+  `baud host probe` reporting `regime=rejected` under PMU contention. Report a flake as a flake, with both
+  results; a failure that reproduces in isolation is real and must not be worked around.
+- **The enforced-regime scripts (`drive/manual/h3-enforced-*.sh`, `drive/manual/h7-enforced-*.sh`) are deliberately not in
+  the gate.** They `rmmod`/`insmod` the live `kvm_intel` and guard on `fuser /dev/kvm`, so they are mutually
+  exclusive with every other baud process on the box — run them by hand, one at a time, and confirm the stock
+  module is restored afterwards.
+- `bats drive/gate.test.bats` covers the gate itself and the concurrency-safety contract the drive scripts
+  must uphold; the `slow`-tagged tests interrupt a live gate and need an idle machine.

@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Henrique Falconer. All rights reserved.
+# drive/h/h2.sh — H2 drive script: deterministic double-run (todo.md §10's H2 definition)
+#
+# H2's spec: "Same image + tape twice ⇒ byte-identical observation stream (console + probes +
+# final memory hash), CPUID masked, virtual TSC pinned." This validates that for real against
+# actual /dev/kvm — this is NOT the pre-pivot "tape-integration workload fuzzing" H2 a prior
+# version of this script tested (todo.md §14 flagged h2.sh/h3.sh as stale, still validating an old
+# ptrace-era milestone definition; this rewrite replaces it, mirroring h1.sh's own rewrite once
+# real KVM hardware existed to make the current H2 meaningful).
+#
+#   H2.1  baud host probe still reports runnable=true (cheap, early sanity check)
+#   H2.2  cpuid_leaves_are_fixed (`masked_bits_are_always_fixed_regardless_of_host_input`):
+#         RDRAND/RDSEED/TSX/x2APIC bits are always 0 regardless of host CPUID input
+#   H2.3  work_clock_is_monotone_and_reproducible: the work-clock is non-decreasing and the full
+#         sequence is identical across a same-(base,k) double-run
+#   H2.4  double_boot_memory_identical (H1's own test, re-verified here as part of H2's "same
+#         image+tape twice" guarantee): boots hello-guest twice against real /dev/kvm, asserts
+#         console output and guest-RAM blake3 hash are byte-identical across both boots
+#   H2.5  all_input_is_tape_derived: boots tape-echo-guest (reads 4 bytes from the tape device,
+#         echoes them to console) three times against real /dev/kvm — same tape twice produces
+#         byte-identical output; changing one tape byte changes the output (input is genuinely
+#         tape-derived, not a synthetic stand-in — test-matrix row 21's "fake determinism" risk)
+#   H2.6  no_unmodeled_exit_is_silent: a fuzz smoke proptest over random `Exit::Unmodeled` values
+#         asserts the run loop's dispatch never returns anything but `Err(DeterminismHole)` for
+#         them — no wildcard arm, no silent continue
+#   H2.7  cpuid_leaves_are_fixed (real hardware): boots hello-guest twice against real /dev/kvm and
+#         reads every served CPUID leaf back from the live vCPU via KVM_GET_CPUID2, asserting the
+#         two full leaf sets are byte-identical and RDRAND/x2APIC/RDSEED/TSX read back cleared —
+#         H2.2 only ever fed a synthetic `kvm_cpuid_entry2` through the pure mask function; this
+#         closes the real-hardware readback half of the same named test (todo.md §14's H2 gap),
+#         which caught a genuine determinism bug (Initial APIC ID leaking host-core migration,
+#         fixed in `cpuid.rs`'s mask table this iteration)
+
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+export PATH="$HOME/.cargo/bin:$HOME/mingw64-tools/mingw64/bin:$PATH"
+
+log()  { echo "[h2] $*" >&2; }
+pass() { echo "  [PASS] $*"; }
+fail() { echo "  [FAIL] $*" >&2; exit 1; }
+
+echo ""
+echo "=== H2: Deterministic double-run ==="
+echo ""
+
+# ---------------------------------------------------------------------------
+# H2.1 (checked first — cheap, and everything below is meaningless without it) — real KVM present.
+# Same pattern as drive/h/h0.sh and drive/h/h1.sh.
+# ---------------------------------------------------------------------------
+log "Building baud-host/baud-server/baud-cli..."
+# BAUD_GATE_PREBUILT: set by a gate that has already built the workspace, so the (~7s, target-dir
+# locking) no-op `cargo build` below can be skipped when many drive scripts run concurrently.
+if [[ -z "${BAUD_GATE_PREBUILT:-}" ]]; then
+    cargo build -q -p baud-host -p baud-server -p baud-cli 2>&1
+fi
+
+REPO_ROOT="$(pwd)"
+BAUD="$REPO_ROOT/target/debug/baud"
+BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
+DB_FILE="$(mktemp -t baud-h2-XXXXXX.sqlite)"
+DB_FILE="$(cygpath -m "$DB_FILE" 2>/dev/null || echo "$DB_FILE")"
+
+# Own port + own snapshot store, so this script can run concurrently with any other drive script.
+BAUD_PORT="${BAUD_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));p=s.getsockname()[1];s.close();print(p)')}"
+SRV="http://127.0.0.1:$BAUD_PORT"
+export BAUD_SERVER="$SRV"
+SNAP_ROOT="$(mktemp -d -t baud-h2-snap-XXXXXX)"
+
+cleanup() {
+    if [[ -n "${SERVER_PID:-}" ]]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+    sleep 0.2
+    rm -f "$DB_FILE" 2>/dev/null || true
+    rm -rf "$SNAP_ROOT" 2>/dev/null || true
+}
+trap cleanup EXIT
+# bash does NOT run an EXIT trap when it dies from an untrapped signal, so `trap cleanup EXIT`
+# alone leaks this script's baud-server, temp DB and snapshot dir whenever the script is
+# interrupted -- Ctrl-C, or drive/gate.sh reaping its pool. Re-raising through `exit` makes the
+# EXIT trap fire, so cleanup() runs on every exit path. (This is how 21 stray temp SQLite files
+# and two orphaned servers survived a killed gate run.)
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+log "Starting baud-server on $SRV..."
+BAUD_DB="sqlite://${DB_FILE}?mode=rwc" BAUD_ADDR="127.0.0.1:$BAUD_PORT" \
+    BAUD_SNAPSHOT_STORE="$SNAP_ROOT" "$BAUD_SERVER_BIN" &
+SERVER_PID=$!
+
+for _ in $(seq 1 60); do
+    if curl -sf "$SRV/health" > /dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
+done
+curl -sf "$SRV/health" > /dev/null 2>&1 || fail "baud-server did not come up on $SRV"
+
+log "baud host probe --json"
+PROBE_JSON="$("$BAUD" host probe --json)" || fail "H2.1: 'baud host probe --json' FAILED to run"
+echo "$PROBE_JSON"
+RUNNABLE="$(echo "$PROBE_JSON" | grep -oE '"runnable":[[:space:]]*(true|false)' | grep -oE 'true|false')"
+if [[ "$RUNNABLE" != "true" ]]; then
+    fail "H2.1: host probe runnable is '$RUNNABLE' — no real /dev/kvm, H2 cannot mean anything here."
+fi
+pass "H2.1: host probe runnable='$RUNNABLE' (real KVM present)"
+
+# ---------------------------------------------------------------------------
+# H2.2 — cpuid_leaves_are_fixed
+# ---------------------------------------------------------------------------
+log "Building baud-multiverse..."
+if [[ -z "${BAUD_GATE_PREBUILT:-}" ]]; then
+    cargo build -q -p baud-multiverse 2>&1 || fail "H2.2: baud-multiverse build FAILED"
+fi
+
+log "Running masked_bits_are_always_fixed_regardless_of_host_input (cpuid_leaves_are_fixed)..."
+CPUID_OUT=$(cargo test -q -p baud-multiverse masked_bits_are_always_fixed_regardless_of_host_input 2>&1)
+echo "$CPUID_OUT"
+echo "$CPUID_OUT" | grep -q "test result: ok" || fail "H2.2: cpuid_leaves_are_fixed FAILED"
+pass "H2.2: cpuid_leaves_are_fixed — RDRAND/RDSEED/TSX/x2APIC always masked to 0"
+
+# ---------------------------------------------------------------------------
+# H2.3 — work_clock_is_monotone_and_reproducible
+# ---------------------------------------------------------------------------
+log "Running work_clock_is_monotone_and_reproducible..."
+CLOCK_OUT=$(cargo test -q -p baud-multiverse work_clock_is_monotone_and_reproducible 2>&1)
+echo "$CLOCK_OUT"
+echo "$CLOCK_OUT" | grep -q "test result: ok" || fail "H2.3: work_clock_is_monotone_and_reproducible FAILED"
+pass "H2.3: work_clock_is_monotone_and_reproducible — non-decreasing and reproducible"
+
+# ---------------------------------------------------------------------------
+# H2.4 — double_boot_memory_identical (H1's test, re-verified as part of H2)
+# ---------------------------------------------------------------------------
+log "Running double_boot_memory_identical against real /dev/kvm..."
+BOOT_OUT=$(cargo test -q -p baud-multiverse double_boot_memory_identical -- --test-threads=1 2>&1)
+echo "$BOOT_OUT"
+echo "$BOOT_OUT" | grep -q "test result: ok" || fail "H2.4: double_boot_memory_identical FAILED"
+pass "H2.4: double_boot_memory_identical — console + RAM hash byte-identical across two real boots"
+
+# ---------------------------------------------------------------------------
+# H2.5 — all_input_is_tape_derived (real hardware, new this milestone)
+# ---------------------------------------------------------------------------
+log "Running all_input_is_tape_derived against real /dev/kvm (tape-echo-guest)..."
+TAPE_OUT=$(cargo test -q -p baud-multiverse all_input_is_tape_derived -- --test-threads=1 2>&1)
+echo "$TAPE_OUT"
+echo "$TAPE_OUT" | grep -q "test result: ok" || fail "H2.5: all_input_is_tape_derived FAILED"
+pass "H2.5: all_input_is_tape_derived — same tape twice identical; one changed byte changes output"
+
+# ---------------------------------------------------------------------------
+# H2.6 — no_unmodeled_exit_is_silent
+# ---------------------------------------------------------------------------
+log "Running no_unmodeled_exit_is_silent (baud-vcpu)..."
+if [[ -z "${BAUD_GATE_PREBUILT:-}" ]]; then
+    cargo build -q -p baud-vcpu 2>&1 || fail "H2.6: baud-vcpu build FAILED"
+fi
+UNMODELED_OUT=$(cargo test -q -p baud-vcpu no_unmodeled_exit_is_silent 2>&1)
+echo "$UNMODELED_OUT"
+echo "$UNMODELED_OUT" | grep -q "test result: ok" || fail "H2.6: no_unmodeled_exit_is_silent FAILED"
+pass "H2.6: no_unmodeled_exit_is_silent — every unmodeled exit fails loud, never a silent continue"
+
+# ---------------------------------------------------------------------------
+# H2.7 — cpuid_leaves_are_fixed (real hardware readback via KVM_GET_CPUID2)
+# ---------------------------------------------------------------------------
+log "Running cpuid_leaves_are_fixed (real hardware readback) against real /dev/kvm..."
+CPUID_RH_OUT=$(cargo test -q -p baud-multiverse --lib linux::tests::cpuid_leaves_are_fixed -- --test-threads=1 2>&1)
+echo "$CPUID_RH_OUT"
+echo "$CPUID_RH_OUT" | grep -q "test result: ok" || fail "H2.7: cpuid_leaves_are_fixed (real hardware) FAILED"
+pass "H2.7: cpuid_leaves_are_fixed (real hardware) — two real boots read back identical CPUID, RDRAND/x2APIC/RDSEED/TSX cleared"
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== H2 milestone: ALL CHECKS PASSED ==="
+echo ""
+echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
+echo "  - CPUID leaves are fixed (RDRAND/RDSEED/TSX/x2APIC masked, reproducible across reads)"
+echo "  - The work-clock is monotone and reproducible for a fixed (base, k)"
+echo "  - Same guest image + tape boots to byte-identical console + RAM state twice in a row"
+echo "  - The tape device is the guest's genuine input channel: same tape -> same output,"
+echo "    one changed tape byte -> changed output (tests/fixtures/tape-echo-guest/)"
+echo "  - No VM exit is ever silently unhandled — the catch-all always fails loud"
+echo ""
+echo "Run H3 next: ./drive/h/h3.sh"

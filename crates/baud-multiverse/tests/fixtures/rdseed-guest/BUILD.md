@@ -94,5 +94,5 @@ $ objdump -D -b binary -m i386:x86-64 -M intel --adjust-vma=0x200200 <body of bz
 Both enforced-regime tests live in `crates/baud-multiverse/src/linux/mod.rs`
 (`rdseed_enforced_regime_is_bit_exact_across_boots`,
 `ud2_outside_the_rdseed_site_table_reinjects_ud`), `#[ignore]`d so a normal `cargo test
---workspace` against the stock module never runs them; `drive/h3-enforced-rdseed.sh` invokes them
+--workspace` against the stock module never runs them; `drive/manual/h3-enforced-rdseed.sh` invokes them
 by name after swapping the patched module in.

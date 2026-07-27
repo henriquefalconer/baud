@@ -40,7 +40,7 @@ sudo usermod -aG kvm "$USER"                      # open /dev/kvm without sudo (
 cargo run -p baud-cli -- host probe --json        # regime must NOT be "rejected"
 ```
 
-H1+ (booting a real guest) runs here directly, e.g. `bash drive/h1.sh`. If `/dev/kvm` is ever missing,
+H1+ (booting a real guest) runs here directly, e.g. `bash drive/h/h1.sh`. If `/dev/kvm` is ever missing,
 VT-x is off in firmware — everything else is already in place.
 
 ## Building an out-of-tree kernel module against this WSL2 kernel
@@ -104,9 +104,9 @@ echo baud | sudo -S rmmod kvm_intel && echo baud | sudo -S rmmod kvm
 echo baud | sudo -S modprobe kvm_intel   # restores the stock module + its kvm.ko dependency
 ```
 
-`drive/h3-enforced-rdtsc.sh` does exactly this dance (build → swap → run the `#[ignore]`d
+`drive/manual/h3-enforced-rdtsc.sh` does exactly this dance (build → swap → run the `#[ignore]`d
 `rdtsc_enforced_regime_is_bit_exact_across_boots` test → swap back, unconditionally via a
-`trap ... EXIT`) — `drive/h3-enforced-rdrand.sh` is its sibling for RDRAND (applies
+`trap ... EXIT`) — `drive/manual/h3-enforced-rdrand.sh` is its sibling for RDRAND (applies
 `kernel-module/baud-enforced/rdrand-enforce.patch` on top of the same tree, idempotent same as
 `rdtsc-enforce.patch`). Every other `drive/*.sh`/`cargo test --workspace` assumes the **stock**
 module, so these two are the only scripts that should ever touch the live `kvm_intel`/`kvm`
@@ -124,12 +124,18 @@ then `git push` works normally.
 
 ## Building / testing
 
+**To test baud, run `bash drive/gate.sh`** — one command, the whole gate (build, clippy, workspace tests, and
+every drive script), with a per-unit PASS/FAIL table and logs under `target/gate-logs/`.
+
 ```
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Drive scripts (`drive/h0.sh`, `drive/h1.sh`, `drive/m0.sh`, …) build only what they need and run the CLI
-against a locally-spawned `baud-server` on a temp SQLite file — see any `drive/*.sh` for the pattern
-(spawn server, `trap cleanup EXIT`, run `baud <cmd> --json`, assert on the JSON).
+Drive scripts live under `drive/h/`, `drive/m/`, `drive/pkg/`, `drive/manual/` and `drive/demo/`; `gate.sh`
+and its `gate.test.bats` sit at `drive/` root. Each builds only what it needs and runs the CLI against a
+locally-spawned `baud-server` on an ephemeral port and a temp SQLite file — see any of them for the pattern
+(spawn server, health-poll, `trap cleanup EXIT`/`INT`/`TERM`, run `baud <cmd> --json`, assert on the JSON).
+The `drive/manual/*` scripts swap the live `kvm_intel` module, so they are excluded from the gate and must
+be run by hand, one at a time.

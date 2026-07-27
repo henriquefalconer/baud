@@ -97,9 +97,50 @@ mod tests {
     #[test]
     fn duplicate_detection() {
         let mut proc = FrameProcessor::new(0, 2, 2, PixFmt::Indexed8);
-        let buf = vec![42u8; 4];
-        proc.ingest(0, &buf, true).unwrap();
-        let hash = proc.prev_hash.clone().unwrap();
-        assert!(proc.is_duplicate(&hash));
+        let frame_a = vec![42u8; 4];
+        let frame_b = vec![7u8; 4]; // different pixels → different fingerprint
+
+        let hash_a = proc.ingest(0, &frame_a, true).unwrap().record.hash.clone();
+
+        // Positive case: re-presenting the frame just ingested is a duplicate.
+        assert!(
+            proc.is_duplicate(&hash_a),
+            "the hash of the frame just ingested must be reported as a duplicate"
+        );
+
+        // Negative case: a *different* frame is not a duplicate of the previous one.
+        // (This is the half the old test never covered — `is_duplicate` returning
+        // `true` unconditionally would have passed it.)
+        let hash_b = fingerprint(&frame_b, proc.width, proc.height, &proc.format).unwrap();
+        assert_ne!(hash_a, hash_b, "different pixel content must fingerprint differently");
+        assert!(
+            !proc.is_duplicate(&hash_b),
+            "a frame with different content must not be reported as a duplicate"
+        );
+
+        // Ingesting the different frame moves `prev_hash` on: the new frame is now the
+        // duplicate candidate and the old one no longer is.
+        proc.ingest(1, &frame_b, true).unwrap();
+        assert!(proc.is_duplicate(&hash_b), "prev_hash must track the most recent frame");
+        assert!(
+            !proc.is_duplicate(&hash_a),
+            "the previous frame's hash must stop being a duplicate once a new frame is ingested"
+        );
+
+        // Ingesting identical content again yields the same hash — the duplicate the
+        // dedup bookkeeping exists to spot.
+        let repeat = proc.ingest(2, &frame_b, true).unwrap().record.hash.clone();
+        assert_eq!(repeat, hash_b, "identical content must produce an identical fingerprint");
+        assert!(proc.is_duplicate(&repeat));
+    }
+
+    #[test]
+    fn is_duplicate_is_false_before_any_frame_is_ingested() {
+        let proc = FrameProcessor::new(0, 2, 2, PixFmt::Indexed8);
+        let hash = fingerprint(&[42u8; 4], 2, 2, &PixFmt::Indexed8).unwrap();
+        assert!(
+            !proc.is_duplicate(&hash),
+            "with no previous frame nothing can be a duplicate"
+        );
     }
 }

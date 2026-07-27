@@ -96,7 +96,7 @@ pub async fn weather(
 
 // ---------------------------------------------------------------------------
 // Simulation helper — generate a synthetic weather timeline for a 3-node run
-// (used by drive/m5.sh to seed the weather table for testing)
+// (used by drive/m/m5.sh to seed the weather table for testing)
 // ---------------------------------------------------------------------------
 
 pub async fn simulate_weather(

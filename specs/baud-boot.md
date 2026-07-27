@@ -249,7 +249,7 @@ match vcpu.run()? {
 }
 ```
 
-The `drive/h7.sh` script wraps these: build a real image → `guest_kernel_boots_to_userspace` →
+The `drive/h/h7.sh` script wraps these: build a real image → `guest_kernel_boots_to_userspace` →
 `boot_params_seed_is_pinned` → `double_boot_ram_hash_identical` (`baud-multiverse`) → `os_entropy_is_deterministic`.
 
 ---

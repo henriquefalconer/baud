@@ -534,6 +534,18 @@ pub struct HaltOutcome {
     pub exit_pc: u64,
 }
 
+/// Exactly [`HaltOutcome`] minus its `ram_hash` — what
+/// [`Multiverse::run_to_first_halt_without_ram_hash`] observes for a caller that does not want to
+/// pay for a blake3 pass over all of [`layout::GUEST_RAM_SIZE`] on every single run.
+#[derive(Debug)]
+pub struct HaltObservation {
+    /// Every byte the guest wrote to the console (COM1 data register), in order — identical to
+    /// [`HaltOutcome::console_output`].
+    pub console_output: Vec<u8>,
+    /// The vCPU's RIP at the moment the halt was observed — identical to [`HaltOutcome::exit_pc`].
+    pub exit_pc: u64,
+}
+
 /// One stopping condition [`Multiverse::run_until_branch_or_halt`] can report — either the guest
 /// halted normally (same payload as [`Multiverse::run_to_first_halt`]), or it issued the tape
 /// device's `MARK_BRANCH` control op (specs/baud-tape-device.md §4) and is still running, paused
@@ -878,10 +890,32 @@ impl Multiverse {
     /// this `Multiverse`'s console `Bus` and work-clock `TimeSource` — any exit kind neither knows
     /// how to serve is `Err(DeterminismHole)`, never a silent continue (specs/baud-vcpu.md §3).
     pub fn run_to_first_halt(&mut self) -> Result<HaltOutcome, DeterminismHole> {
-        baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
+        let observed = self.run_to_first_halt_without_ram_hash()?;
         Ok(HaltOutcome {
-            console_output: self.bus.console.output().to_vec(),
+            console_output: observed.console_output,
             ram_hash: self.ram_hash(),
+            exit_pc: observed.exit_pc,
+        })
+    }
+
+    /// [`run_to_first_halt`](Self::run_to_first_halt) without the guest-RAM hash: the identical run
+    /// loop, stopping at the identical first `Hlt`/`Shutdown` and reporting the identical console
+    /// output and exit PC, but skipping [`ram_hash`](Self::ram_hash)'s blake3 pass over all
+    /// [`layout::GUEST_RAM_SIZE`] bytes (~0.1s per call on this dev machine, irrespective of how
+    /// much of that RAM the guest actually touched).
+    ///
+    /// For a caller that runs many guests but only needs the RAM hash of some of them —
+    /// `thousand_branches_are_independent_and_deterministic` runs 1000 branches and compares the
+    /// RAM hash of 8 — this is the difference between paying that pass 1000 times and paying it 8
+    /// times. The hash is not lost by using this entry point: a halted guest's RAM does not change
+    /// underneath its `Multiverse`, so [`ram_hash`](Self::ram_hash) called afterwards returns
+    /// exactly what [`run_to_first_halt`](Self::run_to_first_halt) would have put in
+    /// [`HaltOutcome::ram_hash`] — which is precisely how `run_to_first_halt` itself is now
+    /// implemented, on top of this.
+    pub fn run_to_first_halt_without_ram_hash(&mut self) -> Result<HaltObservation, DeterminismHole> {
+        baud_vcpu::linux::run_until_halted(&mut self.guest.vcpu, &mut self.bus, &mut self.time)?;
+        Ok(HaltObservation {
+            console_output: self.bus.console.output().to_vec(),
             exit_pc: self.current_rip()?,
         })
     }
@@ -2063,7 +2097,7 @@ mod tests {
     /// `handle_baud_rdtsc_exit`, `kernel-module/baud-enforced/rdtsc-enforce.patch`) to already be
     /// loaded in place of the stock module — `#[ignore]`d so a normal `cargo test --workspace`
     /// (stock module, todo.md's mandatory green-build protocol) never runs it; only
-    /// `drive/h3-enforced-rdtsc.sh` invokes it by name, after swapping the module in and before
+    /// `drive/manual/h3-enforced-rdtsc.sh` invokes it by name, after swapping the module in and before
     /// swapping the stock one back.
     ///
     /// Under the *stock* module RDTSC never traps, so a raw `rdtsc` read still reflects real
@@ -2074,7 +2108,7 @@ mod tests {
     /// equality across two boots, not just the high bits: the enforced regime's actual promise
     /// (todo.md §3.8, test-matrix row 1).
     #[test]
-    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdtsc.sh"]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/manual/h3-enforced-rdtsc.sh"]
     fn rdtsc_enforced_regime_is_bit_exact_across_boots() {
         let kernel = rdtsc_guest_kernel_path();
         let cmdline = "console=ttyS0";
@@ -2115,7 +2149,7 @@ mod tests {
     /// `kernel-module/baud-enforced/rdrand-enforce.patch`, layered on
     /// `rdtsc-enforce.patch`) already loaded in place of the stock module — `#[ignore]`d so a
     /// normal `cargo test --workspace` (stock module) never runs it; only
-    /// `drive/h3-enforced-rdrand.sh` invokes it by name.
+    /// `drive/manual/h3-enforced-rdrand.sh` invokes it by name.
     ///
     /// Under the *enforced* regime, `SECONDARY_EXEC_RDRAND_EXITING` traps the `rdrand` **before**
     /// the CPUID-gated `#UD` check the cooperative regime relies on, so the guest reaches the echo
@@ -2123,7 +2157,7 @@ mod tests {
     /// served from `WorkClock::serve_enforced_rdrand()`, a deterministic tape-seeded PRNG draw,
     /// not real hardware entropy, so two boots of the same (empty) tape must reproduce bit-for-bit.
     #[test]
-    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdrand.sh"]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/manual/h3-enforced-rdrand.sh"]
     fn rdrand_enforced_regime_is_bit_exact_across_boots() {
         let kernel = rdrand_guest_kernel_path();
         let cmdline = "console=ttyS0";
@@ -2185,7 +2219,7 @@ mod tests {
     /// tests. Requires the patched `kvm_intel.ko` (`kernel-module/baud-enforced/ud2-enforce.patch`
     /// layered on `rdrand-enforce.patch` on `rdtsc-enforce.patch`) already loaded in place of the
     /// stock module — `#[ignore]`d so a normal `cargo test --workspace` (stock module) never runs
-    /// it; only `drive/h3-enforced-rdseed.sh` invokes it by name.
+    /// it; only `drive/manual/h3-enforced-rdseed.sh` invokes it by name.
     ///
     /// RDSEED's enforced path is structurally different from RDTSC's and RDRAND's, and this is what
     /// proves that difference works end to end. `SECONDARY_EXEC_RDSEED_EXITING` is not settable on
@@ -2203,7 +2237,7 @@ mod tests {
     /// two boots of the same (empty) tape, since `serve_enforced_rdseed` draws from the same
     /// tape-seeded `SplitMix64` stream `serve_enforced_rdrand` does.
     #[test]
-    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdseed.sh"]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/manual/h3-enforced-rdseed.sh"]
     fn rdseed_enforced_regime_is_bit_exact_across_boots() {
         let kernel = rdseed_guest_kernel_path();
         let cmdline = "console=ttyS0";
@@ -2254,9 +2288,9 @@ mod tests {
     /// matched too loosely), the guest would run on and emit 5 bytes instead of 1. If `reinject_ud`
     /// failed to inject anything, RIP would still be sitting on the `UD2` (the kernel handler never
     /// advances it) and the guest would re-trap the same instruction forever — this test would hang
-    /// rather than fail, which is itself a legible signal in `drive/h3-enforced-rdseed.sh`'s output.
+    /// rather than fail, which is itself a legible signal in `drive/manual/h3-enforced-rdseed.sh`'s output.
     #[test]
-    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/h3-enforced-rdseed.sh"]
+    #[ignore = "needs the patched enforced-regime kvm_intel.ko loaded; see drive/manual/h3-enforced-rdseed.sh"]
     fn ud2_outside_the_rdseed_site_table_reinjects_ud() {
         let kernel = rdseed_guest_kernel_path();
         let cmdline = "console=ttyS0";
@@ -3195,8 +3229,8 @@ mod tests {
     /// **Requires the enforced (RDTSC-trapping) `kvm_intel.ko`** (`kernel-module/baud-enforced/
     /// rdtsc-enforce.patch`), like the sibling `*_enforced_regime_is_bit_exact_across_boots` tests
     /// -- `#[ignore]`d so a normal `cargo test --workspace` (stock module) never runs it; only
-    /// `drive/h7-enforced-entropy.sh` invokes it by name, after the same swap-in/swap-out dance
-    /// `drive/h3-enforced-rdtsc.sh` uses. This was empirically load-bearing, not a defensive
+    /// `drive/manual/h7-enforced-entropy.sh` invokes it by name, after the same swap-in/swap-out dance
+    /// `drive/manual/h3-enforced-rdtsc.sh` uses. This was empirically load-bearing, not a defensive
     /// precaution: an earlier version of this test against the *stock* module (RDTSC executing
     /// natively) failed non-deterministically even with the `SETUP_RNG_SEED` boot seed pinned and
     /// `random.trust_bootloader=on` set, because `random_init()` (`drivers/char/random.c`)
@@ -3248,7 +3282,7 @@ mod tests {
     /// interrupt-injection engine's "is the target crossed yet" reads and the work-clock's own
     /// served value are, by construction, the identical read of the identical fd — no second
     /// epoch left to disagree with. A real-hardware `H7_ENTROPY_REPEATS=10` batch
-    /// (`drive/h7-enforced-entropy.sh`) after this fix (and after also fixing `SPURIOUS_LAPIC_LINE`
+    /// (`drive/manual/h7-enforced-entropy.sh`) after this fix (and after also fixing `SPURIOUS_LAPIC_LINE`
     /// below, a second, independent bug this fix's improved timing precision exposed at a much
     /// higher rate) passed 7/10, and every one of the 3 failures showed the *same* tick count and
     /// a **1-2 count** RCB-delta disagreement (down from the pre-fix 34) with a bit-identical
@@ -3279,9 +3313,9 @@ mod tests {
     /// `±1`-nondeterministic on this exact host (`docs/determinism.md`'s table), which is exactly
     /// the few-count landing-RCB jitter this doc spent several iterations chasing. Switching both
     /// call sites to the raw event (see [`BR_INST_RETIRED_COND`]) took a real-hardware
-    /// `H7_ENTROPY_REPEATS=10` batch to 10/10 (`drive/h7-enforced-entropy.sh`), and the sibling
+    /// `H7_ENTROPY_REPEATS=10` batch to 10/10 (`drive/manual/h7-enforced-entropy.sh`), and the sibling
     /// `double_boot_ram_hash_identical` test below — same root cause, previously 0/8-4/8 — to
-    /// 25/25 across two batches (`drive/h7-enforced-checkpoint.sh`).
+    /// 25/25 across two batches (`drive/manual/h7-enforced-checkpoint.sh`).
     #[test]
     #[ignore]
     fn os_entropy_is_deterministic() {
@@ -3472,8 +3506,8 @@ mod tests {
     /// ordinary kernel data inside the whole-RAM-hashed region) earlier in boot under the *stock*
     /// module's real-TSC reads. Only with RDTSC/RDTSCP hardware-trapped and served from the
     /// work-clock does every RAM byte the checkpoint would hash become a pure function of the
-    /// tape. `#[ignore]`d for this reason; `drive/h7-enforced-checkpoint.sh` runs it with
-    /// `--ignored` after the same swap-in/swap-out dance `drive/h7-enforced-entropy.sh` uses.
+    /// tape. `#[ignore]`d for this reason; `drive/manual/h7-enforced-checkpoint.sh` runs it with
+    /// `--ignored` after the same swap-in/swap-out dance `drive/manual/h7-enforced-entropy.sh` uses.
     ///
     /// **Real-hardware result: fails 100% of the time even under the enforced module (0/8 across
     /// two real batches), unlike `os_entropy_is_deterministic`'s ~70-90% pass rate on the
@@ -3496,7 +3530,7 @@ mod tests {
     /// residual single-fd `perf_event`-read jitter to exactly zero (open per
     /// `os_entropy_is_deterministic`'s own doc) or identifying and pinning the specific
     /// static-call site involved -- both future work, not attempted this iteration. Kept
-    /// `#[ignore]`d and wired into `drive/h7-enforced-checkpoint.sh`.
+    /// `#[ignore]`d and wired into `drive/manual/h7-enforced-checkpoint.sh`.
     ///
     /// **RESOLVED.** The "residual single-fd `perf_event`-read jitter" above was never irreducible
     /// hardware imprecision -- it was `LinuxBranchCounter` (this file) and `crates/baud-host/src/
@@ -3507,8 +3541,8 @@ mod tests {
     /// `±1`-nondeterministic on this exact host, exactly matching the jitter that let the
     /// `static_call` trampoline's runtime decision resolve differently each boot. Switching both
     /// call sites to the raw event took a real-hardware batch from 0/8 to 25/25 across two runs
-    /// (10/10 then 15/15, `drive/h7-enforced-checkpoint.sh`), and the identical fix took
-    /// `os_entropy_is_deterministic` above from ~70-90% to 10/10. `drive/h7-enforced-checkpoint.sh`
+    /// (10/10 then 15/15, `drive/manual/h7-enforced-checkpoint.sh`), and the identical fix took
+    /// `os_entropy_is_deterministic` above from ~70-90% to 10/10. `drive/manual/h7-enforced-checkpoint.sh`
     /// now hard-gates on this test like any other real-hardware check.
     #[test]
     #[ignore]
@@ -3849,8 +3883,31 @@ mod tests {
     /// `b.is_deterministic_double_run()`) — done for a sample rather than all `NUM_BRANCHES` purely
     /// to bound this test's real-hardware run time; determinism itself is not sampled science here,
     /// it is the same `restore` code path every branch already takes, already proven bit-identical
-    /// by `snapshot_roundtrip_is_bit_identical` above.
+    /// by `snapshot_roundtrip_is_bit_identical` above. The per-branch RAM hash is therefore
+    /// computed for exactly those sampled indices too (via
+    /// [`Multiverse::run_to_first_halt_without_ram_hash`] plus an explicit
+    /// [`Multiverse::ram_hash`]), not for all `NUM_BRANCHES` — a 256 MiB blake3 pass whose result
+    /// nothing reads is pure wall clock.
+    ///
+    /// Being the workspace's only ~`NUM_BRANCHES`-deep run of full VM lifecycles (the next largest
+    /// count anywhere is 6), this is also the only place a per-lifecycle *resource* leak is
+    /// observable, so it asserts that explicitly rather than waiting for an eventual `Err`/OOM
+    /// kill: open-fd count across the loop must be flat (a one-fd-per-branch leak would be
+    /// ~`NUM_BRANCHES` extra fds), and RSS growth from a warm baseline must stay under a bound far
+    /// below "one leaked 256 MiB guest-RAM region per branch" yet far above any plausible allocator
+    /// drift. Both samples are taken between waves, with every worker joined and no branch alive,
+    /// so `BRANCH_WORKERS` changes only the *peak* RSS during a wave, not what these two measure.
+    ///
+    /// `NUM_BRANCHES` real KVM VM lifecycles cost ~67s on this dev machine (measured on a quiet
+    /// host; ~143s with `BRANCH_WORKERS = 1`, i.e. before the branches were spread across threads,
+    /// and ~237s before that, when the RAM hash was still computed for the ~992 branches that never
+    /// read one), and by themselves the entire floor of `cargo test -p baud-multiverse --lib` (the
+    /// next-slowest test in the crate is ~2s). `drive/h/h5.sh` already runs this test by name, so
+    /// leaving it in the default suite meant paying that floor *twice* per verification round;
+    /// `#[ignore]`d here so only `drive/h/h5.sh` invokes it, the same opt-in convention as the
+    /// enforced-regime tests (`drive/manual/h3-enforced-rdtsc.sh` etc).
     #[test]
+    #[ignore = "1000 real KVM VM lifecycles, ~67s; covered by drive/h/h5.sh, too slow for the default suite"]
     fn thousand_branches_are_independent_and_deterministic() {
         let kernel = tape_echo_guest_kernel_path();
         let cmdline = "console=ttyS0";
@@ -3869,21 +3926,181 @@ mod tests {
             vec![(i & 0xff) as u8, ((i >> 8) & 0xff) as u8, 0xAA, 0xBB]
         };
 
-        let mut outputs = Vec::with_capacity(NUM_BRANCHES);
-        for i in 0..NUM_BRANCHES {
-            let suffix = suffix_for(i);
-            let mut branch = Multiverse::branch(&universe, suffix.clone(), WORK_CLOCK_K, None)
-                .unwrap_or_else(|e| panic!("branch {i} failed: {e}"));
-            let outcome = branch.run_to_first_halt().unwrap_or_else(|e| panic!("branch {i} run failed: {e}"));
-            assert_eq!(
-                outcome.console_output, suffix,
-                "branch {i} must echo exactly its own tape suffix {suffix:?}, got \
-                 {:?} — any mismatch means this branch observed another branch's state \
-                 (or stale/shared state), not its own",
-                outcome.console_output
-            );
-            outputs.push((suffix, outcome.ram_hash));
-        }
+        // Only the `DOUBLE_RUN_SAMPLE` indices the double-run loop below re-forks ever read a
+        // recorded RAM hash, and `Multiverse::ram_hash` is a blake3 pass over all
+        // `layout::GUEST_RAM_SIZE` (256 MiB, ~0.1s here) regardless of how few pages the guest
+        // touched — so hashing every branch would spend ~99% of that work on hashes nothing reads.
+        // `run_to_first_halt_without_ram_hash` + an explicit `branch.ram_hash()` on exactly the
+        // sampled indices is the same observation for a fraction of the wall clock.
+        let sample_stride = NUM_BRANCHES / DOUBLE_RUN_SAMPLE;
+
+        // The resource-leak coverage this test uniquely can provide: it is the only place in the
+        // workspace that runs ~1008 KVM_CREATE_VM + vCPU + 256 MiB-guest-RAM-region + perf_event
+        // create/destroy cycles (the next largest count anywhere is 6). A per-branch leak of even
+        // one fd or one RAM region is invisible in any other test but shows up here ~1000x over —
+        // so measure both explicitly rather than relying on an eventual Err/OOM.
+        let open_fds = || {
+            std::fs::read_dir("/proc/self/fd").expect("/proc/self/fd is readable on Linux").count()
+        };
+        let vm_rss_kib = || -> u64 {
+            let status =
+                std::fs::read_to_string("/proc/self/status").expect("/proc/self/status is readable on Linux");
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|kib| kib.parse::<u64>().ok())
+                .expect("/proc/self/status always reports VmRSS for a running process")
+        };
+
+        // A leaked fd per branch would be ~1000 extra fds here, so the slack only has to absorb
+        // test-harness noise (a stray pipe/inotify fd), not any real per-branch growth.
+        const FD_SLACK: usize = 16;
+        // Warm RSS baseline: taken after the first `RSS_WARM_BRANCH` branches rather than before
+        // any of them, so one-time allocator arena growth from the first handful of 256 MiB restore
+        // cycles (and from the worker threads' own per-thread arenas) has already settled and is
+        // not counted as "growth". Both samples are taken between waves, with every worker joined,
+        // so neither includes a live guest-RAM region.
+        const RSS_WARM_BRANCH: usize = 50;
+        // Sized off both ends of the gap it has to sit in. Measured drift over the remaining ~950
+        // branches on this dev machine is ~7.2 MiB (8508 KiB -> 15800 KiB, spread of 0.15 MiB over
+        // 15+ consecutive runs), which is just `outputs`/`results` growing plus allocator
+        // bookkeeping — the 256 MiB guest-RAM regions themselves are mmap'd and munmap'd per
+        // branch, so they never accumulate no matter how many are live at once. (It is ~2.2 MiB
+        // with `BRANCH_WORKERS = 1`; the extra ~5 MiB is the per-worker-thread allocator arenas, a
+        // one-off that does not scale with `NUM_BRANCHES`.) The smallest leak worth
+        // catching is a single un-released guest-RAM region, +256 MiB. 128 MiB sits ~18x above the
+        // measured drift and below that smallest real leak, so it cannot flake on normal allocator
+        // behaviour yet still fails on even one leaked region (let alone one per branch, which
+        // would be +250 GiB and an OOM kill long before the loop ends).
+        const RSS_GROWTH_LIMIT_KIB: u64 = 128 * 1024; // 128 MiB
+
+        // Branch independence is the very property this test asserts, so the branches are also
+        // safe to *run* concurrently — this is `fleet_of_vms_run_in_parallel_without_interference`'s
+        // construction (concurrent real VMs on real threads) applied to branches, and it makes the
+        // cross-branch-perturbation check strictly stronger: a sequential loop can only catch state
+        // leaking through a *reused* resource, whereas concurrent branches would also catch state
+        // leaking through a genuinely shared live one. `universe` is shared by plain `&` — its
+        // pages are `Arc`-backed `PageRef`s, so `Universe` is `Sync` — and `std::thread::scope`
+        // borrows it in place, so no `'static` bound and no `Arc` wrapper is needed. Nothing else
+        // crosses a thread boundary: `page_store` is touched only by the pre-loop `snapshot`, and
+        // each branch's vm/vcpu fds and its `perf_event` counter are created *and* used on the one
+        // worker thread that owns that branch end to end — which is exactly what KVM (vcpu ioctls
+        // belong to the thread that created the vCPU) and `perf_event_open` (`pid == 0` attaches
+        // the counter to the calling thread) each require.
+        //
+        // The worker count is sized off RAM, not cores: `baud_snapshot::linux::restore` writes all
+        // 65536 pages of the branch's `layout::GUEST_RAM_SIZE` (256 MiB) region — it is a real
+        // copy, not COW — so every *concurrently live* branch costs a full 256 MiB of RSS, i.e. N
+        // workers cost N x 256 MiB. This host has 8 logical / 4 physical cores and ~5 GiB of
+        // available RAM: 4 x 256 MiB = 1 GiB peak, ~20% of available, with one branch per physical
+        // core and the SMT siblings left as headroom for the host's own work (and for whatever else
+        // `drive/gate.sh` is running alongside h5). Going wider trades a guaranteed, linear RSS cost
+        // for very little wall clock — each branch is memory-bandwidth-bound inside `restore` at
+        // least as much as it is CPU-bound inside `KVM_RUN`, so the shared memory path saturates
+        // well before the logical cores do.
+        const BRANCH_WORKERS: usize = 4;
+
+        // One parallel wave of branches: `range`'s indices are dealt round-robin to
+        // `BRANCH_WORKERS` scoped threads (so the sampled indices spread evenly over the workers
+        // too), each of which runs its branches exactly as the old sequential loop did — same
+        // `branch` + `run_to_first_halt_without_ram_hash` + same per-branch assertion, and
+        // `ram_hash` for the sampled indices only. Returns `(index, suffix, sampled ram_hash)` per
+        // branch, unordered; the caller sorts by index. Every worker joins before this returns, so
+        // afterwards no branch is alive anywhere — which is what makes the RSS samples below
+        // comparable to the sequential version's.
+        let run_branch_wave = |range: std::ops::Range<usize>| -> Vec<(usize, Vec<u8>, Option<String>)> {
+            let universe = &universe;
+            let suffix_for = &suffix_for;
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..BRANCH_WORKERS)
+                    .map(|worker| {
+                        let range = range.clone();
+                        scope.spawn(move || {
+                            range
+                                .skip(worker)
+                                .step_by(BRANCH_WORKERS)
+                                .map(|i| {
+                                    let suffix = suffix_for(i);
+                                    let mut branch =
+                                        Multiverse::branch(universe, suffix.clone(), WORK_CLOCK_K, None)
+                                            .unwrap_or_else(|e| panic!("branch {i} failed: {e}"));
+                                    let outcome = branch
+                                        .run_to_first_halt_without_ram_hash()
+                                        .unwrap_or_else(|e| panic!("branch {i} run failed: {e}"));
+                                    assert_eq!(
+                                        outcome.console_output, suffix,
+                                        "branch {i} must echo exactly its own tape suffix {suffix:?}, got \
+                                         {:?} — any mismatch means this branch observed another branch's state \
+                                         (or stale/shared state), not its own",
+                                        outcome.console_output
+                                    );
+                                    // `branch` has halted, so its RAM is stable: hashing here is
+                                    // exactly the `ram_hash` `run_to_first_halt` would have
+                                    // returned, just only for the sampled indices.
+                                    let ram_hash = (i % sample_stride == 0).then(|| branch.ram_hash());
+                                    (i, suffix, ram_hash)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| {
+                        handle.join().unwrap_or_else(|_| {
+                            panic!("a branch worker thread panicked — its own assertion/panic message is above")
+                        })
+                    })
+                    .collect()
+            })
+        };
+
+        let fds_before = open_fds();
+
+        // Two waves rather than one, purely so `rss_warm_kib` keeps the meaning it had when the
+        // loop was sequential: the first wave is the warm-up (the same `RSS_WARM_BRANCH` branches,
+        // now run in parallel), and every one of its workers has joined before the sample is taken,
+        // so — exactly as before — the baseline is taken with no branch alive and no guest-RAM
+        // region resident. Peak RSS *during* a wave now scales with `BRANCH_WORKERS`, but neither
+        // of the two samples is taken during one.
+        let mut results = run_branch_wave(0..RSS_WARM_BRANCH);
+        let rss_warm_kib = vm_rss_kib();
+        results.extend(run_branch_wave(RSS_WARM_BRANCH..NUM_BRANCHES));
+
+        let fds_after = open_fds();
+        let rss_after_kib = vm_rss_kib();
+
+        // Back to branch order, so `outputs[i]` is branch `i`'s — the indices are exactly
+        // `0..NUM_BRANCHES` (each dealt to exactly one worker), so this is a total order with no
+        // gaps, which the length assertion pins.
+        assert_eq!(
+            results.len(),
+            NUM_BRANCHES,
+            "every branch index must come back from exactly one worker thread"
+        );
+        results.sort_unstable_by_key(|(i, _, _)| *i);
+        let outputs: Vec<(Vec<u8>, Option<String>)> =
+            results.into_iter().map(|(_, suffix, ram_hash)| (suffix, ram_hash)).collect();
+        eprintln!(
+            "thousand_branches_are_independent_and_deterministic: fds {fds_before} -> {fds_after}, \
+             VmRSS {rss_warm_kib} KiB (after branch {RSS_WARM_BRANCH}) -> {rss_after_kib} KiB"
+        );
+        assert!(
+            fds_after <= fds_before + FD_SLACK,
+            "{NUM_BRANCHES} branch lifecycles leaked file descriptors: {fds_before} open before the \
+             loop, {fds_after} after (allowed slack {FD_SLACK}) — each branch opens a vm fd, a vcpu \
+             fd, a guest-RAM memfd and a perf_event fd, so a per-branch leak of even one shows up \
+             as ~{NUM_BRANCHES} extra fds here"
+        );
+        assert!(
+            rss_after_kib <= rss_warm_kib + RSS_GROWTH_LIMIT_KIB,
+            "{NUM_BRANCHES} branch lifecycles grew RSS from {rss_warm_kib} KiB (warm baseline, after \
+             branch {RSS_WARM_BRANCH}) to {rss_after_kib} KiB, past the {RSS_GROWTH_LIMIT_KIB} KiB \
+             bound — each branch maps a fresh {} MiB guest-RAM region, so unbounded growth here \
+             means those regions are not being released",
+            layout::GUEST_RAM_SIZE / (1024 * 1024)
+        );
 
         // Every branch's output is pinned to its own unique suffix by construction (asserted
         // above), so distinct suffixes trivially mean distinct expected outputs — this is an
@@ -3894,13 +4111,18 @@ mod tests {
 
         // A sample of branches, re-forked from the same universe with the same suffix, must be
         // internally deterministic (the spec pseudocode's `b.is_deterministic_double_run()`).
-        for i in (0..NUM_BRANCHES).step_by(NUM_BRANCHES / DOUBLE_RUN_SAMPLE) {
+        for i in (0..NUM_BRANCHES).step_by(sample_stride) {
             let suffix = suffix_for(i);
             let mut replay = Multiverse::branch(&universe, suffix.clone(), WORK_CLOCK_K, None)
                 .unwrap_or_else(|e| panic!("branch {i} replay failed: {e}"));
             let replay_outcome =
                 replay.run_to_first_halt().unwrap_or_else(|e| panic!("branch {i} replay run failed: {e}"));
             let (_, first_ram_hash) = &outputs[i];
+            // `sample_stride` selects exactly the indices the loop above hashed, so this is
+            // infallible by construction — the `expect` only pins that invariant in place.
+            let first_ram_hash = first_ram_hash
+                .as_ref()
+                .unwrap_or_else(|| panic!("branch {i} is a sampled index, so its RAM hash was recorded"));
             assert_eq!(
                 replay_outcome.console_output, suffix,
                 "branch {i} replayed from the same universe+suffix must produce the same output"
@@ -3926,7 +4148,19 @@ mod tests {
     /// sequential `restore` calls). Also gives [`baud_vcpu::linux::pin_thread_to_core`] its first
     /// real call site in the workspace (todo.md §14: written for spec compliance, zero callers
     /// until this test).
+    ///
+    /// Load-sensitive by construction, and so `#[ignore]`d: it pins its threads to *fixed* logical
+    /// cores (0/2/4/...) and its throughput check is a timing *ratio* against a serial baseline
+    /// measured moments earlier — both of which assume the machine is otherwise quiet. Inside
+    /// `cargo test --workspace` it instead runs alongside up to 7 sibling KVM tests on this
+    /// 8-thread host, which contend for exactly those cores and stretch `parallel_total` for
+    /// reasons that have nothing to do with the concurrency being tested; that is the single
+    /// largest source of recorded flakes in `ralph/progress.txt` (19). `drive/h/h6.sh` is its sole
+    /// runner (`--include-ignored`), where it is the only KVM workload on the machine — the same
+    /// opt-in convention `thousand_branches_are_independent_and_deterministic` and the
+    /// enforced-regime tests already use.
     #[test]
+    #[ignore = "timing-ratio + fixed-core pinning, flaky under any concurrent load; covered by drive/h/h6.sh on a quiet machine"]
     fn fleet_of_vms_run_in_parallel_without_interference() {
         let host = baud_host::Host::probe();
         assert!(

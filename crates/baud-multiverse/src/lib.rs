@@ -608,6 +608,12 @@ pub struct Multiverse {
     guest_quantum_steps: Vec<u64>,
 }
 
+/// The simulation loop's per-quantum action draw is `draw_int(0, SPIN_ACTION)`.
+/// Values below `SPIN_ACTION` index the synthetic syscall table (the guest reaches a
+/// syscall boundary and yields); `SPIN_ACTION` itself means the guest spun for the
+/// whole quantum without reaching a syscall — the case the wall-clock watchdog kills.
+const SPIN_ACTION: u64 = 6;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyscallLogEntry {
     pub step: u64,
@@ -737,11 +743,12 @@ impl Multiverse {
         // same tape-consumption and observation-emission paths as the real
         // supervisor, allowing the protocol and double-run tests to pass.
         //
-        // Wall-clock watchdog (spec §6): in real mode this is a wall-clock timer
-        // (outside the deterministic boundary). In simulation mode, we use a
-        // "steps without yielding" counter as a proxy: if a guest is scheduled
-        // quantum_limit_ms / 100 times without making a syscall that yields control,
-        // it is killed with Crash{detail: "quantum-overrun"}.
+        // Wall-clock watchdog (docs/determinism.md "Known limits" §4): in real mode
+        // this is a wall-clock timer (outside the deterministic boundary). In
+        // simulation mode, we use a "quanta without yielding" counter as a proxy: if a
+        // guest is scheduled quantum_limit_ms / 100 times and never reaches a syscall
+        // that yields control (`SPIN_ACTION` below), it is killed with
+        // Crash{detail: "quantum-overrun"}.
         let quantum_step_limit = if self.quantum_limit_ms > 0 {
             // 100ms per simulated step → quantum_limit_ms / 100 steps
             (self.quantum_limit_ms / 100).max(1) as u64
@@ -801,9 +808,24 @@ impl Multiverse {
                 continue;
             }
 
-            // Draw a synthetic syscall from the allowlist.
-            let sysno_idx = tape.draw_int(0, 5); // pick from a few common ones
-            let sysno = [0u32, 1, 228, 318, 60, 231][sysno_idx as usize];
+            // Draw what the guest does with this quantum. Indices 0..=5 pick the
+            // syscall it reaches — reaching a syscall is what yields control back to
+            // the supervisor. Index SPIN_ACTION means the guest burned the whole
+            // quantum computing and never reached a syscall boundary: the spin that
+            // the wall-clock watchdog above exists to catch (docs/determinism.md,
+            // "Known limits" §4). Without this outcome the watchdog is unreachable,
+            // because every scheduled guest would yield in the same step in which its
+            // quantum counter was incremented.
+            let action = tape.draw_int(0, SPIN_ACTION);
+            if action == SPIN_ACTION {
+                // No syscall this quantum: burn the time, do NOT reset the quantum
+                // counter, and let the watchdog above kill the guest once the counter
+                // exceeds the limit.
+                self.clock.advance(100);
+                self.step += 1;
+                continue;
+            }
+            let sysno = [0u32, 1, 228, 318, 60, 231][action as usize];
 
             self.clock.advance(100);
             let vtime = self.clock.now_nanos();
@@ -1167,80 +1189,180 @@ mod tests {
         assert_eq!(t1, t3_1, "virtual clock after advance must be identical across replays");
     }
 
-    /// Additional test: different tapes produce different observations (non-triviality).
+    /// Non-triviality counterpart to `double_run_is_bit_identical`: the tape actually
+    /// steers execution, so a *different* tape gives a different run. If this failed,
+    /// the determinism claim would be vacuous — a supervisor that ignored the tape
+    /// entirely would also produce bit-identical double runs.
+    ///
+    /// Divergence is asserted at two levels, because the two are not the same claim:
+    ///   * execution always diverges — different tapes drive different syscalls;
+    ///   * the *observation stream* diverges only when the differing behaviour is
+    ///     observable. Two tapes that pick, say, `read` vs `write` emit no
+    ///     observations at all in this simulation, so their streams coincide; that is
+    ///     why the property is "may diverge" at the observation level. The pair used
+    ///     below (exit vs. keep-running) is observable, so its streams must differ.
     #[test]
-    fn different_tapes_may_diverge() {
-        let tape_a: Vec<u8> = vec![0x00u8; 64];
-        let tape_b: Vec<u8> = vec![0xFFu8; 64];
-
+    fn different_tapes_diverge() {
         let manifest = make_manifest(1);
 
-        let mut m_a = Multiverse::load(manifest.clone(), vec![]).expect("load a");
-        let mut src_a = TapeDrawSource::new(tape_a);
-        let obs_a = m_a.run(&mut src_a);
+        // --- Execution-level divergence: read-forever vs write-forever ---------------
+        let mut m_read = Multiverse::load(manifest.clone(), vec![]).expect("load read");
+        let obs_read = m_read.run(&mut TapeDrawSource::new(action_tape(0, 8))); // sysno 0 = read
+        let mut m_write = Multiverse::load(manifest.clone(), vec![]).expect("load write");
+        let obs_write = m_write.run(&mut TapeDrawSource::new(action_tape(1, 8))); // sysno 1 = write
 
-        let mut m_b = Multiverse::load(manifest.clone(), vec![]).expect("load b");
-        let mut src_b = TapeDrawSource::new(tape_b);
-        let obs_b = m_b.run(&mut src_b);
+        let sysnos = |m: &Multiverse| m.syscall_log().iter().map(|e| e.sysno).collect::<Vec<_>>();
+        assert_eq!(sysnos(&m_read), vec![0u32; 8], "tape must select `read` every quantum");
+        assert_eq!(sysnos(&m_write), vec![1u32; 8], "tape must select `write` every quantum");
+        assert_ne!(
+            sysnos(&m_read),
+            sysnos(&m_write),
+            "different tapes must drive different executions"
+        );
+        // Neither `read` nor `write` is observable in this simulation, so these two
+        // runs are the "may not diverge" case at the observation level — asserted here
+        // so that making syscalls observable trips this test rather than passing it by.
+        assert_eq!(
+            obs_read.stream_hash(),
+            obs_write.stream_hash(),
+            "unobservable syscall differences must not show up in the observation stream"
+        );
 
-        // The two tapes may produce different observations (proves non-triviality).
-        // We don't assert they MUST differ (a degenerate tape could be identical),
-        // just that each run is self-consistent.
-        assert!(
-            !obs_a.stream_hash().is_empty(),
-            "observation stream hash must not be empty"
+        // --- Observation-level divergence: exiting vs. running on ---------------------
+        let mut m_exit = Multiverse::load(manifest.clone(), vec![]).expect("load exit");
+        let obs_exit = m_exit.run(&mut TapeDrawSource::new(action_tape(4, 8))); // sysno 60 = exit
+        assert_ne!(
+            obs_exit.stream_hash(),
+            obs_read.stream_hash(),
+            "an exiting guest and a still-running guest must not hash to the same stream"
         );
         assert!(
-            !obs_b.stream_hash().is_empty(),
-            "observation stream hash must not be empty"
+            obs_exit.observations.iter().any(|o| o.probe == "exit"),
+            "the exit tape must produce an exit observation: {:?}",
+            obs_exit.observations.iter().map(|o| o.probe.as_str()).collect::<Vec<_>>()
         );
+        assert!(
+            !obs_read.observations.iter().any(|o| o.probe == "exit"),
+            "the read-forever tape must not produce an exit observation"
+        );
+    }
+
+    /// Build a tape that makes a single-guest simulation take `steps` quanta, each
+    /// resolving to the given action index.
+    ///
+    /// Draw layout per quantum (see `Multiverse::run`): with one guest the
+    /// `draw_int(0, 0)` scheduling draw consumes nothing (lo >= hi), so each quantum
+    /// consumes exactly the 8 bytes of the `draw_int(0, SPIN_ACTION)` action draw,
+    /// which returns `u64::from_le_bytes(..) % (SPIN_ACTION + 1)`.
+    fn action_tape(action: u64, steps: usize) -> Vec<u8> {
+        assert!(action <= SPIN_ACTION);
+        let mut tape = Vec::with_capacity(steps * 8);
+        for _ in 0..steps {
+            tape.extend_from_slice(&action.to_le_bytes());
+        }
+        tape
     }
 
     /// VR2-M7: wall-clock watchdog kills a spinning guest with quantum-overrun.
     ///
-    /// Spec §6: "A guest spinning without syscalls starves the cluster; the supervisor
-    /// detects quantum overrun (wall-clock watchdog, outside the deterministic boundary)
-    /// and kills with report."
+    /// docs/determinism.md, "Known limits" §4: "a guest spinning without syscalls
+    /// starves the cluster. The supervisor's wall-clock watchdog (outside the
+    /// deterministic boundary) kills it with a report."
     ///
-    /// In simulation mode, we use a step-count proxy for wall-clock time. A guest that
-    /// is scheduled repeatedly without yielding at a syscall boundary (quantum_limit_ms
-    /// steps) is killed with Crash{detail: "quantum-overrun"}.
+    /// In simulation mode wall-clock time is proxied by quanta: a guest that is
+    /// scheduled for more than `quantum_limit_ms / 100` consecutive quanta without
+    /// ever reaching a syscall boundary is killed with
+    /// `Crash{signal: SIGKILL, detail: "quantum-overrun"}`.
+    ///
+    /// This asserts the three halves of that contract that actually matter:
+    ///   1. a spinning guest IS killed, observably (crash observation + no further
+    ///      execution),
+    ///   2. a guest that yields at a syscall boundary every quantum is NOT killed,
+    ///      however long it runs (the watchdog must not fire on well-behaved guests),
+    ///   3. `quantum_limit_ms = 0` disables the watchdog, as documented on the field.
     #[test]
     fn quantum_overrun_guest_is_killed() {
-        let manifest = make_manifest(1);
-        let mut m = Multiverse::load(manifest, vec![]).expect("load manifest");
+        // --- 1. A spinning guest is killed ------------------------------------------
+        let mut m = Multiverse::load(make_manifest(1), vec![]).expect("load manifest");
+        m.quantum_limit_ms = 200; // 200ms / 100ms per quantum = 2 non-yielding quanta
 
-        // Set a very tight quantum limit: 1 step. This means the guest will be killed
-        // after just 1 consecutive scheduling without yielding at a syscall.
-        // (In the simulation, every scheduling slot IS a syscall, so we need to
-        // trigger via the guest_quantum_steps counter directly.)
-        m.quantum_limit_ms = 100; // 100ms / 100ms per step = 1 step limit
-
-        // Run with a tape that schedules guest 0 repeatedly. The watchdog should
-        // trigger after quantum_limit_ms/100 = 1 step.
-        let tape_bytes: Vec<u8> = vec![0x00u8; 128]; // all zeros → always picks guest 0
-        let mut tape = TapeDrawSource::new(tape_bytes);
+        // 10 quanta of pure spin: the guest never reaches a syscall.
+        let mut tape = TapeDrawSource::new(action_tape(SPIN_ACTION, 10));
         let obs = m.run(&mut tape);
 
-        // The guest should have a quantum-overrun crash observation
-        let crash_obs = obs.observations.iter().find(|o| {
-            o.probe == "crash" && o.value.to_string().contains("quantum-overrun")
-        });
+        let crash = obs
+            .observations
+            .iter()
+            .find(|o| o.probe == "crash")
+            .unwrap_or_else(|| {
+                panic!(
+                    "spinning guest must be killed with a crash observation; got {:?}",
+                    obs.observations.iter().map(|o| o.probe.as_str()).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(crash.node, 0, "the crash must name the spinning guest");
+        assert_eq!(
+            crash.value.get("detail").and_then(|v| v.as_str()),
+            Some("quantum-overrun"),
+            "crash detail must be quantum-overrun, got {}",
+            crash.value
+        );
+        assert_eq!(
+            crash.value.get("signal").and_then(|v| v.as_str()),
+            Some("SIGKILL"),
+            "the watchdog kills the guest, got {}",
+            crash.value
+        );
+        // It fires as soon as the limit is exceeded — the 3rd consecutive non-yielding
+        // quantum with a 2-quantum limit — not merely "eventually".
+        assert_eq!(crash.step, 2, "watchdog must fire on the quantum after the limit is exceeded");
+        // Observably killed: a spinning guest never reached a syscall, and once killed
+        // it never runs again — no syscall is logged for it despite 7 quanta of tape
+        // remaining after the kill.
+        assert!(
+            m.syscall_log().is_empty(),
+            "a spinning guest never reaches a syscall boundary: {:?}",
+            m.syscall_log()
+        );
+        assert!(
+            obs.observations.iter().any(|o| o.probe == "exit_code" && o.node == 0),
+            "a killed guest must be reported dead in the final-state observations"
+        );
+        assert!(
+            !obs.completed(),
+            "a stream containing a watchdog kill must not report completed()"
+        );
 
-        // In simulation mode, each "step" yields at a syscall, so the quantum counter
-        // resets each time. But with quantum_limit_ms=100 (1 step), any guest that is
-        // scheduled twice in a row should trigger the limit.
-        // Verify either: crash found (quantum-overrun) or all observations are healthy.
-        // The key property is that the watchdog mechanism is wired in and can fire.
-        let _ = crash_obs; // may not fire in simulation since every step yields
+        // --- 2. A guest that yields every quantum is NOT killed ---------------------
+        let mut m_ok = Multiverse::load(make_manifest(1), vec![]).expect("load manifest");
+        m_ok.quantum_limit_ms = 200; // same tight limit
+        // 40 quanta, every one of them reaching syscall 0 (read) — 20x the limit.
+        let mut tape_ok = TapeDrawSource::new(action_tape(0, 40));
+        let obs_ok = m_ok.run(&mut tape_ok);
+        assert!(
+            !obs_ok.observations.iter().any(|o| o.probe == "crash"),
+            "a guest that yields at a syscall boundary every quantum must never be killed"
+        );
+        assert_eq!(
+            m_ok.syscall_log().len(),
+            40,
+            "all 40 yielding quanta must have been served"
+        );
 
-        // What we CAN assert: the quantum watchdog code path was compiled and runs
-        // without panicking, and the observation stream is deterministic.
-        let tape_bytes2: Vec<u8> = vec![0x00u8; 128];
-        let mut tape2 = TapeDrawSource::new(tape_bytes2);
-        let manifest2 = make_manifest(1);
-        let mut m2 = Multiverse::load(manifest2, vec![]).expect("load manifest 2");
-        m2.quantum_limit_ms = 100;
+        // --- 3. quantum_limit_ms = 0 disables the watchdog --------------------------
+        let mut m_off = Multiverse::load(make_manifest(1), vec![]).expect("load manifest");
+        m_off.quantum_limit_ms = 0; // documented: "Set to 0 to disable"
+        let mut tape_off = TapeDrawSource::new(action_tape(SPIN_ACTION, 10));
+        let obs_off = m_off.run(&mut tape_off);
+        assert!(
+            !obs_off.observations.iter().any(|o| o.probe == "crash"),
+            "quantum_limit_ms = 0 must disable the watchdog"
+        );
+
+        // --- 4. The kill is still deterministic -------------------------------------
+        let mut m2 = Multiverse::load(make_manifest(1), vec![]).expect("load manifest 2");
+        m2.quantum_limit_ms = 200;
+        let mut tape2 = TapeDrawSource::new(action_tape(SPIN_ACTION, 10));
         let obs2 = m2.run(&mut tape2);
         assert_eq!(
             obs.stream_hash(), obs2.stream_hash(),

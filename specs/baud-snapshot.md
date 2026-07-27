@@ -252,7 +252,7 @@ instead of silently rewinding it.
   `KVM_GET_*`/`KVM_SET_*` the table above lists, in the plan's exact order. `Multiverse::snapshot`/
   `Multiverse::restore` (`crates/baud-multiverse/src/linux/mod.rs`) now drive this against a real,
   running guest for the first time (`linux::tests::snapshot_roundtrip_is_bit_identical`,
-  `drive/h5.sh`): capture a `timer-guest` fixture mid-run (after its first delivered interrupt),
+  `drive/h/h5.sh`): capture a `timer-guest` fixture mid-run (after its first delivered interrupt),
   restore into a brand-new `Multiverse`, deliver a second interrupt and run to halt — the restored
   run's landed instruction and whole observation stream (console output, RAM hash) match a
   straight, never-snapshotted run exactly. Two real, previously-undiscovered bugs surfaced by this
@@ -263,7 +263,7 @@ instead of silently rewinding it.
   reset the RCB space `inject_timer_tick`'s target computation depends on — fixed by adding an
   `rcb_anchor` field (§3's second note) via `WorkClock::rcb_offset`.
 - **Reset (§5) — built, wired into `baud-multiverse`, and exercised for real on real KVM
-  hardware (`reset_cost_scales_with_write_set`, `drive/h5.sh`'s H5.4).** `KVM_CAP_DIRTY_LOG_RING`
+  hardware (`reset_cost_scales_with_write_set`, `drive/h/h5.sh`'s H5.4).** `KVM_CAP_DIRTY_LOG_RING`
   is real: `crates/baud-snapshot/src/dirty_ring.rs` is the hardware-independent ring-scan protocol
   (decode a `kvm_dirty_gfn` ring into harvested `(slot, offset)` pairs, unit- and property-tested
   with no KVM involved), driven by `src/linux.rs`'s `DirtyRing`. Because §1's hard constraint (one
@@ -342,14 +342,14 @@ instead of silently rewinding it.
     `b.is_deterministic_double_run()` for a representative subset (full-N double-run was judged not
     worth 2x this test's real-hardware wall time, given every branch already takes the same
     `restore` code path `snapshot_roundtrip_is_bit_identical` already proved bit-identical).
-    `drive/h5.sh` gained a new H5.5 step running this test (takes ~3.5 minutes on this dev machine:
+    `drive/h/h5.sh` gained a new H5.5 step running this test (takes ~3.5 minutes on this dev machine:
     real KVM VM lifecycles, not a synthetic loop). `cargo test -p baud-multiverse`: adds 1 new test,
     passing.
   - **Not yet done**: the `O(write-set)` memory-efficiency guarantee itself (this section's actual
     "cheap" promise) still needs the memfd/`UFFDIO_CONTINUE` rearchitecture described above. Both
     findings remain tracked in `crates/baud-snapshot/src/lib.rs`'s module doc and todo.md §14.
 - **Restore into a live shell (§5.1) — the crate-level primitive is built and exercised on real
-  KVM hardware (`shell_into_universe_resumes`, `drive/h5.sh`'s H5.6); the `baud shell-into` CLI/
+  KVM hardware (`shell_into_universe_resumes`, `drive/h/h5.sh`'s H5.6); the `baud shell-into` CLI/
   server verb the test's name references is not.** `Console::enqueue_input`
   (`crates/baud-multiverse/src/console.rs`) and `Multiverse::{console_output,
   enqueue_console_input, step_exit, run_until_console_len}` (`crates/baud-multiverse/src/linux/

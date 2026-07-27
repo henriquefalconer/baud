@@ -6036,3 +6036,10 @@ todo.md updated via subagent, verified clean (no 'Iteration' text introduced, vi
 Post-push verification: git push was rejected once (a concurrent commit 04ad9f3 from the user's own tools/pauseresume_ab.sh work landed on origin mid-session, unrelated to this iteration's changes); rebased cleanly onto it (no conflicts, that commit only touches tools/pauseresume_ab.sh), re-verified cargo build + the virtio-rng test group at the rebased tip (all pass), then pushed -- git fetch confirms origin/main == local main == 8a40e76, working tree clean.
 
 Iteration complete: closed spec §3.8's virtio_rng_reseed_is_deterministic by proving a real Linux kernel's own virtio-rng driver stays deterministic across repeated reseeds (four reads per boot, distinct entropy each time, byte-identical across two boots), needing zero host-side/run-loop changes -- the plumbing was already general. All verification green (build/clippy/test --workspace, 8 h-series + 5 m-series + 5 pkg drive scripts), pushed and confirmed clean against origin. todo.md still has pending items (Buildroot/pinned-Nix guest-image pipeline for H8/H9's full rootfs needs, H8 Mario still blocked on FCEUX Qt5/SDL2/Xvfb packaging, H9 Ubuntu not started) -- emitting NEXT.
+
+## 2026-07-26T22:07:33 UTC (41min) - Session usage — build-34 [sonnet]
+- cost $5.6956 (from claude -p)
+- context 169,313 tok peak of 1M (17%) across 93 inference calls, monotonic
+- models sonnet-5 $5.6924 (in 224 / out 50,805 / cache-read 12,430,057) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260726T004845Z/034-build-34.json

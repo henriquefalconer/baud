@@ -120,7 +120,7 @@ impl CapabilityChecks for LinuxChecks {
     ///
     /// **This reports whether the patched module is *loaded right now*, which is a different
     /// question from whether it exists**, and it deliberately stays `false`: that module is only
-    /// ever swapped in transiently, by `drive/h3-enforced-{rdtsc,rdrand,rdseed}.sh`, each of which
+    /// ever swapped in transiently, by `drive/manual/h3-enforced-{rdtsc,rdrand,rdseed}.sh`, each of which
     /// unconditionally restores the stock module on exit (CLAUDE.md). Every other process on this
     /// host — including whatever calls this — therefore runs against the stock module, and
     /// reporting otherwise would overclaim guarantees the running kernel does not provide

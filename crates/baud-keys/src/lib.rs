@@ -309,9 +309,7 @@ pub fn decrypt_secrets(secrets_path: &std::path::Path) -> Result<SecretsMap, Key
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| KeysError::SopsDecryptFailed(e.to_string()))?;
 
-    let mut map = SecretsMap::default();
-    flatten_json_object(&json, String::new(), &mut map.0);
-    Ok(map)
+    Ok(SecretsMap::from_sops_json(&json))
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +320,24 @@ pub fn decrypt_secrets(secrets_path: &std::path::Path) -> Result<SecretsMap, Key
 pub struct SecretsMap(std::collections::HashMap<String, SecretString>);
 
 impl SecretsMap {
+    /// Build a map from the JSON `sops --decrypt --output-type json` prints: nested
+    /// objects are flattened to `parent_child` keys and the `sops` metadata block is
+    /// dropped. Split out of [`decrypt_secrets`] so the flattening and the redaction
+    /// built on top of it are testable without a `sops` binary on PATH.
+    pub fn from_sops_json(json: &serde_json::Value) -> Self {
+        let mut map = SecretsMap::default();
+        flatten_json_object(json, String::new(), &mut map.0);
+        map
+    }
+
+    /// The key names paired with [`baud_secret::REDACTED`] — never the values.
+    /// This is the whole of [`show_redacted`]'s redaction step.
+    pub fn redacted(&self) -> std::collections::HashMap<String, String> {
+        self.keys()
+            .map(|k| (k.to_owned(), baud_secret::REDACTED.to_owned()))
+            .collect()
+    }
+
     pub fn get(&self, key: &str) -> Option<&SecretString> {
         self.0.get(key)
     }
@@ -411,8 +427,7 @@ pub fn edit_secrets(secrets_path: &std::path::Path) -> Result<(), KeysError> {
 /// Returns a `HashMap<key_name, "[REDACTED]">` so callers can display the
 /// structure without exposing any secret values.
 pub fn show_redacted(secrets_path: &std::path::Path) -> Result<std::collections::HashMap<String, String>, KeysError> {
-    let map = decrypt_secrets(secrets_path)?;
-    Ok(map.keys().map(|k| (k.to_owned(), baud_secret::REDACTED.to_owned())).collect())
+    Ok(decrypt_secrets(secrets_path)?.redacted())
 }
 
 /// Rotate sops data keys (re-encrypt all secrets with a new data encryption key).
@@ -511,59 +526,197 @@ mod tests {
         std::fs::write(tmp.path(), format!("# created: 2026-07-24T00:00:00Z\n# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"))
             .expect("write identity file");
         // age_public_key() reads via age_key_path(), which checks $SOPS_AGE_KEY_FILE first —
-        // point it at our temp file for the duration of this test.
-        std::env::set_var("SOPS_AGE_KEY_FILE", tmp.path());
-        let pk = age_public_key();
-        std::env::remove_var("SOPS_AGE_KEY_FILE");
+        // point it at our temp file for the duration of this test (under ENV_LOCK, since
+        // the env is process-global and other tests in this binary drive it too).
+        let home = tempfile::tempdir().expect("tmp home");
+        let pk = with_key_env(Some(tmp.path()), Some(home.path()), age_public_key);
         assert_eq!(pk.as_deref(), Some(TEST_RECIPIENT));
     }
 
+    /// `HOME` and `SOPS_AGE_KEY_FILE` are process-global, so the tests that rewrite
+    /// them to drive [`age_key_path`]'s resolution order must not run concurrently
+    /// with each other (or with anything else in this binary that reads them).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `SOPS_AGE_KEY_FILE` and `HOME` set to the given values (`None`
+    /// removes the variable), restoring both afterwards.
+    fn with_key_env<R>(key_file: Option<&std::path::Path>, home: Option<&std::path::Path>, f: impl FnOnce() -> R) -> R {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_key = std::env::var_os("SOPS_AGE_KEY_FILE");
+        let prev_home = std::env::var_os("HOME");
+        match key_file {
+            Some(p) => std::env::set_var("SOPS_AGE_KEY_FILE", p),
+            None => std::env::remove_var("SOPS_AGE_KEY_FILE"),
+        }
+        match home {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        let out = f();
+        match prev_key {
+            Some(v) => std::env::set_var("SOPS_AGE_KEY_FILE", v),
+            None => std::env::remove_var("SOPS_AGE_KEY_FILE"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    /// [`age_key_path`]'s documented resolution order, pinned against a synthetic HOME
+    /// so the answer does not depend on whether the developer running the tests happens
+    /// to have a key installed.
     #[test]
     fn age_key_path_returns_none_when_absent() {
-        // With no SOPS_AGE_KEY_FILE and no default location (typical CI), this
-        // should return None rather than panic.
-        // (If the dev machine has the key, it returns Some — both outcomes are valid.)
-        let _ = age_key_path();
+        let home = tempfile::tempdir().expect("tmp home");
+
+        // 1. Nothing anywhere: no env override, and an empty HOME so neither the macOS
+        //    nor the Linux/XDG default exists → None (not a panic, not a stale path).
+        let found = with_key_env(None, Some(home.path()), age_key_path);
+        assert_eq!(found, None, "no env override and no key under HOME must resolve to None");
+
+        // 2. $SOPS_AGE_KEY_FILE pointing at a file that does not exist is ignored, and
+        //    still falls through to None rather than returning the bogus path.
+        let missing = home.path().join("nope/keys.txt");
+        let found = with_key_env(Some(&missing), Some(home.path()), age_key_path);
+        assert_eq!(found, None, "a non-existent $SOPS_AGE_KEY_FILE must not be returned");
+
+        // 3. $SOPS_AGE_KEY_FILE pointing at an existing file wins, even though the
+        //    Linux/XDG default also exists — that is the documented precedence.
+        let xdg = home.path().join(".config/sops/age");
+        std::fs::create_dir_all(&xdg).expect("mkdir xdg");
+        std::fs::write(xdg.join("keys.txt"), TEST_IDENTITY).expect("write xdg key");
+        let override_file = home.path().join("override.txt");
+        std::fs::write(&override_file, TEST_IDENTITY).expect("write override key");
+        let found = with_key_env(Some(&override_file), Some(home.path()), age_key_path);
+        assert_eq!(found.as_deref(), Some(override_file.as_path()), "$SOPS_AGE_KEY_FILE must win");
+
+        // 4. With the override gone, the Linux/XDG default is found.
+        let found = with_key_env(None, Some(home.path()), age_key_path);
+        assert_eq!(
+            found.as_deref(),
+            Some(xdg.join("keys.txt").as_path()),
+            "$HOME/.config/sops/age/keys.txt must be the fallback"
+        );
     }
 
+    /// `doctor` reports what is actually on this host — it must not invent a `sops`
+    /// that is not installed, nor hand back a key path that does not exist.
     #[test]
-    fn doctor_does_not_panic() {
+    fn doctor_reports_reflect_the_host() {
+        // doctor() reads $SOPS_AGE_KEY_FILE / $HOME through age_key_path(); hold the
+        // env lock so a concurrent test cannot rewrite them mid-check.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let report = doctor();
-        // sops may or may not be installed — just check it doesn't panic
-        let _ = report.sops_ok;
+
+        let on_path = |bin: &str| Command::new(bin).arg("--version").output().is_ok();
+        assert_eq!(report.sops_ok, on_path("sops"), "sops_ok must match whether sops is on PATH");
+        assert_eq!(report.age_ok, on_path("age"), "age_ok must match whether age is on PATH");
+        assert_eq!(
+            report.ssh_to_age_present,
+            on_path("ssh-to-age"),
+            "ssh_to_age_present must match whether ssh-to-age is on PATH"
+        );
+
+        // A version string is reported exactly when the binary was found.
+        assert_eq!(report.sops_version.is_some(), report.sops_ok);
+        assert_eq!(report.age_version.is_some(), report.age_ok);
+
+        // A reported key path must exist (age_key_path only returns paths it stat'd).
+        if let Some(p) = &report.age_key_path {
+            assert!(p.exists(), "doctor reported a key path that does not exist: {}", p.display());
+        }
+        assert_eq!(
+            report.secrets_file_exists,
+            secrets_file().exists(),
+            "secrets_file_exists must match the filesystem"
+        );
+        // is_recipient is only answerable with both a key and a secrets file present.
+        if report.age_key_path.is_none() || !report.secrets_file_exists {
+            assert_eq!(
+                report.is_recipient, None,
+                "is_recipient must be None when the key or the secrets file is missing"
+            );
+        }
     }
 
+    /// VR1-m4: `show_redacted` must never expose actual secret values.
+    ///
+    /// The redaction step is asserted directly against a decrypted map (no `sops`
+    /// binary needed, and no dependency on the process's working directory — the old
+    /// version of this test resolved `secrets_file()` relative to the CWD, so under
+    /// `cargo test` it always took its `!exists()` early return and never ran).
     #[test]
     fn show_redacted_hides_value() {
-        // VR1-m4: show_redacted must never expose actual secret values.
-        // If secrets file doesn't exist, the function returns an error — not a leaked value.
-        // If it does exist and decrypts successfully, all values must be "[REDACTED]".
-        let secrets = secrets_file();
-        if !secrets.exists() {
-            // Not installed — skip test but ensure the function signature is correct
-            let result: Result<std::collections::HashMap<String, String>, KeysError> =
-                show_redacted(std::path::Path::new("/nonexistent"));
-            // Must return an error, not a leaked value
-            assert!(result.is_err(), "show_redacted on missing file must return Err");
-            return;
+        const API_KEY: &str = "dt_live_THIS_MUST_NEVER_BE_PRINTED";
+        const ROOT_KEY: &str = "AGE-SECRET-KEY-1THISMUSTNEVERBEPRINTED";
+
+        let secrets = SecretsMap::from_sops_json(&serde_json::json!({
+            "daytona_api_key": API_KEY,
+            "identity": { "root_key": ROOT_KEY },
+            "sops": { "age": [{ "recipient": "age1notasecret" }] },
+        }));
+
+        // Sanity: the map really does hold the secrets we are about to redact,
+        // including the nested one flattened to `identity_root_key`.
+        assert_eq!(
+            secrets.get("daytona_api_key").map(|s| s.expose().as_str()),
+            Some(API_KEY)
+        );
+        assert_eq!(
+            secrets.get("identity_root_key").map(|s| s.expose().as_str()),
+            Some(ROOT_KEY)
+        );
+
+        let redacted = secrets.redacted();
+
+        // Key names survive; values are all exactly "[REDACTED]".
+        let mut names: Vec<&str> = redacted.keys().map(|k| k.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["daytona_api_key", "identity_root_key"],
+            "redacted output must list the key names (and drop the sops metadata block)"
+        );
+        for (key, value) in &redacted {
+            assert_eq!(
+                value, baud_secret::REDACTED,
+                "show_redacted: key '{key}' must have value '[REDACTED]', got '{value}'"
+            );
         }
-        match show_redacted(&secrets) {
-            Ok(map) => {
-                // All values must be exactly "[REDACTED]"
-                for (key, value) in &map {
-                    assert_eq!(
-                        value, baud_secret::REDACTED,
-                        "show_redacted: key '{key}' must have value '[REDACTED]', got '{value}'"
-                    );
-                }
-            }
-            Err(_) => {
-                // sops decrypt failed (e.g., no age key) — that's acceptable; no leak occurred
-            }
-        }
+
+        // Nothing derived from the secret values may appear anywhere in the output.
+        let rendered = format!("{redacted:?}");
+        assert!(!rendered.contains(API_KEY), "redacted output leaked the API key: {rendered}");
+        assert!(!rendered.contains(ROOT_KEY), "redacted output leaked the root key: {rendered}");
+        assert!(!rendered.contains("dt_live"), "redacted output leaked an API-key prefix: {rendered}");
+
+        // And the whole-file entry point still refuses a missing file rather than
+        // returning anything at all (CWD-independent: an absolute temp path).
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let missing = tmp.path().join("no-such-secrets.enc.yaml");
+        assert!(
+            show_redacted(&missing).is_err(),
+            "show_redacted on a missing file must return Err, never a value"
+        );
     }
 
+    /// `#[ignore]`d rather than self-skipping: this needs the real `sops` and
+    /// `age-keygen` binaries, which are absent on the dev host (CLAUDE.md), and a test
+    /// that returns early having asserted nothing is indistinguishable from one that
+    /// passes. Run it with `cargo test -p baud-keys -- --ignored` on a host that has
+    /// them; the guards below now fail loudly instead of skipping.
+    ///
+    /// NOTE (unfixed, deliberately not papered over): this test drives `sops` directly
+    /// and never calls this crate's own [`rotate_secrets`], which runs
+    /// `sops --rotate --in-place` — a data-key refresh that keeps the same recipient
+    /// set. That does *not* invalidate the old age private key, which is what the
+    /// assertion below (and VR2-M3) demands; recipient replacement needs
+    /// `sops updatekeys`. So even on a host with the tooling, this passing does not
+    /// mean `baud secrets rotate` satisfies the invariant.
     #[test]
+    #[ignore = "requires the `sops` and `age-keygen` binaries on PATH"]
     fn rotate_invalidates_old_key() {
         // VR2-M3: rotate must invalidate the OLD data-encryption key.
         //
@@ -584,20 +737,15 @@ mod tests {
         // gracefully. The test asserts the structural invariant when tooling is
         // present, and documents the contract when it is not.
 
-        // If sops is not on PATH we cannot perform the rotation — skip.
-        if std::process::Command::new("sops").arg("--version").output().is_err() {
-            // sops not available: document the contract expectation and skip.
-            // In CI with sops the test must pass.
-            eprintln!(
-                "[rotate_invalidates_old_key] sops not found on PATH; \
-                 skipping live rotation test. Install sops + age to run this test."
-            );
-            return;
-        }
-        if std::process::Command::new("age-keygen").arg("--version").output().is_err() {
-            eprintln!("[rotate_invalidates_old_key] age-keygen not found; skipping.");
-            return;
-        }
+        // Loud, not silent: this test is #[ignore]d precisely because it needs these.
+        assert!(
+            Command::new("sops").arg("--version").output().is_ok(),
+            "rotate_invalidates_old_key needs `sops` on PATH (that is why it is #[ignore]d)"
+        );
+        assert!(
+            Command::new("age-keygen").arg("--version").output().is_ok(),
+            "rotate_invalidates_old_key needs `age-keygen` on PATH (that is why it is #[ignore]d)"
+        );
 
         // Generate a temporary key pair
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -628,10 +776,10 @@ mod tests {
         let old_pub = extract_pub(&old_key_path);
         let new_pub = extract_pub(&new_key_path);
 
-        if old_pub.is_empty() || new_pub.is_empty() {
-            eprintln!("[rotate_invalidates_old_key] could not extract public keys; skipping.");
-            return;
-        }
+        assert!(
+            !old_pub.is_empty() && !new_pub.is_empty(),
+            "age-keygen output must contain a '# public key: age1...' line"
+        );
 
         // Create a minimal sops secrets file encrypted with old_key
         let secrets_path = tmp.path().join("secrets.yaml");
@@ -646,14 +794,10 @@ mod tests {
             .env("SOPS_AGE_KEY_FILE", &old_key_path)
             .output();
 
-        match enc {
-            Ok(o) if o.status.success() => { /* encrypted successfully */ }
-            _ => {
-                // Encryption may fail if sops can't encrypt the placeholder — skip.
-                eprintln!("[rotate_invalidates_old_key] sops encrypt failed; skipping.");
-                return;
-            }
-        }
+        assert!(
+            matches!(&enc, Ok(o) if o.status.success()),
+            "sops --encrypt must succeed: {enc:?}"
+        );
 
         // Verify old_key CAN decrypt before rotation
         let before_decrypt = std::process::Command::new("sops")
@@ -675,17 +819,10 @@ mod tests {
             .env("SOPS_AGE_RECIPIENTS", &new_pub)
             .output();
 
-        match rotate {
-            Ok(o) if o.status.success() => { /* rotated */ }
-            _ => {
-                // updatekeys may not be available or may fail without a .sops.yaml config.
-                eprintln!(
-                    "[rotate_invalidates_old_key] sops updatekeys failed (likely needs .sops.yaml); \
-                     skipping post-rotation assertion."
-                );
-                return;
-            }
-        }
+        assert!(
+            matches!(&rotate, Ok(o) if o.status.success()),
+            "sops updatekeys must succeed (it may need a .sops.yaml naming the new recipient): {rotate:?}"
+        );
 
         // After rotation: old_key must FAIL to decrypt (VR2-M3 core assertion)
         let after_old = std::process::Command::new("sops")

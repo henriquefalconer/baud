@@ -111,7 +111,7 @@ checkpoint's *placement* can avoid) and would make a full-RAM hash disagree rega
 checkpoint fires. Moving the checkpoint later only avoids *console-output*/wall-clock comparison
 points; it does not exempt already-printed, TSC-tainted bytes sitting in RAM. `double_boot_ram_hash_
 identical` (`crates/baud-multiverse/src/linux/mod.rs`) is `#[ignore]`d for this reason and driven by
-`drive/h7-enforced-checkpoint.sh`, the same swap-in/swap-out dance as `drive/h7-enforced-entropy.sh`.
+`drive/manual/h7-enforced-checkpoint.sh`, the same swap-in/swap-out dance as `drive/manual/h7-enforced-entropy.sh`.
 
 **Real-hardware result even under the enforced module: fails every run (0/8, twice), root-caused
 by a one-off byte-diff diagnostic.** Unlike `os_entropy_is_deterministic`'s ~70-90% pass rate on
@@ -199,7 +199,7 @@ The initramfs the test assembles carries exactly four entries:
   /lib64/ld-linux-x86-64.so.2]`) — the kernel's ELF loader opens this path verbatim to find the
   interpreter before the interpreter itself ever runs.
 
-Real-hardware result: **5/5 clean, no jitter** (`drive/pkg-dynamic-link.sh`) — the first
+Real-hardware result: **5/5 clean, no jitter** (`drive/pkg/pkg-dynamic-link.sh`) — the first
 dynamically-linked binary ever booted through baud-multiverse, and the first real (non-unit-test)
 exercise of `InitramfsEntry::symlink`.
 

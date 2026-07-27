@@ -126,7 +126,7 @@ pub async fn list_frames(
 // baud-multiverse and writes the *real* pixel bytes the guest produced. Runs with no such row —
 // every pre-pivot manually-seeded run (`POST /runs/:id/frames`, hash-only, no kernel/tape to
 // replay) — keep the prior synthetic-gradient-from-hash fallback so existing callers of that
-// route (drive/m5.sh, m8.sh, full-demo.sh) are unaffected.
+// route (drive/m/m5.sh, m8.sh, full-demo.sh) are unaffected.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

@@ -123,7 +123,7 @@ advances RIP itself on a hit, and re-injects `#UD` at that same untouched RIP
 (`KVM_SET_VCPU_EVENTS`) on a miss, which is what a native un-intercepted fault would have reported.
 
 The consequence for the regime as a whole: **RDTSC + RDRAND + RDSEED are all enforceable on this
-exact dev host**, not just the first two. `drive/h3-enforced-rdseed.sh` exercises both halves
+exact dev host**, not just the first two. `drive/manual/h3-enforced-rdseed.sh` exercises both halves
 (served site, and re-injected non-site) against real `/dev/kvm`.
 
 ## The userspace side needs zero changes to any pinned crate
@@ -150,8 +150,8 @@ code, not a dependency-version problem.
 
 - ~~The design above is unbuilt and untested~~ — all three patches now exist, build against
   `~/wsl-kernel-src/src`, and are hardware-tested: `rdtsc-enforce.patch` and `rdrand-enforce.patch`
-  via `drive/h3-enforced-rdtsc.sh`/`drive/h3-enforced-rdrand.sh`, and `ud2-enforce.patch` via
-  `drive/h3-enforced-rdseed.sh` — both its served-site and re-injected-non-site halves pass against
+  via `drive/manual/h3-enforced-rdtsc.sh`/`drive/manual/h3-enforced-rdrand.sh`, and `ud2-enforce.patch` via
+  `drive/manual/h3-enforced-rdseed.sh` — both its served-site and re-injected-non-site halves pass against
   real `/dev/kvm` with the patched module swapped in, and the stock module restores cleanly on exit.
 - ~~RDSEED-exiting stays permanently out of reach on this exact host~~ — true of the *secondary
   control*, irrelevant to the *regime*: see "RDSEED, without any secondary control at all" above.
@@ -159,7 +159,7 @@ code, not a dependency-version problem.
   caveat left.
 - `crates/baud-host/src/linux.rs`'s `enforced_module_present()` still returns `false` — but now for
   a different reason than "no such module exists" (see that function's own doc): the patched module
-  is only ever swapped in transiently by the `drive/h3-enforced-*.sh` scripts, which always restore
+  is only ever swapped in transiently by the `drive/manual/h3-enforced-*.sh` scripts, which always restore
   the stock one, so no ordinary process on this host is running under it. Wiring this to a real
   runtime check (a `KVM_CHECK_EXTENSION` the patches would have to add) is the outstanding work.
 - Nothing plumbs a real `baud image build`'s `RdseedRewriteReport` into

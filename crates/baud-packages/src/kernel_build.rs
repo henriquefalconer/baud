@@ -134,8 +134,8 @@ mod tests {
     /// scratch copies, and asserts the resulting `bzImage` bytes are byte-identical. Requires a
     /// real kernel source tree (`BAUD_KERNEL_SRC`, default `~/wsl-kernel-src/src` per CLAUDE.md)
     /// and `gcc-13`, and takes several minutes (two full kernel builds) -- gated behind
-    /// `#[ignore]` and driven by `drive/pkg-image-build.sh`, the same opt-in convention as the
-    /// enforced-regime tests (`drive/h3-enforced-rdtsc.sh` etc).
+    /// `#[ignore]` and driven by `drive/pkg/pkg-image-build.sh`, the same opt-in convention as the
+    /// enforced-regime tests (`drive/manual/h3-enforced-rdtsc.sh` etc).
     #[test]
     #[ignore]
     fn image_build_is_reproducible() {

@@ -68,10 +68,7 @@ pub async fn run() -> Result<()> {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        tracing::info!("scaffold mode: using synthetic tape (seed={})", seed);
-        let tape_bytes = make_tape_from_seed(seed, 4096);
-        let mut tape = TapeDrawSource::new(tape_bytes);
-        supervisor.run(&mut tape)
+        run_scaffold(&mut supervisor, seed)
     };
 
     tracing::info!("supervisor completed: {} observations", obs_stream.observations.len());
@@ -79,13 +76,7 @@ pub async fn run() -> Result<()> {
     // Encode and emit observations to stdout as length-prefixed CBOR
     // (in production these go to the WebSocket transport during run_with_relay)
     for obs_entry in &obs_stream.observations {
-        let obs = Observation {
-            probe: obs_entry.probe.clone(),
-            node: obs_entry.node as u16,
-            value: json_to_probe_value(&obs_entry.value),
-            step: obs_entry.step,
-        };
-        let msg = Msg::Observe(obs);
+        let msg = Msg::Observe(to_proto_observation(obs_entry));
         if let Ok(cbor) = baud_proto::encode(&msg) {
             let _ = cbor; // In scaffold: no transport wired up
         }
@@ -99,6 +90,29 @@ pub async fn run() -> Result<()> {
     tracing::info!("baud-tape-agent: run complete ({} observations, hash={})",
         obs_stream.observations.len(), &stream_hash[..16.min(stream_hash.len())]);
     Ok(())
+}
+
+/// Drive an already-loaded supervisor from a synthetic tape derived from `seed`
+/// (scaffold / test mode — no server, no network). Split out of [`run`] so the
+/// workload-agnostic half of the agent (spec → manifest → supervisor → observations)
+/// can be exercised without setting `BAUD_SPEC`/`BAUD_WS_URL` in the environment.
+pub fn run_scaffold(supervisor: &mut Multiverse, seed: u64) -> baud_multiverse::ObservationStream {
+    tracing::info!("scaffold mode: using synthetic tape (seed={seed})");
+    let tape_bytes = make_tape_from_seed(seed, 4096);
+    let mut tape = TapeDrawSource::new(tape_bytes);
+    supervisor.run(&mut tape)
+}
+
+/// Convert one supervisor observation into the wire `Observation` the agent streams
+/// out. Workload-agnostic: the probe name is carried through untouched, whatever
+/// adapter produced it.
+pub fn to_proto_observation(entry: &baud_multiverse::ObservationEntry) -> Observation {
+    Observation {
+        probe: entry.probe.clone(),
+        node: entry.node as u16,
+        value: json_to_probe_value(&entry.value),
+        step: entry.step,
+    }
 }
 
 /// Run the supervisor with the relay protocol: draws come from baud-server over WebSocket.
@@ -277,14 +291,24 @@ mod tests {
 
     /// VR1-B5: unmodified_agent_runs_a_new_workload
     ///
-    /// Verifies that the agent can load and validate a minimal workload spec
-    /// without any workload-specific code in the agent itself.
-    /// The agent must never need to be modified for a new workload kind.
+    /// The agent must never need to be modified for a new workload kind: a spec it has
+    /// never seen, naming binaries that do not exist on this machine, must go through
+    /// the same workload-agnostic pipeline as any other — lint → [`build_manifest`] →
+    /// supervisor → observations → wire `Observe` messages.
+    ///
+    /// This runs that whole pipeline (the same calls [`run`] makes in scaffold mode)
+    /// for two *unrelated* novel workloads and asserts both are carried end to end.
+    /// The previous version of this test called no function from this crate at all —
+    /// it only exercised `baud_init::lint`.
     #[test]
     fn unmodified_agent_runs_a_new_workload() {
-        // A novel workload spec using only the closed adapter set.
-        // The agent processes this without any workload-specific code.
-        let spec_yaml = r#"
+        use baud_multiverse::Multiverse;
+        use baud_proto::Msg;
+
+        // Two novel workloads, sharing no binary, node count or probe adapter — only
+        // the closed adapter set. The agent has no branch for either.
+        let workloads = [
+            r#"
 nix: "./flake.nix#new-workload"
 nodes:
   - name: worker
@@ -293,28 +317,93 @@ nodes:
       input: stdin
       probes:
         - stdout-kv
-"#;
+"#,
+            r#"
+nix: "./flake.nix#some-other-workload"
+nodes:
+  - name: alpha
+    argv: ["never-seen-before-binary", "--role", "alpha"]
+    adapters:
+      input:
+        fifo:
+          path: /run/input.fifo
+      probes:
+        - exit-hash
+  - name: beta
+    argv: ["another-unknown-binary"]
+    adapters:
+      input: stdin
+      probes:
+        - exit-hash
+"#,
+        ];
 
-        // Lint succeeds (agent validates spec on startup)
-        let doc = baud_init::lint(spec_yaml)
-            .expect("minimal spec must lint ok");
+        let mut hashes = Vec::new();
+        for (i, spec_yaml) in workloads.iter().enumerate() {
+            // 1. Lint (the agent validates the spec on startup).
+            let doc = baud_init::lint(spec_yaml).expect("novel spec must lint ok");
 
-        assert_eq!(doc.nodes.len(), 1);
-        assert_eq!(doc.nodes[0].name, "worker");
+            // 2. Manifest built generically from the spec's nodes — no workload knowledge.
+            let manifest = super::build_manifest(&doc).expect("build manifest");
+            assert_eq!(
+                manifest.guests.len(),
+                doc.nodes.len(),
+                "workload {i}: every node in the spec must become a guest"
+            );
 
-        // The agent has no workload-specific branches — it processes any valid spec
-        // through the same adapter pipeline. The test passes if lint succeeds and
-        // the agent's generic adapter dispatch would cover this workload's needs.
-        let has_stdin_input = matches!(
-            doc.nodes[0].adapters.input,
-            Some(InputAdapter::Stdin)
+            // 3. The supervisor loads it even though none of these binaries exist here.
+            let mut supervisor =
+                Multiverse::load_from_manifest(manifest).expect("supervisor must load novel manifest");
+
+            // 4. Run it through the agent's own scaffold path.
+            let obs = super::run_scaffold(&mut supervisor, 7);
+            assert!(
+                !obs.observations.is_empty(),
+                "workload {i}: the agent must produce observations for a novel workload"
+            );
+
+            // 5. Every observation the run produced must survive the agent's outbound
+            //    encoding — again with no per-workload special-casing.
+            for entry in &obs.observations {
+                let msg = Msg::Observe(super::to_proto_observation(entry));
+                let cbor = baud_proto::encode(&msg).expect("observation must encode to CBOR");
+                assert!(!cbor.is_empty(), "encoded observation must not be empty");
+                match baud_proto::decode(&cbor).expect("observation must decode") {
+                    Msg::Observe(o) => {
+                        assert_eq!(o.probe, entry.probe, "probe name must round-trip untouched");
+                        assert_eq!(o.step, entry.step);
+                    }
+                    other => panic!("expected Observe, got {:?}", std::mem::discriminant(&other)),
+                }
+            }
+
+            // Re-running the same workload with the same seed is reproducible.
+            let mut again = Multiverse::load_from_manifest(
+                super::build_manifest(&doc).expect("build manifest"),
+            )
+            .expect("load again");
+            assert_eq!(
+                super::run_scaffold(&mut again, 7).stream_hash(),
+                obs.stream_hash(),
+                "workload {i}: same spec + same seed must reproduce the same stream"
+            );
+            hashes.push(obs.stream_hash().to_owned());
+        }
+
+        // The two different workloads are actually run differently (a pipeline that
+        // ignored the spec would give both the same stream).
+        assert_ne!(hashes[0], hashes[1], "different workloads must produce different runs");
+
+        // The adapters in the spec are the closed set the agent dispatches on.
+        let doc = baud_init::lint(workloads[0]).expect("lint");
+        assert!(
+            matches!(doc.nodes[0].adapters.input, Some(InputAdapter::Stdin)),
+            "input adapter must be Stdin"
         );
-        assert!(has_stdin_input, "input adapter must be Stdin");
-
-        let has_stdout_kv = doc.nodes[0].adapters.probes.iter().any(|p| {
-            matches!(p, ProbeAdapter::StdoutKv { .. })
-        });
-        assert!(has_stdout_kv, "probe must include stdout-kv");
+        assert!(
+            doc.nodes[0].adapters.probes.iter().any(|p| matches!(p, ProbeAdapter::StdoutKv { .. })),
+            "probe must include stdout-kv"
+        );
     }
 
     /// Test that the agent builds a manifest from a spec document correctly.

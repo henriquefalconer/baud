@@ -179,4 +179,161 @@ mod tests {
             "{err}"
         );
     }
+
+    /// A *stub* kernel tree: a `Makefile` and a `scripts/kconfig/merge_config.sh` that accept
+    /// exactly the invocations `kernel_build::build_bzimage` makes, append each one to
+    /// `<tree>/build-steps.log`, and (for `bzImage`) produce the
+    /// `arch/x86/boot/bzImage` artifact the real builder then requires. Nothing here compiles
+    /// anything -- the point is to exercise *our* orchestration (step order, env pinning,
+    /// merge_config arguments, artifact plumbing, initramfs assembly, hashing) in about a second,
+    /// with no `gcc-13`, no `musl-gcc` and no 1.8 GB kernel checkout. Real-toolchain coverage stays
+    /// in the `#[ignore]`d `image_build_is_reproducible` (`drive/pkg/pkg-image-build.sh`); this is the
+    /// fast in-repo half that runs on every `cargo test`.
+    fn write_stub_kernel_tree(root: &Path) {
+        // `$@` is the target; the env echo pins deterministic_build_env()'s variables so a
+        // regression that stops exporting them shows up in the log rather than silently.
+        fs::write(
+            root.join("Makefile"),
+            "mrproper allnoconfig olddefconfig:\n\
+             \t@echo \"make $@\" >> $(CURDIR)/build-steps.log\n\
+             \t@touch $(CURDIR)/.config\n\
+             \n\
+             bzImage:\n\
+             \t@echo \"make $@ ts=$$KBUILD_BUILD_TIMESTAMP user=$$KBUILD_BUILD_USER \
+             host=$$KBUILD_BUILD_HOST epoch=$$SOURCE_DATE_EPOCH\" >> $(CURDIR)/build-steps.log\n\
+             \t@mkdir -p $(CURDIR)/arch/x86/boot\n\
+             \t@printf 'stub-bzImage-bytes' > $(CURDIR)/arch/x86/boot/bzImage\n",
+        )
+        .unwrap();
+
+        fs::create_dir_all(root.join("scripts/kconfig")).unwrap();
+        let merge_script = root.join("scripts/kconfig/merge_config.sh");
+        fs::write(
+            &merge_script,
+            "#!/usr/bin/env bash\n\
+             set -eu\n\
+             echo \"merge_config.sh $*\" >> \"$PWD/build-steps.log\"\n\
+             # A real merge_config.sh reads both files; failing here if either is missing keeps\n\
+             # the stub honest about build_bzimage's ordering contract.\n\
+             test -f .config\n\
+             cat \"$3\" >> .config\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&merge_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn gunzip(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(bytes).read_to_end(&mut out).unwrap();
+        out
+    }
+
+    /// Fast, toolchain-free smoke test of the whole in-repo `spec -> image` chain against the stub
+    /// tree above: `build_guest_image` -> `build_bzimage` (`make` + `merge_config.sh`) ->
+    /// `build_reproducible_initramfs` (the real `flate2` cpio.gz path) -> §4.5's identity hashes.
+    #[test]
+    fn build_guest_image_drives_the_real_pipeline_against_a_stub_kernel_tree() {
+        let kernel_dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        write_stub_kernel_tree(kernel_dir.path());
+
+        let fragment = work.path().join("minimal.config");
+        fs::write(&fragment, "CONFIG_BAUD_STUB=y\n").unwrap();
+        let init_src = work.path().join("init");
+        fs::write(&init_src, b"#!stub-init-binary").unwrap();
+        let helper_src = work.path().join("helper");
+        fs::write(&helper_src, b"#!stub-helper-binary").unwrap();
+
+        let entries = [
+            InitramfsFileEntry {
+                archive_path: "init".to_string(),
+                mode: 0o755,
+                source_path: init_src,
+            },
+            InitramfsFileEntry {
+                archive_path: "helper".to_string(),
+                mode: 0o755,
+                source_path: helper_src,
+            },
+        ];
+        let output_dir = work.path().join("out");
+        let result = build_guest_image(&GuestImageBuildConfig {
+            kernel: KernelBuildConfig {
+                kernel_src: kernel_dir.path(),
+                config_fragment: &fragment,
+                cc: "stub-cc",
+                jobs: Some(1),
+            },
+            initramfs_entries: &entries,
+            output_dir: &output_dir,
+        })
+        .expect("stub-tree guest image build failed");
+
+        // 1. The kernel steps ran, in spec §4.5's order, and nothing else ran.
+        let log = fs::read_to_string(kernel_dir.path().join("build-steps.log")).unwrap();
+        let steps: Vec<&str> = log.lines().collect();
+        assert_eq!(steps.len(), 5, "unexpected step count in:\n{log}");
+        assert_eq!(steps[0], "make mrproper");
+        assert_eq!(steps[1], "make allnoconfig");
+        assert!(
+            steps[2].starts_with("merge_config.sh -m .config /") && steps[2].ends_with("minimal.config"),
+            "merge_config.sh must be handed `-m .config <canonicalized fragment>`, got: {}",
+            steps[2]
+        );
+        assert_eq!(steps[3], "make olddefconfig");
+        // deterministic_build_env() must reach the compiler's environment, or two builds of the
+        // same source stop being byte-identical (the `image_build_is_reproducible` failure mode).
+        assert_eq!(
+            steps[4],
+            "make bzImage ts=@0 user=baud host=baud epoch=0",
+            "every build-identity variable deterministic_build_env() pins must be exported"
+        );
+
+        // 2. The built bzImage was copied out verbatim.
+        assert_eq!(result.bzimage_path, output_dir.join("bzImage"));
+        assert_eq!(fs::read(&result.bzimage_path).unwrap(), b"stub-bzImage-bytes");
+
+        // 3. A real initramfs came out of the real flate2 path -- gzip magic on disk, and both
+        //    entries present in the decompressed newc cpio stream.
+        assert_eq!(result.initramfs_path, output_dir.join("initramfs.cpio.gz"));
+        let gz = fs::read(&result.initramfs_path).unwrap();
+        assert_eq!(&gz[..2], &[0x1f, 0x8b], "initramfs must be gzip-compressed");
+        let cpio = gunzip(&gz);
+        for needle in [
+            &b"init"[..],
+            b"helper",
+            b"#!stub-init-binary",
+            b"#!stub-helper-binary",
+            b"TRAILER!!!",
+        ] {
+            assert!(
+                cpio.windows(needle.len()).any(|w| w == needle),
+                "decompressed cpio is missing {:?}",
+                String::from_utf8_lossy(needle)
+            );
+        }
+
+        // 4. All three §4.5 identities are well-formed lowercase sha256 hex.
+        for (label, hash) in [
+            ("bzimage_sha256", &result.bzimage_sha256),
+            ("initramfs_sha256", &result.initramfs_sha256),
+            ("image_hash", &result.image_hash),
+        ] {
+            assert_eq!(hash.len(), 64, "{label} must be 64 hex chars, got {hash:?}");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "{label} must be lowercase hex, got {hash:?}"
+            );
+        }
+        assert_eq!(
+            hash_image(b"stub-bzImage-bytes", &gz).2,
+            result.image_hash,
+            "image_hash must be sha256(bzImage ‖ initramfs.gz) over exactly the emitted artifacts"
+        );
+    }
 }

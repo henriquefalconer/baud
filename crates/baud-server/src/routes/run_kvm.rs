@@ -1007,7 +1007,7 @@ struct DriverRunSummary {
     /// prior call's persisted `DriverState` when `persist` is set), distinct from `generations`
     /// above (how many generations *this* call ran). Lets an HTTP caller confirm driver-state
     /// persistence actually accumulated across requests instead of resetting every time (e.g.
-    /// `drive/m9.sh`'s M9.6b).
+    /// `drive/m/m9.sh`'s M9.6b).
     cumulative_generation: u64,
 }
 

@@ -16,7 +16,7 @@
 #   Arm C — raw event, pause/resume NEUTRALIZED, but exclude_host=1 set on the counter (opt-in):
 #           tests whether the "textbook flag" can REPLACE the bracketing during real guest execution.
 #
-# It runs the enforced-module os_entropy_is_deterministic test (reusing drive/h7-enforced-entropy.sh's
+# It runs the enforced-module os_entropy_is_deterministic test (reusing drive/manual/h7-enforced-entropy.sh's
 # kernel-module swap; see CLAUDE.md) and reads EVERY gated check the drive runs, not just os_entropy
 # (which is too lenient to reveal a small work-clock drift — the stricter
 # rdtsc_enforced_regime_is_bit_exact_across_boots is what catches host contamination). All crate edits
@@ -47,7 +47,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT" || { echo "cannot cd to repo root $ROOT" >&2; exit 1; }
 
 FILE="crates/baud-multiverse/src/linux/mod.rs"
-DRIVE="drive/h7-enforced-entropy.sh"
+DRIVE="drive/manual/h7-enforced-entropy.sh"
 
 # --- preflight -------------------------------------------------------------------------------
 command -v git >/dev/null || { echo "git not found" >&2; exit 1; }

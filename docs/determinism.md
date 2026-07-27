@@ -10,7 +10,7 @@
 ## H0 (KVM/VT-x) — capability spike, current pivot
 
 Probed via `baud host probe --json` (`specs/baud-host.md` §3, `crates/baud-host`), run from
-`drive/h0.sh` on the machine this iteration's work was done on:
+`drive/h/h0.sh` on the machine this iteration's work was done on:
 
 | Field | This dev machine (Windows 11, no WSL2 distro installed) |
 |---|---|
@@ -59,7 +59,7 @@ work-clock counts conditional branches only (`specs/baud-multiverse.md` §4, `to
 
 **Status: userspace PASS, guest-level H0 pending.** This proves the counter is available and deterministic in
 L1 userspace, but the authoritative gate is guest-filtered counting across `KVM_RUN`
-(`rcb_is_deterministic_on_this_cpu`, via `baud host probe` / `drive/h0.sh`) — run once baud builds in this
+(`rcb_is_deterministic_on_this_cpu`, via `baud host probe` / `drive/h/h0.sh`) — run once baud builds in this
 WSL2 distro. If the guest-level check also passes, the H9 cross-VM fingerprint can run nested; only if it
 fails does the fingerprint move to bare-metal Intel.
 

@@ -507,19 +507,79 @@ mod tests {
         assert_eq!(obs_list[1].probe, "b");
     }
 
+    /// The security half of `chunk_bodies_are_ciphertext` that holds on *every* host,
+    /// with or without the `age` binary: asking for an encrypted journal must never
+    /// result in plaintext on disk. Either the append fails (no `age` binary → no
+    /// chunk file at all), or it succeeds and the bytes written are age ciphertext.
+    ///
+    /// Without this, the only coverage of `open_encrypted` is the `#[ignore]`d test
+    /// below, which does not run on a host lacking `age`/`age-keygen` — i.e. none.
+    #[test]
+    fn requesting_encryption_never_leaves_plaintext_on_disk() {
+        // A real recipient, generated in-process via the `age` crate — no binary needed.
+        let identity = baud_keys::generate_identity_file();
+        let recipient = baud_keys::parse_public_key(&identity).expect("recipient");
+
+        let dir = TempDir::new().unwrap();
+        let mut j = Journal::open_encrypted(dir.path(), "enc-run-002", &recipient)
+            .expect("open_encrypted should succeed");
+        let chunks_dir = dir.path().join("enc-run-002").join("chunks");
+
+        match j.append_observation(obs("probe", 1)) {
+            Ok(addr) => {
+                let on_disk = fs::read(chunks_dir.join(&addr)).expect("chunk file should exist");
+                // The chunk address is blake3 over the *plaintext*, so bytes that hash
+                // to their own address are unencrypted.
+                assert_ne!(
+                    hex_encode(blake3::hash(&on_disk).as_bytes()),
+                    addr,
+                    "chunk written under an encrypting journal is the plaintext CBOR"
+                );
+                assert!(
+                    on_disk.starts_with(b"-----BEGIN AGE ENCRYPTED FILE-----")
+                        || on_disk.starts_with(b"age-encryption.org/v1"),
+                    "chunk on disk is neither armored nor binary age ciphertext: {:?}",
+                    &on_disk[..on_disk.len().min(40)]
+                );
+            }
+            Err(e) => {
+                // Encryption unavailable (no `age` binary on this host) — the append
+                // must fail closed: nothing at all may be written.
+                let written: Vec<_> = fs::read_dir(&chunks_dir)
+                    .expect("chunks dir")
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect();
+                assert!(
+                    written.is_empty(),
+                    "encryption failed ({e}) but chunk bytes were still written: {written:?}"
+                );
+                assert!(
+                    j.observations().map(|o| o.is_empty()).unwrap_or(true),
+                    "a chunk that was never written must not be indexed"
+                );
+            }
+        }
+    }
+
     /// Verify that when `open_encrypted()` is used, chunk files on disk are age
     /// ciphertext (start with the age ASCII-armor header), not raw CBOR.
     ///
-    /// Requires the `age` and `age-keygen` binaries on PATH. If they are not
-    /// present the test is skipped without failure.
+    /// `#[ignore]`d rather than self-skipping: `Journal`'s encryption path shells out
+    /// to the `age` binary, which is absent on the dev host (CLAUDE.md), and a test
+    /// that returns early having asserted nothing is indistinguishable from one that
+    /// passes. Run it with `cargo test -p baud-journal -- --ignored` on a host with
+    /// `age` + `age-keygen`; it fails loudly rather than skipping if they are missing.
+    /// `requesting_encryption_never_leaves_plaintext_on_disk` above covers the part of
+    /// this contract that can be asserted without those binaries.
     #[test]
+    #[ignore = "requires the `age` and `age-keygen` binaries on PATH"]
     fn chunk_bodies_are_ciphertext() {
-        // Skip if age-keygen is not available
         let keygen = std::process::Command::new("age-keygen").arg("--version").output();
-        if keygen.is_err() {
-            eprintln!("chunk_bodies_are_ciphertext: age-keygen not found, skipping");
-            return;
-        }
+        assert!(
+            keygen.is_ok(),
+            "chunk_bodies_are_ciphertext needs `age-keygen` on PATH (that is why it is #[ignore]d)"
+        );
 
         // Generate a fresh test key pair
         // age-keygen writes to stdout: "Public key: age1...\n# created: ...\n# public key: age1...\nAGE-SECRET-KEY-1..."

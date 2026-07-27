@@ -32,7 +32,13 @@ async fn main() -> Result<()> {
     let state = AppState::new().await?;
     let app = build_router(state);
 
-    let addr: SocketAddr = "127.0.0.1:7734".parse()?;
+    // `BAUD_ADDR` overrides the default listen address. The default is the hardcoded
+    // `127.0.0.1:7734` every CLI/drive script has always used, so unset behaves exactly as before;
+    // the override exists so several `drive/*.sh` runs can spawn their own server concurrently,
+    // each on its own port, instead of colliding on the single fixed one.
+    let addr: SocketAddr = std::env::var("BAUD_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:7734".to_owned())
+        .parse()?;
     info!("baud-server listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

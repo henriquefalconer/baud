@@ -820,11 +820,37 @@ mod tests {
         // Record 20 draws
         for _ in 0..20 { d.draw_bits(8); }
         d.end_run(&[]);
+        let before = d.best.len();
+        assert_eq!(before, 20, "20 recorded draws");
 
-        // Oracle: accepts any tape (trivial crash reproduction)
+        // Oracle: accepts any tape (trivial crash reproduction). With nothing to
+        // preserve, shrinking must delete everything — a no-op shrink is a failure.
         let shrunk = d.shrink(|_tape| Some(Score(Vec::new())));
-        // Shrunk tape should be smaller or equal
-        assert!(shrunk.len() <= d.best.len() + 1, "shrink should not grow the tape significantly");
+        assert!(
+            shrunk.len() < before,
+            "shrink must actually reduce the tape: {before} -> {}",
+            shrunk.len()
+        );
+        assert_eq!(
+            shrunk.len(), 0,
+            "an oracle that accepts every tape must shrink all the way to the empty tape"
+        );
+        assert_eq!(shrunk.seed, d.best.seed, "shrinking must not change the tape's seed");
+
+        // And it must stop at the smallest tape the oracle still accepts, rather than
+        // deleting blindly: an oracle that only reproduces with >= 5 choices must be
+        // shrunk to exactly 5.
+        let mut d2 = make_driver(42);
+        d2.begin_run();
+        for _ in 0..20 { d2.draw_bits(8); }
+        d2.end_run(&[]);
+        let shrunk2 = d2.shrink(|tape| {
+            if tape.choices.len() >= 5 { Some(Score(Vec::new())) } else { None }
+        });
+        assert_eq!(
+            shrunk2.len(), 5,
+            "shrink must reduce to the smallest tape the oracle still accepts"
+        );
     }
 
     #[test]
