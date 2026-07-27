@@ -13,6 +13,7 @@
 #   ./drive/gate.sh --no-h5-first    # queue h5 inside the pool instead of running it alone
 #   ./drive/gate.sh --skip-cargo     # drive scripts only
 #   ./drive/gate.sh --force-build-cli
+#   ./drive/gate.sh --no-flake-rerun # skip the phase-6 isolation re-run (see below)
 #
 # WHY THE PHASES ARE WHAT THEY ARE — each of these is load-bearing:
 #
@@ -42,6 +43,22 @@
 #   (~/wsl-kernel-src/src) lives outside git and is mutated in place by drive/manual/h3-enforced-*.sh,
 #   so a git-diff rule alone would be unsound — the stamp fingerprints the tree state too.
 #
+#   Phase 6 flake isolation. rdtsc_guest_reproduces_high_bits_across_boots is the one test in
+#   this gate with both a documented load-flake history AND a known mechanical cause:
+#   KVM_SET_MSRS(IA32_TSC=0) pins only the counter's STARTING value, so real host-scheduling
+#   jitter between that ioctl and the guest's first rdtsc perturbs bits below RDTSC_JITTER_MASK's
+#   20-bit tolerance (crates/baud-multiverse/tests/fixtures/rdtsc-guest/BUILD.md). An 8-wide
+#   fan-out is precisely the load that produces that jitter, and the test reaches the pool from
+#   two directions at once — the workspace `cargo test` and h3.sh's own H3.4 step — so a failure
+#   here says nothing until the test has been given an idle host. Phase 6 therefore re-runs just
+#   that test, alone, after every other unit has drained, and reports BOTH results.
+#
+#   Passing in isolation does NOT turn the gate green. todo.md's standing rule is "report a flake
+#   as a flake, with both results; a failure that reproduces in isolation is real and must not be
+#   worked around" — a gate that excuses its own failures stops being evidence. A flake is
+#   reclassified FAIL -> FLAKE so it reads as distinct from a regression, and the gate still
+#   exits 1. The operator decides.
+#
 # Enforced-regime scripts (h3-enforced-*, h7-enforced-*) are deliberately NOT in this gate: they
 # rmmod/insmod the live kvm_intel and guard on `fuser /dev/kvm`, making them mutually exclusive
 # with every other baud process on the box. Run those by hand, one at a time.
@@ -67,6 +84,7 @@ JOBS=8
 H5_FIRST=1
 SKIP_CARGO=0
 FORCE_BUILD_CLI=0
+FLAKE_RERUN=1
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 LOGDIR="${BAUD_GATE_LOGDIR:-$REPO_ROOT/target/gate-logs/$RUN_ID}"
 
@@ -77,8 +95,10 @@ while [[ $# -gt 0 ]]; do
         --no-h5-first)      H5_FIRST=0; shift ;;
         --skip-cargo)       SKIP_CARGO=1; shift ;;
         --force-build-cli)  FORCE_BUILD_CLI=1; shift ;;
+        --flake-rerun)      FLAKE_RERUN=1; shift ;;
+        --no-flake-rerun)   FLAKE_RERUN=0; shift ;;
         --logdir)           LOGDIR="$2"; shift 2 ;;
-        -h|--help)          sed -n '2,45p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help)          sed -n '2,64p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "gate: unknown option $1 (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -225,6 +245,52 @@ run_one() { # <name> <command...>
 
 failed_count() { grep -c $'\tFAIL\t' "$RESULTS_FILE" 2>/dev/null || true; }
 
+# ── documented-flake machinery (phase 6) ─────────────────────────────────────
+
+FLAKE_TEST="rdtsc_guest_reproduces_high_bits_across_boots"
+ISO_LOG=""; ISO_SECS=0; ISO_RC=0
+
+# Was $FLAKE_TEST the SOLE reason this unit failed? Downgrading a unit that failed for
+# this test AND something else would hide the something else, so this must be exact.
+#
+# libtest prints exactly one `---- <name> stdout ----` block per FAILING test (passing
+# tests get no block), so comparing "blocks naming our test" against "blocks in total"
+# separates "only this test flaked" from "this test flaked and three others really
+# broke". h3.sh is the other route in: it runs the test as its H3.4 step and its fail()
+# exits on the spot, so its marker line is conclusive by itself.
+flake_is_sole_cause() { # <log>
+    local log="$1" total mine
+    [[ -r "$log" ]] || return 1
+    grep -q "$FLAKE_TEST FAILED" "$log" 2>/dev/null && return 0
+    total=$(grep -cE '^---- .* stdout ----' "$log" 2>/dev/null || true)
+    mine=$(grep -cE "^---- .*${FLAKE_TEST} stdout ----" "$log" 2>/dev/null || true)
+    (( ${mine:-0} > 0 && ${mine:-0} == ${total:-0} ))
+}
+
+# FAIL -> FLAKE for one unit. Safe to rewrite the file wholesale here because phase 6
+# runs after every unit has drained, so nothing else is appending to it.
+mark_flake() { # <unit-name>
+    local n="$1" tmp="$RESULTS_FILE.tmp"
+    awk -F'\t' -v OFS='\t' -v n="$n" '$1==n && $2=="FAIL" { $2="FLAKE" } 1' \
+        "$RESULTS_FILE" > "$tmp" && mv "$tmp" "$RESULTS_FILE"
+}
+
+# Like run_one — same process-group reaping — but reports rc in ISO_RC instead of
+# recording a results row, since the isolation re-run is evidence about an existing
+# row, not a unit of its own.
+run_isolated() { # <name> <command...>
+    local name="$1"; shift
+    local t0=$SECONDS
+    ISO_LOG="$LOGDIR/$name.log"
+    ISO_RC=0
+    "$@" > "$ISO_LOG" 2>&1 &
+    local p=$!
+    ACTIVE+=("$p")
+    wait "$p" 2>/dev/null || ISO_RC=$?
+    prune_active
+    ISO_SECS=$((SECONDS - t0))
+}
+
 # ── phase 0: warm-up ─────────────────────────────────────────────────────────
 
 if (( ! SKIP_CARGO )); then
@@ -343,11 +409,38 @@ else
     record "05-pkg-build-cli" SKIP 0 "-"
 fi
 
+# ── phase 6: documented-flake isolation re-run ───────────────────────────────
+# Last, so the host is idle: h5, the fan-out, h6 and pkg-build-cli have all drained.
+# See the header for why this test specifically, and why passing here does not turn
+# the gate green.
+
+FLAKE_CANDIDATES=()
+if (( FLAKE_RERUN )) && (( $(failed_count) > 0 )); then
+    while IFS=$'\t' read -r fname fstatus _ flog; do
+        [[ "$fstatus" == "FAIL" ]] || continue
+        flake_is_sole_cause "$flog" && FLAKE_CANDIDATES+=("$fname")
+    done < "$RESULTS_FILE"
+fi
+
+if (( ${#FLAKE_CANDIDATES[@]} > 0 )); then
+    say "phase 6: $FLAKE_TEST is the sole cause of ${#FLAKE_CANDIDATES[@]} failing unit(s) (${FLAKE_CANDIDATES[*]})"
+    say "phase 6: re-running it alone on the now-idle host"
+    run_isolated "06-flake-rdtsc-isolated" \
+        cargo test -q -p baud-multiverse "$FLAKE_TEST" -- --test-threads=1
+    if (( ISO_RC == 0 )); then
+        say "${YELLOW}phase 6: PASSED in isolation (${ISO_SECS}s) — documented load-flake, not a regression${RESET}"
+        for fname in "${FLAKE_CANDIDATES[@]}"; do mark_flake "$fname"; done
+    else
+        say "${RED}phase 6: FAILED in isolation too (${ISO_SECS}s, rc=$ISO_RC) — this is a real regression${RESET}"
+    fi
+fi
+
 # ── tally ────────────────────────────────────────────────────────────────────
 
 TOTAL=$((SECONDS - GATE_START))
 PASS_N=$(grep -c $'\tPASS\t' "$RESULTS_FILE" || true)
 FAIL_N=$(failed_count)
+FLAKE_N=$(grep -c $'\tFLAKE\t' "$RESULTS_FILE" || true)
 SKIP_N=$(grep -c $'\tSKIP\t' "$RESULTS_FILE" || true)
 
 echo ""
@@ -357,9 +450,25 @@ sort -t$'\t' -k3 -rn "$RESULTS_FILE" | head -5 | while IFS=$'\t' read -r n s d _
     printf '    %-38s %4ds  %s\n' "$n" "$d" "$s"
 done
 echo ""
-printf '  %d passed, %d failed, %d skipped in %dm%02ds (jobs=%d)\n' \
-       "${PASS_N:-0}" "${FAIL_N:-0}" "${SKIP_N:-0}" $((TOTAL / 60)) $((TOTAL % 60)) "$JOBS"
+# "flaked" only appears when there is one, so a clean run's summary line is unchanged.
+FLAKE_TXT=""
+(( ${FLAKE_N:-0} > 0 )) && FLAKE_TXT="$(printf '%d flaked, ' "${FLAKE_N:-0}")"
+printf '  %d passed, %d failed, %s%d skipped in %dm%02ds (jobs=%d)\n' \
+       "${PASS_N:-0}" "${FAIL_N:-0}" "$FLAKE_TXT" "${SKIP_N:-0}" $((TOTAL / 60)) $((TOTAL % 60)) "$JOBS"
 printf '  logs: %s\n' "$LOGDIR"
+
+if (( ${FLAKE_N:-0} > 0 )); then
+    echo ""
+    printf '  %sflakes:%s\n' "$YELLOW" "$RESET"
+    grep $'\tFLAKE\t' "$RESULTS_FILE" | while IFS=$'\t' read -r n _ d l; do
+        printf '    %-38s %4ds  %s\n' "$n" "$d" "$l"
+        printf '      %s\n' "$FLAKE_TEST"
+        printf '      FAILED under %d-wide fan-out, PASSED in isolation (%ds)  %s\n' \
+               "$JOBS" "$ISO_SECS" "$ISO_LOG"
+        printf '      documented load-flake, not a regression — see todo.md and\n'
+        printf '      crates/baud-multiverse/tests/fixtures/rdtsc-guest/BUILD.md\n'
+    done
+fi
 
 if (( ${FAIL_N:-0} > 0 )); then
     echo ""
@@ -372,6 +481,15 @@ if (( ${FAIL_N:-0} > 0 )); then
     printf '        timer_tick_lands_at_identical_instruction, rdtsc_guest_reproduces_high_bits_across_boots,\n'
     printf '        fleet_of_vms_run_in_parallel_without_interference, and `baud host probe` regime=rejected.\n'
     printf '        Re-run a failing unit in isolation before treating it as a regression.\n'
+    printf '        (rdtsc_guest_reproduces_high_bits_across_boots is re-run automatically by phase 6\n'
+    printf '        when it is the sole cause of a unit failure; the other three are still by hand.)\n'
+    exit 1
+fi
+
+# Reported, not excused: a flake still exits 1. See the header.
+if (( ${FLAKE_N:-0} > 0 )); then
+    echo ""
+    say "${YELLOW}gate not green — no regressions found, but ${FLAKE_N} unit(s) flaked (see above)${RESET}"
     exit 1
 fi
 

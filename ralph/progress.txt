@@ -6094,3 +6094,75 @@ IMPORTANT: git status now shows additional modified files I did NOT author -- dr
   - Verification: cargo build/clippy --workspace --all-targets/test --workspace all clean (0 failures across 41 test-result groups). `bash drive/gate.sh` run 4 consecutive times: every run had exactly one failure, always `rdtsc_guest_reproduces_high_bits_across_boots` (already documented in todo.md/gate.sh as a load-flake), never twice in the same unit, and it passed cleanly every time it was re-run in isolation -- confirmed amplified by a second, independent `ralph/ralph` session found actively running against this same host for the whole verification window (`ps aux`). My new watchdog tests and the rdrand fix passed in every single run, isolated and under contention alike.
   - Note: the working tree also contains uncommitted changes to drive/gate.sh, drive/gate.test.bats, drive/h/h3.sh, and drive/pkg/pkg-build-cli.stamp authored by that same concurrent second session (a flake-isolation mechanism for gate.sh plus a real h3.sh `set -e`/`|| true` bug fix) -- left untouched and unstaged since this is shared working-tree state I did not author and have not independently verified; only this iteration's own files are staged/committed here.
 ---
+
+Post-push verification: git fetch confirms origin/main == local main == 9fbff72 (rebased cleanly onto 7c2c824, a concurrent unrelated doc-comment commit from the user, no conflicts; rebuilt + re-ran the watchdog tests at the rebased tip, still green). Restored the concurrent second ralph session's stashed drive/gate.sh + drive/gate.test.bats + drive/h/h3.sh + drive/pkg/pkg-build-cli.stamp changes back into the working tree afterward, untouched, so that session can commit its own work when ready -- confirmed nothing of theirs was lost (git stash pop, clean apply).
+
+Iteration complete: closed todo.md sec 14.1's #1 priority item -- the real KVM run loop's missing wall-clock watchdog. Implemented a pthread_kill/SIGUSR1-based companion-thread watchdog in baud-vcpu, threaded a real wall-clock budget through baud-multiverse's Multiverse::run_to_first_halt family, hardware-verified with a new zero-exit spin-guest fixture plus a normal-guest negative case, and fixed an incidental unrelated flake (stale kvm module state) found along the way. All verification green (build/clippy/test --workspace, 4 gate.sh runs each showing only the pre-existing documented rdtsc contention flake -- confirmed via isolation re-runs and amplified by a detected concurrent second ralph session sharing this host), pushed and confirmed clean against origin (9fbff72). todo.md retains many pending items (H8 Mario FCEUX/Xvfb packaging, H9 Ubuntu not started, Buildroot/Nix image pipeline, and the sec 14.1 'still open' list items 1-5) -- emitting NEXT.
+
+## 2026-07-27T05:17:43 UTC (1h00min) - Session usage — build-1 [sonnet]
+- cost $17.2848 (from claude -p)
+- context 367,449 tok peak of 1M (37%) across 158 inference calls, monotonic
+- models sonnet-5 $17.2816 (in 406 / out 156,222 / cache-read 40,787,700) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T041811Z/001-build-1.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... checking git status and uncommitted changes from prior work first.
+
+Chose to secure and verify the substantial uncommitted flake-isolation work already sitting in drive/gate.sh, drive/gate.test.bats, and drive/h/h3.sh (left over from a concurrent ralph session earlier tonight, per iteration 1's notes) -- it's a complete, well-documented fix for the rdtsc load-flake reporting gap that todo.md sec 15 already documents as a known problem. Running the new bats tests first.
+
+Found the uncommitted gate.sh/gate.test.bats work was actually badly broken: drive/gate.sh had every phase-6 flake-detection function and the phase-6 execution block duplicated verbatim (two FLAKE_TEST/flake_is_sole_cause/mark_flake/run_isolated definitions, two phase-6 exec blocks, two redundant 'gate not green' exit blocks), and gate.test.bats had a fully duplicated test with the same name, which made bats refuse to even load the file (bats errors on duplicate test names). This is consistent with two concurrent ralph sessions independently implementing the same fix and both landing in this shared working tree without a merge. Deprogrammed the duplication down to one clean copy of each, keeping the more thoroughly-commented version each time. bash -n now passes, and all 32 non-slow bats tests in drive/gate.test.bats pass, including the 6 new phase-6 tests. Now running the full gate.sh to confirm the fixed script actually behaves correctly end-to-end (this is the real behavioral test, not just bats).
+
+Started 'bash drive/gate.sh' in background (task bom5zhlhl) to validate the de-duplicated gate.sh end-to-end -- expect ~6min per todo.md sec 15. Waiting for completion.
+
+## 2026-07-27T05:21:13 UTC (4min) - Session usage — build-2 [sonnet]
+- cost $1.4434 (from claude -p)
+- context 100,942 tok peak of 1M (10%) across 34 inference calls, monotonic
+- models sonnet-5 $1.4402 (in 68 / out 12,356 / cache-read 2,637,409) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T041811Z/002-build-2.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Deduplicated the two residual leftovers in drive/gate.sh from the concurrent session's partially-applied edit (a repeated --no-flake-rerun help line + case arm, and a repeated 'Phase 6 flake isolation' header paragraph) -- the function bodies (flake_is_sole_cause/mark_flake/run_isolated) were already single-copy. Fixed the --help sed range (2,72p -> 2,64p) since the header shrank by 7 lines. bash -n passes. Running bats now.
+
+bats all green (28/28 non-slow). Now running the real end-to-end 'bash drive/gate.sh' (the actual behavioral test, not just bats) in the background -- expect ~6min per todo.md sec 15.
+
+Waiting for the background gate.sh run to finish (task bhlips6z8) before deciding whether to commit.
+
+## 2026-07-27T05:23:44 UTC (3min) - Session usage — build-2 [sonnet]
+- cost $1.1480 (from claude -p)
+- context 110,887 tok peak of 1M (11%) across 23 inference calls, monotonic
+- models sonnet-5 $1.1448 (in 46 / out 7,849 / cache-read 2,120,454) · haiku-4-5 $0.0032
+- transcript: ralph/.run/20260727T041811Z/003-build-2.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2
+═══════════════════════════════════════════════════════
+
+Finding most important item to address from todo.md and studying repo state...
+
+Bats dedup confirmed clean (single copy of each phase-6 function/test). Running drive/gate.test.bats (non-slow) to confirm...
+
+All 28 non-slow bats tests pass. Checking for concurrent ralph/gate processes on this host before running the real end-to-end drive/gate.sh...
+
+Host idle, no concurrent gate/cargo/KVM processes. Running bash drive/gate.sh (the real end-to-end pre-push validation) now, timeout 600000ms...
+
+Gate fully green: 23/23 passed, 0 failed, 1 skipped, no flakes triggered (rdtsc test passed cleanly inside h3 this run). The uncommitted phase-6 flake-isolation feature for drive/gate.sh is verified working end-to-end. Committing now.
+
+## 2026-07-27T05:30:00 UTC - Changes committed.
+- Verified, closed, and committed the drive/gate.sh phase-6 flake-isolation feature that a concurrent second ralph session left uncommitted in the shared working tree (and that build-2 of this iteration had already deduplicated a corrupted double-copy of).
+- Files changed: drive/gate.sh, drive/gate.test.bats, drive/h/h3.sh, drive/pkg/pkg-build-cli.stamp, todo.md, ralph/progress.txt.
+- **Brief description of changes:**
+  - drive/gate.sh: new phase 6 runs after every other unit has drained. If `rdtsc_guest_reproduces_high_bits_across_boots` (the one documented load-flake with a known mechanical cause — KVM_SET_MSRS(IA32_TSC=0) pins only the counter's starting value, so host-scheduling jitter under an 8-wide fan-out perturbs bits below the 20-bit RDTSC_JITTER_MASK tolerance) was the *sole* cause of a failing unit, it re-runs that test alone on the now-idle host and reclassifies the unit FAIL -> FLAKE in the results table. A flake still exits 1 (reported, not excused) per todo.md's standing rule. New `--no-flake-rerun` flag disables it.
+  - drive/h3.sh: real bug fix found while building phase 6 — `RDTSC_OUT=$(cargo test ...)` had no `|| true` under the script's `set -e`, so a failing test aborted the assignment itself and neither the captured output nor the script's own fail() diagnostic ever printed. Silent-truncation failure mode, same family as §14.1's other "false passes in the drive scripts" findings.
+  - drive/gate.test.bats: 2 new tests for the phase-6 machinery (`flake_is_sole_cause`'s sole-cause/mixed-cause/h3.sh-marker/empty-log cases, and a static assertion that the flake-exit-1 guard precedes the "gate green" success message).
+  - todo.md §15: documented phase 6 and the h3.sh fix; also fixed a pre-existing doc/code drift (§15 said "4-wide"/"default 4" for the fan-out, but drive/gate.sh's actual default has been 8 since commit 843d350).
+  - Verification: `bash -n drive/gate.sh` clean, no duplicate function/test definitions (build-2 of this iteration had already deduplicated a corrupted double-copy left by two concurrent ralph sessions independently landing the same feature in one shared working tree). All 28 non-slow `bats drive/gate.test.bats` tests pass. Full real `bash drive/gate.sh` run: 23 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 0 flakes triggered (rdtsc test passed cleanly on this idle-host run) — gate green.
+---

@@ -139,7 +139,9 @@ pass "H3.3: 'baud host probe --require cooperative' exits 0 on runnable='$RUNNAB
 # H3.4 — rdtsc_guest_reproduces_high_bits_across_boots
 # ---------------------------------------------------------------------------
 log "Running rdtsc_guest_reproduces_high_bits_across_boots against real /dev/kvm (rdtsc-guest fixture)..."
-RDTSC_OUT=$(cargo test -q -p baud-multiverse rdtsc_guest_reproduces_high_bits_across_boots -- --test-threads=1 2>&1)
+# `|| true` under this script's `set -e`: a failing test would otherwise abort AT the
+# assignment, so neither the captured output nor the fail() message below ever prints.
+RDTSC_OUT=$(cargo test -q -p baud-multiverse rdtsc_guest_reproduces_high_bits_across_boots -- --test-threads=1 2>&1) || true
 echo "$RDTSC_OUT"
 echo "$RDTSC_OUT" | grep -q "test result: ok" || fail "H3.4: rdtsc_guest_reproduces_high_bits_across_boots FAILED"
 pass "H3.4: rdtsc_guest_reproduces_high_bits_across_boots — raw rdtsc reproduces in its high bits across two boots once pinned"

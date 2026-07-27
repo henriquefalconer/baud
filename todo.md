@@ -2360,9 +2360,18 @@ Run **`bash drive/gate.sh`** — one Bash call, `timeout: 600000`. That is the w
 
 It runs, in order: a warm-up `cargo build --workspace --tests --bins` (which then lets every drive script
 skip its own no-op `cargo build` via `BAUD_GATE_PREBUILT`), `cargo clippy --workspace --all-targets`,
-`cargo test --workspace`, the 19 fan-out drive scripts 4-wide, `drive/h/h6.sh` on an otherwise-idle host, and
-`drive/pkg/pkg-build-cli.sh` only when its fingerprint changed. It prints a per-unit PASS/FAIL/duration table and
-writes per-unit logs under `target/gate-logs/<run-id>/`. Exit code is non-zero iff some unit failed.
+`cargo test --workspace`, the 19 fan-out drive scripts 8-wide, `drive/h/h6.sh` on an otherwise-idle host,
+`drive/pkg/pkg-build-cli.sh` only when its fingerprint changed, and finally **phase 6**: if
+`rdtsc_guest_reproduces_high_bits_across_boots` (the one documented load-flake with a known mechanical cause,
+see §14.1 item above) was the *sole* cause of a unit's failure, the gate re-runs just that test alone on the
+now-idle host and reclassifies the unit `FAIL` → `FLAKE` in the summary table — but **a flake still exits 1**,
+same as a real failure; it is reported, not excused, so re-run isolation evidence is never silently swallowed
+into a green gate. `--no-flake-rerun` disables phase 6 (default on). This closed a real `h3.sh` bug found
+alongside it: `RDTSC_OUT=$(cargo test ...)` had no `|| true` under the script's `set -e`, so a failing test
+aborted the assignment itself — neither the captured test output nor the script's own `fail()` diagnostic ever
+printed, which is exactly the silent-truncation failure mode §14.1's "false passes in the drive scripts" catalogs.
+It prints a per-unit PASS/FAIL/FLAKE/duration table and writes per-unit logs under `target/gate-logs/<run-id>/`.
+Exit code is non-zero iff some unit failed or flaked.
 
 - **Do not run the units by hand instead.** The old sequence (`cargo build`, then `cargo clippy`, then
   `cargo test`, then each `drive/*.sh` one at a time) takes ~16 min against the gate's ~6 min, and re-runs
@@ -2370,7 +2379,7 @@ writes per-unit logs under `target/gate-logs/<run-id>/`. Exit code is non-zero i
 - **A failing unit does not abort the gate**, so one run reports the state of everything rather than stopping
   at the first problem.
 - **If it exceeds the call timeout**, re-run with `run_in_background: true`. Do not split it into pieces.
-- **`--jobs N`** changes fan-out width (default 4); `--jobs 1` is the serial equivalent. `--force-build-cli`
+- **`--jobs N`** changes fan-out width (default 8); `--jobs 1` is the serial equivalent. `--force-build-cli`
   runs the gated kernel-build script regardless of its fingerprint.
 - **Before treating a failure as a regression, re-run that one script in isolation.** This host has a
   documented load-flake history in `timer_tick_lands_at_identical_instruction`,

@@ -267,6 +267,39 @@ kvm_holders() {
     [ "$status" -eq 0 ]
 }
 
+# ── phase 6: flake isolation re-run ──────────────────────────────────────────
+
+@test "flake detection accepts a sole-cause failure and rejects a mixed one" {
+    eval "$(sed -n '/^FLAKE_TEST="/p;/^flake_is_sole_cause()/,/^}$/p' drive/gate.sh)"
+    tmp="$BATS_TEST_TMPDIR"
+
+    printf 'failures:\n\n---- linux::tests::%s stdout ----\n' "$FLAKE_TEST" > "$tmp/sole.log"
+    run flake_is_sole_cause "$tmp/sole.log"
+    [ "$status" -eq 0 ]
+
+    # The flake AND a real regression: downgrading this would hide the regression.
+    printf 'failures:\n\n---- linux::tests::%s stdout ----\n---- linux::tests::other stdout ----\n' \
+        "$FLAKE_TEST" > "$tmp/mixed.log"
+    run flake_is_sole_cause "$tmp/mixed.log"
+    [ "$status" -ne 0 ]
+
+    # h3.sh's fail() exits on the spot, so its marker line is conclusive alone.
+    printf '  [FAIL] H3.4: %s FAILED\n' "$FLAKE_TEST" > "$tmp/h3.log"
+    run flake_is_sole_cause "$tmp/h3.log"
+    [ "$status" -eq 0 ]
+
+    : > "$tmp/empty.log"
+    run flake_is_sole_cause "$tmp/empty.log"
+    [ "$status" -ne 0 ]
+}
+
+@test "a flake still exits 1 instead of turning the gate green" {
+    guard=$(grep -n 'gate not green' drive/gate.sh | cut -d: -f1)
+    green=$(grep -n '^say ".*gate green' drive/gate.sh | cut -d: -f1)
+    [ -n "$guard" ] && [ -n "$green" ]
+    [ "$guard" -lt "$green" ]
+}
+
 # ── behavioural: interrupt cleanup (slow, needs an idle machine) ──────────────
 
 # bats test_tags=slow
