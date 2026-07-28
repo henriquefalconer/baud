@@ -127,6 +127,14 @@ pub struct RunKvmBody {
     /// pattern_hex` is set.
     #[serde(default = "default_halt_max_exits_per_burst")]
     pub halt_max_exits_per_burst: u32,
+    /// Overrides `PERIODIC_TICK_WATCHDOG_BUDGET`'s 600s default
+    /// (`Multiverse::set_periodic_tick_watchdog_budget`) for this boot's periodic-timer-tick and
+    /// resume-past-halt burst-loop watchdogs — closes todo.md §14 item 18/19's flagged "CLI/HTTP-
+    /// tunable knob" gap. A real, slow guest (H9's Ubuntu rootfs) needs headroom well past the
+    /// 600s default to tell "merely slow" apart from "genuinely wedged" without a code change.
+    /// `None` (the default) preserves this route's exact prior behavior (the 600s constant).
+    #[serde(default)]
+    pub periodic_tick_watchdog_budget_secs: Option<u64>,
 }
 
 fn default_halt_max_exits_per_burst() -> u32 {
@@ -439,6 +447,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
     let tape_hex = body.tape_hex.clone();
+    let periodic_tick_watchdog_budget_secs = body.periodic_tick_watchdog_budget_secs;
 
     // A `spawn_blocking` closure is not cancellable, so the only thing that can stop an abandoned
     // run is the run loop itself noticing. `cancel` lives in this async handler: if hyper drops
@@ -464,6 +473,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
             virtio_blk,
             acpi,
             halt_console_pattern.as_ref().map(|(p, m)| (p.as_slice(), *m)),
+            periodic_tick_watchdog_budget_secs,
             Some(cancel_flag),
         )
     })
@@ -677,7 +687,7 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false, None, None)
+    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false, None, None, None)
         .map(|(outcome, _records)| outcome)
 }
 
@@ -694,7 +704,10 @@ fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<Bran
 /// read-only *mapping* of the image file (`open_virtio_blk_image`) rather than its bytes on the
 /// heap, and which is handed to `enable_virtio_pci_blk` by move: no copy is made anywhere on this
 /// path. `halt_console_pattern` is `(pattern_bytes, max_exits_per_burst)`; `None` preserves this
-/// function's exact prior behavior (a guest's first `Hlt` is always terminal). `cancel`, when
+/// function's exact prior behavior (a guest's first `Hlt` is always terminal).
+/// `periodic_tick_watchdog_budget_secs`, when set, overrides `PERIODIC_TICK_WATCHDOG_BUDGET`'s
+/// 600s default (`Multiverse::set_periodic_tick_watchdog_budget`) — see [`RunKvmBody::
+/// periodic_tick_watchdog_budget_secs`]'s doc for why this exists. `cancel`, when
 /// set, is installed on the booted `Multiverse` as its supervisory cancellation flag
 /// ([`Multiverse::set_cancel_flag`](baud_multiverse::linux::Multiverse::set_cancel_flag)) so an
 /// abandoned run stops between exits instead of running to completion — see [`CancelGuard`].
@@ -709,6 +722,7 @@ fn boot_run_and_drain(
     virtio_blk: Option<(baud_multiverse::virtio_blk::BlockBase, u8, u32)>,
     acpi: bool,
     halt_console_pattern: Option<(&[u8], u32)>,
+    periodic_tick_watchdog_budget_secs: Option<u64>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     // `virtio_blk`'s base image is moved into the device below, so keep the two scalars every
@@ -728,6 +742,9 @@ fn boot_run_and_drain(
     .map_err(|e| format!("boot error: {e}"))?;
     if let Some(flag) = cancel {
         mv.set_cancel_flag(flag);
+    }
+    if let Some(secs) = periodic_tick_watchdog_budget_secs {
+        mv.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(secs));
     }
     if acpi {
         mv.write_acpi_tables().map_err(|e| format!("write_acpi_tables error: {e}"))?;
@@ -846,6 +863,7 @@ pub(crate) fn boot_and_drain_frames(
         virtio_rng,
         virtio_blk,
         acpi,
+        None,
         None,
         cancel,
     )?;
@@ -2274,7 +2292,7 @@ mod tests {
         assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(
@@ -2315,7 +2333,7 @@ mod tests {
                 .expect("boot_snapshot_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 3);
@@ -2395,6 +2413,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .expect("real linux-guest boot through boot_run_and_drain failed");
 
@@ -2441,6 +2460,7 @@ mod tests {
                 None,
                 None,
                 true, // acpi
+                None,
                 None,
                 None,
             )
@@ -2490,6 +2510,7 @@ mod tests {
             false,
             Some((pattern, MAX_EXITS_PER_BURST)),
             None,
+            None,
         )
         .expect("idle-halt-guest boot through boot_run_and_drain did not reach the target console pattern");
 
@@ -2498,6 +2519,58 @@ mod tests {
             console.ends_with("ubuntu login:"),
             "the route-level run must resume past every silent idle halt and stop only once the \
              pattern appears; got:\n{console}"
+        );
+    }
+
+    fn halt_then_spin_guest_kernel_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/halt-then-spin-guest/bzImage")
+    }
+
+    /// Route-level proof that `RunKvmBody::periodic_tick_watchdog_budget_secs` (todo.md §14 item
+    /// 18/19's flagged "CLI/HTTP-tunable knob" gap) actually reaches
+    /// `Multiverse::set_periodic_tick_watchdog_budget`, not just `RunKvmBody`'s own
+    /// deserialization — the same distinction `run_kvm_resumes_past_idle_halts_until_console_
+    /// pattern_found` draws for `halt_console_pattern`. `halt-then-spin-guest` (see
+    /// `baud_multiverse::linux`'s `halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit`, the
+    /// primitive-level sibling of this test) halts once, wakes into an unbounded `spin: jmp spin`
+    /// on the injected tick, and never produces `pattern` — with the watchdog budget overridden
+    /// down to 1s, the burst loop's watchdog must fire within a bounded wall-clock window instead
+    /// of the 600s default, and the resulting error must name the *overridden* 1000ms budget, not
+    /// the default 600000ms one — proving the override value itself made it through, not just
+    /// that some watchdog eventually fired.
+    #[test]
+    fn periodic_tick_watchdog_budget_override_reaches_the_route_wiring() {
+        const TIMER_VECTOR: u8 = 0xec;
+        let kernel = halt_then_spin_guest_kernel_path();
+        let start = std::time::Instant::now();
+
+        let Err(err) = boot_run_and_drain(
+            &kernel,
+            "console=ttyS0",
+            vec![],
+            None,
+            Some((500_000, TIMER_VECTOR, 20_000)),
+            None,
+            None,
+            false,
+            Some((b"this pattern never appears in this fixture's console output", 1_000_000)),
+            Some(1),
+            None,
+        ) else {
+            panic!("a wedged burst-loop exit must not complete without a watchdog kill")
+        };
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "a 1s watchdog override must reclaim the wedged call promptly, not merely eventually \
+             (took {elapsed:?})"
+        );
+        assert!(
+            err.contains("watchdog killed the guest after 1000ms"),
+            "the error must name the overridden 1000ms budget, proving the override value \
+             actually reached Multiverse, not just that some watchdog fired; got: {err}"
         );
     }
 
@@ -2553,6 +2626,7 @@ mod tests {
             None,
             Some((base, virtio_blk_vector, 200_000)),
             false,
+            None,
             None,
             None,
         )
@@ -2618,6 +2692,7 @@ mod tests {
             None,
             Some((base, baud_multiverse::pic8259::isa_irq_vector(11), 200_000)),
             false,
+            None,
             None,
             Some(flag),
         ) else {
@@ -3017,7 +3092,7 @@ mod tests {
                 .expect("resume_and_generate with virtio_rng failed");
 
         let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None)
+            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None, None)
                 .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(resumed_outcomes.len(), 3);

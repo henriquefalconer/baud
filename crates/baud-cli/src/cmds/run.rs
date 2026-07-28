@@ -151,6 +151,13 @@ pub enum RunAction {
         /// set.
         #[arg(long, default_value_t = 200_000)]
         halt_max_exits_per_burst: u32,
+        /// Overrides the server's default 600s wall-clock watchdog budget for this boot's
+        /// periodic-timer-tick and resume-past-halt burst-loop watchdogs
+        /// (`Multiverse::set_periodic_tick_watchdog_budget`) — a real, slow guest (e.g. a full
+        /// distro rootfs) may need headroom well past 600s to tell "merely slow" apart from
+        /// "genuinely wedged" without a code change. Omit to use the server's default.
+        #[arg(long)]
+        periodic_tick_watchdog_budget_secs: Option<u64>,
     },
     /// Boot a guest image, snapshot immediately after boot as a shared branch point, then fork one
     /// independent continuation per `--branch-tape-hex` (repeatable) — or, with `--generate-seed`
@@ -374,6 +381,7 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             virtio_blk_max_exits,
             halt_console_pattern_hex,
             halt_max_exits_per_burst,
+            periodic_tick_watchdog_budget_secs,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -408,6 +416,9 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             if let Some(pattern_hex) = halt_console_pattern_hex {
                 body["halt_console_pattern_hex"] = json!(pattern_hex);
                 body["halt_max_exits_per_burst"] = json!(halt_max_exits_per_burst);
+            }
+            if let Some(secs) = periodic_tick_watchdog_budget_secs {
+                body["periodic_tick_watchdog_budget_secs"] = json!(secs);
             }
             let v = c.post("/run/kvm", &body).await?;
             fmt::print(&v, json);

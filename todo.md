@@ -3340,6 +3340,79 @@ snapshot, not a duplicate of it.
      zero new. Full `bash drive/gate.sh` → 24 passed, 0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_
      across_boots`, the documented load-flake, confirmed passing in isolation by gate phase 6 in 3s — green
      per `CLAUDE.md`'s documented exception), 1 skipped (`pkg-build-cli`, fingerprint unchanged), 3m19s.
+  20. **H9 — implemented and hardware-verified the CLI/HTTP-tunable watchdog-budget knob item 18/19
+     flagged as a known gap, then used it on a real H9 attempt and found a sharper, more precise
+     diagnosis of the stall than any prior iteration reached.** `RunKvmBody` (`crates/baud-
+     server/src/routes/run_kvm.rs`) gained `periodic_tick_watchdog_budget_secs: Option<u64>`
+     (`#[serde(default)]`), threaded through `run()` and `boot_run_and_drain` (an 11th parameter —
+     all ~10 existing call sites, production and test, updated) into
+     `Multiverse::set_periodic_tick_watchdog_budget`, overriding `PERIODIC_TICK_WATCHDOG_BUDGET`'s
+     600s default for both the per-tick `inject_at` watchdog and the resume-past-halt burst-loop
+     watchdog item 18 added. `baud run kvm` (`crates/baud-cli/src/cmds/run.rs`) gained the matching
+     `--periodic-tick-watchdog-budget-secs` flag. New hardware-verified route-level test
+     `periodic_tick_watchdog_budget_override_reaches_the_route_wiring` (`crates/baud-
+     server/src/routes/run_kvm.rs`, using the `halt-then-spin-guest` fixture item 18 added, with
+     the budget overridden down to 1s) proves the override value itself reaches `Multiverse` — the
+     error names the overridden `1000ms` budget, not the `600000ms` default — not just that
+     `RunKvmBody` deserializes the field. Verified: `cargo test -p baud-server` → 41 passed (was
+     40), `cargo clippy -p baud-server -p baud-cli --all-targets` → 50 warnings, confirmed via `git
+     stash` baseline comparison to be identical pre-existing, zero new.
+     Used the new knob on a real detached H9 (Ubuntu 18.04.1) attempt with the budget raised to
+     1800s (30 min, 3x the prior 600s default), per item 18/19's own recommendation that 3
+     consecutive attempts each measuring a single tick/burst-exit taking minutes to tens of minutes
+     made "raise the budget and re-attempt" more informative than adding the knob alone. Ticks
+     climbed to 2200/20000 in ~3s wall-clock (the same fast-early-ticks-then-stall pattern every
+     prior attempt hit), then stalled; the watchdog fired at exactly the overridden `1800000ms`,
+     confirming the CLI→HTTP→`Multiverse` override plumbing works end-to-end on a real attempt, not
+     just synthetically (`"determinism hole: wall-clock watchdog killed the guest after 1800000ms
+     with no Hlt/Shutdown reached..."`). This is itself a real finding: 3x headroom did not let the
+     boot progress past the same tick 2200 it always stalls at, real evidence against the "merely
+     slow, just needs more time" hypothesis items 17-19 left open.
+     Since the stall reproduces deterministically within ~3s wall-clock (not tens of minutes),
+     attaching `gdb` to a fresh attempt (item 18's successful technique) was far cheaper than
+     waiting out another 30-minute budget. A live `gdb -p <tid> -batch -ex "thread apply all bt"`
+     backtrace on the stalled `tokio-rt-worker` thread (state `R`) showed it blocked inside the raw
+     `ioctl(KVM_RUN)` syscall itself: `baud_vcpu::linux::run_and_convert` ←
+     `run_and_convert_rcb_bracketed` ← `run_one_exit_impl` ←
+     `run_one_exit_cancellable_with_watchdog` ← `Multiverse::step_exit_cancellable_with_watchdog` ←
+     `run_to_first_halt_with_periodic_timer_and_devices`'s resume-past-halt burst loop
+     (`crates/baud-multiverse/src/linux/mod.rs:2154`) ←
+     `run_until_console_pattern_with_periodic_timer_and_devices` ← `boot_run_and_drain`. This
+     confirms the watchdog is wrapping the correct call (it did correctly kill it at the budget in
+     the attempt above) — but the guest produces **zero VM exits for 30+ minutes straight** inside
+     that one `KVM_RUN` call, a genuine native-execution stall, not many small exits accumulating
+     from slow real I/O (which would instead hit `max_exits_per_burst` with a `DeterminismHole`,
+     not a single stuck ioctl).
+     While reading `run_to_first_halt_with_periodic_timer_and_devices` to interpret this backtrace,
+     found a real, confirmed structural asymmetry (not yet fixed): the ordinary per-tick paths
+     (`InjectOutcome::Injected`/`Halted` arms, `crates/baud-multiverse/src/linux/mod.rs` lines
+     ~2056-2114) both poll `devices` (virtio-blk/virtio-rng notify counts) and call
+     `service_running`/`service_halted` after each timer delivery — but the "resume past a non-
+     terminal halt, deliver the timer interrupt directly, drain to pattern" burst loop just below
+     it (same file, lines ~2129-2168, entered once no device has pending work at a halt and
+     `pattern` hasn't appeared yet) never checks or services `devices` at all inside its raw exit-
+     drain loop; it only checks cancellation, the target pattern, and `max_exits_per_burst`. This
+     is a real gap, independently worth fixing, but does **not** perfectly explain this specific
+     zero-exit stall: a guest that halts to wait for a virtio-blk completion would exit immediately
+     via `Hlt` (this project's model always traps it) and fall through to the next outer-loop tick,
+     not block natively for 30 minutes with no exit at all. The more likely explanation for *this*
+     stall is a genuine RAM-only spin loop the guest executes with no I/O/HLT access whatsoever
+     (e.g. a TSC-calibration delay loop — H9's cmdline sets `clocksource=tsc tsc=reliable no-
+     kvmclock`, native `rdtsc` is unlocked/untrapped under the stock `kvm_intel` module H9 always
+     runs under — or an early-boot driver-init spin this project's hardware model doesn't satisfy),
+     which the device-servicing gap cannot address either way.
+     **Not fixed this iteration** (both are real, scoped, next-step candidates, not attempted here
+     for lack of more direct evidence and hardware time): (a) the burst loop's missing device-
+     servicing, since fixing it touches the hot boot path and needs new hardware regression tests,
+     and per the paragraph above is not proven to be this stall's actual cause; (b) capturing the
+     guest's own RIP/registers at the moment of a watchdog kill (needs a `KVM_GET_REGS` read
+     immediately after the forced `-EINTR`, before the call is treated as a bare error) — the
+     single highest-value next diagnostic, since two live `gdb` sessions this iteration (this one
+     and item 18's) only ever reached the *host*-side call stack, never the guest's own program
+     counter, and "zero VM exits for 30+ minutes" is consistent with several distinct plausible
+     causes (a TSC-calibration bug, an unrelated driver-init spin, or the device-servicing gap only
+     *if* the very next event would have been a `Hlt`) that only the guest's own RIP can
+     distinguish between. A future iteration should add that capture, then re-attempt.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

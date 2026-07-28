@@ -7676,3 +7676,51 @@ Gate green (24 passed, 0 failed, 1 documented flake confirmed passing in isolati
   - Verified: `cargo test -p baud-vcpu -p baud-multiverse` 229+40 passed; `cargo test -p baud-server --bin baud-server` 40 passed; `cargo clippy` on all three, baseline-identical warning counts via `git stash` comparison, zero new. `bash drive/gate.sh`: 24 passed, 0 failed, 1 flaked (documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in isolation), 1 skipped, 3m19s — green per CLAUDE.md's documented exception.
   - todo.md gained items 18 and 19 documenting all of the above; H9's own next step (raise the burst-loop watchdog budget and re-attempt) remains open.
 ---
+
+Post-push verification: origin/main == local HEAD (297e536) exactly, working tree clean. Gate was green (24 passed, 0 failed, 1 documented flake confirmed passing in isolation, 1 skipped, 3m19s) at this commit's tree before pushing. todo.md still has pending items (H9 itself remains open per item 18/19's own next-step note -- raise the burst-loop watchdog budget and re-attempt -- plus other still-open items throughout). Iteration closed.
+
+## 2026-07-28T00:42:19 UTC (52min) - Session usage — build-6 [sonnet]
+- cost $10.5674 (from claude -p)
+- context 262,010 tok peak of 1M (26%) across 139 inference calls, monotonic
+- models sonnet-5 $10.0124 (in 278 / out 85,511 / cache-read 24,330,061) · opus-5[1m] $0.5518 · haiku-4-5 $0.0032
+- subagents (1) opus-5 x1
+- transcript: ralph/.run/20260727T203641Z/007-build-6.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Studying todo.md and specs to find the most important item to address...
+
+Chose to continue H9 (Ubuntu 18.04.1 boot): todo.md's still-open next step after items 18/19 -- raise the periodic-tick/burst-loop watchdog budget substantially and re-attempt, since three consecutive real attempts each measured a single tick/burst-exit taking minutes to tens of minutes. Implementing the CLI/HTTP-tunable knob for PERIODIC_TICK_WATCHDOG_BUDGET first (flagged as a known gap) rather than hardcoding a temporary constant bump, so the override is permanent, testable functionality. RunKvmBody gained periodic_tick_watchdog_budget_secs (Option<u64>, serde default None), threaded through run()/boot_run_and_drain/Multiverse::set_periodic_tick_watchdog_budget; all ~10 existing boot_run_and_drain call sites (production + tests) updated for the new parameter. cargo build/test -p baud-server compile clean so far. Adding the matching CLI flag next.
+
+New route-level test periodic_tick_watchdog_budget_override_reaches_the_route_wiring passes on real /dev/kvm: a 1s override reclaims a wedged burst-loop exit and the error names the overridden 1000ms budget, proving the JSON->CLI->Multiverse plumbing actually carries the value, not just deserializes it. Running full baud-server test suite + clippy for regressions before the real H9 attempt...
+
+Verified: 41 baud-server tests pass (was 40), clippy identical baseline (50 warnings before/after via git stash comparison, zero new). Building baud-server/baud-cli release-mode binaries is unnecessary (drive scripts/CLI use debug), proceeding to launch a real detached H9 boot attempt with the new --periodic-tick-watchdog-budget-secs knob set well past the 600s default. Checking environment (perf_event_paranoid, /dev/kvm free, Ubuntu image presence) first...
+
+Launched detached baud-server (PID 181622, port 17944) and detached H9 boot attempt (baud run kvm, vector 238, 20000 max ticks, --periodic-tick-watchdog-budget-secs 1800, PID 181680), both survive session teardown via setsid+nohup+disown. This attempt uses the new watchdog-budget CLI knob raised to 1800s (30 min), 3x the prior 600s default, per todo.md's own recommendation after 3 consecutive attempts each measured a single tick/burst-exit taking minutes to tens of minutes on this real 2.2GiB rootfs. Watching server.log for tick progress and cli.json for completion...
+
+9 min in: ticks climbed to 2200/20000 in ~3s wall-clock (same fast-early-ticks-then-stall pattern as every prior attempt), server pinned at 98%% CPU since. This time the watchdog budget is 1800s (30 min), so still well within budget -- continuing to poll toward the deadline to see whether the boot progresses further (proving it was merely slow) or the watchdog fires (still wedged even with 3x headroom).
+
+19 min in: still stalled at tick 2200/20000, server CPU time climbing steadily (~99%% one core the whole time), consistent with the same class of very-long single call prior iterations hit. The 1800s (30 min) watchdog budget for this specific call should be reached around the ~30-31 min mark since the tick-2200 log line. Continuing to poll toward that deadline plus margin for the response to propagate back to the CLI client.
+
+REAL RESULT: the watchdog fired at exactly the overridden 1800000ms (30 min), confirming the CLI-\>HTTP-\>Multiverse plumbing works end-to-end on a real H9 attempt, not just the unit test. But the single stalled tick (2200/20000, same tick every attempt -- deterministic) did NOT complete even with 3x the prior 600s budget -- real evidence against the 'merely slow, just needs more time' hypothesis this iteration set out to test. Since the stall is deterministic and reproduces within ~3s wall-clock, attaching gdb to a fresh attempt (iteration 6's successful technique) is far cheaper than another 30-min wait and should directly name what tick 2200 is actually blocked on. Killing this attempt's processes and launching a fresh one to gdb-attach.
+
+Second live gdb attach reproduced the exact same tick-2200 stall (~3s wall clock) and got a full backtrace: the tokio-rt-worker thread is blocked inside the raw ioctl(KVM_RUN) syscall itself, via step_exit_cancellable_with_watchdog -> the resume-past-halt burst loop (run_to_first_halt_with_periodic_timer_and_devices, mod.rs:2154) -> run_until_console_pattern_with_periodic_timer_and_devices -> boot_run_and_drain. Confirms the watchdog IS wrapping the right call (it correctly killed it in attempt 1), but the guest produces ZERO VM exits for 30+ minutes straight inside that one call -- a genuine native execution stall, not many small exits from slow I/O. While reading the code to interpret this, found a real structural asymmetry: the burst loop's raw exit-drain (mod.rs ~2129-2168) never polls/services  (virtio-blk/virtio-rng) at all, unlike the ordinary per-tick paths 60 lines above it which do. Real gap, but doesn't perfectly explain a zero-exit stall (a guest halting to wait for a device would HLT-exit immediately, not block natively) -- more likely the guest is in a genuine RAM-only spin loop. Killing both H9 processes and writing this up in todo.md via a subagent.
+
+todo.md item 20 written by subagent (lines 3343-3415), documenting the new watchdog-budget knob, its real-hardware verification, the 1800s H9 attempt result, the gdb backtrace finding, and the confirmed (but not-yet-fixed, not proven root cause) device-servicing gap in the burst loop. Running the full pre-push gate (bash drive/gate.sh) now...
+
+Gate green: 25 passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m49s. Cleaning up temp H9 work dir. Appending final progress block and committing.
+
+## 2026-07-28T01:34:30 UTC - Changes committed.
+- Continued H9 (Ubuntu 18.04.1 boot): implemented and hardware-verified the CLI/HTTP-tunable watchdog-budget knob todo.md items 18/19 had flagged as a known gap, used it on a real 30-minute H9 attempt, then used a live gdb backtrace (reproduced deterministically within ~3s) to precisely locate the stall as a genuine zero-VM-exit native execution block, and found a real (not-yet-fixed, not proven root cause) device-servicing gap in the resume-past-halt burst loop.
+- Files changed: crates/baud-cli/src/cmds/run.rs, crates/baud-server/src/routes/run_kvm.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - RunKvmBody gained periodic_tick_watchdog_budget_secs (Option<u64>, serde default None), threaded through run()/boot_run_and_drain (an 11th parameter, all ~10 call sites updated)/Multiverse::set_periodic_tick_watchdog_budget, overriding PERIODIC_TICK_WATCHDOG_BUDGET's 600s default for both the per-tick and burst-loop watchdogs. baud run kvm gained the matching --periodic-tick-watchdog-budget-secs flag.
+  - New hardware-verified route-level test periodic_tick_watchdog_budget_override_reaches_the_route_wiring (halt-then-spin-guest fixture, 1s override) proves the override value itself reaches Multiverse, not just RunKvmBody's deserialization.
+  - Launched a real detached H9 attempt with the budget raised to 1800s (30 min, 3x default). Ticks climbed to 2200/20000 in ~3s then stalled; the watchdog fired at exactly the overridden 1800000ms -- confirms the plumbing works end-to-end on real hardware, and is real evidence against the "merely slow" hypothesis (3x headroom did not let the boot progress past the same tick it always stalls at).
+  - A fresh attempt reproduced the identical stall in ~3s; a live gdb backtrace showed the stalled thread blocked inside the raw ioctl(KVM_RUN) syscall itself, inside the resume-past-halt burst loop (step_exit_cancellable_with_watchdog) -- zero VM exits for 30+ minutes, a genuine native execution stall, not slow I/O.
+  - While interpreting the backtrace, found a real structural asymmetry: the burst loop's raw exit-drain never polls/services devices (virtio-blk/virtio-rng), unlike the ordinary per-tick paths 60 lines above it -- documented as a real gap, not fixed (doesn't perfectly explain a zero-exit stall since a device-wait would HLT-exit immediately).
+  - Verified: cargo test -p baud-server -> 41 passed (was 40); cargo clippy -p baud-server -p baud-cli --all-targets -> 50 warnings, confirmed via git stash baseline comparison identical pre-existing, zero new. bash drive/gate.sh -> 25 passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m49s.
+  - todo.md gained item 20 documenting all of the above; H9's own next step (capture guest RIP/registers at watchdog-kill time for a future attempt) remains open.
+---
