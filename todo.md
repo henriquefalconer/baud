@@ -3453,6 +3453,84 @@ snapshot, not a duplicate of it.
      device-servicing gap. Not re-attempted this iteration (no spare hardware-time budget after the
      implementation + full gate verification above) — a future iteration should launch a detached
      H9 attempt exactly as items 16-20 did and read the RIP straight out of the resulting error.
+  22. **H9 — item 21's own real next step, executed: re-attempted the real Ubuntu boot with the**
+     **guest RIP capture in place, then added a second diagnostic (console output at the moment of**
+     **a kill) and used it too — this is the sharpest lead on the real stall's cause found so far.**
+     First re-attempt (unchanged code from item 21, `--periodic-tick-watchdog-budget-secs 90` — the
+     stall reproduces within ~3s per item 20, so 90s is ample headroom, not the 1800s prior attempts
+     needed only because they were also *hunting for* the reproduction window): watchdog fired at
+     exactly 90000ms with `guest RIP at kill: 0xffffffffc009b0d3`. A second, independent attempt
+     landed at `0xffffffffc009b0da` — 7 bytes away, not a different location entirely, exactly what
+     landing at different points inside one small tight loop looks like across two runs whose only
+     source of variance is the watchdog's own documented non-determinism (`docs/determinism.md`
+     "Known limits" §4) in exactly when it happens to land. **Both addresses are in kernel *module*
+     space (`0xffffffffc0000000`+, not core kernel `.text`)** — real evidence the guest is stuck
+     inside a loaded driver/crypto module, not a core-kernel TSC-calibration delay loop as item 20's
+     leading hypothesis suggested.
+     Built a second capture to go with it: `RunLoopError::WatchdogKilled` (`crates/baud-vcpu/src/
+     lib.rs`) gained `console_tail: Option<String>` — the last 200 bytes of the guest's own serial
+     console output at the moment of the kill, reusing the `console_tail()` helper `crates/baud-
+     multiverse/src/linux/mod.rs`'s own `DeterminismHole` messages already used nearby. `Some(String::
+     new())` when the console produced nothing before the kill; `None` only at `baud_vcpu`'s own
+     whole-run watchdog (`linux::run_until_halted`), which has no console/device model in scope at
+     all (that is `baud_multiverse`'s job) — a structural `None`, not a failed read, unlike
+     `guest_rip`'s `None`. Wired at the same 3 sites item 21's `guest_rip` was: `baud_vcpu::linux::
+     run_until_halted` (always `None`), and `baud_multiverse`'s per-tick `inject_at` watchdog and
+     resume-past-halt burst-loop watchdog (both `Some`, using data already in scope — no new fallible
+     read, unlike `guest_rip`'s `KVM_GET_REGS`). Folded into the same `#[error(...)]` string via a new
+     `format_console_tail` helper. All 4 existing `WatchdogKilled`-destructuring tests updated and
+     strengthened with real assertions, not just made to compile: `wall_clock_watchdog_kills_a_truly_
+     spinning_guest` (`baud_vcpu`'s whole-run watchdog, `spin-guest`) now asserts `console_tail ==
+     None`; `periodic_tick_watchdog_kills_a_stuck_tick`/`..._via_spawn_blocking` (same fixture, tick
+     watchdog) assert `console_tail == Some(String::new())` (`spin-guest` performs no I/O at all);
+     `halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit` (`halt-then-spin-guest`, whose ISR
+     writes exactly one `'T'` byte to COM1 before falling into its own spin loop, per that fixture's
+     `payload.s`) asserts `console_tail == Some("T".to_string())` — real hardware confirmation the
+     capture reaches genuine non-empty console content, not just that the field exists. Verified:
+     `cargo build -p baud-vcpu -p baud-multiverse -p baud-server -p baud-cli` clean; `cargo clippy`
+     on the same four, only pre-existing warnings in unrelated files (none in any changed file);
+     `cargo test -p baud-multiverse --lib -- watchdog` → 7 passed (real `/dev/kvm`); `cargo test -p
+     baud-vcpu` → 40 passed; `cargo test -p baud-server --bin baud-server -- periodic_tick_watchdog_
+     budget_override_reaches_the_route_wiring` → 1 passed.
+     **Used it on a third real H9 attempt (same 90s budget, `quiet loglevel=1` stripped from the
+     cmdline for full verbose kernel log — item 12's own advice, "always verify against a verbose
+     boot first" — so any late printk before the stall would actually reach the console).** The
+     watchdog fired with `guest RIP at kill: 0xffffffffc009b0da` (bit-identical to the second
+     attempt above — the same tight loop, now confirmed twice at the same address under the same
+     conditions) and, for the first time, real console content: `console output before kill:
+     "...cm_enc/dec engaged.\r\n[ 2.068844] AES CTR mode by8 optimization enabled\r\n[ 2.131266]
+     systemd-udevd[132]: link_config: autonegotiation is unset or enabled, the speed and duplex are
+     not writable.\r\n"`. Two real findings from this text: (1) **the boot had already reached real
+     userspace** — `systemd-udevd[132]` is a running process with a PID, not kernel boot text, so
+     `/init`'s handoff to systemd/udev succeeded and init is well underway, much further than any
+     prior attempt had direct console evidence for (`quiet loglevel=1`'s absence is what makes this
+     line visible at all; every quiet-mode attempt saw only the log's byte-length, never its
+     content). (2) The very last line is systemd-udevd processing a **network link** config event
+     (`net_setup_link`'s own generic autonegotiation-unset warning) — this project's `Multiverse`
+     implements no virtio-net or any other NIC (only virtio-blk is enabled on this boot), so this is
+     almost certainly udev's generic per-interface rule running against the loopback device `lo`
+     (the one network interface universally present with no device model needed), not evidence of a
+     missing NIC model. `console_output` stayed at exactly 17372 bytes across every progress-log
+     tick from ~3.2s onward in every attempt (quiet or verbose) — the same plateau every attempt
+     hits, now attributable to a specific point right after this one systemd-udevd line.
+     **Not resolved this iteration, real next steps for a future one**: the module-space RIP
+     combined with an AES-NI module-init line right before the stall is suggestive but not proof —
+     matching the exact RIP to a symbol needs the kernel's own `System.map`/debug `vmlinux` (not
+     present in `~/.baud-tmp/ubuntu-1804`; `fetch.sh` only pulls the runtime `vmlinuz-generic`/
+     `initrd-generic`, no debug package) or a from-scratch module-load-order reconstruction from the
+     initrd's own `.ko` files, neither attempted here. The **udev network-link hypothesis is the
+     more actionable lead**: if udev's `link_config` builtin (or a caller inside `systemd-udevd`)
+     makes a blocking netlink/genetlink read waiting on a response no in-guest kernel component ever
+     sends (since no real NIC exists), that would produce exactly this symptom — the guest going
+     fully quiet with zero VM exits, because a blocked userspace `read()` on an empty socket needs
+     no further host-visible activity until something wakes it, and nothing in this project's device
+     model ever will. A future iteration should test this directly: boot the same image with `udev.
+     children_max=1` already set (present in the current cmdline, so this is not yet it) replaced or
+     supplemented by `systemd.mask=systemd-udevd.service` (or `rd.udev.log_level=debug`/an even more
+     verbose cmdline) to see whether skipping/tracing udev's own device processing avoids or
+     illuminates the stall, which the burst loop's still-open missing-device-servicing gap (item 20)
+     does not explain either way (no HLT is ever reached once this point is hit, so that gap's
+     "resume past a halt" code path is never even entered here).
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

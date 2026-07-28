@@ -2055,6 +2055,7 @@ impl Multiverse {
                     RunLoopError::WatchdogKilled {
                         budget_ms: tick_watchdog_budget.as_millis() as u64,
                         guest_rip: self.guest.vcpu.get_regs().ok().map(|regs| regs.rip),
+                        console_tail: Some(console_tail(self.bus.console.output())),
                     }
                 } else {
                     self.stepper_error(e)
@@ -2170,6 +2171,7 @@ impl Multiverse {
                                 RunLoopError::WatchdogKilled {
                                     budget_ms: tick_watchdog_budget.as_millis() as u64,
                                     guest_rip: self.guest.vcpu.get_regs().ok().map(|regs| regs.rip),
+                                    console_tail: Some(console_tail(self.bus.console.output())),
                                 }
                             } else {
                                 e
@@ -2861,13 +2863,20 @@ mod tests {
             "the watchdog must reclaim a spinning guest promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(baud_vcpu::RunLoopError::WatchdogKilled { budget_ms, guest_rip }) => {
+            Err(baud_vcpu::RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
                 // todo.md §14.2 H9 item 20's own named next diagnostic: the guest's own RIP, not
                 // just a host-side stack trace. `spin-guest` is exactly `1: jmp 1b`, so a captured
                 // RIP must land inside that one instruction's own address, not merely be present.
                 let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
                 assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                // This kill comes through `run_to_first_halt` -> `baud_vcpu::linux::run_until_
+                // halted`'s own whole-run watchdog, which has no console/device model in scope at
+                // all (that is `Multiverse`'s job) — structurally `None`, per item 21's doc.
+                assert_eq!(
+                    console_tail, None,
+                    "baud_vcpu's own whole-run watchdog has no console model, must always be None"
+                );
             }
             other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
         }
@@ -2911,10 +2920,18 @@ mod tests {
             "the per-tick watchdog must reclaim a wedged tick promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip }) => {
+            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
                 let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
                 assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                // This kill comes through the tick loop's own `inject_at` watchdog, which does have
+                // a console/device model in scope (`Multiverse::bus.console`) — `Some`, not `None`,
+                // even though `spin-guest` (`1: jmp 1b`, no I/O) never actually writes to it.
+                assert_eq!(
+                    console_tail,
+                    Some(String::new()),
+                    "spin-guest performs no I/O, so its captured console tail must be Some(empty)"
+                );
             }
             other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
         }
@@ -2990,10 +3007,15 @@ mod tests {
         runtime.shutdown_timeout(std::time::Duration::from_millis(500));
 
         match outcome {
-            Ok((RunLoopError::WatchdogKilled { budget_ms, guest_rip }, elapsed)) => {
+            Ok((RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }, elapsed)) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
                 let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
                 assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                assert_eq!(
+                    console_tail,
+                    Some(String::new()),
+                    "spin-guest performs no I/O, so its captured console tail must be Some(empty)"
+                );
                 assert!(
                     elapsed < std::time::Duration::from_secs(10),
                     "the per-tick watchdog must reclaim a wedged tick promptly (took {elapsed:?})"
@@ -3038,7 +3060,7 @@ mod tests {
              promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip }) => {
+            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
                 // This is the exact call site todo.md §14.2 H9 items 18/20 traced a real Ubuntu
                 // boot stall to — `halt-then-spin-guest`'s ISR resumes into `spin: jmp spin`, so a
@@ -3046,6 +3068,15 @@ mod tests {
                 // H9 stall this fixture models.
                 let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
                 assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                // `payload.s`'s ISR writes exactly one 'T' byte to COM1 before falling into `spin`
+                // — proves the capture reaches real, non-empty console content at the moment of a
+                // kill, the exact scenario todo.md §14.2 H9 item 21 found in a real Ubuntu attempt
+                // (console output stopped growing well before the watchdog fired).
+                assert_eq!(
+                    console_tail,
+                    Some("T".to_string()),
+                    "the ISR's one COM1 write must be captured verbatim in the watchdog kill's console tail"
+                );
             }
             other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
         }

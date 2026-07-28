@@ -7763,3 +7763,51 @@ Full gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unch
   - Strengthened all 4 existing hardware tests that matched WatchdogKilled to assert guest_rip is a real nonzero address, not just to compile
   - Full bash drive/gate.sh green: 25 passed, 0 failed, 1 skipped, 2m54s, no flakes
 ---
+
+Pushed to origin/main: 9688ec4 == origin/main HEAD, confirmed via git fetch + rev-parse. todo.md still has pending items (H9 real-boot re-attempt with the new RIP capture, §14.2 server-side run-lifetime findings), so this iteration ends with NEXT.
+
+## 2026-07-28T01:49:22 UTC (14min) - Session usage — build-8 [sonnet]
+- cost $4.1183 (from claude -p)
+- context 158,488 tok peak of 1M (16%) across 67 inference calls, monotonic
+- models sonnet-5 $4.1151 (in 1,709 / out 38,304 / cache-read 8,303,372) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T203641Z/009-build-8.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 9
+═══════════════════════════════════════════════════════
+
+Studying todo.md and specs to find the most important item to address...
+
+Chose item 21's recommended next step: re-attempt the real H9 Ubuntu boot with the new guest_rip capture in place, per todo.md lines 3448-3455 ("Still open for H9, the real next step... actually re-attempting the real Ubuntu boot with this new capture"). Dispatched a research subagent to find the exact recipe/flags used by prior detached H9 attempts (items 16-20) before launching one myself. Meanwhile resetting perf_event_paranoid...
+
+Found the exact H9 boot recipe in examples/ubuntu/BUILD.md: real Ubuntu 18.04.1 artifacts already present at ~/.baud-tmp/ubuntu-1804 (vmlinuz-generic, initrd-generic, rootfs.raw), server logging already defaults to info for baud_server/baud_multiverse/baud_vcpu (no BAUD_LOG override needed). Confirmed --periodic-timer-vector 238 (not the 0xec default) is required for this 4.15 kernel. Waiting on research subagent to confirm exact detached-launch mechanics (background process handling, log capture) used by items 16-20 before firing off the attempt.
+
+Have the full recipe from examples/ubuntu/BUILD.md and confirmed debug binaries (target/debug/baud, target/debug/baud-server) are already built and up to date (git status clean except progress.txt) -- no rebuild needed. Launching the real H9 Ubuntu boot attempt now with a 90s watchdog budget (stall reproduces within ~3s per item 20, so this is plenty to capture the guest_rip on a kill), all in one foreground Bash call per CLAUDE.md guidance about not backgrounding processes under claude -p...
+
+Watchdog fired and captured guest RIP: 0xffffffffc009b0d3 -- this is in kernel MODULE address space (0xffffffffc0000000+), not core kernel .text. Rules out a TSC-calibration-loop-in-core-kernel hypothesis, points at a loaded driver module (virtio_blk/virtio_pci are the only extras this boot loads). Re-running with quiet/loglevel=1 stripped from cmdline to correlate the last kernel log lines before the stall with this RIP...
+
+RIP moved by only 7 bytes between two independent attempts (0xffffffffc009b0d3 vs 0xffffffffc009b0da) -- consistent with a genuine tight spin loop in the same small code region (watchdog firing is the one documented non-deterministic, wall-clock-timed intervention, so landing at different offsets within the same loop across runs is expected, not a determinism bug). console_output length logging shows 17372 bytes reached by tick 100 (3.3s) and never grew again before the 90s kill -- the guest stopped producing any new kernel log output well before the stall, meaning the last printed line is the strongest available clue to which module is spinning. The JSON error response has no console_output field on a WatchdogKilled error (only Halted outcomes include it) -- investigating whether a targeted capture (mirroring item 21s guest_rip pattern) is feasible before deciding the code change for this iteration.
+
+Implemented item 21s natural next step: capture the last 200 bytes of guest console output at the moment of a watchdog kill (console_tail: Option<String>), mirroring guest_rip. Added format_console_tail helper in baud-vcpu/src/lib.rs, wired at all 3 construction sites (baud-vcpu whole-run watchdog -> always None, no console model there; baud-multiverse tick + burst-loop watchdogs -> Some(last 200 bytes)). Strengthened all 4 existing hardware tests to assert on the new field (including a halt-then-spin-guest fixture check that the ISRs single COM1 write is captured verbatim). Building now...
+
+All targeted tests green: cargo test -p baud-multiverse --lib -- watchdog (7 passed, including new console_tail assertions), cargo test -p baud-vcpu (40 passed), cargo test -p baud-server --bin baud-server -- periodic_tick_watchdog_budget_override_reaches_the_route_wiring (1 passed). Clippy clean on baud-vcpu/baud-multiverse/baud-server/baud-cli -- only pre-existing warnings in unrelated files. Re-running the real H9 Ubuntu boot attempt (verbose cmdline, no quiet) with this new build to read the actual console_tail content and pin down which module is stuck...
+
+Strong new finding: console_tail before this kill reads "...cm_enc/dec engaged.\r\n[ 2.068844] AES CTR mode by8 optimization enabled\r\n[ 2.131266] systemd-udevd[132]: link_config: autonegotiation is unset or enabled, the speed and duplex are not writable.\r\n" -- boot already reached userspace (systemd-udevd running, processing a network link config event) at kernel time ~2.13s, guest-internal time. Combined with the module-space RIP (0xffffffffc0...), this points at either the aesni_intel crypto module or the udev-triggered network-link-config path, not a TSC-calibration loop and not virtio_blk (never mentioned in the captured tail). Writing up todo.md item 22 with this finding and the code change, then running the full gate before commit...
+
+Cleaned up temp H9-attempt server processes/files. Running the full pre-push gate (bash drive/gate.sh) now...
+
+Full gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m53s, no flakes. Updating todo.md with item 22s findings (done) and committing.
+
+##  UTC - Changes committed.
+- Added a console_tail capture to WatchdogKilled (mirrors item 21s guest_rip) and used both on 3 real H9 Ubuntu boot attempts, finding the stall RIP is in kernel module space and the boot had already reached userspace (systemd-udevd processing a network link config event) at the moment of the kill
+- Files changed: crates/baud-vcpu/src/lib.rs, crates/baud-vcpu/src/linux/mod.rs, crates/baud-multiverse/src/linux/mod.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Added `console_tail: Option<String>` to `RunLoopError::WatchdogKilled`, filled from the last 200 bytes of the guests own serial console output at the 2 baud-multiverse construction sites (per-tick and burst-loop watchdogs); structurally `None` at baud-vcpus own whole-run watchdog site, which has no console/device model
+  - Folded into the thiserror Display message via a new format_console_tail helper
+  - Strengthened all 4 existing WatchdogKilled-destructuring tests with real assertions on the new field (including a fixture whose ISR writes exactly one byte to COM1, proving the capture reaches real content)
+  - Used the new capture (plus the prior guest_rip capture) on 3 real Ubuntu 18.04.1 boot attempts: 2 quiet-cmdline attempts landed guest RIP at 0xffffffffc009b0d3 and 0xffffffffc009b0da (7 bytes apart, both in kernel module space, consistent with one small tight loop), a 3rd verbose-cmdline attempt reproduced the same 0xffffffffc009b0da RIP and captured real console content: the boot had reached userspace (systemd-udevd running) and its last line was a network-link autonegotiation warning, right before the stall
+  - Documented the finding and next-step hypothesis (udev network-link processing blocking on a nonexistent NIC) as todo.md item 22
+  - Full bash drive/gate.sh green: 25 passed, 0 failed, 1 skipped, 2m53s, no flakes
+---

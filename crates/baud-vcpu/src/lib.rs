@@ -124,6 +124,19 @@ fn format_guest_rip(guest_rip: &Option<u64>) -> String {
     }
 }
 
+/// Render the optional console tail a watchdog kill captured, for `RunLoopError::WatchdogKilled`'s
+/// `#[error(...)]` string. `None` means the kill happened at a call site with no console/device
+/// model at all (this crate's own whole-run watchdog, `linux::run_until_halted` — that primitive
+/// is generic over any guest and does not know about a serial bus) rather than a failed read, so
+/// it is worded differently from `format_guest_rip`'s `None` case.
+fn format_console_tail(console_tail: &Option<String>) -> String {
+    match console_tail {
+        Some(tail) if tail.is_empty() => "; console output before kill: (empty)".to_string(),
+        Some(tail) => format!("; console output before kill: {tail:?}"),
+        None => String::new(),
+    }
+}
+
 /// What driving a guest to `Hlt`/`Shutdown` with no bound but a wall-clock watchdog
 /// (`linux::run_until_halted`) can fail with: either a genuine [`DeterminismHole`], or the
 /// watchdog itself killing a guest that spun for longer than its budget without ever reaching
@@ -149,13 +162,24 @@ pub enum RunLoopError {
     /// only if that follow-up read itself failed (e.g. the vCPU fd was already torn down) — the
     /// kill is still reported either way; a missing register read is never treated as the kill
     /// itself not having happened.
+    ///
+    /// `console_tail` is the last 200 bytes of the guest's own serial console output at the
+    /// moment of the kill (todo.md §14.2 H9 item 21's own next step: a real attempt showed the
+    /// guest's console stopped growing well before the kill, so whatever it last printed is the
+    /// strongest available clue to *which* driver/subsystem the captured `guest_rip` sits inside,
+    /// without needing kernel symbol/debug info this project has none of). `Some(String::new())`
+    /// if the console produced no output at all before the kill; `None` only at call sites with no
+    /// console/device model in scope at all (this crate's own whole-run watchdog has none — that
+    /// is `baud_multiverse`'s job, not `baud_vcpu`'s), never because a read failed (unlike
+    /// `guest_rip`, this is plain memory already held by the caller, not a fallible ioctl).
     #[error(
         "wall-clock watchdog killed the guest after {budget_ms}ms with no Hlt/Shutdown reached \
          (docs/determinism.md \"Known limits\" §4: the one non-deterministic intervention — \
-         logged, not replayed){}",
-        format_guest_rip(.guest_rip)
+         logged, not replayed){}{}",
+        format_guest_rip(.guest_rip),
+        format_console_tail(.console_tail)
     )]
-    WatchdogKilled { budget_ms: u64, guest_rip: Option<u64> },
+    WatchdogKilled { budget_ms: u64, guest_rip: Option<u64>, console_tail: Option<String> },
     /// The supervisor's cancellation flag was observed set
     /// (`baud_multiverse::linux::Multiverse::set_cancel_flag`) — the caller abandoned the run
     /// (e.g. `baud-server`'s HTTP client disconnected) and does not want its result, so the loop

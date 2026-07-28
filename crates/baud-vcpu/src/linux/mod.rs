@@ -221,6 +221,9 @@ pub fn run_until_halted(
         _ => RunLoopError::WatchdogKilled {
             budget_ms: watchdog_budget.as_millis() as u64,
             guest_rip: vcpu.get_regs().ok().map(|regs| regs.rip),
+            // This crate has no serial-console/device model (that is `baud_multiverse`'s job) —
+            // structurally `None`, not a failed read, per `WatchdogKilled::console_tail`'s doc.
+            console_tail: None,
         },
     })
 }
