@@ -2181,6 +2181,30 @@ impl Multiverse {
                         if matches!(dispatch, baud_vcpu::DispatchOutcome::Halted) {
                             break;
                         }
+                        // todo.md §14.2 H9 items 20/21/22's own flagged gap: this drain loop used
+                        // to check only cancellation/pattern/burst-count, never `devices` — a
+                        // completion arriving mid-burst (the guest running, not halted, between
+                        // two raw exits) went unserviced until the *next* periodic tick's Injected/
+                        // Halted arms noticed it, or forever if the guest never reaches another
+                        // tick boundary. Mirrors the Injected arm's own per-exit notify-count poll
+                        // above, at burst-loop granularity instead of tick granularity.
+                        for (i, dev) in devices.iter().enumerate() {
+                            let notify_count = (dev.notify_count)(self).unwrap_or(0);
+                            if notify_count != last_notify[i] {
+                                last_notify[i] = notify_count;
+                                let service_start = std::time::Instant::now();
+                                (dev.service_running)(self, dev.vector)?;
+                                let service_elapsed = service_start.elapsed();
+                                if service_elapsed >= SLOW_TICK_PHASE_LOG_THRESHOLD {
+                                    info!(
+                                        "run_to_first_halt_with_periodic_timer_and_devices: tick \
+                                         {tick_index}/{max_ticks} burst device[{i}].service_running \
+                                         took {:.1}s",
+                                        service_elapsed.as_secs_f64(),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3111,6 +3135,73 @@ mod tests {
         assert!(
             outcome.console_output.windows(3).any(|w| w == [TIMER_MARKER, TIMER_MARKER, TIMER_MARKER]),
             "expected three consecutive timer-interrupt marker bytes on the console"
+        );
+    }
+
+    fn halt_then_multi_io_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/halt-then-multi-io-guest/bzImage")
+    }
+
+    static HALT_THEN_MULTI_IO_SERVICE_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// The concrete fix for todo.md §14.2 H9 items 20/21/22's own flagged, previously-unfixed gap:
+    /// the resume-past-halt burst loop (`crates/baud-multiverse/src/linux/mod.rs`) used to check
+    /// `devices` only once, before entering its raw exit-drain loop, never again inside it — a
+    /// completion arriving *between* two of the loop's own exits went unserviced until the next
+    /// periodic tick, or forever if none came. `halt-then-multi-io-guest` performs three separate
+    /// `out` writes after waking from its one real `hlt` (`tests/fixtures/halt-then-multi-io-guest/
+    /// BUILD.md`) — three real VM exits in a row inside the burst loop, before spinning forever — so
+    /// a fake `TickPolledDevice` whose `notify_count` is tied to the guest's own growing console
+    /// output sees three distinct notify-count changes *during* that one burst; `service_running`
+    /// must fire once for each, not once for the whole tick.
+    #[test]
+    fn burst_loop_services_devices_between_raw_exits() {
+        HALT_THEN_MULTI_IO_SERVICE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        fn fake_notify_count(mv: &Multiverse) -> Option<u64> {
+            Some(mv.bus.console.output().len() as u64)
+        }
+        fn fake_service_running(_mv: &mut Multiverse, _vector: u8) -> Result<u32, RunLoopError> {
+            HALT_THEN_MULTI_IO_SERVICE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(0)
+        }
+        fn fake_service_halted(_mv: &mut Multiverse, _vector: u8) -> Result<u32, RunLoopError> {
+            Ok(0)
+        }
+
+        let kernel = halt_then_multi_io_guest_kernel_path();
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+
+        let devices = [TickPolledDevice {
+            vector: 0,
+            notify_count: fake_notify_count,
+            service_running: fake_service_running,
+            service_halted: fake_service_halted,
+        }];
+
+        let (_, outcome) = mv
+            .run_to_first_halt_with_periodic_timer_and_devices(
+                500_000,
+                TIMER_VECTOR,
+                &devices,
+                20_000,
+                Some(b"ABC"),
+                1_000_000,
+            )
+            .expect("the guest must reach the ABC pattern well before its final spin");
+
+        assert_eq!(
+            String::from_utf8_lossy(&outcome.console_output),
+            "ABC",
+            "the three marker writes must be observed verbatim, in order"
+        );
+        assert_eq!(
+            HALT_THEN_MULTI_IO_SERVICE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the burst loop must service the fake device once for each of the three notify-count \
+             changes that occur between its own raw exits, not just once per periodic tick"
         );
     }
 

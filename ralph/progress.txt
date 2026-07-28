@@ -7811,3 +7811,34 @@ Full gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unch
   - Documented the finding and next-step hypothesis (udev network-link processing blocking on a nonexistent NIC) as todo.md item 22
   - Full bash drive/gate.sh green: 25 passed, 0 failed, 1 skipped, 2m53s, no flakes
 ---
+
+Pushed to origin/main: bbacdce == origin/main HEAD, confirmed via git fetch + rev-parse. todo.md still has pending items (H9 udev-network-link hypothesis to test next, burst-loop device-servicing gap, §14.2 server-side run-lifetime findings), so this iteration ends with NEXT.
+
+## 2026-07-28T02:08:22 UTC (19min) - Session usage — build-9 [sonnet]
+- cost $4.6920 (from claude -p)
+- context 172,771 tok peak of 1M (17%) across 69 inference calls, monotonic
+- models sonnet-5 $4.6888 (in 873 / out 54,978 / cache-read 9,023,774) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T203641Z/010-build-9.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 10
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md...
+
+Confirmed via code read that the resume-past-halt burst loop in run_to_first_halt_with_periodic_timer_and_devices (crates/baud-multiverse/src/linux/mod.rs) never checked/serviced devices inside its raw exit-drain loop, exactly the gap flagged as 'real, scoped, not yet fixed' by todo.md items 20/21/22. Fixed it: added a per-exit device notify-count check + service_running call inside the burst loop. Built a new hardware fixture tests/fixtures/halt-then-multi-io-guest (3 separate OUT-triggered VM exits after waking from halt) and a new test burst_loop_services_devices_between_raw_exits proving service_running now fires once per notify-count change mid-burst, not just once per tick. New test + the two existing burst-loop tests pass on real KVM. Continuing to run the full workspace build/clippy/test and gate.sh...
+
+Full workspace verification green: cargo build --workspace clean; cargo clippy --workspace --all-targets 74 warnings all pre-existing (none new, none in touched files); cargo test --workspace 600 passed, 0 failed, 15 ignored, including the new burst_loop_services_devices_between_raw_exits test. Now updating todo.md and running the full pre-push gate (drive/gate.sh)...
+
+Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m46s. No flakes. Committing.
+
+## 2026-07-28T02:21:23 UTC - Changes committed.
+- Fixed the resume-past-halt burst loop's missing device-servicing gap (todo.md §14.2 H9 items 20/21/22's flagged, previously-unfixed gap)
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/halt-then-multi-io-guest/{BUILD.md,build.py,payload.s,bzImage} (new), todo.md
+- **Brief description of changes:**
+  - run_to_first_halt_with_periodic_timer_and_devices's burst-drain loop now polls each device's notify_count and calls service_running after every raw VM exit that doesn't itself halt, not just once per periodic tick
+  - Added new hardware fixture halt-then-multi-io-guest (3 separate OUT-triggered VM exits after waking from halt) to exercise multiple exits inside one burst
+  - Added regression test burst_loop_services_devices_between_raw_exits proving service_running now fires once per notify-count change mid-burst
+  - Documented the fix and its confirmed non-relation to the still-open real H9 stall in todo.md item 23
+---

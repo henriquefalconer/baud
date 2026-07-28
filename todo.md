@@ -3531,6 +3531,41 @@ snapshot, not a duplicate of it.
      illuminates the stall, which the burst loop's still-open missing-device-servicing gap (item 20)
      does not explain either way (no HLT is ever reached once this point is hit, so that gap's
      "resume past a halt" code path is never even entered here).
+  23. **Fixed the burst loop's missing device-servicing gap items 20/21/22 each independently
+     flagged as "real, scoped, not yet fixed."** `run_to_first_halt_with_periodic_timer_and_devices`'s
+     resume-past-halt burst loop (`crates/baud-multiverse/src/linux/mod.rs`, the "no device has
+     pending work, but the caller wants to keep going until the console shows `p`" branch) used to
+     check `devices` for pending notifications only once, before entering its raw exit-drain loop —
+     never again inside it. A device completion arriving *between* two of that loop's own exits (the
+     guest running, not halted) went unserviced until the next periodic tick's own check, or forever
+     if the guest never reached one. Fixed by adding the same per-exit notify-count poll-and-service
+     the ordinary `Injected` tick arm already does, at burst-loop granularity: after every
+     `step_exit_cancellable_with_watchdog` call that doesn't itself return `Halted`, check each
+     device's `notify_count` and call `service_running` on change, before looping to the next raw
+     exit. (Confirmed independently, per item 22's own reasoning, that this gap does **not** explain
+     the real H9 stall traced there: that stall was zero VM exits for 30+ minutes inside one
+     `KVM_RUN`, never reaching this loop's per-exit check points at all — this fix closes a real,
+     separate correctness gap, not that stall.)
+     New hardware fixture `tests/fixtures/halt-then-multi-io-guest/` (`BUILD.md` has the full
+     rationale): unlike every existing burst-loop fixture (`halt-then-spin-guest` reaches at most one
+     real exit inside the loop before spinning forever), this one performs three separate `out`
+     writes after waking from its one real `hlt` — three real VM exits in a row inside the burst
+     loop, each a distinct point where a fake `TickPolledDevice`'s `notify_count` (tied to the
+     guest's own growing console output) changes. New test
+     `burst_loop_services_devices_between_raw_exits` (`crates/baud-multiverse/src/linux/mod.rs`)
+     asserts the fake device's `service_running` fires exactly three times — once per marker, not
+     once per tick — real proof the fix detects and services each mid-burst change rather than only
+     the state at the loop's entry or exit. Verified: `cargo build --workspace` clean; `cargo clippy
+     --workspace --all-targets` → 74 warnings, all pre-existing (none new, none in
+     `baud-multiverse`'s touched files); `cargo test --workspace` → 600 passed, 0 failed, 15 ignored
+     (including the new test, and the existing `halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit`/
+     `burst_watchdog_does_not_fire_on_normal_resume_past_halt` still green, proving the fix does not
+     disturb the burst loop's existing watchdog or normal-boot behavior).
+     **Still open, unchanged from item 22**: the real H9 stall itself (zero VM exits inside one
+     `KVM_RUN` for 30+ minutes, guest RIP landing in kernel module space with an AES-NI module-init
+     line right before it) remains unresolved — the udev network-link hypothesis (a blocking
+     netlink/genetlink read against a nonexistent NIC) is still the most actionable untried lead, per
+     item 22's own next-step note.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 
