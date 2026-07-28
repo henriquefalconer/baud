@@ -7842,3 +7842,39 @@ Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged
   - Added regression test burst_loop_services_devices_between_raw_exits proving service_running now fires once per notify-count change mid-burst
   - Documented the fix and its confirmed non-relation to the still-open real H9 stall in todo.md item 23
 ---
+
+Pushed 178d561 to origin/main; verified origin/main HEAD matches local HEAD. todo.md §14/§14.2 still has open items (the real H9 stall itself, the udev network-link hypothesis, various §14.1 defect items) so pending work remains.
+
+## 2026-07-28T02:22:23 UTC (14min) - Session usage — build-10 [sonnet]
+- cost $3.1963 (from claude -p)
+- context 148,475 tok peak of 1M (15%) across 48 inference calls, monotonic
+- models sonnet-5 $3.1931 (in 114 / out 46,772 / cache-read 5,394,544) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T203641Z/011-build-10.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 11
+═══════════════════════════════════════════════════════
+
+Finding most important item to address... reading todo.md and recent git history to pick up where iteration 10 left off.
+
+Chose item 22/23's own next step: test the udev network-link hypothesis for the real H9 stall (zero VM exits for 30+ min, guest RIP in kernel module space, right after a systemd-udevd link_config line). This is the most actionable untried lead per todo.md §14 item 22/23.
+
+Building baud-server/baud-cli release-mode binaries before launching the H9 attempt...
+
+H9 attempt launched: baud-server on port 17934, baud run kvm detached (setsid nohup & disown), cmdline masks systemd-udevd.service (in addition to the pre-existing systemd-timesyncd.service mask) to test whether udev's link_config netlink read is the real H9 stall's cause. quiet/loglevel=1 stripped for verbose output. periodic-tick-watchdog-budget-secs=90, vector=238, max-ticks=20000. Polling now...
+
+Finding: masking systemd-udevd.service made ZERO difference — watchdog fired at the exact same guest RIP (0xffffffffc009b0da) and exact same console tail ("...AES CTR mode by8 optimization enabled...systemd-udevd[132]: link_config: autonegotiation...") as pre-mask attempts. This disproves the specific udev-netlink-block hypothesis as stated (masking the systemd unit had no observable effect on the stall), and the bit-identical RIP is itself evidence this is a deterministic guest-internal computation, not a host-timing-dependent block. The AES CTR mode by8 module-init line sits immediately before the stall in every attempt, closer in the log than the udev line is causally implicated — testing module_blacklist=aesni_intel next to see if suppressing that crypto module changes the outcome.
+
+Documented item 24 findings in todo.md (udev-mask disproven as stated, aesni_intel blacklist rules out that module, stall correlation with the udevd link_config line strengthened, concrete next steps recorded). No source code changed this iteration. Running the full pre-push gate now...
+
+Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged), 2m27s. Committing todo.md + progress.txt (no source code changed this iteration).
+
+## 2026-07-28T02:35:12 UTC - Changes committed.
+- Ran two new real-hardware H9 boot experiments testing the udev network-link stall hypothesis (todo.md §14 item 22/23's own recommended next step)
+- Files changed: todo.md (item 24 documenting findings; no source code changed)
+- **Brief description of changes:**
+  - Experiment 1: masked systemd-udevd.service via cmdline — zero effect on the stall (bit-identical RIP/console tail), disproving the specific "systemd-managed udevd blocks on netlink" hypothesis and pointing instead at the initramfs-stage udevd as the more likely candidate
+  - Experiment 2: blacklisted aesni_intel — the AES CTR module-init line disappeared from the console tail and the stall RIP shifted (module-load-address-shift consistent with one fewer module), but the stall still occurred immediately after the same udevd link_config console line, ruling out AES-NI module init as the cause while strengthening the udevd-link_config correlation
+  - Documented concrete, sharper next steps in todo.md item 24: resolve the captured RIPs against a System.map/module reconstruction, inspect the initrd's own early-boot udevd invocation directly, and try net.ifnames=1/explicit ip= as an untried lever
+---

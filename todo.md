@@ -3566,6 +3566,72 @@ snapshot, not a duplicate of it.
      line right before it) remains unresolved — the udev network-link hypothesis (a blocking
      netlink/genetlink read against a nonexistent NIC) is still the most actionable untried lead, per
      item 22's own next-step note.
+  24. **H9 — item 22/23's own recommended next step, executed: tested the udev network-link**
+     **hypothesis directly with two targeted real-boot experiments. The specific hypothesis as stated**
+     **is disproven, but the experiments sharpened where the stall actually sits and ruled out a**
+     **second candidate (AES-NI module init) along the way. Still not root-caused.**
+     No code changes were needed — `--cmdline` (`crates/baud-cli/src/cmds/run.rs:75-76`) already fully
+     replaces the guest cmdline, so both experiments were ad hoc `baud run kvm` invocations (no
+     `drive/h/h9.sh` exists; per item 12/15, real Ubuntu-image attempts have always been launched by hand
+     following `examples/ubuntu/BUILD.md`'s recipe, `setsid nohup ... & disown` detached, this time with
+     `--periodic-tick-watchdog-budget-secs 90` since item 20 established the stall reproduces within ~3s
+     of ticking so 90s is ample without needing to hunt for a reproduction window).
+     **Experiment 1 — mask `systemd-udevd.service`.** Added `systemd.mask=systemd-udevd.service` to the
+     existing cmdline (alongside the pre-existing `systemd.mask=systemd-timesyncd.service`), quiet/
+     loglevel=1 still stripped for full verbose output. Result: **zero observable difference** — the
+     watchdog fired at the exact bit-identical guest RIP (`0xffffffffc009b0da`) and exact same console
+     tail (`"...AES CTR mode by8 optimization enabled...systemd-udevd[132]: link_config: autonegotiation
+     is unset or enabled..."`) as item 22's own pre-mask attempts. Masking a systemd `.service` unit
+     should make `systemctl start` (including socket-activated starts) on it a no-op, so `systemd-udevd`
+     genuinely starting anyway (visible as `systemd-udevd[132]` in the console) as the specific real-root
+     managed unit is inconsistent with the mask taking effect — the much more likely explanation is that
+     the udevd instance visible in this boot's console is the **initramfs-tools early-boot udevd**
+     (started directly by the initrd's own `/init` script to coldplug devices and find the root device
+     before `pivot_root`, entirely independent of the real root's systemd unit tree), not the
+     `systemd-udevd.service`-managed instance the mask targets — masking only the latter, as done here,
+     cannot affect the former. This specific hypothesis (blocking netlink read inside the *systemd-
+     managed* `systemd-udevd.service`) is therefore disproven as stated; it says nothing about whether an
+     **initramfs-stage** udevd is involved.
+     **Experiment 2 — blacklist `aesni_intel`.** Added `module_blacklist=aesni_intel` to the same cmdline
+     (dropped the now-proven-inert `systemd-udevd.service` mask to isolate this one variable). Confirmed
+     working: the `"AES CTR mode by8 optimization enabled"` line is gone from the captured console tail
+     entirely, replaced by a different, unrelated systemd-udevd line (`"Network interface NamePolicy=
+     disabled on kernel command line, ignoring."`). Result: **the stall still occurs**, at a *different*
+     guest RIP (`0xffffffffc006c0da`, vs. `0xffffffffc009b0da` before — both still in kernel module space,
+     `0xffffffffc0000000`+, the ~0x2f000-byte delta consistent with module load addresses shifting because
+     one fewer module — `aesni_intel.ko` — occupies the module address region ahead of whatever now sits
+     at the stall point), and — the load-bearing observation — **still immediately after the identical
+     `systemd-udevd[132]: link_config: autonegotiation is unset or enabled...` console line** in both
+     attempts. This rules out AES-NI module init itself as the stall's cause (removing it only moved
+     which module happens to occupy that address range, it did not remove the stall) while *strengthening*
+     the correlation between the stall and the udevd `link_config` line specifically, since that line's
+     position immediately before the freeze held constant across both experiments regardless of what
+     module code ends up at the RIP.
+     **Not resolved this iteration — real next steps for a future one, sharper than item 22's**: (a) the
+     `systemd-udevd[132]: link_config: autonegotiation is unset or enabled, the speed and duplex are not
+     writable` line is systemd's own well-known, routine, harmless message for any interface without
+     ethtool link-settings support (e.g. `lo` on essentially any real Linux boot) — its appearance being
+     last is not, on its own, strong evidence of a genuine block *inside* udev's own code; it may only mark
+     the last console-flushed line before several more silent boot steps occur, so the true stall point
+     could be later than currently assumed. A `System.map`/debug `vmlinux` (still not present in
+     `~/.baud-tmp/ubuntu-1804` — `fetch.sh` only pulls the runtime `vmlinuz-generic`/`initrd-generic`) or a
+     from-scratch module-load-order reconstruction (matching the initrd's own `.ko` files' sizes against
+     the ~0x2f000-byte RIP delta measured here) would let a future iteration resolve either RIP to an
+     actual symbol instead of reasoning from log-line adjacency alone — this is now a much cheaper
+     experiment to interpret correctly, since two real, deterministic RIPs are already captured and
+     waiting to be resolved. (b) since experiment 1 shows the console's `udevd[132]` is most likely the
+     **initramfs-stage** instance, a future attempt should mask/skip udev at that stage instead (e.g.
+     `initramfs.tools`' own `break=` cmdline hooks, or check whether this image's initrd even runs a
+     genuine udevd vs. `udevadm trigger --action=add` against a static `/sys` tree — inspecting the
+     initrd's own `/scripts/init-premount`/`/scripts/local` content, extractable from `initrd-generic`
+     without booting anything, is a free next step). (c) a completely different, untried lever: boot with
+     `net.ifnames=1` (drop the current `net.ifnames=0`) or add `netroot=` / an explicit `ip=` cmdline
+     stanza to see whether presenting a *different* network-naming code path changes anything, though (a)
+     and (b) are more likely to be informative first. Verified no regression from this iteration's own
+     work: no source files were touched (cmdline-only experiments, `--cmdline` already supported
+     replacement), so no build/test/clippy/gate re-verification was needed beyond confirming both detached
+     `baud-server`/`baud run kvm` processes and their temp DB/snapshot dirs were fully torn down after each
+     experiment (confirmed via `ps aux` showing no `baud-server`/`baud run kvm` processes remaining).
 
 ### 14.1 Defects found in the test suite and the drive scripts
 
