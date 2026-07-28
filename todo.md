@@ -3413,6 +3413,46 @@ snapshot, not a duplicate of it.
      causes (a TSC-calibration bug, an unrelated driver-init spin, or the device-servicing gap only
      *if* the very next event would have been a `Hlt`) that only the guest's own RIP can
      distinguish between. A future iteration should add that capture, then re-attempt.
+  21. **Implemented item 20's own highest-value next diagnostic: `RunLoopError::WatchdogKilled`
+     now captures the guest's own RIP at the moment of a kill, hardware-verified at all three
+     construction sites.** `WatchdogKilled` (`crates/baud-vcpu/src/lib.rs`) gained a
+     `guest_rip: Option<u64>` field, filled via a best-effort `vcpu.get_regs().ok().map(|r|
+     r.rip)` immediately after the watchdog's forced `EINTR` is detected and before the raw ioctl
+     error is discarded — exactly the read item 20 named ("needs a `KVM_GET_REGS` read immediately
+     after the forced `-EINTR`, before the call is treated as a bare error"). `None` only if that
+     follow-up register read itself fails; the kill is still reported either way (a missing
+     register read never suppresses the kill itself). Threaded through all three places that build
+     this variant: `crates/baud-vcpu/src/linux/mod.rs`'s `run_until_halted` (the whole-run
+     watchdog), and `crates/baud-multiverse/src/linux/mod.rs`'s two sites inside
+     `run_to_first_halt_with_periodic_timer_and_devices` — the per-tick `inject_at` watchdog and
+     the resume-past-halt burst-loop watchdog (item 18's fix; the call site items 18/20's real H9
+     attempts actually traced the live stall to, so this is the one most likely to matter on a
+     future real attempt). The new field is folded into the `#[error(...)]` message via a new
+     `format_guest_rip` helper (confirmed `thiserror` 2.0.19, already pinned workspace-wide, allows
+     arbitrary expressions referencing named fields in `#[error(...)]`, not just direct field
+     interpolation) — e.g. `"...; guest RIP at kill: 0x1234"`, or `"...; guest RIP at kill:
+     unavailable (register read after the kill also failed)"` — so the CLI/HTTP surface
+     (`baud-server`'s `run_loop_error`/`format!("run failed: {e}")`, both plain `Display`
+     formatters) picks it up with no separate wiring. All 4 existing test call sites that
+     destructured `WatchdogKilled { budget_ms }` were updated to `{ budget_ms, guest_rip }`, and
+     each was strengthened (not just made to compile) to assert `guest_rip.is_some()` and that the
+     captured value is a plausible nonzero address — real hardware confirmation that the capture
+     actually works, not just that the field exists. Verified: `cargo build -p baud-vcpu -p
+     baud-multiverse -p baud-server -p baud-cli` clean; `cargo clippy` on the same four, only
+     pre-existing warnings in unrelated files (none in any changed file); `cargo test -p
+     baud-multiverse --lib -- watchdog` → 7 passed (all real `/dev/kvm`, including the three
+     RIP-capture assertions against `spin-guest`/`halt-then-spin-guest`/the `spawn_blocking`
+     variant); `cargo test -p baud-server --bin baud-server -- periodic_tick_watchdog_budget_override_reaches_the_route_wiring`
+     → 1 passed; full `bash drive/gate.sh` → 25 passed, 0 failed, 1 skipped (pkg-build-cli,
+     fingerprint unchanged), 2m54s, no flakes.
+     **Still open for H9, the real next step, unchanged from item 20**: (a) the burst loop's
+     missing device-servicing (real, scoped, not yet fixed); (b) actually re-attempting the real
+     Ubuntu boot with this new capture in place — the next stall will now report the guest's own
+     RIP directly in the `WatchdogKilled` error text, without needing a live `gdb` session at all,
+     which should finally distinguish a TSC-calibration delay loop from a driver-init spin from the
+     device-servicing gap. Not re-attempted this iteration (no spare hardware-time budget after the
+     implementation + full gate verification above) — a future iteration should launch a detached
+     H9 attempt exactly as items 16-20 did and read the RIP straight out of the resulting error.
 
 ### 14.1 Defects found in the test suite and the drive scripts
 

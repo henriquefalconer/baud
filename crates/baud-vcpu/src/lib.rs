@@ -114,6 +114,16 @@ pub struct EnforcedRdseedSite {
 #[error("determinism hole: unhandled exit `{0}` reached the run-loop catch-all")]
 pub struct DeterminismHole(pub String);
 
+/// Render the optional guest RIP a watchdog kill captured, for `RunLoopError::WatchdogKilled`'s
+/// `#[error(...)]` string — `None` (the register read itself failed) says so explicitly rather
+/// than silently omitting the clause, so a reader never mistakes absence-of-info for "RIP was 0".
+fn format_guest_rip(guest_rip: &Option<u64>) -> String {
+    match guest_rip {
+        Some(rip) => format!("; guest RIP at kill: {rip:#x}"),
+        None => "; guest RIP at kill: unavailable (register read after the kill also failed)".to_string(),
+    }
+}
+
 /// What driving a guest to `Hlt`/`Shutdown` with no bound but a wall-clock watchdog
 /// (`linux::run_until_halted`) can fail with: either a genuine [`DeterminismHole`], or the
 /// watchdog itself killing a guest that spun for longer than its budget without ever reaching
@@ -130,12 +140,22 @@ pub enum RunLoopError {
     /// reaching `Hlt`/`Shutdown` (todo.md §14.1 "Still open" item 1 — other run-loop entry points
     /// already carry a deterministic `max_exits`/`max_ticks` budget; this is the one that had
     /// none at all).
+    ///
+    /// `guest_rip` is a best-effort `KVM_GET_REGS` read taken immediately after the watchdog's
+    /// forced `EINTR`, before the raw ioctl error is discarded (todo.md §14.2 H9 item 20's own
+    /// named next diagnostic: two live `gdb` backtraces only ever reached the *host*-side call
+    /// stack, never the guest's own program counter, which is what actually distinguishes "a
+    /// long but legitimate native stretch" from "wedged at one specific instruction"). `None`
+    /// only if that follow-up read itself failed (e.g. the vCPU fd was already torn down) — the
+    /// kill is still reported either way; a missing register read is never treated as the kill
+    /// itself not having happened.
     #[error(
         "wall-clock watchdog killed the guest after {budget_ms}ms with no Hlt/Shutdown reached \
          (docs/determinism.md \"Known limits\" §4: the one non-deterministic intervention — \
-         logged, not replayed)"
+         logged, not replayed){}",
+        format_guest_rip(.guest_rip)
     )]
-    WatchdogKilled { budget_ms: u64 },
+    WatchdogKilled { budget_ms: u64, guest_rip: Option<u64> },
     /// The supervisor's cancellation flag was observed set
     /// (`baud_multiverse::linux::Multiverse::set_cancel_flag`) — the caller abandoned the run
     /// (e.g. `baud-server`'s HTTP client disconnected) and does not want its result, so the loop

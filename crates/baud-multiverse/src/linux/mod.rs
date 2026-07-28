@@ -2048,7 +2048,14 @@ impl Multiverse {
                 // happened to fire in the same window — `stepper_error` already makes that same
                 // cancel-first check via `is_cancelled_error`/`self.is_cancelled()`.
                 if tick_timed_out && !self.is_cancelled() {
-                    RunLoopError::WatchdogKilled { budget_ms: tick_watchdog_budget.as_millis() as u64 }
+                    // Best-effort `KVM_GET_REGS` right here, before `e` (the raw ioctl error) is
+                    // discarded — todo.md §14.2 H9 item 20's own named next diagnostic: the guest's
+                    // own RIP is what distinguishes a merely-slow native stretch from a genuinely
+                    // wedged one, which no host-side `gdb` backtrace can show.
+                    RunLoopError::WatchdogKilled {
+                        budget_ms: tick_watchdog_budget.as_millis() as u64,
+                        guest_rip: self.guest.vcpu.get_regs().ok().map(|regs| regs.rip),
+                    }
                 } else {
                     self.stepper_error(e)
                 }
@@ -2156,7 +2163,14 @@ impl Multiverse {
                         burst_watchdog.disarm();
                         let dispatch = dispatch.map_err(|e| {
                             if burst_timed_out && !self.is_cancelled() {
-                                RunLoopError::WatchdogKilled { budget_ms: tick_watchdog_budget.as_millis() as u64 }
+                                // Same best-effort capture as the tick-level watchdog above (todo.md
+                                // §14.2 H9 item 20) — this is the call site item 18/20 actually
+                                // traced a real H9 stall to, so this is the one most likely to ever
+                                // fire against a real boot.
+                                RunLoopError::WatchdogKilled {
+                                    budget_ms: tick_watchdog_budget.as_millis() as u64,
+                                    guest_rip: self.guest.vcpu.get_regs().ok().map(|regs| regs.rip),
+                                }
                             } else {
                                 e
                             }
@@ -2847,8 +2861,13 @@ mod tests {
             "the watchdog must reclaim a spinning guest promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(baud_vcpu::RunLoopError::WatchdogKilled { budget_ms }) => {
+            Err(baud_vcpu::RunLoopError::WatchdogKilled { budget_ms, guest_rip }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
+                // todo.md §14.2 H9 item 20's own named next diagnostic: the guest's own RIP, not
+                // just a host-side stack trace. `spin-guest` is exactly `1: jmp 1b`, so a captured
+                // RIP must land inside that one instruction's own address, not merely be present.
+                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
             }
             other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
         }
@@ -2892,8 +2911,10 @@ mod tests {
             "the per-tick watchdog must reclaim a wedged tick promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(RunLoopError::WatchdogKilled { budget_ms }) => {
+            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
+                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
             }
             other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
         }
@@ -2969,8 +2990,10 @@ mod tests {
         runtime.shutdown_timeout(std::time::Duration::from_millis(500));
 
         match outcome {
-            Ok((RunLoopError::WatchdogKilled { budget_ms }, elapsed)) => {
+            Ok((RunLoopError::WatchdogKilled { budget_ms, guest_rip }, elapsed)) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
+                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
                 assert!(
                     elapsed < std::time::Duration::from_secs(10),
                     "the per-tick watchdog must reclaim a wedged tick promptly (took {elapsed:?})"
@@ -3015,8 +3038,14 @@ mod tests {
              promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(RunLoopError::WatchdogKilled { budget_ms }) => {
+            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
+                // This is the exact call site todo.md §14.2 H9 items 18/20 traced a real Ubuntu
+                // boot stall to — `halt-then-spin-guest`'s ISR resumes into `spin: jmp spin`, so a
+                // captured RIP here must land inside that one instruction, same shape as the real
+                // H9 stall this fixture models.
+                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
             }
             other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
         }

@@ -214,7 +214,14 @@ pub fn run_until_halted(
         // thing to report, and a cancelled run's caller is by construction no longer listening.
         RunLoopError::Cancelled => RunLoopError::Cancelled,
         RunLoopError::DeterminismHole(hole) if !watchdog_fired => RunLoopError::DeterminismHole(hole),
-        _ => RunLoopError::WatchdogKilled { budget_ms: watchdog_budget.as_millis() as u64 },
+        // `vcpu`'s own `KVM_RUN` (`run_and_convert`) already returned — this `get_regs()` is not
+        // competing with any live borrow of it, same reasoning as the `RdseedTrapNeedsRip` fetch
+        // in `run_one_exit_impl`. Best-effort: `.ok()` so a register-read failure never turns a
+        // real watchdog kill into a panic or a different error entirely (`format_guest_rip`'s doc).
+        _ => RunLoopError::WatchdogKilled {
+            budget_ms: watchdog_budget.as_millis() as u64,
+            guest_rip: vcpu.get_regs().ok().map(|regs| regs.rip),
+        },
     })
 }
 

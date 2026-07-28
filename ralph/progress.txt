@@ -7724,3 +7724,42 @@ Gate green: 25 passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, fingerprint
   - Verified: cargo test -p baud-server -> 41 passed (was 40); cargo clippy -p baud-server -p baud-cli --all-targets -> 50 warnings, confirmed via git stash baseline comparison identical pre-existing, zero new. bash drive/gate.sh -> 25 passed, 0 failed, 0 flaked, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m49s.
   - todo.md gained item 20 documenting all of the above; H9's own next step (capture guest RIP/registers at watchdog-kill time for a future attempt) remains open.
 ---
+
+Post-push verification: origin/main == local HEAD (8dbea16) exactly, working tree clean. Gate was green (25 passed, 0 failed, 0 flaked, 1 skipped, 2m49s) at this commit's tree before pushing. todo.md still has pending items (H9 itself remains open per item 20's own next-step note -- capture guest RIP/registers at watchdog-kill time -- plus other still-open items throughout, e.g. §4.5 Buildroot/pinned-Nix, virtio-rng boot/cmdline wiring). Iteration closed.
+
+## 2026-07-28T01:35:21 UTC (53min) - Session usage — build-7 [sonnet]
+- cost $8.4911 (from claude -p)
+- context 246,030 tok peak of 1M (25%) across 118 inference calls, monotonic
+- models sonnet-5 $8.4879 (in 270 / out 78,966 / cache-read 19,324,888) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T203641Z/008-build-7.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 8
+═══════════════════════════════════════════════════════
+
+Studying todo.md and progress history to pick the next most important item...
+
+Dispatched two research subagents: one mapping the watchdog-kill/EINTR code paths and RunLoopError propagation, another checking specs/ and examples/ubuntu/BUILD.md for H9 context. Reset perf_event_paranoid to -1 and confirmed /dev/kvm is free. Candidate next step per todo.md item 20: capture guest RIP/registers via KVM_GET_REGS at the moment of a watchdog kill (highest-value next diagnostic for the H9 real-Ubuntu-boot stall).
+
+Design settled: add `guest_rip: Option<u64>` to `RunLoopError::WatchdogKilled`, captured via a best-effort `vcpu.get_regs()` at each of the 3 construction sites (baud-vcpu run_until_halted, baud-multiverse tick-level inject_at watchdog, baud-multiverse burst-loop watchdog) right after EINTR/watchdog-fire is detected and before the ioctl error is discarded -- this is exactly item 20s own recommended next diagnostic. Confirmed via research: kvm-ioctls 0.25s VcpuFd::get_regs() has no precondition tied to the prior calls result, and thiserror 2.0.19 supports arbitrary expressions in #[error(...)] so the RIP can be folded into the existing message. Implementing now.
+
+Build clean for baud-vcpu/baud-multiverse/baud-server/baud-cli after threading guest_rip through WatchdogKilled. Now running the targeted hardware tests against real /dev/kvm...
+
+All 7 watchdog tests pass on real /dev/kvm, including the new guest_rip capture assertions (spin-guest, halt-then-spin-guest, and spawn_blocking variant all confirm a nonzero RIP was captured at the kill). Running the route-level test and clippy next...
+
+Clippy clean on baud-vcpu/baud-multiverse/baud-server/baud-cli -- the only warnings are pre-existing, unrelated ones (baud-cli print_literal, baud-server fuzz.rs/replay.rs/tracing.rs), none touching the changed files. Running the full pre-push gate (bash drive/gate.sh) now...
+
+Full gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, fingerprint unchanged), 2m54s, no flakes. Updating todo.md with item 21 and committing.
+
+## 2026-07-28T01:48:36 UTC - Changes committed.
+- Implemented H9 item 20's own named next diagnostic: capture guest RIP at watchdog-kill time
+- Files changed: crates/baud-vcpu/src/lib.rs, crates/baud-vcpu/src/linux/mod.rs, crates/baud-multiverse/src/linux/mod.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Added `guest_rip: Option<u64>` to `RunLoopError::WatchdogKilled`, filled via a best-effort `KVM_GET_REGS` read immediately after the watchdog's forced EINTR, before the raw ioctl error is discarded
+  - Threaded the capture through all 3 construction sites: baud-vcpu's whole-run watchdog, and baud-multiverse's per-tick inject_at watchdog and resume-past-halt burst-loop watchdog
+  - Folded the new field into the existing thiserror Display message so it reaches the CLI/HTTP surface with no separate wiring
+  - Strengthened all 4 existing hardware tests that matched WatchdogKilled to assert guest_rip is a real nonzero address, not just to compile
+  - Full bash drive/gate.sh green: 25 passed, 0 failed, 1 skipped, 2m54s, no flakes
+---
