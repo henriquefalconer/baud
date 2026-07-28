@@ -3213,6 +3213,134 @@ snapshot, not a duplicate of it.
      cooperative-stop-flag refactor scoped out above). Whichever it is, the phase-level log line will name
      it directly instead of leaving it ambiguous.
 
+  18. **H9 — item 17's next step, executed: a live `gdb` backtrace against the stalled vCPU thread named**
+     **the hang exactly, and it is neither of the two candidates item 17 predicted. The thread was parked**
+     **in a raw `KVM_RUN` inside the resume-past-halt *burst loop*, a third call site bounded only by an**
+     **exit count and by no wall clock at all; it now carries the same per-call watchdog, and is the first**
+     **code path in that loop to have any test coverage whatsoever.**
+     The Ubuntu 18.04.1 image was not present on this machine at the start of the iteration
+     (`~/.baud-tmp/ubuntu-1804` was gone), so it was re-fetched with `bash examples/ubuntu/fetch.sh`. The
+     qcow2 → raw conversion short-circuited on files left on disk, which means the script's
+     `if [[ ! -f rootfs.raw ]]` guard also skipped the `sudo tune2fs` pinning step this time — non-critical,
+     and the script's own comment already describes that step as "defence in depth, not a fixup". The boot
+     attempt itself was launched exactly as items 15-17 launched theirs: `setsid nohup ... & disown` for
+     both `baud-server` and the `baud run kvm` client so neither dies with the session, vector `238`, 20000
+     max ticks, `tail -f` on the server log.
+     The new technique, and the reason this iteration got a definite answer where items 16-17 got
+     circumstantial ones: rather than watching the log and waiting out the 600s per-tick budget again,
+     `gdb -p <tid> -batch -ex "thread apply all bt"` was attached to the hot `spawn_blocking` worker thread
+     *while it was still stalled*, yielding a live stack. That is a direct read of where the process
+     actually is, instead of inferring it from CPU%, `strace -c` ioctl counts and `/proc/<tid>/status` the
+     way items 16-17 had to. `gdb` was already installed on this host — no new dependency — and this is
+     worth reaching for first in any future "the run loop is wedged and the log is silent" investigation.
+     The stack read, innermost first: a blocking `KVM_RUN` ioctl in `VcpuFd::run` →
+     `baud_vcpu::linux::run_and_convert` → `run_and_convert_rcb_bracketed` → `run_one_exit_impl` →
+     `run_one_exit_cancellable` → `Multiverse::step_exit_cancellable` →
+     `Multiverse::run_to_first_halt_with_periodic_timer_and_devices` at what was then line 2112 (the line
+     number moved after this iteration's fix). `LinuxPmuStepper`/`inject_at`
+     (`crates/baud-vcpu/src/linux/pmu.rs`) — the entire code path item 16's per-tick watchdog covers — did
+     not appear anywhere in the trace. Neither did any device-servicing frame, so item 17's leading theory
+     (a slow virtio-blk batch against the mmap'd 2.2 GiB rootfs) is superseded, though the gap it described
+     around `dev.service_running`/`dev.service_halted` remains real and remains unfixed.
+     What line 2112 actually was: the "resume past a non-terminal halt" burst loop added by items 12/13.
+     When a tick finds the guest already `Hlt`-ed with no device holding pending work, but the caller's
+     `pattern` (here `--halt-console-pattern-hex` for `"ubuntu login:"`) has not appeared yet, the halt is
+     not treated as terminal — the periodic-timer vector is staged directly via `KVM_SET_VCPU_EVENTS`,
+     bypassing `inject_at` entirely, and the guest is then driven forward one `step_exit_cancellable()`
+     call at a time in a raw loop whose only bound is `max_exits_per_burst`. That is an exit *count*, not a
+     wall-clock bound, and it only advances when a call returns: a single call that never returns — because
+     the woken guest happens to run a long or infinite native stretch producing no further VM exit — blocks
+     the loop forever with nothing to notice. This is precisely the primitive `examples/ubuntu/BUILD.md`
+     documents as required to carry a real boot past its first idle halt, so it is on H9's critical path by
+     definition, not a side branch reached by accident.
+     Fixed, hardware-verified against real `/dev/kvm` throughout. `crates/baud-vcpu/src/linux/mod.rs` gained
+     `pub fn run_one_exit_cancellable_with_watchdog(vcpu, bus, time, watchdog: Option<&AtomicBool>, cancel:
+     Option<&AtomicBool>)`, a thin wrapper delegating to the crate-private `run_one_exit_impl` — which had
+     accepted a `watchdog` parameter all along, but only `run_until_halted` had ever passed `Some` for it;
+     `run_one_exit_cancellable` always passed `None`, which is the whole reason the burst loop's ioctl was
+     uninterruptible. `crates/baud-multiverse/src/linux/mod.rs` gained
+     `Multiverse::step_exit_cancellable_with_watchdog(&mut self, watchdog: &AtomicBool)` mirroring the
+     existing `step_exit_cancellable`, and the burst loop inside
+     `run_to_first_halt_with_periodic_timer_and_devices` now arms a fresh per-call
+     `baud_vcpu::linux::Watchdog` around *every* `step_exit_cancellable` call it makes instead of calling it
+     unguarded, reusing the existing `periodic_tick_watchdog_budget` field and `PERIODIC_TICK_WATCHDOG_BUDGET`
+     constant — the same 600s, and the same arm/disarm/classify-as-`RunLoopError::WatchdogKilled { budget_ms }`
+     dance (real supervisor cancellation still wins) that the tick loop's own `inject_at` call already used.
+     Both `periodic_tick_watchdog_budget`'s field doc and `PERIODIC_TICK_WATCHDOG_BUDGET`'s own doc were
+     updated to record that one budget now guards two distinct call sites inside the same function: the
+     tick-level `inject_at` call, and each individual burst-loop `step_exit_cancellable` call.
+     New fixture `crates/baud-multiverse/tests/fixtures/halt-then-spin-guest/` (`payload.s`/`build.py`/
+     `BUILD.md`, wrapping mechanics copied directly from `../timer-guest/`): `lidt`/`sti`/`hlt`, and then —
+     reachable only via the injected interrupt's `iretq`, which resumes execution at the instruction after
+     the `hlt` — `spin: jmp spin` forever. Its ISR writes one `'T'` marker byte to COM1 before `iretq`, so
+     the first post-wake exit is an ordinary serial write and only the *next* one blocks forever, which is
+     the shape needed to exercise the loop rather than its entry condition. This is the first fixture to
+     reach the burst loop at all: every pre-existing periodic-timer test passes `pattern = None`, and that
+     path returns before the loop is ever entered, so the loop had exactly zero test coverage before this
+     iteration despite sitting on H9's real boot path. Two new tests in
+     `crates/baud-multiverse/src/linux/mod.rs`: `halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit`
+     (halt-then-spin-guest, 300ms per-call budget, `pattern` set to bytes the guest never writes; asserts
+     `RunLoopError::WatchdogKilled` comes back inside a bounded wall-clock window rather than hanging the
+     suite) and `burst_watchdog_does_not_fire_on_normal_resume_past_halt` (negative case, timer-guest, 5s
+     budget, `pattern` deliberately three consecutive marker bytes rather than one — timer-guest's ISR also
+     fires from inside its main loop before the guest ever reaches `Hlt`, so a one-byte pattern would match
+     and return before the burst loop was genuinely entered — proving the new watchdog does not
+     false-positive on ordinary resume-past-halt traffic).
+     Verified: `cargo test -p baud-vcpu -p baud-multiverse` → 229 + 40 passed, 0 failed (229 = the prior 227
+     plus the two new burst-loop tests), all on real `/dev/kvm`; `cargo clippy -p baud-vcpu -p baud-multiverse
+     --all-targets` → 26 warnings, confirmed via a `git stash` baseline re-run to be the identical
+     pre-existing set in unrelated files, zero new.
+     **Real-world confirmation, same iteration**: launched another genuinely detached H9 attempt immediately
+     after the fix (identical recipe/setup to every prior attempt) with both watchdogs in place. Ticks
+     climbed to 2200/20000 within ~3s (the same fast-early-ticks-then-stall shape every prior attempt saw,
+     at yet another different tick count — 17100, then 5100, then 4900, then 2200 — consistent with real
+     host-timing-dependent contention deciding where the expensive phase starts, not a fixed tick), then the
+     server log went dark. This time, instead of hanging silently for 28+ minutes with zero signal (items
+     16-17's outcome), a watchdog fired at exactly 600.06s (`budget_ms=600000`) with a clean, typed error
+     surfaced all the way to the CLI client's own JSON response: `"determinism hole: wall-clock watchdog
+     killed the guest after 600000ms with no Hlt/Shutdown reached"`. No `"inject_at took Xs"` phase-log line
+     (`SLOW_TICK_PHASE_LOG_THRESHOLD`) appeared before the kill — that line always fires when `inject_at`
+     itself is the slow phase, and its absence here is circumstantial but suggestive evidence this was the
+     *new* burst-loop watchdog that fired, not the pre-existing tick-level one, consistent with this
+     iteration's `gdb` finding. Not confirmed with a second live `gdb` backtrace during this exact run (judged
+     not worth another ~10-minute wait given the phase-log evidence already points the same way) — a future
+     iteration wanting airtight confirmation of which watchdog fired should attach `gdb` again during the
+     next stall. Either way, the mechanism works end-to-end on a real, not synthetic, boot: the attempt now
+     fails fast and diagnosably instead of hanging forever.
+     **Still open for H9, the real next step**: the boot has not yet reached `ubuntu login:`. Since a
+     `WatchdogKilled` here means the guest, once woken from `Hlt`, ran natively for over 600s with zero VM
+     exits (a very long uninterruptible operation, or something worse), the next attempt should either raise
+     the budget for this specific call site well past 600s and see whether the boot eventually completes on
+     its own (proving it was merely slow, not wedged), or add the CLI/HTTP-tunable knob already flagged as a
+     known gap for `PERIODIC_TICK_WATCHDOG_BUDGET` so this can be tuned per attempt without a code change.
+     Given three consecutive real attempts (items 16, 17, and this one) have now each independently measured
+     a single tick/burst-exit taking minutes to tens of minutes on this real 2.2 GiB rootfs image, raising the
+     budget substantially (e.g. to 30-60 minutes) and re-attempting is the more likely-to-be-informative next
+     move over adding the knob first.
+  19. **The full gate, run right after item 18's fix, caught a real, reproducible unit-test bug — fixed.**
+     `routes::run_kvm::tests::virtio_blk_image_size_guard_rejects_only_implausible_images`
+     (`crates/baud-server/src/routes/run_kvm.rs`) failed in the gate's `cargo test` phase and reproduced
+     immediately in isolation on an otherwise-idle host (so not one of this host's documented load-flakes —
+     confirmed by re-running it alone 3/3 times after the fix below, all green). Root cause:
+     `open_virtio_blk_image` re-read live `MemAvailable` from `/proc/meminfo` internally
+     (`virtio_blk_image_size_limit()`), independently of the test's own separate call to the same function a
+     few lines earlier — two live reads of host memory state a few instructions apart are not guaranteed to
+     agree, so the `limit` value embedded in a rejection's error string could differ (typically by a few MiB)
+     from the `limit` the test had captured moments before, failing `err.contains(&limit.to_string())` even
+     though the rejection decision itself was always correct. Fixed by threading `limit` through
+     `open_virtio_blk_image` as an explicit parameter instead of re-reading it internally, so any caller that
+     needs to reason about the exact limit a decision was measured against computes it exactly once and hands
+     it down — both production call sites (`routes::run_kvm::run`, `routes::stream`'s replay path) now call
+     `virtio_blk_image_size_limit()` once and pass the result in; `virtio_blk_image_size_limit` itself is now
+     `pub(crate)` so `stream.rs` can reach it. The test now passes the same `limit` it asserts on into the call
+     under test, making the assertion deterministic instead of racing two live reads. Verified: `cargo build -p
+     baud-server` clean; `cargo test -p baud-server --bin baud-server` → 40 passed, 0 failed (including the
+     fixed test, re-run 3/3 individually plus once in the full suite); `cargo clippy -p baud-server
+     --all-targets` → 46 warnings, confirmed via `git stash` baseline comparison to be identical pre-existing,
+     zero new. Full `bash drive/gate.sh` → 24 passed, 0 failed, 1 flaked (`rdtsc_guest_reproduces_high_bits_
+     across_boots`, the documented load-flake, confirmed passing in isolation by gate phase 6 in 3s — green
+     per `CLAUDE.md`'s documented exception), 1 skipped (`pkg-build-cli`, fingerprint unchanged), 3m19s.
+
 ### 14.1 Defects found in the test suite and the drive scripts
 
 Latent defects, each of which let a test or script report success it had not earned. The pre-push gate is

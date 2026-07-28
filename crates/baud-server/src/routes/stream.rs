@@ -345,7 +345,10 @@ async fn render_frames_from_real_replay(
     // `run_kvm::open_virtio_blk_image`'s doc. A replay boots the identical image the original run
     // did, so it carried the identical double-copy cost until now.
     let virtio_blk_image = match &virtio_blk {
-        Some((path, _, _)) => match crate::routes::run_kvm::open_virtio_blk_image(path) {
+        Some((path, _, _)) => match crate::routes::run_kvm::open_virtio_blk_image(
+            path,
+            crate::routes::run_kvm::virtio_blk_image_size_limit(),
+        ) {
             Ok(base) => Some(base),
             Err(e) => return Err(json!({ "error": e })),
         },

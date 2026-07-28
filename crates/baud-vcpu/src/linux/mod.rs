@@ -327,6 +327,24 @@ pub fn run_one_exit_cancellable(
     run_one_exit_impl(vcpu, bus, time, None, cancel)
 }
 
+/// [`run_one_exit_cancellable`] plus a per-call wall-clock watchdog: identical retry-on-`EINTR`
+/// and cancellation behavior, but also bounded by `watchdog` (the caller arms/disarms a
+/// [`Watchdog`] around this call, the same per-call pattern
+/// `baud_multiverse::linux::Multiverse`'s periodic-tick loop already uses for `inject_at`). Needed
+/// by any caller that drives `run_one_exit_cancellable` in a tight loop rather than through
+/// [`run_until_halted`] — a single such call can still block inside `KVM_RUN` forever if the guest
+/// makes no further exit, the identical "tight `jmp $` never traps" hazard `run_until_halted`'s own
+/// watchdog exists to solve, just reachable from a different call site.
+pub fn run_one_exit_cancellable_with_watchdog(
+    vcpu: &mut VcpuFd,
+    bus: &mut dyn Bus,
+    time: &mut dyn TimeSource,
+    watchdog: Option<&AtomicBool>,
+    cancel: Option<&AtomicBool>,
+) -> Result<DispatchOutcome, RunLoopError> {
+    run_one_exit_impl(vcpu, bus, time, watchdog, cancel)
+}
+
 /// [`run_one_exit`]'s real body, plus the two things it does not need: on `EINTR`, check whether
 /// the supervisor's `cancel` flag is set, or whether `watchdog` (armed only by
 /// [`run_until_halted`]) has already fired, before blindly retrying — see this crate's

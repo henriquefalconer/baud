@@ -587,7 +587,10 @@ pub struct Multiverse {
     /// overridable via
     /// [`set_periodic_tick_watchdog_budget`](Self::set_periodic_tick_watchdog_budget) — deliberately
     /// a separate field from `watchdog_budget` above: the two guard different call paths with very
-    /// different natural budgets (a whole run vs. one 500000-RCB-ish tick within it).
+    /// different natural budgets (a whole run vs. one 500000-RCB-ish tick within it). Also reused,
+    /// per call rather than per tick, to bound the same function's resume-past-halt burst loop
+    /// (todo.md §14 item 17's real finding: a genuine H9 stall lived there, not inside `inject_at`,
+    /// so this same budget now guards both).
     periodic_tick_watchdog_budget: Duration,
     /// The supervisor's cancellation flag, if one was installed via
     /// [`set_cancel_flag`](Self::set_cancel_flag) — `None` for every caller that never installs
@@ -639,6 +642,14 @@ const RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS: u32 = 100;
 /// [`Multiverse::watchdog_budget`], which guards a different call path entirely and stays at its
 /// own tighter [`DEFAULT_WATCHDOG_BUDGET`]) — a CLI/HTTP knob can follow once real H9 attempts
 /// show whether 600s is the right number.
+///
+/// Also arms the resume-past-halt burst loop's own per-call watchdog (same function, further
+/// down) — todo.md §14 item 17 found, via a live `gdb` backtrace of a real stalled H9 attempt,
+/// that the actual unbounded block was not inside `inject_at` at all but inside that burst loop's
+/// `step_exit_cancellable` call: a guest woken from a non-terminal `Hlt` by a directly-delivered
+/// timer interrupt can run natively for however long before its next exit, the identical hazard
+/// this budget already exists to bound, just reachable from a second call site within the same
+/// function.
 ///
 /// [`watchdog::Watchdog`]: baud_vcpu::linux::Watchdog
 const PERIODIC_TICK_WATCHDOG_BUDGET: Duration = Duration::from_secs(600);
@@ -1204,6 +1215,29 @@ impl Multiverse {
             &mut self.guest.vcpu,
             &mut self.bus,
             &mut self.time,
+            self.cancel.as_deref(),
+        )
+    }
+
+    /// [`step_exit_cancellable`](Self::step_exit_cancellable) plus a per-call wall-clock watchdog
+    /// (`watchdog`, armed and disarmed by the caller around this one call) — for a burst-drain loop
+    /// that calls this many times in a row rather than going through
+    /// [`run_until_halted`](baud_vcpu::linux::run_until_halted), which already carries its own
+    /// whole-run watchdog. A single such call can otherwise block inside `KVM_RUN` forever if the
+    /// guest happens to make no further exit from this point on (todo.md §14 item 17's follow-up:
+    /// this is exactly what a real H9 Ubuntu attempt hit inside
+    /// [`run_to_first_halt_with_periodic_timer_and_devices`](Self::run_to_first_halt_with_periodic_timer_and_devices)'s
+    /// resume-past-halt burst loop — a code path distinct from the `inject_at` call the per-*tick*
+    /// watchdog already covers).
+    fn step_exit_cancellable_with_watchdog(
+        &mut self,
+        watchdog: &std::sync::atomic::AtomicBool,
+    ) -> Result<baud_vcpu::DispatchOutcome, RunLoopError> {
+        baud_vcpu::linux::run_one_exit_cancellable_with_watchdog(
+            &mut self.guest.vcpu,
+            &mut self.bus,
+            &mut self.time,
+            Some(watchdog),
             self.cancel.as_deref(),
         )
     }
@@ -2109,7 +2143,24 @@ impl Multiverse {
                             ))
                             .into());
                         }
-                        let dispatch = self.step_exit_cancellable()?;
+                        // Same per-call watchdog dance as the tick loop's own `inject_at` call
+                        // above (see `PERIODIC_TICK_WATCHDOG_BUDGET`'s doc): a guest woken from a
+                        // non-terminal halt can run natively for as long as it likes before its
+                        // next exit, with nothing else bounding a single `step_exit_cancellable`
+                        // call here otherwise (todo.md §14 item 17's real finding — a genuine H9
+                        // stall lived in exactly this loop, a code path distinct from `inject_at`
+                        // that the per-tick watchdog above never covered).
+                        let burst_watchdog = baud_vcpu::linux::Watchdog::arm(tick_watchdog_budget);
+                        let dispatch = self.step_exit_cancellable_with_watchdog(&burst_watchdog.fired);
+                        let burst_timed_out = burst_watchdog.fired.load(std::sync::atomic::Ordering::SeqCst);
+                        burst_watchdog.disarm();
+                        let dispatch = dispatch.map_err(|e| {
+                            if burst_timed_out && !self.is_cancelled() {
+                                RunLoopError::WatchdogKilled { budget_ms: tick_watchdog_budget.as_millis() as u64 }
+                            } else {
+                                e
+                            }
+                        })?;
                         burst_exits += 1;
                         if matches!(dispatch, baud_vcpu::DispatchOutcome::Halted) {
                             break;
@@ -2764,6 +2815,16 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/spin-guest/bzImage")
     }
 
+    /// `tests/fixtures/halt-then-spin-guest/` (that directory's `BUILD.md`): halts once via a real
+    /// `hlt`, then — reached only via the injected interrupt's `iretq` — spins forever with zero
+    /// further VM exits. The fixture that exercises
+    /// [`run_to_first_halt_with_periodic_timer_and_devices`]'s resume-past-halt burst loop
+    /// end-to-end (todo.md §14 item 17's finding: that loop, not `inject_at`, is where a real H9
+    /// stall actually lived).
+    fn halt_then_spin_guest_kernel_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/halt-then-spin-guest/bzImage")
+    }
+
     /// The concrete fix for todo.md §14.1 "Still open" item 1: before the watchdog existed,
     /// `run_to_first_halt()` against a guest that never exits (this project's subtractive machine
     /// model has no APIC/PIT/host interrupts to force one) hung the calling thread forever. A
@@ -2918,6 +2979,79 @@ mod tests {
             Ok((other, _)) => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
             Err(msg) => panic!("{msg}"),
         }
+    }
+
+    /// The burst-loop sibling of [`periodic_tick_watchdog_kills_a_stuck_tick`]: proves the
+    /// resume-past-halt burst loop's own per-call watchdog (todo.md §14 item 17's fix) actually
+    /// reclaims a wedged `step_exit_cancellable` call, not just a wedged `inject_at` call.
+    /// `halt-then-spin-guest` halts almost immediately (well before `period_rcb`'s target, the
+    /// same "halted before its tick's full RCB budget" case a real Ubuntu boot hits per todo.md
+    /// §14 item 12); with no devices and a `pattern` that never appears, the burst loop then
+    /// delivers the timer interrupt directly and drains exits one at a time — the first call
+    /// handles the ISR's COM1 write normally, but the guest falls straight into `spin: jmp spin`
+    /// immediately afterward, so the *next* `step_exit_cancellable` call blocks forever without
+    /// this fix.
+    #[test]
+    fn halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit() {
+        let kernel = halt_then_spin_guest_kernel_path();
+        let budget = std::time::Duration::from_millis(300);
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_periodic_tick_watchdog_budget(budget);
+
+        let start = std::time::Instant::now();
+        let result = mv.run_to_first_halt_with_periodic_timer_and_devices(
+            500_000,
+            TIMER_VECTOR,
+            &[],
+            20_000,
+            Some(b"this pattern never appears in this fixture's console output"),
+            1_000_000,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "the burst loop's per-call watchdog must reclaim a wedged step_exit_cancellable call \
+             promptly, not merely eventually (took {elapsed:?})"
+        );
+        match result {
+            Err(RunLoopError::WatchdogKilled { budget_ms }) => {
+                assert_eq!(budget_ms, budget.as_millis() as u64);
+            }
+            other => panic!("expected RunLoopError::WatchdogKilled, got {other:?}"),
+        }
+    }
+
+    /// The negative case alongside [`halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit`]: a
+    /// normal periodic-timer run (`timer-guest`, which keeps halting and waking rather than ever
+    /// falling into an unbounded spin) must not be disturbed by the burst loop's new watchdog —
+    /// proving it is not a source of false-positive kills on ordinary "resume past a non-terminal
+    /// halt" traffic. The pattern is three consecutive marker bytes rather than one: `timer-guest`'s
+    /// ISR also fires once from *inside* the main loop (an ordinary `inject_at` delivery, not the
+    /// burst loop), and nothing else ever writes to this fixture's console — three in a row can
+    /// only accumulate from three separate hlt/wake cycles once the guest is sitting at its final
+    /// `hlt`, guaranteeing this exercises the resume-past-halt burst loop for real rather than
+    /// returning on the very first tick.
+    #[test]
+    fn burst_watchdog_does_not_fire_on_normal_resume_past_halt() {
+        let kernel = timer_guest_kernel_path();
+        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        mv.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(5));
+
+        let (_, outcome) = mv
+            .run_to_first_halt_with_periodic_timer_and_devices(
+                200_000,
+                TIMER_VECTOR,
+                &[],
+                20_000,
+                Some(&[TIMER_MARKER, TIMER_MARKER, TIMER_MARKER]),
+                1_000_000,
+            )
+            .expect("a normal resume-past-halt run must succeed within its burst watchdog budget");
+        assert!(
+            outcome.console_output.windows(3).any(|w| w == [TIMER_MARKER, TIMER_MARKER, TIMER_MARKER]),
+            "expected three consecutive timer-interrupt marker bytes on the console"
+        );
     }
 
     /// Set `flag` from another thread after `delay`, the way `baud-server`'s `CancelGuard` does

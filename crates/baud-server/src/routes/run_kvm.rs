@@ -259,7 +259,7 @@ fn mem_available_bytes() -> Option<u64> {
 
 /// The largest virtio-blk base image this host will accept, in bytes — see
 /// [`VIRTIO_BLK_IMAGE_AVAILABLE_MEM_MULTIPLE`].
-fn virtio_blk_image_size_limit() -> u64 {
+pub(crate) fn virtio_blk_image_size_limit() -> u64 {
     mem_available_bytes()
         .map(|available| available.saturating_mul(VIRTIO_BLK_IMAGE_AVAILABLE_MEM_MULTIPLE))
         .unwrap_or(0)
@@ -283,13 +283,20 @@ fn virtio_blk_image_size_limit() -> u64 {
 /// error string) the previous `std::fs::read` produced for the overwhelmingly common failure —
 /// a path that does not exist or cannot be read — before either the size check or the mapping
 /// can dress it up in different words.
+/// `limit` is the caller's own [`virtio_blk_image_size_limit`] reading, taken as a parameter
+/// rather than read again in here: `MemAvailable` is live host state that can differ between two
+/// separate reads a few instructions apart, so a caller that needs to reason about (or assert on)
+/// the exact limit a rejection was measured against must compute it exactly once and hand it down
+/// — reading it twice let a real test flake (the size embedded in a rejection's error string
+/// silently disagreeing with a `limit` the test itself had captured moments earlier from a second,
+/// independent `/proc/meminfo` read).
 pub(crate) fn open_virtio_blk_image(
     path: &str,
+    limit: u64,
 ) -> Result<baud_multiverse::virtio_blk::BlockBase, String> {
     let len = std::fs::metadata(path)
         .map_err(|e| format!("failed to read virtio_blk image_path '{path}': {e}"))?
         .len();
-    let limit = virtio_blk_image_size_limit();
     if len > limit {
         return Err(format!(
             "virtio_blk image_path '{path}' is {len} bytes, above this host's limit of {limit} \
@@ -403,7 +410,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     // Mapped, not read: see `open_virtio_blk_image`'s doc for why this route never puts a disk
     // image on the heap (nor a second copy of it) any more.
     let virtio_blk_image = match &body.virtio_blk {
-        Some(spec) => match open_virtio_blk_image(&spec.image_path) {
+        Some(spec) => match open_virtio_blk_image(&spec.image_path, virtio_blk_image_size_limit()) {
             Ok(base) => Some(base),
             Err(e) => return Json(json!({ "error": e })),
         },
@@ -2530,8 +2537,9 @@ mod tests {
         // no caller uses any more.
         let image_file = tempfile::NamedTempFile::new().expect("create virtio-blk image tempfile");
         std::fs::write(image_file.path(), &base_image).expect("write virtio-blk image tempfile");
-        let base = open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"))
-            .expect("map the virtio-blk image file");
+        let base =
+            open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"), virtio_blk_image_size_limit())
+                .expect("map the virtio-blk image file");
         let virtio_blk_vector = baud_multiverse::pic8259::isa_irq_vector(11); // matches
                                                                                // PciHostBridge's
                                                                                // VIRTIO_BLK_DEFAULT_IRQ_LINE
@@ -2597,8 +2605,9 @@ mod tests {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let image_file = tempfile::NamedTempFile::new().expect("create virtio-blk image tempfile");
         image_file.as_file().set_len(4 * baud_multiverse::virtio_blk::SECTOR_SIZE).expect("size image");
-        let base = open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"))
-            .expect("map the virtio-blk image file");
+        let base =
+            open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"), virtio_blk_image_size_limit())
+                .expect("map the virtio-blk image file");
 
         let Err(err) = boot_run_and_drain(
             &kernel,
@@ -2647,7 +2656,12 @@ mod tests {
         let huge = tempfile::NamedTempFile::new().expect("create sparse image tempfile");
         let huge_len = limit.saturating_add(1024 * 1024 * 1024);
         huge.as_file().set_len(huge_len).expect("set sparse length");
-        let Err(err) = open_virtio_blk_image(huge.path().to_str().expect("utf-8 tempfile path"))
+        // `limit` is passed in explicitly (not re-read inside `open_virtio_blk_image`) so the
+        // value asserted on below is guaranteed to be the exact one the rejection was measured
+        // against — `MemAvailable` is live host state, and two independent reads of it a few
+        // instructions apart are not guaranteed to agree (a real flake this test used to hit).
+        let Err(err) =
+            open_virtio_blk_image(huge.path().to_str().expect("utf-8 tempfile path"), limit)
         else {
             panic!("an image far above the limit must be rejected")
         };
@@ -2659,11 +2673,11 @@ mod tests {
         let ordinary = tempfile::NamedTempFile::new().expect("create ordinary image tempfile");
         ordinary.as_file().set_len(64 * 1024 * 1024).expect("set sparse length");
         assert!(
-            open_virtio_blk_image(ordinary.path().to_str().expect("utf-8 tempfile path")).is_ok(),
+            open_virtio_blk_image(ordinary.path().to_str().expect("utf-8 tempfile path"), limit).is_ok(),
             "an ordinary-sized image must still be accepted"
         );
 
-        let Err(missing) = open_virtio_blk_image("/no/such/virtio-blk/image.img") else {
+        let Err(missing) = open_virtio_blk_image("/no/such/virtio-blk/image.img", limit) else {
             panic!("a missing path must still fail")
         };
         assert!(

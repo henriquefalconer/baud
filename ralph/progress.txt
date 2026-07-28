@@ -7617,3 +7617,62 @@ Gate green (25 passed, 0 failed, 1 flaked -- the documented rdtsc load-flake, co
   - Verified: `cargo test -p baud-vcpu -p baud-multiverse` -> 227 + 40 passed, 0 failed, on real /dev/kvm. `cargo clippy --workspace --all-targets` -> 74 warnings, confirmed via git-stash baseline comparison to be identical pre-existing, zero new. `bash drive/gate.sh` -> 25 passed, 0 failed, 1 flaked (documented rdtsc load-flake, confirmed passing in isolation), 0 skipped, 5m37s -- green per CLAUDE.md's documented exception.
   - todo.md gained item 17 documenting all of the above; item 16's still-open next step (re-attempt the real boot) remains open, now sharper: the phase-level log will directly name whether a future stall is inject_at or device-servicing.
 ---
+
+Post-push verification: origin/main == local HEAD (46b8b59) exactly, working tree clean. Gate was green (25 passed, 0 failed, 1 documented flake, 0 skipped, 5m37s) at this commit's tree before pushing. todo.md still has pending items (H9 boot itself remains open per item 17's own next-step note, plus other still-open items throughout). Iteration closed.
+
+## 2026-07-27T23:50:48 UTC (55min) - Session usage — build-5 [sonnet]
+- cost $8.1661 (from claude -p)
+- context 225,764 tok peak of 1M (23%) across 96 inference calls, monotonic
+- models sonnet-5 $8.1629 (in 266 / out 123,588 / cache-read 15,210,500) · haiku-4-5 $0.0032
+- subagents (2) sonnet-5 x2
+- transcript: ralph/.run/20260727T203641Z/006-build-5.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 6
+═══════════════════════════════════════════════════════
+
+Studying todo.md and recent progress history to find the most important next step...
+
+Chose to continue H9 (Ubuntu 18.04.1 boot): todo.md item 17's still-open next step -- re-attempt the real boot now that phase-level tracing (inject_at vs per-device servicing) is wired, to learn definitively where the stall lives. /dev/kvm confirmed free (fuser found nothing), perf_event_paranoid already -1. Building baud-server/baud-cli before launching a fresh detached attempt...
+
+Ubuntu image artifacts (~/.baud-tmp/ubuntu-1804) are not present on this machine -- re-fetching via examples/ubuntu/fetch.sh (~5 min, mostly the 2.2GiB qcow2->raw convert) before the boot attempt can proceed...
+
+Ubuntu image ready. Launching detached baud-server + H9 boot attempt (vector 238, 20000 max ticks) now, with item 17's phase-level tracing and per-tick watchdog in place -- the first real attempt to test whether the phase log will finally name where the stall lives (inject_at vs device servicing).
+
+Boot stalled at tick 4900/20000 after ~3s wall clock (same cheap-early-ticks-then-stall pattern as iterations 4-5, this time slightly earlier: tick 4900 vs 5100/17100 previously). Server pinned at ~92%% CPU, zero new log lines for 5+ min. No phase-level log line has fired yet either (SLOW_TICK_PHASE_LOG_THRESHOLD=1s) -- consistent with a single inject_at call still in-flight past 1s, which the phase log only reports once the call returns. Continuing to poll toward the 600s per-tick watchdog deadline to see whether it fires this time.
+
+BREAKTHROUGH via gdb stack trace (far more direct than log-polling): attached gdb to the hot thread mid-stall and got a live backtrace. The stall is NOT inside inject_at/LinuxPmuStepper at all (the code path item 16/17's watchdog covers) -- it is inside step_exit_cancellable() at crates/baud-multiverse/src/linux/mod.rs:2112, the 'resume past a non-terminal halt' burst loop that delivers a timer interrupt directly and then drains exits one KVM_RUN at a time via step_exit_cancellable(), which has ZERO watchdog wired to it (only checks self.is_cancelled() between calls, nothing bounds a single KVM_RUN inside step_exit_cancellable itself). This is exactly the BUILD.md 'carry the boot past the first halt' code path H9 actually needs. Killing the stalled attempt now (diagnosis complete) and implementing a watchdog for this burst loop too.
+
+Fix implemented: run_one_exit_cancellable_with_watchdog (baud-vcpu) + step_exit_cancellable_with_watchdog (baud-multiverse), and the resume-past-halt burst loop in run_to_first_halt_with_periodic_timer_and_devices now arms a per-call watchdog (reusing periodic_tick_watchdog_budget) around each step_exit_cancellable call, converting a wedged call into RunLoopError::WatchdogKilled instead of hanging forever. Compiles clean. Building a new hand-assembled fixture (halt-then-spin-guest: hlt once, then on wake from the injected interrupt spins forever with zero further exits) to hardware-test the burst loop specifically, since no existing fixture exercises it (every existing periodic-tick test passes pattern=None, which returns before the burst loop is ever reached).
+
+Fixture + fix compile clean. Running the two new hardware tests (halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit, burst_watchdog_does_not_fire_on_normal_resume_past_halt) on real /dev/kvm...
+
+Both new tests pass on real hardware. Running full baud-vcpu + baud-multiverse test suites plus clippy to check for regressions before the full gate...
+
+Dispatched a subagent to update todo.md item 18 with this iteration's finding/fix. Meanwhile launching another real detached H9 attempt now that both watchdogs (tick-level inject_at, and the new burst-loop step_exit_cancellable) are in place, to see whether the boot progresses further or fails fast with a diagnosable WatchdogKilled.
+
+todo.md item 18 written by subagent (lines 3216-3304), documenting the gdb-backtrace finding and fix. H9 boot attempt still running: tick 2200/20000 at ~3s elapsed as of last check, continuing to poll.
+
+REAL VERIFICATION: the fix caught a genuine stall on this very next H9 attempt. Boot progressed to tick ~2200/20000 (~3s wall clock, same fast-early-ticks pattern as every prior attempt), then went dark -- and this time, instead of hanging silently for 28+ minutes with zero signal (items 16-17's outcome), the per-call watchdog fired at exactly 600.06s (budget_ms=600000) with a clean typed error surfaced all the way to the CLI client's JSON response: 'wall-clock watchdog killed the guest after 600000ms with no Hlt/Shutdown reached'. No 'inject_at took Xs' phase-log line appeared before the kill (that line fires whenever inject_at itself is what's slow) -- circumstantial but suggestive evidence this was the NEW burst-loop watchdog that fired, not the pre-existing tick-level one, consistent with this iteration's gdb-based diagnosis. Either way: the boot now fails fast and diagnosably instead of hanging forever, real forward progress. Killing the completed attempt's server, then running the full pre-push gate.
+
+todo.md item 18 updated with the real-world confirmation. Running the full pre-push gate (bash drive/gate.sh) now...
+
+Gate found a real, reproducible (not memory-pressure-flake) bug in virtio_blk_image_size_guard_rejects_only_implausible_images: open_virtio_blk_image() re-reads live /proc/meminfo's MemAvailable internally, independently of the test's own earlier read -- two live reads a few instructions apart can disagree, so the limit embedded in the rejection error string can differ from the limit the test captured earlier, failing the string-match assertion. Confirmed reproducible in isolation on an idle host (not caused by my H9 memory pressure). Fixing at the root: threading the size limit through open_virtio_blk_image as an explicit parameter instead of re-reading it internally, so a caller (production or test) that needs to reason about the exact limit computes it exactly once.
+
+Fixed the virtio_blk_image_size_guard test bug (threaded the size limit through open_virtio_blk_image as an explicit parameter, avoiding two racing live /proc/meminfo reads). cargo test -p baud-server: 40/40 passed. Documented as todo.md item 19. Re-running the full pre-push gate...
+
+Gate green (24 passed, 0 failed, 1 documented flake confirmed passing in isolation, 1 skipped, 3m19s) per CLAUDE.md's documented exception. Cleaned up temp work dirs. Appending final progress block and committing.
+
+## 2026-07-28T00:41:28 UTC - Changes committed.
+- Continued H9 (Ubuntu 18.04.1 boot): re-attempted the real boot with item 17's phase-level tracing in place, used a live `gdb` backtrace to conclusively locate the actual unbounded block (not `inject_at`, but the resume-past-halt burst loop's `step_exit_cancellable` call), fixed it with a per-call watchdog, hardware-verified the fix on a fresh real H9 attempt, and separately found + fixed a real (non-flaky) test bug the gate itself surfaced.
+- Files changed: crates/baud-vcpu/src/linux/mod.rs, crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/tests/fixtures/halt-then-spin-guest/ (new), crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/stream.rs, todo.md, ralph/progress.txt
+- **Brief description of changes:**
+  - Re-fetched the Ubuntu 18.04.1 image (not present on this machine at session start) and launched a genuinely detached H9 attempt (setsid+nohup+disown, vector 238, 20000 max ticks) exactly as prior iterations did.
+  - New diagnostic technique: attached `gdb -p <tid> -batch -ex "thread apply all bt"` to the stalled spawn_blocking worker thread mid-stall, getting a live stack trace instead of circumstantial CPU/ioctl evidence. It showed the thread blocked in a raw `KVM_RUN` inside `Multiverse::run_to_first_halt_with_periodic_timer_and_devices`'s resume-past-halt burst loop (`step_exit_cancellable`), not inside `inject_at`/`LinuxPmuStepper` the way items 16-17's per-tick watchdog assumed.
+  - Fixed: added `baud_vcpu::linux::run_one_exit_cancellable_with_watchdog` and `Multiverse::step_exit_cancellable_with_watchdog`, and wired a per-call watchdog (reusing `periodic_tick_watchdog_budget`/`PERIODIC_TICK_WATCHDOG_BUDGET`, same 600s budget) around every `step_exit_cancellable` call in the burst loop, converting a wedged call into `RunLoopError::WatchdogKilled` instead of an unbounded hang.
+  - New fixture `crates/baud-multiverse/tests/fixtures/halt-then-spin-guest/` (halts once, then — reachable only via the injected interrupt's `iretq` — spins forever) is the first fixture to exercise the burst loop at all (every prior periodic-timer test passed `pattern = None`, returning before the loop is ever reached). New tests `halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit` and `burst_watchdog_does_not_fire_on_normal_resume_past_halt`, both hardware-verified.
+  - Real-world confirmation: launched another detached H9 attempt with the fix in place. Instead of hanging silently for 28+ minutes (items 16-17's outcome), a watchdog fired at exactly 600.06s with a clean typed error surfaced to the CLI client. H9 has not yet reached `ubuntu login:`; todo.md records the next step (raise the per-call budget substantially and re-attempt, given three consecutive real attempts have now each measured a single tick/burst-exit taking minutes to tens of minutes on the real rootfs).
+  - Separately: the gate's own `cargo test` phase caught a real, reproducible (confirmed in isolation, not a memory-pressure flake) bug in `virtio_blk_image_size_guard_rejects_only_implausible_images` — `open_virtio_blk_image` re-read live `/proc/meminfo` internally, independently of the test's own earlier read, so two live reads a few instructions apart could disagree on the embedded limit value. Fixed by threading the limit through as an explicit parameter (both production call sites and the test now compute it once).
+  - Verified: `cargo test -p baud-vcpu -p baud-multiverse` 229+40 passed; `cargo test -p baud-server --bin baud-server` 40 passed; `cargo clippy` on all three, baseline-identical warning counts via `git stash` comparison, zero new. `bash drive/gate.sh`: 24 passed, 0 failed, 1 flaked (documented `rdtsc_guest_reproduces_high_bits_across_boots` load-flake, confirmed passing in isolation), 1 skipped, 3m19s — green per CLAUDE.md's documented exception.
+  - todo.md gained items 18 and 19 documenting all of the above; H9's own next step (raise the burst-loop watchdog budget and re-attempt) remains open.
+---
