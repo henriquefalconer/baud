@@ -1,0 +1,16 @@
+{
+  "id": "b8333a4dc",
+  "name": "Run ralph loop",
+  "command": "echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && while :; do ./ralph/ralph --prompt prompt-plan.md --model openai-codex/gpt-5-6-luna --thinking medium --harness pi && ./ralph/ralph --model openai-codex/gpt-5-6-luna --thinking medium --harness pi; done",
+  "description": "Run the requested ralph planning and execution loop continuously.",
+  "status": "running",
+  "outputPath": ".pi/tasks/session-391178-391178/b8333a4dc.output",
+  "cwd": "/mnt/c/Users/henriquefalconer/code/baud",
+  "startTime": 1788473817860,
+  "pid": 391263,
+  "bytesWritten": 0,
+  "isAgent": true,
+  "notified": false,
+  "notifyOnCompletion": true,
+  "triggerOnCompletion": true
+}
