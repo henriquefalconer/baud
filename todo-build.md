@@ -26,6 +26,10 @@ resolved item to one `DONE` sentence. Every milestone ends with a drive script a
 12 is the problem → specification → test matrix: every risk found in review is turned into a concrete
 guarantee and the test that proves it.
 
+## Current implementation queue
+
+- **G1 stock-KVM run integration.** Affected paths: `crates/baud-multiverse/src/lib.rs`, `src/linux/`, `src/cpuid.rs`, `src/timesource.rs`, `src/tape_bus.rs`, and `crates/baud-vcpu/src/{lib.rs,boundary.rs,linux/}`. Replace the still-active simulation request path with the real one-vCPU stock-KVM boot and exit loop, wire CPUID, work-clock, tape, and fail-closed dispatch into the request path, and record the cooperative capability without overclaiming enforced guarantees. Acceptance: `double_boot_memory_identical`, `cpuid_leaves_are_fixed`, `work_clock_is_monotone_and_reproducible`, `all_input_is_tape_derived`, and `no_unmodeled_exit_is_silent` pass through `drive/h/h1.sh`, `drive/h/h2.sh`, and `drive/h/h4.sh`; unavailable KVM or unsupported exits return a diagnostic error rather than falling back to simulation.
+
 ---
 
 ## 0. Context and goal

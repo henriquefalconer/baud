@@ -7939,3 +7939,36 @@ ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-co
 - ralph ended with items outstanding
 - total cost $0.0000 (summed from session usage)
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5-6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+## 2026-07-24T10:32:00 UTC - Ralph planning pass 1 findings
+- Eight implementation audits returned, one for each standing group. Reports received: 8. Accepted into `todo-build.md`: 1 complete task. Merged: 0. Rejected: 0. The seven non-selected proposals remain future work or blockers and were not duplicated into this iteration's single-task queue.
+- G1 is partly built. `baud-vcpu` has fail-closed dispatch, open-bus behavior, enforced-exit decoding, watchdog support, and boundary machinery. `baud-multiverse` has KVM-oriented Linux modules for CPUID, boot, devices, and work-clock. The blocking gap is architectural: `crates/baud-multiverse/src/lib.rs` still runs the synthetic simulation path, while the real Linux modules are additive and are not wired into server/agent requests.
+- G2 is partly built: decoder-based rdseed rewriting, image lint, and kernel/initramfs helpers exist, but the complete reproducible image pipeline and tape endpoint are not demonstrated.
+- G3 is partly built: full state capture, restore, dirty reset, and independent restored branches exist. UFFD shared-memory branching and the stored-universe `shell-into` command path remain open.
+- G4 is partly built but not measured by this audit. Basic device, driver, tracing, stream, and encrypted snapshot-store pieces exist; full cross-crate acceptance remains unproven.
+- G5 is partly built. Routes and CLI coverage are broad, but live run-watch SSE, pause/resume, authenticated streaming, and cancellation wiring remain open.
+- G6 is blocked by the documented Ubuntu 18.04.1 zero-exit `KVM_RUN` stall. The next diagnostic order remains symbol resolution, initramfs udev inspection, then network naming/boot parameters. A watchdog stop is not success.
+- G7 is blocked by the missing real Linux/FCEUX image and harness. The existing `nes_bridge.c` is a synthetic fixture and cannot satisfy the target acceptance.
+- G8 is partly built. Host probing, placement, secrets, and package definitions exist; NixOS host modules, target relocation, and the automated image pipeline remain open.
+- Validation: strict task-marker prune proof (`rg -n -i '^[[:space:]]*[-*][[:space:]]+\\**(done|completed)\\**([[:space:]]|$)|^[[:space:]]*status:[[:space:]]+\\**(done|completed)\\**([[:space:]]|$)' todo-build.md`) returned no matches. No source or test files were modified in plan mode.
+
+## 2026-07-24T10:40:00 UTC - Changes committed
+- Updated `todo-build.md` with the one accepted G1 implementation item. Standing groups in `todo-plan.md` remain unchanged.
+- Recorded all eight audit reports, the G1 selection, G6 blocker, validation, and prune result in this file.
+- No implementation, test, configuration, or specification code was changed. Full gate was not run because this was plan mode; the required implementation acceptance remains on the queued item.
+- Remaining: implement the G1 KVM integration; G2-G5 and G8 remain partly built, G6 remains blocked by the Ubuntu stall, and G7 remains blocked by the real emulator image dependency.
+
+
+## 2026-07-24T10:00:00 UTC - Ralph planning pass 1 start
+- Prune check: `todo-build.md` contains no task bullet marked DONE, done, or completed; 0 items removed. Existing `done` words are historical prose, test names, or non-task status descriptions and were retained.
+- Selected standing group: G1 — Deterministic machine core.
+- Selected task: finish the stock-KVM deterministic run path, specifically replace the still-active simulation request path with the real KVM boot/run integration while preserving fail-closed exit dispatch and the existing hardware-tested primitives.
+- This selection follows the first actionable unfinished task in the highest-priority group. The `baud-multiverse/src/lib.rs` pivot notice confirms the real modules are additive and not yet wired into server/agent requests.
