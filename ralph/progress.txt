@@ -7972,3 +7972,42 @@ ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-co
 - Selected standing group: G1 — Deterministic machine core.
 - Selected task: finish the stock-KVM deterministic run path, specifically replace the still-active simulation request path with the real KVM boot/run integration while preserving fail-closed exit dispatch and the existing hardware-tested primitives.
 - This selection follows the first actionable unfinished task in the highest-priority group. The `baud-multiverse/src/lib.rs` pivot notice confirms the real modules are additive and not yet wired into server/agent requests.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
+
+Analysing baud and auditing every queued group before pruning and revising the implementation plan.
+
+Selected standing group: G1 — Deterministic machine core. Selected task: finish the stock-KVM deterministic run path by wiring the real one-vCPU KVM boot/run loop into the active request path, preserving fail-closed dispatch and capability diagnostics.
+
+Prune complete: scanned todo-build.md for task markers in every DONE/completed spelling; 0 marked-DONE items removed, and the strict marker search is clean.
+
+Specs re-derived. Auditing 8 groups: G1 deterministic core, G2 Linux boot pipeline, G3 snapshots, G4 tape/exploration, G5 server surface, G6 distro validation, G7 interactive target, G8 host/release operations.
+
+Audit reports returned: 8/8. G1 confirms partly-built real KVM modules but the active legacy Multiverse path remains; G2-G5 are partly built with dependency gaps; G6 and G7 are blocked; G8 proposes an independent NixOS host module.
+
+RULINGS: retain the selected G1 item as the sole current implementation contract; reject duplicate proposals and blocked/partial follow-ons; accept one later G8 host-module item because it is complete-sized and does not reopen a settled question.
+
+Queue updated: the selected G1 item now covers all active production callers and explicitly forbids simulation fallback; one dependency-ordered G8 NixOS host-module item was accepted. No specs were needed because the existing contracts already state the requirements.
+
+Verifying the markdown queue, marker prune, repository evidence, and required host capability reset before the pre-push gate.
+
+Pre-push verify: the required gate was attempted once and failed in phase 0 warm-up with rc=101 because target/debug contained invalid or missing Rust metadata (.rmeta absent in baud-multiverse and baud-snapshot-store, dependent crates unavailable). No source or test failure ran; this is an environment/build-artifact blocker, and the gate was not repeated.
+
+RULINGS review complete: G1 remains the only selected unfinished task; the G8 proposal is queued after it; G2-G5 proposals were rejected as duplicate, dependency-bound, or not a complete next item; G6/G7 remain visible blockers. The strict DONE-marker proof remains clean.
+
+Final re-read confirms the standing groups remain intact, the queue has exactly two pending bullets in dependency order, the G6 blocker is still explicit, and no DONE task marker remains.
+
+## 2026-09-03T22:38:12 UTC - Plan pass committed.
+- Prune: 0 DONE items removed; strict marker proof clean.
+- Briefs: 8 implementation-audit briefs filed, one per standing group; 8/8 returned.
+- Queue decisions: 1 selected G1 item revised in place, 1 complete G8 item accepted, 6 proposals rejected as duplicate, dependency-bound, or blocked.
+- Verify: not green. `bash drive/gate.sh` stopped in phase 0 with rc=101 on invalid or missing target Rust metadata; no implementation tests ran.
+- **Most severe findings:**
+  - The real KVM modules exist, but active legacy request paths still use the synthetic simulation and need the selected G1 integration.
+  - The Ubuntu 18.04.1 boot remains blocked in one zero-exit `KVM_RUN`; the Mario target remains blocked on the real image and harness pipeline.
+---
