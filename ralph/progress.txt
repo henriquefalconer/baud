@@ -7878,3 +7878,30 @@ Gate green: 25 passed, 0 failed, 1 skipped (pkg-build-cli, unchanged), 2m27s. Co
   - Experiment 2: blacklisted aesni_intel — the AES CTR module-init line disappeared from the console tail and the stall RIP shifted (module-load-address-shift consistent with one fewer module), but the stall still occurred immediately after the same udevd link_config console line, ruling out AES-NI module init as the cause while strengthening the udevd-link_config correlation
   - Documented concrete, sharper next steps in todo.md item 24: resolve the captured RIPs against a System.map/module reconstruction, inspect the initrd's own early-boot udevd invocation directly, and try net.ifnames=1/explicit ip= as an untried lever
 ---
+
+## 2026-07-28T02:35:54 UTC (14min) - Session usage — build-11 [sonnet]
+- cost $2.2888 (from claude -p)
+- context 126,834 tok peak of 1M (13%) across 34 inference calls, monotonic
+- models sonnet-5 $2.2856 (in 82 / out 31,519 / cache-read 3,366,485) · haiku-4-5 $0.0032
+- subagents (1) sonnet-5 x1
+- transcript: ralph/.run/20260727T203641Z/012-build-11.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 12
+═══════════════════════════════════════════════════════
+
+Finding most important item to address...
+
+Chose to inspect the Ubuntu initrd's own early-boot udevd invocation directly (todo.md item 24 next-step (b)) — a free, no-boot-needed diagnostic that can confirm or deny whether the udevd visible in H9's stall console tail is the initramfs-stage instance, sharpening the still-unresolved real H9 stall investigation.
+
+Launched a real H9 boot attempt using a custom-repacked initrd (extracted the stock initrd-generic, added BAUD_MARKER echo-to-/dev/kmsg lines around each step of scripts/init-top/udev -- daemon start, trigger subsystems, trigger devices, settle -- then regzipped it) to pinpoint exactly which of those four steps the guest is stuck in when the watchdog fires. Server PID 272338 (port 17955), boot attempt PID 272397, periodic-tick-watchdog-budget-secs=90. Polling for completion...
+
+First experiment result: console tail ended with "BAUD_MARKER: after settle" -- udevadm settle actually COMPLETES successfully, disproving the "settle blocks forever" hypothesis outright. The stall is somewhere AFTER init-top/udev finishes but BEFORE "Mounting root file system" is logged (which never appeared), i.e. inside load_modules (conf/modules: RAID modules) or one of the 3 init-premount scripts (plymouth, lvm2, cloud-initramfs-dyn-netconf). Added markers around load_modules and each init-premount script boundary, launched a second real boot attempt (PID 277840) to pinpoint further...
+
+load_modules never finished -- "before load_modules" is the LAST marker seen, no "after load_modules". The stall is inside modprobing one of conf/modules RAID/DM modules (linear/multipath/raid0/raid1/raid456/raid5/raid6/raid10). This strongly matches the well-known raid6_pq/async_tx module-init CPU benchmark (raid6_select_algo), which times candidate syndrome algorithms against jiffies in a tight loop -- if the guest's jiffies is not advancing at this exact point (periodic-timer interrupt not being delivered/serviced during early module init), that loop spins forever with zero I/O and zero VM exits, exactly matching every piece of evidence gathered across items 20-24 plus this iteration (RIP in kernel module space, zero exits, occurs right after udev init-top completes). Testing directly: emptying conf/modules to skip these RAID modules entirely...
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7
+═══════════════════════════════════════════════════════
+
+Finding most important item to address in todo.md, studying specs and prior progress first...

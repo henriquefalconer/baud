@@ -1,36 +1,43 @@
 #!/usr/bin/env bash
-# ralph — the Ralph Wiggum build loop: a dumb orchestrator that spends one clean
-# `claude -p` session per forward step and keeps every scrap of continuity on disk
-# (todo.md, ralph/progress.txt, git history), so a session starts fresh and reads
-# state rather than inheriting it.
+# ralph — the Ralph Wiggum loop: a dumb orchestrator that spends one clean
+# one clean harness session per forward step and keeps every scrap of continuity on disk
+# (the prompt's own list file, ralph/progress.txt, git history), so a session starts
+# fresh and reads state rather than inheriting it.
 #
-# Phases:
-#   Build   one session per todo.md item, looping while sessions answer
-#           <promise>NEXT</promise>, until one answers <promise>COMPLETE</promise>
-#   Verify  one session per product domain, exercising the built product for real
-#   Fix     the build loop again, over the findings triaged back into todo.md
-#   Ship    from-scratch setup, README, full verification, end-to-end smoke pass
+# The loop: one session per item on that list, running while sessions answer
+# <promise>NEXT</promise>, until one answers <promise>COMPLETE</promise>.
 #
-# ralph/prompt-build.md is the single tuning surface — it is piped in verbatim with
+# The prompt file is the single tuning surface — it is piped in verbatim with
 # [ralph-iteration] substituted, so editing it steers the very next iteration.
+# It lives in ralph/ and defaults to prompt-build.md; -p names a different one
+# (prompt-plan.md, …), which is how one orchestrator drives
+# three different loops without a second copy of this script.
 #
-# TOOL SET — validated 2026-07-24 by asking a live `claude -p ... --chrome` session
+# TOOL SET — validated 2026-07-24 by asking a live browser-enabled session
 # to enumerate its own tools. The default grant is already complete: Agent, Bash,
-# Read, Edit, Write, Skill, ToolSearch, Task*, Monitor, WebFetch, WebSearch and all
-# 23 mcp__claude-in-chrome__* tools (computer, navigate, read_page, tabs_*, find,
+# Read, Edit, Write, Skill, ToolSearch, Task*, Monitor, WebFetch, WebSearch and the
+# browser automation tools (computer, navigate, read_page, tabs_*, find,
 # javascript_tool, read_console_messages, ...). Nothing was missing, so this script
 # passes NO --tools/--allowedTools filter: any such flag could only ever shrink that
-# set. Do not add one.
+# set. Do not add one. The same holds for pi: its grant is the built-in read/bash/
+# edit/write set plus every extension the user installed (the Agent tool, background
+# tasks, web access), and a --tools allowlist could only remove one of them.
 #
 # Usage:  ralph/ralph [options]
-#   -n, --iterations N      max build iterations (0 = unlimited, default 0)
-#   -r, --verify-rounds N   max verify->fix rounds (0 = until clean, default 10)
-#   -m, --model M           model alias for every session (default sonnet)
-#   -w, --watchdog SECS     kill a session after SECS with no progress.txt append
+#   -n, --iterations N      max ralph iterations (0 = unlimited, default 0)
+#   -p, --prompt FILE       prompt file inside ralph/ (default prompt-build.md)
+#   --harness H             execution harness: pi (default), codex or claude
+#   -m, --model M           model alias for every session (pi default
+#                           anthropic/claude-haiku-4-5; codex default gpt-5.6-luna;
+#                           claude default sonnet)
+#   -t, --thinking LEVEL    thinking level per session: low|medium|high|xhigh|max;
+#                           pi also takes off|minimal and defaults to off (for codex and
+#                           claude, unset = the CLI's own default, whatever /effort last saved)
+#   -w, --watchdog SECS     kill a session after SECS with no progress.txt append (0 = off, default)
 #                           (default 2700 = the 45 min prompt-build.md promises; 0 disables)
-#   -b, --budget USD        per-session --max-budget-usd cap
+#   -b, --budget USD        per-session USD cap (pi and Codex are checked from the
+#                           transcript's own usage; Claude enforces it in the CLI)
 #   -B, --budget-total USD  stop the whole run once less than $2 of this remains
-#       --build-only        stop after the build loop reports COMPLETE
 #   -h, --help
 set -uo pipefail
 
@@ -38,7 +45,7 @@ set -uo pipefail
 # anything it spawns inherits that group. That is what makes a session's whole
 # tree — including subagents it launched — addressable as one unit, both to wait
 # for and to kill. Verified: a grandchild of a backgrounded job stays alive after
-# `wait` on that job returns, which is precisely how an Opus subagent outlived a
+# `wait` on that job returns, which is precisely how a subagent outlived a
 # ralph iteration and reported in long after the script had moved on.
 set -m
 
@@ -53,40 +60,110 @@ PROGRESS="ralph/progress.txt"
 # transcripts — namespacing removes that entirely. Kept runs live in ralph/.archive/.
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUNDIR="ralph/.run/$RUN_ID"
-MODEL="${RALPH_MODEL:-sonnet}"
+HARNESS="${RALPH_HARNESS:-pi}"
+MODEL="${RALPH_MODEL:-}"
+# The prompt file, by NAME, inside ralph/. A basename only —
+# it is resolved under ralph/, so a path cannot point the loop outside the run kit.
+PROMPT_NAME="${RALPH_PROMPT:-prompt-build.md}"
+# Empty = pass no thinking override and inherit the selected CLI's configured default.
+THINKING="${RALPH_THINKING:-}"
 MAX_ITER="${RALPH_MAX_ITER:-0}"
-VERIFY_ROUNDS="${RALPH_VERIFY_ROUNDS:-10}"
-WATCHDOG="${RALPH_WATCHDOG_SECS:-2700}"
+# 0 = disabled (the default). A long, quiet stretch is normal work — a full verify, a wide
+# refactor, a Chrome sweep — not a hang, and killing it mid-iteration threw away real progress.
+# Set RALPH_WATCHDOG_SECS or -w to re-arm it.
+WATCHDOG="${RALPH_WATCHDOG_SECS:-0}"
 BUDGET_USD="${RALPH_MAX_BUDGET_USD:-}"
 BUDGET_TOTAL_USD="${RALPH_BUDGET_TOTAL_USD:-}"
 BUDGET_RESERVE_USD="${RALPH_BUDGET_RESERVE_USD:-2.00}"
 GROUP_WAIT_MAX="${RALPH_GROUP_WAIT_MAX:-900}"
-RESUME_MAX="${RALPH_RESUME_MAX:-4}"      # resumes allowed within one iteration    # seconds to wait for leftover session work
-BUILD_ONLY=0
+RESUME_MAX="${RALPH_RESUME_MAX:-4}"      # resumes allowed within one iteration
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--iterations)     MAX_ITER="$2"; shift 2 ;;
-    -r|--verify-rounds)  VERIFY_ROUNDS="$2"; shift 2 ;;
+    -p|--prompt)         PROMPT_NAME="$2"; shift 2 ;;
     -m|--model)          MODEL="$2"; shift 2 ;;
+    --harness)           HARNESS="$2"; shift 2 ;;
+    -t|--thinking)       THINKING="$2"; shift 2 ;;
     -w|--watchdog)       WATCHDOG="$2"; shift 2 ;;
     -b|--budget)         BUDGET_USD="$2"; shift 2 ;;
     -B|--budget-total)   BUDGET_TOTAL_USD="$2"; shift 2 ;;
-    --build-only)        BUILD_ONLY=1; shift ;;
-    -h|--help)           sed -n '2,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)           sed -n '2,41p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "ralph: unknown option $1 (try --help)" >&2; exit 2 ;;
   esac
 done
 
-command -v claude  >/dev/null || { echo "ralph: claude CLI not on PATH" >&2; exit 1; }
+# pi is the only harness with a fixed thinking default: its own default is whatever the
+# model catalogue says, which differs per model, so ralph pins "off" and the ledger
+# always names a level. Codex and Claude keep inheriting their CLI's saved default.
+case "$HARNESS" in
+  pi)     [[ -n "$MODEL" ]] || MODEL="anthropic/claude-haiku-4-5"
+          [[ -n "$THINKING" ]] || THINKING="off" ;;
+  codex)  [[ -n "$MODEL" ]] || MODEL="gpt-5.6-luna" ;;
+  claude) [[ -n "$MODEL" ]] || MODEL="sonnet" ;;
+  *) echo "ralph: --harness must be pi, codex or claude (got '$HARNESS')" >&2; exit 2 ;;
+esac
+
+# pi's thinking scale has two levels below "low" that the other CLIs cannot express.
+if [[ "$HARNESS" == pi ]]; then
+  case "$THINKING" in
+    off|minimal|low|medium|high|xhigh|max) ;;
+    *) echo "ralph: --thinking must be one of off minimal low medium high xhigh max (got '$THINKING')" >&2; exit 2 ;;
+  esac
+else
+  case "$THINKING" in
+    ""|low|medium|high|xhigh|max) ;;
+    *) echo "ralph: --thinking must be one of low medium high xhigh max (got '$THINKING')" >&2; exit 2 ;;
+  esac
+fi
+
+case "$HARNESS" in
+  pi)     command -v pi     >/dev/null || { echo "ralph: pi CLI not on PATH" >&2; exit 1; } ;;
+  codex)  command -v codex  >/dev/null || { echo "ralph: codex CLI not on PATH" >&2; exit 1; } ;;
+  claude) command -v claude >/dev/null || { echo "ralph: claude CLI not on PATH" >&2; exit 1; } ;;
+esac
 command -v python3 >/dev/null || { echo "ralph: python3 required (no jq on this box)" >&2; exit 1; }
-[[ -f ralph/prompt-build.md ]] || { echo "ralph: ralph/prompt-build.md missing" >&2; exit 1; }
+PROMPT_NAME="$(basename "$PROMPT_NAME")"
+PROMPT_FILE="ralph/$PROMPT_NAME"
+[[ -f "$PROMPT_FILE" ]] || { echo "ralph: $PROMPT_FILE missing" >&2; exit 1; }
 mkdir -p "$RUNDIR"
 touch "$PROGRESS"
 git rev-parse --abbrev-ref HEAD > ralph/.last-branch 2>/dev/null || true
 
-CLAUDE_ARGS=( -p --dangerously-skip-permissions --chrome --model "$MODEL" --output-format json )
-[[ -n "$BUDGET_USD" ]] && CLAUDE_ARGS+=( --max-budget-usd "$BUDGET_USD" )
+# The thinking level is NOT written to the session JSON — only to the transcript, on
+# every assistant record. So the ledger has to carry it, or a past run's entry cannot
+# be told apart from one at a different level.
+MODEL_LABEL="$MODEL"
+[[ -n "$THINKING" ]] && MODEL_LABEL="$MODEL thinking=$THINKING"
+# The ledger keeps model and thinking level as two separate bracketed fields —
+# "[opus] [low]" — so the model field reads the same whether or not a level was
+# chosen. Unset prints no second bracket rather than an empty one.
+THINKING_TAG=""
+[[ -n "$THINKING" ]] && THINKING_TAG=" [$THINKING]"
+
+if [[ "$HARNESS" == pi ]]; then
+  # --mode json streams the session header (id, cwd) and every message as JSONL on
+  # stdout, which is how the session transcript under ~/.pi/agent/sessions is found
+  # afterwards. pi has no permission prompts and no budget flag: the per-session cap is
+  # checked from the transcript's own cost figures, the same way Codex is.
+  HARNESS_ARGS=( -p --mode json --model "$MODEL" --thinking "$THINKING" )
+elif [[ "$HARNESS" == codex ]]; then
+  HARNESS_ARGS=( --yolo --json -m "$MODEL" )
+  # Codex and Claude each call the level by their own name on the command line.
+  [[ -n "$THINKING" ]] && HARNESS_ARGS+=( -c "model_reasoning_effort=$THINKING" )
+  HARNESS_ARGS+=(
+    -c "agents.max_depth=32"
+    -c "agents.max_concurrent_threads_per_session=32"
+    -c "features.goals=false"
+    -c "tool_output_token_limit=40000"
+    -c "model_context_window=1050000"
+    -c "model_auto_compact_token_limit=997500"
+  )
+else
+  HARNESS_ARGS=( -p --dangerously-skip-permissions --chrome --model "$MODEL" --output-format json )
+  [[ -n "$THINKING" ]] && HARNESS_ARGS+=( --effort "$THINKING" )
+  [[ -n "$BUDGET_USD" ]] && HARNESS_ARGS+=( --max-budget-usd "$BUDGET_USD" )
+fi
 
 # ── small helpers ────────────────────────────────────────────────────────────
 
@@ -125,16 +202,21 @@ promise_of() {
     sed -E 's#</?promise>##g'
 }
 
-# ── session runner: one `claude -p`, watchdogged on progress.txt liveness ────
+# ── session runner: one headless harness turn, watchdogged on progress.txt ───
 
 SESSION_N=0
 LAST_JSON=""
+LAST_RAW_JSON=""
 USAGE_DEFERRED=0
 ITER_JSONS=()
 ITER_SECS=0
+ITER_COST_START=0
 
 # Start a fresh usage accumulation for one iteration.
-begin_iteration_usage() { ITER_JSONS=(); ITER_SECS=0; USAGE_DEFERRED=1; }
+begin_iteration_usage() {
+  ITER_JSONS=(); ITER_SECS=0; USAGE_DEFERRED=1
+  ITER_COST_START="$(spent_usd)"
+}
 
 # Emit the single ledger entry for the iteration just finished.
 flush_iteration_usage() { # <label>
@@ -143,6 +225,16 @@ flush_iteration_usage() { # <label>
   SESSION_SECS="$ITER_SECS"
   log_usage "$1" "${ITER_JSONS[@]}"
   ITER_JSONS=(); ITER_SECS=0
+}
+
+session_budget_exhausted() {
+  [[ "$HARNESS" == claude || -z "$BUDGET_USD" ]] && return 1
+python3 - "$ITER_COST_START" "$BUDGET_USD" "$COST_FILE" <<'PY'
+import sys
+start, limit, path = float(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
+spent = sum(float(line) for line in open(path) if line.strip())
+sys.exit(0 if spent - start > limit else 1)
+PY
 }
 # run_session hands its result back through a FILE, never stdout: wrapping it in
 # $( ) would run it in a subshell and discard every variable it sets — session
@@ -223,6 +315,918 @@ await_group() { # <pgid> <label>
   say "leftover work in [$label] finished after ${waited}s"
 }
 
+# The CLI process exiting is necessary but not sufficient to accept its promise.
+# Both harnesses can leave work outside that process: Codex persists spawned-agent
+# turns in its local state store, and Claude exposes background agents separately.
+# A promise from a parent that still has either kind of work is a progress report,
+# not the end of an iteration.
+codex_pending_work() { # <Codex JSONL from this invocation>; stdout = reasons
+  local source="${1:-}"
+  RALPH_CODEX_SOURCE="$source" python3 - <<'PY'
+import datetime, json, os, sqlite3
+
+source = os.environ.get("RALPH_CODEX_SOURCE", "")
+def events(path):
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                try:
+                    outer = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                payload = outer.get("payload")
+                event = dict(payload) if isinstance(payload, dict) else dict(outer)
+                event["_ralph_timestamp"] = outer.get("timestamp") or event.get("timestamp")
+                yield event
+    except OSError:
+        return
+
+root_events = list(events(source))
+if not root_events:
+    print("Codex session record is unavailable")
+    raise SystemExit(0)
+
+root = None
+turn_finished = False
+reported_children = {}
+terminal_agent_statuses = {"completed", "failed", "cancelled", "canceled", "closed"}
+for line in root_events:
+    if line.get("type") == "thread.started":
+        root = line.get("thread_id") or line.get("id")
+    if line.get("type") == "turn.completed":
+        turn_finished = True
+    item = line.get("item") or {}
+    if str(item.get("type", "")).lower() in {"collabagenttoolcall", "collab_tool_call"}:
+        states = item.get("agents_states") or {}
+        for child in item.get("receiver_thread_ids") or []:
+            state = states.get(child)
+            if isinstance(state, dict):
+                state = state.get("status")
+            if isinstance(state, str) and state:
+                reported_children[child] = state.lower()
+if not root:
+    print("Codex thread id is unavailable")
+    raise SystemExit(0)
+reasons = []
+if not turn_finished:
+    reasons.append(f"Codex turn {root} has not completed")
+
+home = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+db_paths = [os.path.join(home, f"state_{n}.sqlite") for n in (5, 4, 3)]
+children = {}
+seen = {root}
+frontier = [root]
+while frontier:
+    parent = frontier.pop()
+    found = []
+    for path in db_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            found.extend(db.execute(
+                "select child_thread_id, status from thread_spawn_edges where parent_thread_id = ?",
+                (parent,),
+            ).fetchall())
+            db.close()
+        except sqlite3.Error:
+            pass
+    for child, status in found:
+        children[child] = status
+        if child not in seen:
+            seen.add(child)
+            frontier.append(child)
+
+# The returned invocation includes the parent's own wait/close-agent results.
+# They are more direct than the eventually-consistent SQLite edge state and
+# still let us find a child even when the state database is briefly unreadable.
+for child, status in reported_children.items():
+    children.setdefault(child, status)
+    seen.add(child)
+
+paths = {source}
+for thread_id in seen:
+    for path in db_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            row = db.execute("select rollout_path from threads where id = ?", (thread_id,)).fetchone()
+            db.close()
+            if row and row[0]:
+                paths.add(row[0])
+        except sqlite3.Error:
+            pass
+
+def thread_state(path):
+    """Return (terminal, active, live_commands) from a thread's own record.
+
+    `thread_spawn_edges.status` is deliberately not used as liveness: it can
+    remain `open` after `wait_agent` has returned a completed result.  The
+    thread's terminal event is the evidence that the parent is no longer
+    waiting for that subagent.
+    """
+    terminal = False
+    last_event_at = None
+    last_command_ended = False
+    started, completed = {}, set()
+    for event in events(path):
+        kind = event.get("type")
+        raw_time = event.get("_ralph_timestamp")
+        if isinstance(raw_time, str):
+            try:
+                last_event_at = datetime.datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        if kind in {"turn_context", "thread.started"}:
+            terminal = False
+            last_command_ended = False
+        elif kind == "task_complete":
+            terminal = True
+        item = event.get("item") or {}
+        item_type = str(item.get("type", "")).lower()
+        item_id = item.get("id")
+        if item_type in {"commandexecution", "command_execution"} and item_id:
+            if kind in {"item.started", "item_started"}:
+                started[item_id] = item.get("process_id")
+            elif kind in {"item.completed", "item_completed"}:
+                completed.add(item_id)
+                last_command_ended = True
+    live = []
+    if not terminal:
+        for item_id, process_id in started.items():
+            if item_id in completed or not process_id:
+                continue
+            try:
+                os.kill(int(process_id), 0)
+            except (OSError, ValueError):
+                continue
+            live.append((item_id, process_id))
+    # A parent can finish while the platform is cancelling a child.  That
+    # child has no task_complete, but its final CommandExecution is already a
+    # terminal failed/cancelled item and it has no process to wait for.  Do not
+    # turn that stale open edge into a 900-second wait.
+    if terminal or last_command_ended:
+        return True, False, live
+    if last_event_at is None:
+        return False, True, live
+    now = datetime.datetime.now(datetime.timezone.utc)
+    grace = int(os.environ.get("RALPH_CODEX_ACTIVITY_GRACE", "60"))
+    active = (now - last_event_at).total_seconds() <= grace
+    return False, active, live
+
+# The invocation record is specific to the returned turn.  It is the source
+# of truth for the parent command it might still be waiting on.
+_, _, root_live = thread_state(source)
+for item_id, process_id in root_live:
+    reasons.append(f"Codex command {item_id} (pid {process_id}) is still running")
+
+for child, status in children.items():
+    if reported_children.get(child) in terminal_agent_statuses:
+        continue
+    child_path = None
+    for path in db_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            row = db.execute("select rollout_path from threads where id = ?", (child,)).fetchone()
+            db.close()
+            if row and row[0]:
+                child_path = row[0]
+                break
+        except sqlite3.Error:
+            pass
+    if not child_path:
+        if status != "closed":
+            reasons.append(f"Codex child turn {child} has no terminal record")
+        continue
+    terminal, active, live = thread_state(child_path)
+    if not terminal and active:
+        reasons.append(f"Codex child turn {child} has not completed")
+    for item_id, process_id in live:
+        reasons.append(f"Codex child command {item_id} (pid {process_id}) is still running")
+
+if reasons:
+    print("; ".join(dict.fromkeys(reasons)))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+claude_pending_work() { # <Claude result JSON>; stdout = reasons
+  local source="${1:-}"
+  RALPH_CLAUDE_SOURCE="$source" RALPH_REPO_ROOT="$REPO_ROOT" python3 - <<'PY'
+import json, os, subprocess, sys
+
+source = os.environ.get("RALPH_CLAUDE_SOURCE", "")
+root = None
+try:
+    root = json.load(open(source)).get("session_id")
+except (OSError, ValueError, AttributeError):
+    pass
+if not root:
+    print("Claude session id is unavailable")
+    raise SystemExit(0)
+try:
+    raw = subprocess.check_output(
+        ["claude", "agents", "--json", "--cwd", os.environ["RALPH_REPO_ROOT"]],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    )
+    agents = json.loads(raw)
+except (OSError, subprocess.SubprocessError, ValueError):
+    print("Claude background-agent state is unavailable")
+    raise SystemExit(0)
+if not isinstance(agents, list):
+    print("Claude background-agent state is malformed")
+    raise SystemExit(0)
+
+def get(agent, *names):
+    for name in names:
+        value = agent.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+by_parent = {}
+unlinked = []
+for agent in agents:
+    if not isinstance(agent, dict):
+        continue
+    session_id = get(agent, "sessionId", "session_id", "id")
+    parent_id = get(agent, "parentSessionId", "parent_session_id", "parentId", "parent_id")
+    status = str(agent.get("status", "running")).lower()
+    if status in {"completed", "failed", "cancelled", "canceled"}:
+        continue
+    if session_id and parent_id:
+        by_parent.setdefault(parent_id, []).append((session_id, status))
+    else:
+        unlinked.append((session_id or "unknown", status))
+
+reasons = []
+frontier = [root]
+seen = {root}
+while frontier:
+    parent = frontier.pop()
+    for child, status in by_parent.get(parent, []):
+        reasons.append(f"Claude child turn {child} is {status}")
+        if child not in seen:
+            seen.add(child)
+            frontier.append(child)
+
+# Older Claude versions do not include parent ids in `agents --json`. In that
+# case every listed agent for this cwd is active, so refusing the promise is the
+# safe choice; a false wait is preferable to committing over live work.
+if unlinked and not by_parent:
+    reasons.extend(f"Claude background turn {child} is {status}" for child, status in unlinked)
+
+if reasons:
+    print("; ".join(reasons))
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+# pi keeps one JSONL transcript per session under ~/.pi/agent/sessions/<encoded cwd>/
+# (PI_CODING_AGENT_DIR and PI_CODING_AGENT_SESSION_DIR relocate it). Every assistant
+# message in it carries the model, the token counts and the USD cost pi priced that
+# one call at, so cost and context are read from the transcript and nothing else.
+#
+# Work a session farms out lands in OTHER transcripts, and the parent links to them in
+# three ways, all recoverable from the parent's own file (measured 2026-09-01):
+#   1. The Agent tool (pi-subagents) runs the child in-process and writes its session
+#      with a "parentSession" header pointing at the parent's file. A nested agent
+#      spawned by that child is NOT persisted; its cost survives only in the
+#      "details.cost" of the parent's Agent tool result, which is used when no file
+#      answers to the agent id.
+#   2. `pi -p …` run from the bash tool starts a plain session with no parent link.
+#      It is matched by its header timestamp falling between the assistant message
+#      that issued the command and that command's tool result, in the sessions of the
+#      same install (plus any --session-dir the command named). A `--mode json` child
+#      also prints its header into the tool result, and a `--session-id` names itself.
+#   3. bg_run (pi-background-tasks) starts the command detached and returns at once,
+#      so its child begins AFTER the tool result. Every task writes
+#      <cwd>/.pi/tasks/<session>-<pid>/<task>.json with pid, status, startTime and
+#      endTime; that record is the window for a bg_run child, and its pid is what
+#      pending-work checks. Without it the window closes at the task's
+#      <background-task-notification>, or at the end of the transcript.
+#   4. bg_delegate launches `pi --session-id <id> --session-dir <artifacts>/child-session`
+#      and says so in its result ("Child session: <id>", "Artifacts: <dir>"), so the
+#      child is found by id under that directory.
+# One python program serves both the ledger and the quiescence check so they can never
+# disagree on which transcripts belong to an iteration.
+pi_transcript() { # <mode: usage|pending|children> <args...>
+  python3 - "$@" <<'PY'
+import datetime, glob, json, os, re, subprocess, sys
+
+mode, argv = sys.argv[1], sys.argv[2:]
+TERMINAL = {"completed", "failed", "cancelled", "canceled", "aborted", "killed", "error", "timeout", "timed_out"}
+PI_RE = re.compile(r'(?:^|[\s;&|(`{])[\'"]?pi[\'"]?(?:\s|$)')
+# Tools that return before the work they started, so a child of theirs begins after
+# the tool result and the plain call-to-result window would never contain it.
+BACKGROUND_TOOLS = {"bg_run", "bg_run_pi_attested", "bg_delegate"}
+# Tools that launch a `pi` child even when their arguments carry no command line.
+PI_LAUNCHERS = {"bg_delegate", "bg_run_pi_attested"}
+
+def sessions_roots(extra=()):
+    roots = []
+    env = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    if env:
+        roots.append(env)
+    agent = os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(os.path.expanduser("~"), ".pi", "agent")
+    roots.append(os.path.join(agent, "sessions"))
+    roots.extend(extra)
+    seen, out = set(), []
+    for r in roots:
+        r = os.path.abspath(os.path.expanduser(r))
+        if r not in seen:
+            seen.add(r); out.append(r)
+    return out
+
+_headers = {}
+def header(path):
+    if path in _headers:
+        return _headers[path]
+    h = None
+    try:
+        with open(path, errors="replace") as fh:
+            first = fh.readline()
+        d = json.loads(first)
+        if isinstance(d, dict) and d.get("type") == "session":
+            h = d
+    except (OSError, ValueError):
+        pass
+    _headers[path] = h
+    return h
+
+def session_files(roots):
+    out = []
+    for r in roots:
+        out.extend(glob.glob(os.path.join(r, "**", "*.jsonl"), recursive=True))
+    return sorted(set(os.path.abspath(p) for p in out))
+
+def find_by_id(sid, roots):
+    if not sid:
+        return None
+    for path in session_files(roots):
+        if os.path.basename(path).endswith("_" + sid + ".jsonl") or os.path.basename(path) == sid + ".jsonl":
+            return path
+    for path in session_files(roots):
+        h = header(path)
+        if h and h.get("id") == sid:
+            return path
+    return None
+
+def parse_ts(value):
+    if isinstance(value, (int, float)):
+        return datetime.datetime.fromtimestamp(value / 1000, datetime.timezone.utc)
+    if isinstance(value, str):
+        try:
+            return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+def entries(path):
+    out = []
+    try:
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue   # a partially flushed final line
+    except OSError:
+        pass
+    return out
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return ""
+
+def same_file(a, b):
+    if not a or not b:
+        return False
+    if os.path.abspath(a) == os.path.abspath(b):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.basename(a) == os.path.basename(b)
+
+class Session:
+    def __init__(self, path, kind, label):
+        self.path, self.kind, self.label = path, kind, label
+        self.header = header(path) or {}
+        self.id = self.header.get("id")
+        self.cwd = self.header.get("cwd") or ""
+        self.name = None
+        self.calls = []          # one per assistant message
+        self.tool_calls = []     # (name, arguments, start_ts, end_ts, result_text, details)
+        self.agent_status = {}   # subagents:record data.id -> status
+        self.task_notified = {}  # background task id -> timestamp of its terminal notification
+        self.children = []
+        self.fallbacks = []      # (label, cost) for agents with no transcript
+        self.last_ts = None
+        self.turns = 0           # user messages seen; a resume starts a new one
+        self.first_user = ""     # the prompt the session was started with
+        self._parse()
+
+    def _parse(self):
+        pending = {}
+        for e in entries(self.path):
+            ts = parse_ts(e.get("timestamp"))
+            if ts:
+                self.last_ts = ts
+            t = e.get("type")
+            if t == "session_info" and e.get("name"):
+                self.name = e["name"]
+            elif t == "custom" and e.get("customType") == "subagents:record":
+                data = e.get("data") or {}
+                if data.get("id"):
+                    self.agent_status[data["id"]] = str(data.get("status") or "").lower()
+            elif t == "custom_message" and e.get("customType") == "background-task-notification":
+                found = re.search(r"<task-id>\s*([^<\s]+)\s*</task-id>", text_of(e.get("content")))
+                if found and ts:
+                    self.task_notified[found.group(1)] = ts
+            elif t == "message":
+                m = e.get("message") or {}
+                role = m.get("role")
+                if role == "user":
+                    self.turns += 1
+                    if not self.first_user:
+                        self.first_user = text_of(m.get("content"))
+                if role == "assistant":
+                    u = m.get("usage") or {}
+                    cost = u.get("cost") or {}
+                    self.calls.append({
+                        "model": m.get("model") or "", "provider": m.get("provider") or "",
+                        "in": int(u.get("input") or 0), "out": int(u.get("output") or 0),
+                        "cr": int(u.get("cacheRead") or 0), "cw": int(u.get("cacheWrite") or 0),
+                        "reasoning": int(u.get("reasoning") or 0),
+                        "cost": float(cost.get("total") or 0),
+                        "stop": m.get("stopReason") or "", "error": m.get("errorMessage") or "",
+                    })
+                    for c in m.get("content") or []:
+                        if isinstance(c, dict) and c.get("type") == "toolCall":
+                            pending[c.get("id")] = [c.get("name") or "", c.get("arguments") or {}, ts, None, "", None, self.turns]
+                elif role == "toolResult":
+                    rec = pending.pop(m.get("toolCallId"), None)
+                    if rec is None:
+                        rec = [m.get("toolName") or "", {}, None, None, "", None, self.turns]
+                    rec[3] = ts
+                    rec[4] = text_of(m.get("content"))
+                    rec[5] = m.get("details") if isinstance(m.get("details"), dict) else None
+                    self.tool_calls.append(tuple(rec))
+        for rec in pending.values():   # a call whose result never landed (session cut off)
+            self.tool_calls.append(tuple(rec))
+
+    def cost(self):
+        return sum(c["cost"] for c in self.calls)
+
+    def model(self):
+        return self.calls[-1]["model"] if self.calls else ""
+
+    def last_error(self):
+        if self.calls and self.calls[-1]["stop"] == "error":
+            return self.calls[-1]["error"] or "error"
+        return ""
+
+    def background_agents_cut_off(self):
+        """Agents backgrounded in the LAST turn that never reached a terminal record.
+
+        Only the last turn counts: a resumed session was nudged to redo that work in
+        the foreground, and the earlier record can never change afterwards, so
+        holding it against every later promise would keep the slot failing forever
+        (measured 2026-09-01: three refusals in a row on one resumed session).
+        """
+        out = []
+        for name, args, _, _, _, details, turn in self.tool_calls:
+            if turn != self.turns or name not in ("Agent", "Task") or not details:
+                continue
+            aid = details.get("agentId")
+            status = str(details.get("status") or "").lower()
+            if status != "background" or not aid:
+                continue
+            if self.agent_status.get(aid) in TERMINAL:
+                continue
+            out.append((aid, details.get("description") or args.get("description") or ""))
+        return out
+
+def command_of(args, details):
+    """The command line a tool ran: its own argument, else the task record it returned
+    (bg_delegate builds the child's argv itself and reports it only in details)."""
+    for key in ("command", "cmd"):
+        if isinstance(args, dict) and isinstance(args.get(key), str):
+            return args[key]
+    task = (details or {}).get("task")
+    if isinstance(task, dict) and isinstance(task.get("command"), str):
+        return task["command"]
+    return ""
+
+def task_id_of(args, details, result):
+    task = (details or {}).get("task")
+    if isinstance(task, dict) and task.get("id"):
+        return str(task["id"])
+    for key in ("task_id", "taskId"):
+        if (details or {}).get(key):
+            return str(details[key])
+    found = re.search(r"^Started (?:background task|delegate) .*\(([^()\s]+)\)\s*$", result or "", re.M)
+    return found.group(1) if found else None
+
+def task_record(sess, task_id):
+    """<cwd>/.pi/tasks/<session>-<pid>/<task>.json, written by pi-background-tasks."""
+    if not (sess.cwd and sess.id and task_id):
+        return None
+    for path in glob.glob(os.path.join(glob.escape(sess.cwd), ".pi", "tasks", glob.escape(sess.id) + "-*", glob.escape(task_id) + ".json")):
+        try:
+            return json.load(open(path))
+        except (OSError, ValueError):
+            continue
+    return None
+
+def opt_values(command, flag):
+    # Flags may be shell-quoted, as in the argv bg_delegate reports: '--session-id' 'x'.
+    return re.findall(r'(?:^|\s)[\'"]?' + re.escape(flag) + r'[\'"]?(?:=|\s+)(?:"([^"]*)"|\'([^\']*)\'|(\S+))', command)
+
+def opt_value_list(command, flag):
+    return [a or b or c for a, b, c in opt_values(command, flag)]
+
+def discover(root_path, roots):
+    seen = {os.path.abspath(root_path)}
+    files = session_files(roots)
+    root = Session(root_path, "main", "main")
+    def attach(sess):
+        # 1. Agent children: files whose header names this file as parent.
+        by_agent = {}
+        for path in files:
+            if path in seen:
+                continue
+            h = header(path)
+            if not h or not same_file(h.get("parentSession"), sess.path):
+                continue
+            seen.add(path)
+            child = Session(path, "agent", h.get("id"))
+            child.label = child.name or (h.get("id") or "")[:8]
+            sess.children.append(child)
+            if child.name and "#" in child.name:
+                by_agent[child.name.rsplit("#", 1)[1]] = child
+        for name, args, start, end, result, details, _ in sess.tool_calls:
+            if name in ("Agent", "Task") and details and details.get("agentId"):
+                prefix = str(details["agentId"])[:8]
+                if prefix in by_agent:
+                    by_agent[prefix].label = f"{details.get('subagentType') or 'Agent'}#{prefix}"
+                elif isinstance(details.get("cost"), (int, float)) and str(details.get("status", "")).lower() != "background":
+                    sess.fallbacks.append((f"{details.get('subagentType') or 'Agent'}#{prefix}", float(details["cost"])))
+        # 2. pi invocations from a shell or background tool. Explicit ids first; then the
+        #    time windows, foreground calls before background ones because a bash window
+        #    is exact (call to result) while a background one spans the whole task and
+        #    would otherwise swallow a bash child started meanwhile.
+        launches = []
+        for name, args, start, end, result, details, _ in sess.tool_calls:
+            # Only a tool that starts work may be a launch: bg_logs and bg_status echo
+            # the task's command in their details without running anything.
+            command = command_of(args, details if name in BACKGROUND_TOOLS or name in PI_LAUNCHERS else None)
+            if not (name in PI_LAUNCHERS or (command and PI_RE.search(command))):
+                continue
+            launches.append((name in BACKGROUND_TOOLS, name, command, start, end, result or "", details))
+        launches.sort(key=lambda item: item[0])
+        for background, name, command, start, end, result, details in launches:
+            extra = []
+            for d in opt_value_list(command, "--session-dir"):
+                d = os.path.expanduser(d)
+                extra.append(d if os.path.isabs(d) else os.path.join(sess.cwd, d))
+            for d in re.findall(r"^Artifacts:\s*(\S+)\s*$", result, re.M):
+                d = os.path.expanduser(d)
+                extra.append(d if os.path.isabs(d) else os.path.join(sess.cwd, d))
+            local_roots = sessions_roots(extra)
+            local_files = session_files(local_roots) if extra else files
+            ids = list(opt_value_list(command, "--session-id"))
+            ids.extend(re.findall(r"^Child session:\s*(\S+)", result, re.M))
+            for line in result.splitlines():
+                line = line.strip()
+                if line.startswith("{") and '"type":"session"' in line.replace(" ", ""):
+                    try:
+                        d = json.loads(line)
+                        if d.get("id"):
+                            ids.append(d["id"])
+                    except ValueError:
+                        pass
+            found = []
+            for sid in ids:
+                path = find_by_id(sid, local_roots)
+                if path and path not in seen:
+                    seen.add(path); found.append(path)
+            # The launch's window: the task record's start and end when there is one,
+            # else the call and its result (or the transcript's end for a background task).
+            stop = end
+            if background:
+                record = task_record(sess, task_id_of({}, details, result)) or {}
+                if record.get("startTime"):
+                    start = parse_ts(record["startTime"]) or start
+                if record.get("endTime"):
+                    stop = parse_ts(record["endTime"])
+                else:
+                    stop = sess.task_notified.get(task_id_of({}, details, result) or "") or sess.last_ts
+            stop = stop or sess.last_ts
+            def in_window(h):
+                hts = parse_ts(h.get("timestamp"))
+                if hts is None or start is None or hts < start - datetime.timedelta(seconds=1):
+                    return None
+                if stop is not None and hts > stop + datetime.timedelta(seconds=1):
+                    return None
+                return hts
+            # A child started on a prompt file — `pi -p "$(cat FILE)"` — is the session
+            # whose first user message is that file's text, started inside the window.
+            # Eighteen children launched in one second share one window; the prompt tells
+            # them apart, and the window keeps an earlier pass's identical brief out.
+            if not found:
+                for f in re.findall(r'\$\(\s*cat\s+([^)\s"\']+)\s*\)', command):
+                    fp = os.path.expanduser(f)
+                    fp = fp if os.path.isabs(fp) else os.path.join(sess.cwd, fp)
+                    try:
+                        prompt = open(fp, errors="replace").read().strip()
+                    except OSError:
+                        continue
+                    if not prompt:
+                        continue
+                    for path in local_files:
+                        if path in seen:
+                            continue
+                        h = header(path)
+                        if not h or h.get("parentSession") or in_window(h) is None:
+                            continue
+                        probe = Session(path, "", "")
+                        if probe.first_user.strip()[:400] == prompt[:400]:
+                            seen.add(path); found.append(path)
+                            break
+                    if found:
+                        break
+            if not found and "--no-session" not in command and start is not None:
+                # The window only ever matches sessions started in the same directory as
+                # the parent (a `cd` in the command counts): another project's session
+                # that happens to start in the same minute is not this pass's child.
+                cwds = {os.path.abspath(sess.cwd)} if sess.cwd else set()
+                for d in re.findall(r"(?:^|[;&|(]\s*)cd\s+([^\s;&|]+)", command):
+                    d = os.path.expanduser(d.strip("'\""))
+                    cwds.add(os.path.abspath(d if os.path.isabs(d) else os.path.join(sess.cwd, d)))
+                candidates = []
+                for path in local_files:
+                    if path in seen:
+                        continue
+                    h = header(path)
+                    if not h or h.get("parentSession"):
+                        continue
+                    if cwds and os.path.abspath(h.get("cwd") or "") not in cwds:
+                        continue
+                    hts = in_window(h)
+                    if hts is None:
+                        continue
+                    candidates.append((hts, path))
+                # A background task runs one command, so it started one pi: the earliest
+                # unclaimed session in its window. A shell call may have run several.
+                candidates.sort()
+                if background:
+                    candidates = candidates[:1]
+                for _, path in candidates:
+                    seen.add(path); found.append(path)
+            task_name = ((details or {}).get("task") or {}).get("name") if isinstance((details or {}).get("task"), dict) else None
+            for path in found:
+                child = Session(path, "pi -p" if name in ("bash", "shell") else name, (header(path) or {}).get("id"))
+                # Session ids are time-ordered, so their first characters are the same
+                # for every child of one pass; the task's name or the id's tail tells them apart.
+                short_id = (child.id or "")[-8:]
+                child.label = f"{child.kind} {task_name or short_id}"
+                sess.children.append(child)
+        for child in list(sess.children):
+            attach(child)
+    attach(root)
+    return root
+
+def walk(sess):
+    yield sess
+    for c in sess.children:
+        yield from walk(c)
+
+def context_window(model):
+    """Ask pi's own catalogue; the transcript does not carry the window size."""
+    if not model:
+        return None
+    try:
+        out = subprocess.run(["pi", "--offline", "--list-models", model], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == model:
+            m = re.fullmatch(r"(\d+(?:\.\d+)?)([KM])", parts[2])
+            if m:
+                return int(float(m.group(1)) * (1_000_000 if m.group(2) == "M" else 1000))
+    return None
+
+def resolve_main(sources):
+    """The last stdout JSON of an iteration names the session; earlier ones share it."""
+    sid = cwd = None
+    for src in reversed(sources):
+        try:
+            with open(src, errors="replace") as fh:
+                for line in fh:
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if d.get("type") == "session":
+                        sid, cwd = d.get("id"), d.get("cwd")
+                        break
+            if sid:
+                break
+        except OSError:
+            continue
+    if not sid:
+        return None, None, None
+    return sid, cwd, find_by_id(sid, sessions_roots())
+
+if mode == "usage":
+    sources = argv
+    sid, cwd, path = resolve_main(sources)
+    if not sid:
+        print("- session record unavailable (no session header in the harness output)")
+        raise SystemExit(0)
+    if not path:
+        print(f"- session {sid} has no transcript under {sessions_roots()[0]}")
+        raise SystemExit(0)
+    root = discover(path, sessions_roots())
+    nodes = list(walk(root))
+    subs = nodes[1:]
+    main_cost = root.cost()
+    sub_cost = sum(s.cost() for s in subs)
+    fallbacks = [f for s in nodes for f in s.fallbacks]
+    fallback_cost = sum(c for _, c in fallbacks)
+    total = main_cost + sub_cost + fallback_cost
+    line = f"- cost ${total:.4f} (summed from {len(nodes)} session transcript{'s' if len(nodes) != 1 else ''}: main ${main_cost:.4f}"
+    if subs:
+        line += f" · subagents ${sub_cost:.4f}"
+    if fallbacks:
+        line += f" · {len(fallbacks)} agent{'s' if len(fallbacks) != 1 else ''} without a transcript ${fallback_cost:.4f} from the parent's own record"
+    print(line + ")")
+    cost_file = os.environ.get("RALPH_PI_COST_FILE")
+    if cost_file:
+        with open(cost_file, "a") as fh:
+            fh.write(f"{total:.4f}\n")
+    tok = {k: sum(c[k] for s in nodes for c in s.calls) for k in ("in", "cr", "cw", "out", "reasoning")}
+    print("- tokens input {in:,} · cache-read {cr:,} · cache-write {cw:,} · output {out:,} · reasoning {reasoning:,}".format(**tok))
+    if root.calls:
+        ctx = [c["in"] + c["cr"] + c["cw"] for c in root.calls]
+        peak = max(ctx)
+        win = context_window(root.model())
+        of = pct = ""
+        if win:
+            of = f" of {win // 1_000_000}M" if win >= 1_000_000 else f" of {win // 1000}K"
+            pct = f" ({round(peak * 100 / win)}%)"
+        drops = sum(1 for i in range(1, len(ctx)) if ctx[i] < ctx[i - 1] * 0.8)
+        shape = "monotonic" if not drops else f"{drops} drop(s), final {ctx[-1]:,}"
+        if len(sources) > 1:
+            shape += f", resumed {len(sources) - 1}x"
+        print(f"- context {peak:,} tok peak{of}{pct} across {len(ctx)} inference calls, {shape}")
+    by_model = {}
+    for s in nodes:
+        for c in s.calls:
+            b = by_model.setdefault(c["model"] or "?", {"cost": 0.0, "in": 0, "out": 0, "cr": 0})
+            b["cost"] += c["cost"]; b["in"] += c["in"]; b["out"] += c["out"] + c["reasoning"]; b["cr"] += c["cr"]
+    if by_model:
+        parts = []
+        for name, b in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"]):
+            detail = f" (in {b['in']:,} / out {b['out']:,} / cache-read {b['cr']:,})" if not parts else ""
+            parts.append(f"{name} ${b['cost']:.4f}{detail}")
+        print("- models " + " · ".join(parts))
+    if subs or fallbacks:
+        kinds = {}
+        for s in subs:
+            kinds[s.kind] = kinds.get(s.kind, 0) + 1
+        if fallbacks:
+            kinds["agent (no transcript)"] = len(fallbacks)
+        summary = " · ".join(f"{k} x{n}" for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
+        print(f"- subagents ({len(subs) + len(fallbacks)}) {summary}")
+        for s in subs:
+            print(f"  - {s.label}: {s.model() or '?'} ${s.cost():.4f}, {len(s.calls)} inference calls")
+        for label, c in fallbacks:
+            print(f"  - {label}: ${c:.4f} (nested, not persisted)")
+    err = root.last_error()
+    if err:
+        print(f"- ended with an error: {err}")
+    for s in subs:
+        cut = s.background_agents_cut_off()
+        for aid, desc in cut:
+            print(f"- background agent {aid} ({desc}) in {s.label} never reached a terminal state")
+    for aid, desc in root.background_agents_cut_off():
+        print(f"- background agent {aid} ({desc}) never reached a terminal state")
+
+elif mode == "pending":
+    # argv: <meta json written by normalize_pi_result>
+    try:
+        meta = json.load(open(argv[0]))
+    except (OSError, ValueError, IndexError):
+        print("pi session record is unavailable")
+        raise SystemExit(0)
+    sid, path = meta.get("session_id"), meta.get("session_file")
+    if not sid:
+        print("pi session id is unavailable")
+        raise SystemExit(0)
+    if not path or not os.path.exists(path):
+        path = find_by_id(sid, sessions_roots())
+    if not path:
+        print(f"pi session {sid} has no transcript")
+        raise SystemExit(0)
+    root = discover(path, sessions_roots())
+    lost, live = [], []
+    for s in walk(root):
+        for aid, desc in s.background_agents_cut_off():
+            where = "" if s is root else f" in {s.label}"
+            lost.append(f"pi background agent {aid} ({desc}){where} was still running when the session exited")
+    # Detached background tasks record their pid; only a live one is worth waiting for.
+    for s in walk(root):
+        if not s.cwd or not s.id:
+            continue
+        for meta_path in glob.glob(os.path.join(s.cwd, ".pi", "tasks", f"{s.id}-*", "*.json")):
+            try:
+                task = json.load(open(meta_path))
+            except (OSError, ValueError):
+                continue
+            if str(task.get("status", "")).lower() != "running":
+                continue
+            pid = task.get("pid")
+            try:
+                os.kill(int(pid), 0)
+            except (OSError, TypeError, ValueError):
+                continue
+            live.append(f"pi background task {task.get('id') or os.path.basename(meta_path)} (pid {pid}) is still running")
+    if lost:
+        print("lost: " + "; ".join(dict.fromkeys(lost + live)))
+        raise SystemExit(0)
+    if live:
+        print("; ".join(dict.fromkeys(live)))
+        raise SystemExit(0)
+    raise SystemExit(1)
+
+elif mode == "children":
+    # argv: <session file> — one line per transcript in the tree, for inspection and tests.
+    root = discover(argv[0], sessions_roots())
+    for s in walk(root):
+        print(f"{s.kind}\t{s.id}\t{s.model()}\t{s.cost():.4f}\t{s.path}")
+    for s in walk(root):
+        for label, c in s.fallbacks:
+            print(f"fallback\t{label}\t\t{c:.4f}\t")
+else:
+    raise SystemExit(f"pi_transcript: unknown mode {mode}")
+PY
+}
+
+pi_pending_work() { # <normalized pi result (.meta)>; stdout = reasons, "lost: …" when unrecoverable
+  pi_transcript pending "${1:-}"
+}
+
+harness_pending_work() { # <raw harness result>; stdout = reasons
+  case "$HARNESS" in
+    pi)    pi_pending_work "$1" ;;
+    codex) codex_pending_work "$1" ;;
+    *)     claude_pending_work "$1" ;;
+  esac
+}
+
+await_harness_quiescence() { # <raw harness result> <label>
+  local source="${1:-}" label="${2:-}" waited=0 pending
+  while pending="$(harness_pending_work "$source")"; do
+    # Work the harness process took down with it cannot finish however long we wait;
+    # refusing the promise at once sends the iteration into the resume path, whose
+    # nudge is to redo that work in the foreground.
+    if [[ "$pending" == lost:* ]]; then
+      say "session [$label] returned a promise after discarding work — refusing it (${pending#lost: })"
+      note "[ralph] session [$label] ended with backgrounded work unfinished (${pending#lost: }); its promise was not accepted."
+      return 1
+    fi
+    if (( waited == 0 )); then
+      say "session [$label] returned a promise with live harness work — waiting"
+      note "[ralph] session [$label] returned a promise while harness work remained; waiting before accepting it."
+    fi
+    if (( waited >= GROUP_WAIT_MAX )); then
+      say "harness work for [$label] remained after ${waited}s — refusing its promise"
+      note "[ralph] session [$label] still had harness work after ${waited}s; its promise was not accepted."
+      return 1
+    fi
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+  (( waited > 0 )) && say "harness work in [$label] finished after ${waited}s"
+  return 0
+}
+
 watchdog() { # <pid> <label>
   local pid="$1" label="$2" start last now idle
   start=$(date +%s)
@@ -230,7 +1234,7 @@ watchdog() { # <pid> <label>
     sleep 30
     kill -0 "$pid" 2>/dev/null || return 0
     [[ "$WATCHDOG" -le 0 ]] && continue
-    last=$(stat -c %Y "$PROGRESS" 2>/dev/null || echo "$start")
+    last=$(stat -c %Y "$PROGRESS" 2>/dev/null || stat -f %m "$PROGRESS" 2>/dev/null || echo "$start")
     (( last < start )) && last=$start
     now=$(date +%s); idle=$(( now - last ))
     if (( idle > WATCHDOG )); then
@@ -270,6 +1274,166 @@ watchdog() { # <pid> <label>
 # read from the last JSON's session_id alone.
 log_usage() {
   local label="$1"; shift
+  if [[ "$HARNESS" == pi ]]; then
+    local f
+    {
+      printf '\n## %s UTC (%s) - Session usage — %s [%s/%s]%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S)" "$(fmt_dur "${SESSION_SECS:-0}")" "$label" "$HARNESS" "$MODEL" "$THINKING_TAG"
+      RALPH_PI_COST_FILE="$COST_FILE" pi_transcript usage "$@"
+      for f in "$@"; do printf -- '- transcript: %s\n' "$f"; done
+    } >> "$PROGRESS"
+    return 0
+  fi
+  if [[ "$HARNESS" == codex ]]; then
+    {
+      printf '\n## %s UTC (%s) - Session usage — %s [%s/%s]%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%S)" "$(fmt_dur "${SESSION_SECS:-0}")" "$label" "$HARNESS" "$MODEL" "$THINKING_TAG"
+      RALPH_CODEX_COST_FILE="$COST_FILE" python3 - "$MODEL" "$@" <<'PY'
+import glob, json, os, sqlite3, sys
+
+model = sys.argv[1]
+paths = sys.argv[2:]
+keys = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+        "output_tokens", "reasoning_output_tokens")
+zero = lambda: {key: 0 for key in keys}
+
+# USD per million tokens. These are the token rates published for Codex and
+# ChatGPT Work. Reasoning tokens are output tokens for billing purposes; the
+# separate counter is retained in the report so the accounting remains auditable.
+PRICES = {
+    "gpt-5.6-luna": (0.20, 0.02, 1.20),
+    "gpt-5.6-terra": (2.00, 0.20, 12.00),
+    "gpt-5.6-sol": (4.00, 0.40, 20.00),
+    "gpt-5.5": (5.00, 0.50, 30.00),
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "gpt-5.3-codex": (1.75, 0.175, 14.00),
+    "gpt-5.2": (1.75, 0.175, 14.00),
+}
+
+def add(a, b):
+    for key in keys:
+        a[key] += int(b.get(key, 0) or 0)
+
+def usage_from_file(path):
+    total = zero()
+    children = set()
+    last_cumulative = None
+    try:
+        fh = open(path, errors="replace")
+    except OSError:
+        return total, children
+    with fh:
+        for line in fh:
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+                add(total, event["usage"])
+            item = event.get("item") or {}
+            if item.get("type") == "collab_tool_call":
+                children.update(item.get("receiver_thread_ids") or [])
+            # The persisted Codex rollout uses cumulative token_count records.
+            info = (event.get("payload") or {}).get("info")
+            if (event.get("payload") or {}).get("type") == "token_count" and isinstance(info, dict):
+                if isinstance(info.get("total_token_usage"), dict):
+                    last_cumulative = info["total_token_usage"]
+    if last_cumulative is not None and not any(total.values()):
+        add(total, last_cumulative)
+    return total, children
+
+parent = zero()
+children = set()
+for path in paths:
+    got, found = usage_from_file(path)
+    add(parent, got)
+    children.update(found)
+
+def rollout_for(thread_id):
+    root = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+    for path in glob.glob(os.path.join(root, "sessions", "**", "rollout-*.jsonl"), recursive=True):
+        try:
+            first = json.loads(open(path, errors="replace").readline())
+        except (OSError, ValueError):
+            continue
+        payload = first.get("payload") or {}
+        if payload.get("session_id") == thread_id or payload.get("id") == thread_id:
+            return path
+    return None
+
+def child_model(thread_id):
+    root = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+    for name in ("state_5.sqlite", "state_4.sqlite", "state_3.sqlite"):
+        try:
+            db = sqlite3.connect(f"file:{os.path.join(root, name)}?mode=ro", uri=True)
+            row = db.execute("select model from threads where id = ?", (thread_id,)).fetchone()
+            db.close()
+            if row and row[0]:
+                return row[0]
+        except (OSError, sqlite3.Error):
+            pass
+    return model
+
+by_model = {model: zero()}
+add(by_model[model], parent)
+for thread_id in sorted(children):
+    path = rollout_for(thread_id)
+    if not path:
+        continue
+    got, _ = usage_from_file(path)
+    name = child_model(thread_id)
+    bucket = by_model.setdefault(name, zero())
+    add(bucket, got)
+
+def cost(tokens, name):
+    rates = PRICES.get(name)
+    if rates is None:
+        # Snapshot suffixes use the same published rate as their family alias.
+        base = name.split("[")[0]
+        if base.rsplit("-", 1)[-1].isdigit() and len(base.rsplit("-", 1)[-1]) == 8:
+            base = base.rsplit("-", 1)[0]
+        rates = PRICES.get(base)
+    if rates is None:
+        return None
+    uncached, cached, output = rates
+    return ((tokens["input_tokens"] * uncached) +
+            (tokens["cached_input_tokens"] * cached) +
+            (tokens["cache_write_input_tokens"] * uncached * 1.25) +
+            ((tokens["output_tokens"] + tokens["reasoning_output_tokens"]) * output)) / 1_000_000
+
+total_cost = 0.0
+for name, tokens in sorted(by_model.items()):
+    value = cost(tokens, name)
+    if value is not None:
+        total_cost += value
+print("- cost ${:.4f} (calculated from Codex token usage)".format(total_cost))
+cost_file = os.environ.get("RALPH_CODEX_COST_FILE")
+if cost_file:
+    with open(cost_file, "a") as fh:
+        fh.write(f"{total_cost:.4f}\n")
+print("- tokens input {input_tokens:,} · cache-read {cached_input_tokens:,} · "
+      "output {output_tokens:,} · "
+      "reasoning {reasoning_output_tokens:,}".format(**parent))
+print("- models " + " · ".join(
+    "{} ${:.4f} (in {:,} / out {:,} / cache-read {:,})".format(
+        name, cost(tokens, name) or 0, tokens["input_tokens"],
+        tokens["output_tokens"] + tokens["reasoning_output_tokens"],
+        tokens["cached_input_tokens"])
+    for name, tokens in sorted(by_model.items(), key=lambda pair: -(cost(pair[1], pair[0]) or 0))))
+collab_count = 0
+for path in paths:
+    try:
+        with open(path, errors="replace") as fh:
+            collab_count += sum(1 for line in fh if "collab_tool_call" in line)
+    except OSError:
+        pass
+print(f"- child tool calls {collab_count}; child threads {len(children)}")
+PY
+      for f in "$@"; do printf -- '- transcript: %s\n' "$f"; done
+    } >> "$PROGRESS"
+    return 0
+  fi
   local f cost="" any=0
   for f in "$@"; do
     [ -f "$f" ] || continue
@@ -278,8 +1442,8 @@ log_usage() {
   done
   (( any )) || return 0
   {
-    printf '\n## %s UTC (%s) - Session usage — %s [%s]\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%S)" "$(fmt_dur "${SESSION_SECS:-0}")" "$label" "$MODEL"
+    printf '\n## %s UTC (%s) - Session usage — %s [%s/%s]%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%S)" "$(fmt_dur "${SESSION_SECS:-0}")" "$label" "$HARNESS" "$MODEL" "$THINKING_TAG"
     python3 - "$@" <<'PY'
 import glob, json, os, sys
 
@@ -356,7 +1520,7 @@ root = os.path.join(os.path.expanduser("~"), ".claude", "projects",
 # only the inference-call count, which is derived and verifiable.
 # Two independent cost figures live in the session JSON and they do NOT always
 # agree: total_cost_usd is the session total, modelUsage[].costUSD is per model.
-# They reconcile to the cent on sonnet-only sessions, but a session with an Opus
+# They reconcile to the cent on sonnet-only sessions, but a session with a
 # subagent was measured at total_cost_usd $12.3886 against a modelUsage sum of
 # $16.5541. Print the headline figure, and say so when the two disagree rather
 # than emitting two contradictory numbers in one entry.
@@ -378,10 +1542,10 @@ mu_sum = sum((m.get("costUSD") or 0) for m in mu.values())
 # Only meaningful when per-model data exists — an absent modelUsage sums to 0
 # and would otherwise report the whole cost as a discrepancy.
 if mu and abs(mu_sum - total) >= 0.005:
-    print(f"- cost ${total:.4f} (from claude -p; per-model sums to ${mu_sum:.4f}, "
+    print(f"- cost ${total:.4f} (from harness; per-model sums to ${mu_sum:.4f}, "
           f"differs by ${mu_sum - total:+.4f})")
 else:
-    print(f"- cost ${total:.4f} (from claude -p)")
+    print(f"- cost ${total:.4f} (from harness)")
 
 session = calls(os.path.join(root, sid + ".jsonl"))
 if session:
@@ -443,7 +1607,7 @@ PY
 # job and end its turn immediately exited at 6s and the job's output file never appeared;
 # and across the 13 sessions of run 20260727T053631Z await_group never once found a
 # leftover process, while the gate runs those sessions had launched stopped dead at
-# `00-warmup-build`. So "I'll wait for the background gate and resume automatically" is
+# `00-warmup-ralph`. So "I'll wait for the background gate and resume automatically" is
 # false under -p: the turn ending IS the process exiting, which kills the gate.
 #
 # The session is not broken, though — only stranded. `--resume` restores the whole
@@ -462,22 +1626,175 @@ write_resume_prompt() { # <file>
   printf '%s\n' "Repeat the command without backgrounding it, then finish the iteration and end with <promise>NEXT</promise> or <promise>COMPLETE</promise>." > "$1"
 }
 
+normalize_codex_result() { # <jsonl> <normalized-json>
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+thread_id = None
+failed = False
+usage = {"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+         "output_tokens": 0, "reasoning_output_tokens": 0}
+collab_tool_calls = []
+try:
+    lines = open(sys.argv[1], errors="replace")
+except OSError:
+    lines = []
+for line in lines:
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        continue
+    if event.get("type") == "thread.started":
+        thread_id = event.get("thread_id") or event.get("id")
+    if event.get("type") in {"turn.failed", "error"}:
+        failed = True
+    if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+        for key in usage:
+            usage[key] += event["usage"].get(key, 0) or 0
+    item = event.get("item") or {}
+    if item.get("type") == "collab_tool_call":
+        collab_tool_calls.append({
+            "id": item.get("id"),
+            "tool": item.get("tool"),
+            "sender_thread_id": item.get("sender_thread_id"),
+            "status": item.get("status"),
+            "prompt": item.get("prompt"),
+            "receiver_thread_ids": item.get("receiver_thread_ids") or [],
+            "agents_states": item.get("agents_states") or {},
+        })
+if thread_id:
+    json.dump({"session_id": thread_id, "is_error": failed, "usage": usage,
+               "collab_tool_calls": collab_tool_calls}, open(sys.argv[2], "w"))
+else:
+    raise SystemExit(1)
+PY
+}
+
+# pi's `--mode json` stdout is a stream of events, not one result object. This
+# reduces it to the same shape normalize_codex_result produces, so the resume and
+# promise paths read every harness alike. The process exits 0 even when the model
+# call failed (measured: an unknown model id returns rc=0 with stopReason "error"
+# on the assistant message), so is_error comes from the message, never from rc.
+normalize_pi_result() { # <stdout jsonl> <normalized-json>
+  python3 - "$1" "$2" <<'PY'
+import glob, json, os, sys
+
+sid = cwd = None
+last = None          # last assistant message seen on stdout
+saw_assistant = False
+try:
+    lines = open(sys.argv[1], errors="replace")
+except OSError:
+    lines = []
+for line in lines:
+    try:
+        event = json.loads(line)
+    except (ValueError, TypeError):
+        continue
+    if event.get("type") == "session":
+        sid, cwd = event.get("id"), event.get("cwd")
+    # The last assistant message WITH TEXT is the result: a background task's
+    # terminal notification wakes one more turn after the promise, and that turn is
+    # empty (measured: 21 of them after one COMPLETE), so the last message alone
+    # would read as "no promise" and send a finished iteration into a resume.
+    def spoken(m):
+        return any(isinstance(c, dict) and c.get("type") == "text" and c.get("text", "").strip() for c in (m.get("content") or []))
+    msg = event.get("message") if event.get("type") in ("message_end", "turn_end") else None
+    if isinstance(msg, dict) and msg.get("role") == "assistant":
+        saw_assistant = True
+        if spoken(msg) or last is None or msg.get("stopReason") == "error":
+            last = msg
+    if event.get("type") == "agent_end":
+        for m in event.get("messages") or []:
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                saw_assistant = True
+                if spoken(m) or last is None or m.get("stopReason") == "error":
+                    last = m
+if not sid:
+    raise SystemExit(1)
+
+roots = []
+if os.environ.get("PI_CODING_AGENT_SESSION_DIR"):
+    roots.append(os.environ["PI_CODING_AGENT_SESSION_DIR"])
+roots.append(os.path.join(os.environ.get("PI_CODING_AGENT_DIR") or os.path.join(os.path.expanduser("~"), ".pi", "agent"), "sessions"))
+session_file = None
+for root in roots:
+    hits = glob.glob(os.path.join(os.path.expanduser(root), "**", "*_" + sid + ".jsonl"), recursive=True)
+    if hits:
+        session_file = os.path.abspath(sorted(hits)[0])
+        break
+
+def text_of(m):
+    return "\n".join(c.get("text", "") for c in (m.get("content") or []) if isinstance(c, dict) and c.get("type") == "text")
+
+# stdout is cut short when pi dies mid-turn; the transcript on disk still has what
+# it managed to say, so read the last assistant message from there in that case.
+if last is None and session_file:
+    try:
+        for line in open(session_file, errors="replace"):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            m = e.get("message") if e.get("type") == "message" else None
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                saw_assistant = True
+                if spoken(m) or last is None:
+                    last = m
+    except OSError:
+        pass
+
+stop = (last or {}).get("stopReason") or ""
+failed = (not saw_assistant) or stop == "error"
+json.dump({
+    "session_id": sid,
+    "cwd": cwd,
+    "session_file": session_file,
+    "is_error": failed,
+    "stop_reason": stop,
+    "error": (last or {}).get("errorMessage") or "",
+    "result": text_of(last) if last else "",
+}, open(sys.argv[2], "w"))
+PY
+}
+
 # run_session <label> <prompt-file> — writes the session's final text to
 # $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
 run_session() {
-  local label="$1" pf="$2" sid="${3:-}" out rc pid pgid t0
+  local label="$1" pf="$2" sid="${3:-}" out rc pid pgid t0 result_file
   local -a resume_args=()
-  [ -n "$sid" ] && resume_args=( --resume "$sid" )
+  # Codex resumes with a subcommand; the other two take a flag, and pi's is --session,
+  # which reopens the same transcript file (verified: the resumed turn appends to it).
+  if [[ -n "$sid" ]]; then
+    case "$HARNESS" in
+      pi)     resume_args=( --session "$sid" ) ;;
+      claude) resume_args=( --resume "$sid" ) ;;
+    esac
+  fi
   SESSION_N=$((SESSION_N + 1))
   t0=$(date +%s)
   out="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.json"
   LAST_JSON="$out"
+  LAST_RAW_JSON="$out"
   if [ -n "$sid" ]; then
-    say "session $SESSION_N [$label] RESUMING $sid (model=$MODEL)"
+    say "session $SESSION_N [$label] RESUMING $sid (model=$MODEL_LABEL)"
   else
-    say "session $SESSION_N [$label] starting (model=$MODEL)"
+    say "session $SESSION_N [$label] starting (model=$MODEL_LABEL)"
   fi
-  claude "${CLAUDE_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+  result_file="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.result.txt"
+  if [[ "$HARNESS" == codex ]]; then
+    if [ -n "$sid" ]; then
+      codex exec resume "$sid" "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
+    else
+      codex exec "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
+    fi
+  elif [[ "$HARNESS" == pi ]]; then
+    # A child the session starts with `pi -p` reads these to run on the same model and
+    # level as its parent; the prompts name them as $RALPH_MODEL / $RALPH_THINKING.
+    RALPH_MODEL="$MODEL" RALPH_THINKING="$THINKING" \
+      pi "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+  else
+    claude "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+  fi
   pid=$!
   pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
   [ -n "$pgid" ] && SESSION_PGIDS="$SESSION_PGIDS $pgid"
@@ -488,7 +1805,7 @@ run_session() {
   SESSION_SECS=$(( $(date +%s) - t0 ))   # read by log_usage for the header
   ITER_JSONS+=( "$out" )
   ITER_SECS=$(( ITER_SECS + SESSION_SECS ))
-  # A deferred caller (the build loop, which may resume this same session several
+  # A deferred caller (the ralph loop, which may resume this same session several
   # times) logs once for the whole iteration instead of once per invocation.
   if (( USAGE_DEFERRED )); then
     :
@@ -496,39 +1813,71 @@ run_session() {
     log_usage "$label" "$out"
   fi
   (( rc != 0 )) && say "session [$label] exited rc=$rc — see $out.err"
-  jsonfield "$out" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
+  if [[ "$HARNESS" == codex ]]; then
+    normalize_codex_result "$out" "$out.meta" 2>/dev/null || : > "$out.meta"
+    LAST_JSON="$out.meta"
+    cp "$result_file" "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
+  elif [[ "$HARNESS" == pi ]]; then
+    normalize_pi_result "$out" "$out.meta" 2>/dev/null || : > "$out.meta"
+    LAST_JSON="$out.meta"
+    LAST_RAW_JSON="$out.meta"
+    jsonfield "$out.meta" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
+  else
+    jsonfield "$out" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
+  fi
   return 0
 }
 
 # ── prompt assembly ──────────────────────────────────────────────────────────
 
 # The exact select: list matters — it is ONE ToolSearch call, not a search. And
-# "a single Sonnet subagent for build/tests" is deliberate backpressure on builds,
+# "a single subagent for ralph/tests" is deliberate backpressure on ralph runs,
 # not a stylistic choice.
+# The tools a session has differ by harness, and a prompt that names the wrong ones
+# sends the model looking for a ToolSearch it does not have. Each note names what is
+# actually there. On pi the browser is ralph/pi-chrome (installed as a pi package) and
+# a subagent is a `pi -p` child under bg_run, since that is what the transcript ledger
+# and the quiescence check follow.
 env_note() {
+  if [[ "$HARNESS" == pi ]]; then
+    cat <<'ENVNOTE'
+
+## Environment
+- Repo: the current working directory. Stack per the specs and CLAUDE.md.
+- You run with full permissions. Nothing asks you to confirm a tool call.
+- The bash tool's `timeout` is in SECONDS here, 600 at most for anything you wait on; a prompt written for a harness that counts milliseconds ("600000 ms") means 600 on this one, and 600000 would be a week.
+- Browser: the chrome_* tools own a real Chrome window. chrome_open gives a tabId; chrome_eval returns JSON from the page (measure with it, never from a screenshot); chrome_input sends real clicks, hovers and keys; chrome_tabs resizes, lists and closes. A chrome_eval is aborted after its timeoutMs (600000 at most), so a job that runs for minutes must detach itself and be polled. Open new tabs; never reuse a tabId from an earlier session. Close every tab you opened.
+- Subagents: start one as a background task running pi — `bg_run` with isAgent true and the command `pi -p --model "$RALPH_MODEL" --thinking "$RALPH_THINKING" "$(cat /path/to/prompt.txt)"` (both variables are set in your environment; write the prompt to a file first, and pass it as the argument — the task runner gives the child no stdin, so `< file` reaches nothing). It has the same tools you have, including the browser. Its result arrives as a <background-task-notification> **while you keep working** — in this headless run, ending your turn exits the process and kills every background task, so a notification can never wake you afterwards. Never end your turn to wait for a task; wait inside the turn by running `sleep 30` in bash (one call at a time, never past 600 s) and checking bg_status until the task has finished. The same holds for a server you start with bg_run: it lives exactly as long as your turn. bg_delegate is read-only (no bash, no browser) and fits study and searches only. Use parallel children for study and searches, a single child for ralph/tests (backpressure), children for complex reasoning — and wait for every one of them before you finish, since nothing you started survives your exit.
+ENVNOTE
+    return
+  fi
   cat <<'ENVNOTE'
 
 ## Environment
 - Repo: the current working directory. Stack per the specs and CLAUDE.md.
-- You run with full permissions (--dangerously-skip-permissions) and Chrome attached (--chrome).
-- Browser/computer use: when verifying user-facing or HTTP behavior, load the browser tools in ONE ToolSearch call ("select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__read_page,mcp__claude-in-chrome__tabs_create_mcp") and drive the app in a real tab; use the computer tool for screenshots/clicks as needed. Create new tabs; never reuse old tab IDs.
-- If no browser is attached, you may search this filesystem for a Chrome or Chromium executable and launch it yourself, then carry on with the claude-in-chrome tools.
-- Use subagents (Agent tool) as your prompt instructs: parallel Sonnet subagents for study/searches, a single Sonnet subagent for build/tests (backpressure), Opus subagents for complex reasoning.
+- You run with full permissions and Chrome attached.
+- Browser/computer use: when verifying user-facing or HTTP behavior, load the browser tools in ONE ToolSearch call and drive the app in a real tab; use the computer tool for screenshots/clicks as needed. Create new tabs; never reuse old tab IDs.
+- If no browser is attached, you may search this filesystem for a Chrome or Chromium executable and launch it yourself, then carry on with the browser automation tools.
+- Use subagents (Agent tool) as your prompt instructs: parallel subagents for study/searches, a single subagent for ralph/tests (backpressure), subagents for complex reasoning.
 ENVNOTE
 }
 
-build_prompt_file() { # <iter> <extra-context> -> prints path
+ralph_prompt_file() { # <iter> <extra-context> -> prints path
   # Split, not one `local`: bash expands every word of a `local` line before the
   # builtin assigns any of them, so a later word referring to an earlier one is
   # unbound under `set -u`.
   local iter="$1" extra="$2" f
-  f="$RUNDIR/prompt-build-$iter.txt"
-  sed "s/\[ralph-iteration\]/$iter/g" ralph/prompt-build.md > "$f"
+  f="$RUNDIR/${PROMPT_NAME%.md}-$iter.txt"
+  sed "s/\[ralph-iteration\]/$iter/g" "$PROMPT_FILE" > "$f"
   {
     printf '\n\n## Orchestrator notes (these refine, never override, the instructions above)\n'
     printf -- '- This is Ralph iteration %s. Every "[ralph-iteration]" above is already %s.\n' "$iter" "$iter"
-    printf -- '- You are a fresh, clean-context session: all continuity is on disk (todo.md, %s, git history). Study before assuming.\n' "$PROGRESS"
-    printf -- '- This session is terminated after %s seconds with no append to %s. Narrate as you go.\n' "$WATCHDOG" "$PROGRESS"
+    printf -- '- You are a fresh, clean-context session: all continuity is on disk (%s, git history). Study before assuming.\n' "$PROGRESS"
+    if [[ "$WATCHDOG" -gt 0 ]]; then
+      printf -- '- This session is terminated after %s seconds with no append to %s. Narrate as you go.\n' "$WATCHDOG" "$PROGRESS"
+    else
+      printf -- '- There is no idle timeout on this session. Still append to %s as you go: it is the only continuity the next iteration has.\n' "$PROGRESS"
+    fi
     printf -- '- Your final message is parsed by the orchestrator for the promise tag ONLY: end with <promise>NEXT</promise> or <promise>COMPLETE</promise> and stop. A missing tag counts as an abnormal exit.\n'
     [[ -n "$extra" ]] && printf -- '\n### Context from the orchestrator\n%s\n' "$extra"
     env_note
@@ -536,11 +1885,11 @@ build_prompt_file() { # <iter> <extra-context> -> prints path
   printf '%s' "$f"
 }
 
-# ── phase 1: build loop ──────────────────────────────────────────────────────
+# ── the ralph loop ───────────────────────────────────────────────────────────
 
 ITER=1
 
-build_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
+ralph_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
   local phase="$1" extra="$2" fails=0 pf out p
   while :; do
     if (( MAX_ITER > 0 && ITER > MAX_ITER )); then
@@ -549,18 +1898,21 @@ build_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
     fi
     if budget_exhausted; then
       say "budget target nearly exhausted (\$$(spent_usd) of \$$BUDGET_TOTAL_USD) — pausing the loop"
-      note "[ralph] budget target nearly exhausted — loop paused before iteration $ITER; remaining items stay in todo.md."
+      note "[ralph] budget target nearly exhausted — loop paused before iteration $ITER."
       return 1
     fi
-    pf="$(build_prompt_file "$ITER" "$extra")"
+    pf="$(ralph_prompt_file "$ITER" "$extra")"
     # One iteration may take several `claude -p` invocations — the first, plus a
     # resume for each time it ends its turn on a backgrounded command. They are one
     # unit of work on one session id, so usage is accumulated and written once, at
     # the end, instead of once per invocation.
     begin_iteration_usage
-    run_session "build-$ITER" "$pf"
+    run_session "ralph-$ITER" "$pf"
     out="$(cat "$RESULT_FILE")"
     p="$(promise_of "$out")"
+    if [[ -n "$p" ]] && ! await_harness_quiescence "$LAST_RAW_JSON" "ralph-$ITER"; then
+      p=""
+    fi
 
     # A missing tag almost always means the turn ended waiting on a command that -p
     # then killed. Resuming costs one short turn and keeps everything the session
@@ -574,156 +1926,49 @@ build_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
       say "iteration $ITER [$phase]: no promise tag — resuming session $sid (resume $tries/$RESUME_MAX)"
       rp="$RUNDIR/prompt-resume-$ITER-$tries.txt"
       write_resume_prompt "$rp"
-      run_session "build-$ITER" "$rp" "$sid"
+      run_session "ralph-$ITER" "$rp" "$sid"
       out="$(cat "$RESULT_FILE")"
       p="$(promise_of "$out")"
+      if [[ -n "$p" ]] && ! await_harness_quiescence "$LAST_RAW_JSON" "ralph-$ITER"; then
+        p=""
+      fi
     done
 
     if [[ -z "$p" ]]; then
-      flush_iteration_usage "build-$ITER"
+      flush_iteration_usage "ralph-$ITER"
+      if session_budget_exhausted; then
+        say "session budget exceeded (\$$BUDGET_USD cap; actual \$$(spent_usd)) — stopping"
+        return 1
+      fi
       fails=$((fails + 1))
       say "iteration $ITER [$phase]: still no promise tag after $tries resume(s) ($fails/3 consecutive) — retrying the slot"
       (( fails >= 3 )) && { say "aborting: 3 consecutive abnormal exits at iteration $ITER"; return 1; }
       continue
     fi
-    flush_iteration_usage "build-$ITER"
+    flush_iteration_usage "ralph-$ITER"
+    if session_budget_exhausted; then
+      say "session budget exceeded (\$$BUDGET_USD cap; actual \$$(spent_usd)) — stopping"
+      return 1
+    fi
     fails=0
     say "iteration $ITER [$phase] -> <promise>$p</promise>"
     ITER=$((ITER + 1))
     [[ "$p" == COMPLETE ]] && return 0
   done
 }
-
 say "run directory: $RUNDIR"
 note "═══════════════════════════════════════════════════════"
-note "ralph (shell loop) starting — model=$MODEL max-iter=${MAX_ITER:-∞} verify-rounds=$VERIFY_ROUNDS watchdog=${WATCHDOG}s"
-say "build loop starting"
-if ! build_loop Build ""; then
-  say "stopped during Build after $((ITER - 1)) iteration(s)"
-  exit 1
-fi
-say "build reported COMPLETE after $((ITER - 1)) iteration(s)"
-(( BUILD_ONLY )) && { say "--build-only: stopping before verification"; exit 0; }
-
-# ── phase 2+3: verify (Chrome E2E) -> fix, until a clean round ───────────────
-
-DOMAIN_FILE="$RUNDIR/domains.tsv"
-if [[ ! -s "$DOMAIN_FILE" ]]; then
-  cat > "$RUNDIR/prompt-domains.txt" <<PROMPT
-Partition the product surface into verification domains for end-to-end testing.
-
-Read todo.md in full (pending AND completed items — completed items describe what was built) and
-locate the project's spec documents (todo.md and ralph/prompt-build.md reference where they live).
-Group the work into 3-8 coherent verification domains, each sized so a single verification agent
-can exercise it end-to-end in one session. For each domain:
-- key: a short kebab-case identifier (e.g. "core-platform")
-- scope: one sentence describing what it covers, followed by the specific spec files it maps to (comma-separated; globs allowed)
-
-Every spec file must belong to exactly one domain. Write the result to $DOMAIN_FILE, one domain per
-line, as: <key><TAB><scope>. Emit between 3 and 8 lines. Do not modify any other file.
-PROMPT
-  run_session "verify-domains" "$RUNDIR/prompt-domains.txt"
-fi
-[[ -s "$DOMAIN_FILE" ]] || printf 'full-product\tthe entire product surface (domain discovery returned nothing)\n' > "$DOMAIN_FILE"
-say "verification domains: $(cut -f1 "$DOMAIN_FILE" | tr '\n' ' ')"
-
-VERIFY_CLEAN=0
-round=1
-while (( VERIFY_CLEAN == 0 )); do
-  if (( VERIFY_ROUNDS > 0 && round > VERIFY_ROUNDS )); then
-    say "hit verify-rounds cap ($VERIFY_ROUNDS) without a clean round — remaining items stay in todo.md"
-    break
-  fi
-  if budget_exhausted; then
-    say "budget target nearly exhausted — stopping before verification round $round; remaining items stay in todo.md"
-    break
-  fi
-  FIND_DIR="$RUNDIR/findings/round-$round"
-  mkdir -p "$FIND_DIR"
-  say "verification round $round: $(wc -l < "$DOMAIN_FILE") domain session(s)"
-
-  # Domains run one at a time: they start servers and drive a real browser, and
-  # concurrent sessions would fight over ports, tabs and the git index.
-  while IFS=$'\t' read -r key scope; do
-    [[ -z "$key" ]] && continue
-    out_md="$FIND_DIR/$key.md"
-    cat > "$RUNDIR/prompt-verify-$round-$key.txt" <<PROMPT
-You are a product-verification agent for domain "$key" (round $round). Scope: $scope
-
-Goal: prove the implemented product actually behaves per the specs — not just that tests pass.
-1. Read the domain's specs and the relevant source code (parallel Sonnet subagents for breadth).
-2. Run the real thing: the repo's verification protocol first (as defined in todo.md and CLAUDE.md — build + tests); then if the domain has a user-facing surface (app UI, server, CLI), START/LAUNCH IT and exercise the domain's flows end-to-end — use Chrome tools (load via ToolSearch; navigate/read_page/computer for screenshots and clicks) for anything browser-reachable, and computer use for native app UI. If there is no user-facing surface for this domain, exercise the relevant layer directly with small scripts or targeted tests. Honor any testing constraints CLAUDE.md defines (e.g., dedicated test fixtures or throwaway repos).
-3. Check the invariants each spec defines for this domain, exactly as written (edge cases, lifecycle rules, error paths included).
-4. Report ONLY real, reproducible gaps vs the specs with citations. Do not modify any tracked file and do not commit — the one file you may write is the findings file named below. Narrate progress to $PROGRESS per the house style (printf '\n%s\n' "..." >> $PROGRESS), prefixed "[verify:$key]".
-
-Write your findings to $out_md — one "## <severity: blocker|major|minor> — <title>" section each,
-with what you observed vs what the spec requires, a spec citation (path:line) and repro steps.
-An absent or empty findings file means the domain is clean.
-$(env_note)
-PROMPT
-    run_session "verify-$round-$key" "$RUNDIR/prompt-verify-$round-$key.txt"
-  done < "$DOMAIN_FILE"
-
-  found=$(find "$FIND_DIR" -name '*.md' -size +0 2>/dev/null | wc -l)
-  say "round $round: $found domain(s) reported findings"
-  if (( found == 0 )); then VERIFY_CLEAN=1; break; fi
-
-  cat > "$RUNDIR/prompt-triage-$round.txt" <<PROMPT
-Triage the verification findings in $FIND_DIR/*.md into todo.md as new pending items — blockers
-first, then major, then minor; each scoped to about one build iteration, each keeping its spec
-citation and repro notes. Follow the todo format rules in ralph/prompt-plan.md section 3.
-Deduplicate findings that different domains reported about the same defect, keyed on
-spec-citation plus title.
-Do NOT implement any fix. Then append a short progress note to $PROGRESS, run git add -A, commit
-with message "triage: verification round $round findings", and git push.
-PROMPT
-  run_session "triage-$round" "$RUNDIR/prompt-triage-$round.txt"
-
-  say "fix loop for round $round"
-  if ! build_loop Fix "This is a FIX round: todo.md was just repopulated with verification findings from round $round. Work them top-down exactly like normal todo items."; then
-    say "stopped during Fix (round $round) after $((ITER - 1)) iteration(s)"
-    exit 1
-  fi
-  round=$((round + 1))
-done
-
-# ── phase 4: ship ────────────────────────────────────────────────────────────
-
-sed "s/\[ralph-iteration\]/$ITER/g" ralph/prompt-build.md > "$RUNDIR/prompt-ship.txt"
-cat >> "$RUNDIR/prompt-ship.txt" <<PROMPT
-
-## Orchestrator notes
-The instructions above define the house protocol (progress logging, commit discipline, promise
-tags). This is Ralph iteration $ITER. Your one step this session is SHIPPING, not a todo item:
-
-1. Ensure a from-scratch setup path exists and works (dependencies, build, any seed/fixture step
-   the specs call for); document it.
-2. Write/refresh README.md: what this is, prerequisites, install/build, run, test/verify commands,
-   project layout. Verify every command by actually running it.
-3. Run the repo's full verification protocol (per todo.md and CLAUDE.md) — it must be green.
-4. Full smoke pass: launch the product and walk one realistic end-to-end flow across its main
-   domains, with screenshots via the computer tool (chrome tools for anything browser-reachable).
-   Honor any testing constraints CLAUDE.md defines. Fix small issues you hit; anything larger goes
-   to todo.md.
-5. Follow the protocol above for the progress block, git add -A, commit, push, and post-push
-   verification.
-
-End with <promise>COMPLETE</promise> if everything shipped green, else <promise>NEXT</promise>.
-$(env_note)
-PROMPT
-run_session "ship" "$RUNDIR/prompt-ship.txt"
-ship_out="$(cat "$RESULT_FILE")"
-ship_p="$(promise_of "$ship_out")"
-say "ship -> <promise>${ship_p:-none}</promise>"
+note "ralph (shell loop) starting — harness=$HARNESS prompt=$PROMPT_NAME model=$MODEL thinking=${THINKING:-<cli default>} max-iter=${MAX_ITER:-∞} watchdog=${WATCHDOG}s"
+say "ralph loop starting"
+ralph_loop Ralph ""; ralph_rc=$?
 
 TOTAL_COST="$(spent_usd)"
 
 {
   printf '\n## %s UTC - RUN TOTALS (ralph shell loop)\n' "$(date -u +%Y-%m-%dT%H:%M:%S)"
-  printf -- '- sessions: %s; build iterations: %s; verify rounds: %s\n' "$SESSION_N" "$((ITER - 1))" "$((round - 1))"
-  printf -- '- verification ended %s\n' "$( ((VERIFY_CLEAN)) && echo clean || echo 'with findings outstanding')"
-  printf -- '- total cost $%s (summed from claude -p)\n' "$TOTAL_COST"
-  printf -- '- shipped: %s\n' "$( [[ "$ship_p" == COMPLETE ]] && echo yes || echo 'no — re-run ralph')"
+  printf -- '- sessions: %s; ralph iterations: %s\n' "$SESSION_N" "$((ITER - 1))"
+  printf -- '- ralph ended %s\n' "$( ((ralph_rc == 0)) && echo COMPLETE || echo 'with items outstanding')"
+  printf -- '- total cost $%s (summed from session usage)\n' "$TOTAL_COST"
   printf -- '---\n'
 } >> "$PROGRESS"
 say "run totals: $SESSION_N session(s), \$$TOTAL_COST"
@@ -733,4 +1978,9 @@ git add -A && git commit -q -m "ralph: run totals" && git push -q \
   && say "run totals committed and pushed" \
   || say "run totals written to $PROGRESS but not committed (nothing to commit, or push failed)"
 
-[[ "$ship_p" == COMPLETE ]] && exit 0 || exit 1
+if (( ralph_rc != 0 )); then
+  say "stopped during Ralph after $((ITER - 1)) iteration(s)"
+  exit 1
+fi
+say "ralph reported COMPLETE after $((ITER - 1)) iteration(s)"
+exit 0
