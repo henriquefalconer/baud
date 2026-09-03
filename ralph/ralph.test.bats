@@ -14,7 +14,7 @@
 #     iteration had already moved on
 #   * await_group blocks until that leftover work finishes
 #   * reap_sessions kills the entire group, so stopping ralph stops every
-#     `claude -p` it spawned instead of orphaning them onto init
+#     harness it spawned instead of orphaning it onto init
 #   * the pure helpers (fmt_dur, promise_of) behave at their boundaries
 
 setup() {
@@ -148,6 +148,62 @@ teardown() {
   # the job plus at least one descendant
   [ "$(printf '%s\n' $members | wc -l)" -ge 2 ]
   kill -TERM -"$pgid" 2>/dev/null || true
+}
+
+@test "a forced parent death stops a detached harness descendant" {
+  local unrelated parent worker
+  sleep 300 & unrelated=$!
+  bash -c "source '$TMP/lib.sh'; harness_exec sh -c 'setsid sh -c \"sleep 300\" & wait'" &
+  parent=$!
+  SPAWNED="$(ps -o pgid= -p "$parent" 2>/dev/null | tr -d ' ')"
+  [ -n "$SPAWNED" ]
+  sleep 0.5
+  worker="$(pgrep -P "$parent" -f 'sh -c sleep 300' | head -1 || true)"
+  kill -KILL "$parent" 2>/dev/null || true
+  for _ in {1..20}; do
+    [ -z "$worker" ] || ! kill -0 "$worker" 2>/dev/null
+    [ -z "$(pgrep -f '^sleep 300$' | grep -v "^$unrelated$")" ] && break
+    sleep 0.2
+  done
+  kill -0 "$unrelated"
+  kill -KILL "$unrelated" 2>/dev/null || true
+}
+
+@test "each harness recursively stops bash and bg_run subagents, not another pi" {
+  mkdir -p "$TMP/harness-bin"
+  for harness in pi codex claude; do
+    cat > "$TMP/harness-bin/$harness" <<'SH'
+#!/usr/bin/env sh
+if [ "$CHILD_MODE" = bg_run ]; then
+  setsid sh -c "echo \$\$ > '$CHILD_PID_FILE'; sleep 300" &
+else
+  bash -c "echo \$\$ > '$CHILD_PID_FILE'; sleep 300" &
+fi
+wait
+SH
+    chmod +x "$TMP/harness-bin/$harness"
+    for mode in bash bg_run; do
+      rm -f "$TMP/child.pid"
+      bash -c 'exec -a pi sleep 300' & local unrelated=$!
+      CHILD_MODE="$mode" CHILD_PID_FILE="$TMP/child.pid" PATH="$TMP/harness-bin:$PATH" \
+        bash -c "source '$TMP/lib.sh'; harness_exec $harness" &
+      local parent=$! worker
+      for _ in {1..20}; do
+        [ -s "$TMP/child.pid" ] && break
+        sleep 0.1
+      done
+      worker="$(cat "$TMP/child.pid" 2>/dev/null || true)"
+      [ -n "$worker" ] && kill -0 "$worker"
+      kill -KILL "$parent" 2>/dev/null || true
+      for _ in {1..20}; do
+        ! kill -0 "$worker" 2>/dev/null && break
+        sleep 0.1
+      done
+      ! kill -0 "$worker" 2>/dev/null
+      kill -0 "$unrelated"
+      kill -KILL "$unrelated" 2>/dev/null || true
+    done
+  done
 }
 
 @test "group_members reports nothing for an empty or bogus group" {
@@ -417,8 +473,8 @@ teardown() {
   grep -qF -- '## 1. Execute the procedure, in order' "$REPO/ralph/prompt-plan.md"
   grep -qF -- '**Prune `todo-build.md`**' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'Only DONE is deleted' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'not a claim that Baud' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'only after the final commit and push' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'Do not claim that a standing group is complete' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'After the commit is pushed and confirmed landed' "$REPO/ralph/prompt-plan.md"
   ! grep -qF -- '<promise>NEXT</promise>' "$REPO/ralph/prompt-plan.md"
 
   grep -qF -- '## Task-generation method' "$REPO/todo-plan.md"

@@ -10,7 +10,7 @@
 # The prompt file is the single tuning surface — it is piped in verbatim with
 # [ralph-iteration] substituted, so editing it steers the very next iteration.
 # It lives in ralph/ and defaults to prompt-build.md; -p names a different one
-# (prompt-plan.md, …), which is how one orchestrator drives
+# (prompt-submittal, prompt-plan.md, …), which is how one orchestrator drives
 # three different loops without a second copy of this script.
 #
 # TOOL SET — validated 2026-07-24 by asking a live browser-enabled session
@@ -1757,6 +1757,80 @@ json.dump({
 PY
 }
 
+# Run a harness behind a tiny ancestor-exit supervisor. A normal TERM runs the traps
+# above, but a task runner may SIGKILL the ralph shell after cancellation. In that
+# case bash cannot run its traps. The supervisor asks the kernel for SIGTERM when
+# ralph dies, then forwards it to the harness and every descendant before waiting
+# for the harness to exit. This closes the orphan window even for forced teardown.
+harness_exec() {
+  python3 -c '
+import ctypes, os, signal, sys
+
+PR_SET_ANCESTOR_EXIT = 1
+parent = os.getppid()
+if ctypes.CDLL(None).prctl(PR_SET_ANCESTOR_EXIT, signal.SIGTERM) != 0:
+    raise SystemExit("ralph: cannot install ancestor-exit signal")
+if os.getppid() != parent:
+    os.kill(os.getpid(), signal.SIGTERM)
+
+def descendants(root):
+    children = {}
+    try:
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/status") as fh:
+                    ppid = next(line for line in fh if line.startswith("PPid:")).split()[1]
+                children.setdefault(int(ppid), []).append(int(name))
+            except (OSError, StopIteration, ValueError):
+                continue
+    except OSError:
+        return []
+    found, pending = [], [root]
+    while pending:
+        for child_pid in children.get(pending.pop(), []):
+            found.append(child_pid)
+            pending.append(child_pid)
+    return found
+
+child = None
+
+def stop_tree(signum, _frame):
+    if child is None:
+        raise SystemExit(128 + signum)
+    # A bg_run child can detach from the process group. It is still a descendant
+    # while the harness is alive, so walk that tree before signalling the root.
+    pids = descendants(child)
+    for pid in list(reversed(pids)) + [child]:
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+    # Forced teardown must not leave a stubborn detached worker behind.
+    for pid in list(reversed(pids)) + [child]:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+signal.signal(signal.SIGTERM, stop_tree)
+signal.signal(signal.SIGINT, stop_tree)
+child = os.fork()
+if child == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+while True:
+    try:
+        _, status = os.waitpid(child, 0)
+        if os.WIFEXITED(status):
+            raise SystemExit(os.WEXITSTATUS(status))
+        if os.WIFSIGNALED(status):
+            raise SystemExit(128 + os.WTERMSIG(status))
+    except InterruptedError:
+        continue
+' "$@"
+}
+
 # run_session <label> <prompt-file> — writes the session's final text to
 # $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
 run_session() {
@@ -1783,17 +1857,17 @@ run_session() {
   result_file="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.result.txt"
   if [[ "$HARNESS" == codex ]]; then
     if [ -n "$sid" ]; then
-      codex exec resume "$sid" "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
+      harness_exec codex exec resume "$sid" "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
     else
-      codex exec "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
+      harness_exec codex exec "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
     fi
   elif [[ "$HARNESS" == pi ]]; then
     # A child the session starts with `pi -p` reads these to run on the same model and
     # level as its parent; the prompts name them as $RALPH_MODEL / $RALPH_THINKING.
     RALPH_MODEL="$MODEL" RALPH_THINKING="$THINKING" \
-      pi "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+      harness_exec pi "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
   else
-    claude "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+    harness_exec claude "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
   fi
   pid=$!
   pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"

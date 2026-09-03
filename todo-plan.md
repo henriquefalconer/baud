@@ -262,7 +262,7 @@ After every subagent has returned, the main thread must compare proposals with e
 in `todo-build.md`, remove duplicates, reject unsupported claims, and add accepted complete tasks to
 `todo-build.md` in dependency and priority order. **Every accepted task must be written as a Markdown bullet
 point**, with affected paths, the complete next step, and an acceptance criterion. Never add prose paragraphs,
-partial placeholders, or incomplete implementation fragments as task entries. Keep blockers and standing-group
+partial placeholders, or incomplete implementation fragments as task entries. Keep standing-group
 scope in `todo-plan.md`; do not turn an owner decision into build work. Record the number of proposals
 received, accepted, merged, and rejected in `ralph/progress.txt`.
 

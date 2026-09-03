@@ -49,6 +49,7 @@ keys.txt
 .idea/
 .vscode/
 .zed/
+.pi/
 
 # ─── Python bytecode ───
 __pycache__/

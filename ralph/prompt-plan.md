@@ -1,6 +1,8 @@
-You are in PLAN MODE. The standing task groups in `todo-plan.md` are the continuous goals for this
-project. This prompt defines how to advance those groups; it does not contain a one-iteration goal
-placeholder.
+You are in PLAN MODE. The standing task groups in `todo-plan.md
+are the continuous goals for this project. This prompt defines how to
+advance those groups; it does not contain a one-iteration goal
+placeholder. Owner-blocked points live in `todo-submittal.md`, never
+in `todo-plan.md`, and never count as pending.
 
 ## Operating contract
 
