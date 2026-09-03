@@ -1,126 +1,99 @@
-You are in PLAN MODE. The standing task groups in `todo-plan.md
-are the continuous goals for this project. This prompt defines how to
-advance those groups; it does not contain a one-iteration goal
-placeholder. Owner-blocked points live in `todo-submittal.md`, never
-in `todo-plan.md`, and never count as pending.
+HARD STOP: one planning iteration is one full pass of the procedure in §1 over every standing task group in
+`todo-plan.md`. A pass is complete when every group has been audited against the actual implementation, the
+main thread has merged complete actionable tasks into `todo-build.md` as bullet points, the plan and queue
+agree, required markdown changes are written, and **absolutely everything** is committed and pushed to
+`main`. Then append the final progress block, emit one `<promise>COMPLETE</promise>` promise, and stop.
 
-## Operating contract
+The orchestrator schedules later Ralph runs. Finish this pass after the push.
 
-`todo-plan.md` is the durable task-group plan. `todo-build.md` is the implementation queue produced and
-consumed by the build loop. Read both before doing work. The task groups stay in the plan across passes;
-completed implementation items may be collapsed in `todo-build.md`, while the groups themselves remain
-available for the next pass.
+## 0. What this loop is
 
-**Standing task focus.** At the beginning of each planning pass, read the current `todo-plan.md`, identify
-the highest-priority group with an actionable unfinished task, and record that group and task in
-`ralph/progress.txt`. Do not invent a separate goal, select a smaller substitute, or repeat the same
-unfinished task under a new name. If the highest group is blocked, record the blocker and take the first
-actionable task in the next group, without hiding the blocker. This is the pass contract; it replaces a
-per-entry completion lock while keeping focus continuous and auditable.
+`<promise>COMPLETE</promise>` from the planning loop is a claim about this pass, not a claim that Baud is
+built. It means every standing group was examined, the queue was reconciled, and the planning changes were
+committed and pushed. It does not mean the implementation queue is empty or that every standing group is
+finished. Later passes continue from the current files.
 
-At the end of the pass, re-read `todo-plan.md` and `todo-build.md`. Record what was completed, what remains,
-and any blocker. Do not claim that a standing group is complete merely because one task in it was completed.
-
-## Scope and permissions
-
-- Plan mode writes markdown only, normally `specs/**`, `todo-plan.md`, and `todo-build.md`.
-- Never modify source, tests, configuration, or other non-markdown files from plan mode.
-- Before declaring a task missing, search the repository and read the directly relevant implementation,
-  tests, drive scripts, and specification files.
-- Delegate independent implementation audits in parallel with subagents; keep synthesis and decisions in
-  the main pass.
-- For every standing group, ask an implementation-audit subagent to drive through each part of the group's
-  work in the actual code. Give it the group heading, purpose, standing tasks, and acceptance expectations.
-  Instruct it to compare the implementation against `todo-plan.md` and the relevant `specs/**`, inspect the
-  source, tests, and drives, and run focused searches or checks such as `rg -n "TODO|OPEN|Status|Test|Drive"
-  <paths>`, `git diff -- todo-build.md`, and the narrowest applicable test or build command. It may inspect
-  and validate the implementation, but must not edit source, tests, configuration, `todo-plan.md`, or
-  `todo-build.md`.
-- Require each subagent to return a compact implementation report with: group heading, complete task
-  proposal, exact files or symbols, comparison with the specification and plan, evidence of what already
-  exists, dependencies, acceptance test and drive, failure behavior, and status (`built`, `partly built`,
-  `blocked`, `deferred`, or `not measured`).
-- A proposal must describe one complete, coherent implementation outcome sized for one build iteration.
-  Never propose a half-assed, partial, placeholder, TODO-only, or knowingly incomplete implementation for
-  `todo-build.md`. If the complete outcome is not actionable, report the blocker instead.
-- After all reports return, deduplicate them against `todo-build.md`, reject claims without implementation
-  evidence, and add accepted complete tasks from the main thread. Every accepted item must be a Markdown
-  bullet point in `todo-build.md`, with its affected paths, next step, and acceptance criterion. Preserve
-  the standing groups in `todo-plan.md`; subagents audit and propose, but the main thread owns wording,
-  priority, completeness, acceptance criteria, and all writes.
-- Use one markdown file per logical specification unit when new specifications are needed.
-- Cite repository claims with `path:line` when writing specifications.
-- Describe what the system must do; describe implementation details only when the task requires them.
-- Keep `todo-plan.md` lean and durable: standing groups, dependencies, acceptance expectations, and current
-  blockers belong there. Detailed findings and completed implementation history belong in `todo-build.md`
-  or `ralph/progress.txt`.
-- Keep implementation items sized for one coherent build iteration and ordered by dependency.
+0a. Read **this whole file**. Everything below the divider is the procedure in full. The rules are mandatory.
+0b. Read `todo-plan.md` and `todo-build.md`. The first names the continuous goals; the second holds the
+implementation work that can be executed by the build loop.
+0c. Read `AGENTS.md` and the design documents, source, tests, and drives named by the current standing groups.
+0d. **This session runs the procedure itself.** The main thread owns the group audits, task reconciliation,
+file writes, validation, commit, and push. Subagents may inspect code and run focused checks, but they never
+write task files or decide what gets merged. **You own every child you start**: hold its id, wait for every
+result, and let nothing outlive this pass.
 
 ## 1. Execute the procedure, in order
 
-1. **Prune `todo-build.md`** — read the whole file and delete every item that is marked DONE, in every spelling the file uses (§1a). Only DONE is deleted: `SETTLED`, `NOT A GAP`, `SUPERSEDED` and `BLOCKED` are standing decisions that stop settled questions being re-opened, and they survive every prune. Say how many you removed, and prove the file is clean the way §1a demands before you move on.
+1. **Prune `todo-build.md`** — read the whole file and delete every item that is marked DONE,
+  in every spelling the file uses (§1a). Only DONE is deleted: `SETTLED`, `NOT A GAP`, `SUPERSEDED` and `BLOCKED`
+  are standing decisions that stop settled questions being re-opened, and they survive every prune. Say how many you removed,
+   and prove the file is clean the way §1a demands before you move on.
+2. **Audit every standing group.** Start one implementation-audit subagent for each group in parallel with
+   the others. Give each the exact group heading, purpose, standing tasks, current focus, and acceptance
+   expectations from `todo-plan.md`. It must walk every relevant source module, public path, test, drive,
+   integration, and failure path, then compare the actual code with `todo-plan.md`, the named design
+   documents, and `todo-build.md`.
+3. **Require evidence from every audit.** The subagent may run focused commands such as
+   `rg -n "TODO|OPEN|Status|Test|Drive|blocked|deferred" <paths>`,
+   `git diff -- todo-build.md`, and the narrowest relevant test or build command. It must return a compact
+   report containing the group, complete task proposal, comparison of required versus actual behavior,
+   exact paths or symbols, existing evidence, dependencies, acceptance test and drive, failure behavior,
+   and status: `built`, `partly built`, `blocked`, `deferred`, or `not measured`.
+4. **Reject incomplete proposals.** A proposal for `todo-build.md` must be one complete, coherent
+   implementation outcome sized for one build iteration. Never accept a half-assed, partial, placeholder,
+   or TODO-only proposal. If the complete outcome cannot be executed, record the blocker and its evidence
+   rather than disguising it as a smaller task.
+5. **Reconcile in the main thread.** After every audit returns, compare its proposals with the existing
+   queue and remove duplicates. Reject claims without code or test evidence. Add accepted tasks to
+   `todo-build.md` yourself, always as Markdown bullet points, with affected paths, the complete next step,
+   dependencies, acceptance test, drive, and failure behavior. Keep the standing groups and their long-term
+   goals in `todo-plan.md`.
+6. **Review the generated queue.** Read every new bullet, check that it is actionable and complete, and
+   confirm no accepted item is merely a partial implementation. Record proposal counts and important
+   disagreements in `ralph/progress.txt`.
+7. **Prune again** using §1a as the last task-file edit. Prove the remaining DONE hits are prose rather than
+   item markers. Do not delete `SETTLED`, `NOT A GAP`, `SUPERSEDED`, or `BLOCKED` decisions.
+8. **Validate the plan.** Confirm dependencies, acceptance tests, drives, and current blockers. Plan mode
+   writes Markdown only; do not implement source or tests here.
+9. **Commit absolutely everything and push to `main`.** Append the final progress block first, run
+   `git add -A`, commit with a message describing the planning changes, and push. Confirm the remote tip
+   matches the local tip and the working tree is clean. Do nothing after the promise.
 
-## Pass procedure
+## 1a. What a DONE item is, and what clean means
 
-1. Read the complete `todo-plan.md` and `todo-build.md`.
-2. Read the specifications and repository files named by the selected standing group.
-3. Search for existing work before proposing a new item or claiming a capability is absent.
-4. Choose the first actionable task under the highest-priority unfinished group, then log the choice.
-5. Produce or revise the required markdown plan/specification. Do not implement code in this mode.
-6. Validate the plan against dependencies, acceptance tests, drives, and known blockers. Distinguish built,
-   partly built, blocked, deferred, and not measured.
-7. Re-read both task files. Update only the relevant pending item or standing-group note; never erase an
-   unresolved task merely to make the queue appear clean.
-8. Append the final Changes committed progress block to `ralph/progress.txt` first, then commit everything
-   with `git add -A` and push. Include `todo-plan.md`, `todo-build.md`, progress, and any specification
-   changes.
-9. After the push, confirm only that the remote tip matches the local tip and the working tree is clean.
-   Do not repeat the build gate after pushing.
+An item is DONE when its first line carries the word DONE as its marker, regardless of whether it is written
+as `DONE:`, `- DONE —`, `- **DONE** —`, or another format. The marker line and every continuation line up to
+the next blank line, item, or heading are one item and must be removed. Remove empty headings left behind.
+Only DONE items are removed. Standing decisions remain.
 
-## Progress Logging — Mandatory
+Prove the prune by searching `todo-build.md` for `DONE` in every case and reading every hit. Each remaining
+hit must be prose, never an item marker. Record the real counts and before/after line totals in
+`ralph/progress.txt`.
 
-`ralph/progress.txt` has two jobs: it is the watchdog's only liveness signal, and it is the user's live view of what you are doing (the file is tailed in their terminal). Append with `printf '\n%s\n' "<one-liner>" >> ralph/progress.txt` so each entry sits on its own blank-led line.
+## Standing rules
 
-The first thing you do is append:
-```
-═══════════════════════════════════════════════════════
-  Ralph (Plan Mode)
-═══════════════════════════════════════════════════════
+- Read the entire procedure before acting. Do not hand the whole pass to a subagent.
+- Audit every standing group each pass, even when its last audit found no new work.
+- Search before declaring anything absent. Separate built, partly built, blocked, deferred, and not measured.
+- The main thread owns task wording, priority, completeness, acceptance criteria, and writes to both queues.
+- Every accepted `todo-build.md` item is a Markdown bullet describing a complete implementation outcome.
+- Never use a task entry to hide uncertainty, an owner decision, missing evidence, or unfinished integration.
+- Keep the standing groups continuous. Completing a queue item does not delete its group or its future work.
+- Preserve exact failure behavior and validation requirements from the relevant design documents.
+- Do not claim completion from a unit test when the requirement is hardware, timing, or cross-process proof.
+- A stalled run gets bounded diagnostics before behavioral changes. A timeout is never success.
+- Keep the repository clean and include all markdown, progress, and queue changes in the same commit.
 
-Brief explanation of what you will do (starting with a verb like "Analysing baud and auditing every queued group...", ending in ...)
+## Progress logging
 
-```
-The first line appended must be exactly "═══════════════════════════════════════════════════════".
+`ralph/progress.txt` is the liveness and user-facing record. Append a start entry, the selected planning focus,
+subagent audit results, prune counts, queue changes, validation, and the final Changes committed block. Use
+UTC timestamps. Never leave a plan, question, or unperformed promise as the final state.
 
-After the spec is re-derived, append:
-```
+## Completion signal
 
-Specs re-derived. Auditing N groups: <list>.
-```
-Then narrate as you go — each analysis, the differ, each brief as it reports, the RULINGS review, the verify. Lean toward narrating more rather than less; silence looks like a stall.
+After the full pass is committed, pushed, and confirmed landed, reply with exactly:
 
-After the pass is finished, append the block BELOW FIRST, THEN commit so it is part of the same commit:
-```
+`<promise>COMPLETE</promise>`
 
-## <the current UTC time, resolved — e.g. 2026-08-19T03:48:01> UTC - Plan pass committed.
-- How many items each step and each brief filed
-- Whether verify was green
-- **Most severe findings:**
-  - [finding 1]
-  - [finding 2]
----
-```
-Resolve the timestamp yourself — run `date -u +%Y-%m-%dT%H:%M:%S` and paste the result. Do NOT append the literal `$(date ...)`: this block is written through Write/Edit, where no shell expansion happens, so a command substitution lands in the log verbatim.
-
-## Stop Condition
-
-After the commit is pushed and confirmed landed, reply with `<promise>COMPLETE</promise>`
-
-Do not perform any additional work after the promise.
-
-## What completion means in plan mode
-
-A planning pass is complete only after the selected task has been fully studied, the standing groups and
-implementation queue accurately describe the next work, all required markdown changes are written, and the
-commit and push have succeeded. A pass that merely reads the files, drafts a partial outline, or leaves an
-unresolved contradiction is not complete.
+This closes the planning pass only. It does not close the continuous task groups or the build loop.
