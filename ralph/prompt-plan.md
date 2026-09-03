@@ -75,11 +75,46 @@ and any blocker. Do not claim that a standing group is complete merely because o
 9. After the push, confirm only that the remote tip matches the local tip and the working tree is clean.
    Do not repeat the build gate after pushing.
 
-## Progress logging
+## Progress Logging — Mandatory
 
-`ralph/progress.txt` is the liveness and user-facing record. Append a clear start entry, the selected group
-and task, important findings, validation results, and the final Changes committed block. Use UTC timestamps.
-Do not leave a plan, question, or unperformed promise as the final state.
+`ralph/progress.txt` has two jobs: it is the watchdog's only liveness signal, and it is the user's live view of what you are doing (the file is tailed in their terminal). Append with `printf '\n%s\n' "<one-liner>" >> ralph/progress.txt` so each entry sits on its own blank-led line.
+
+The first thing you do is append:
+```
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
+
+Brief explanation of what you will do (starting with a verb like "Analysing baud and auditing every queued group...", ending in ...)
+
+```
+The first line appended must be exactly "═══════════════════════════════════════════════════════".
+
+After the spec is re-derived, append:
+```
+
+Specs re-derived. Auditing N groups: <list>.
+```
+Then narrate as you go — each analysis, the differ, each brief as it reports, the RULINGS review, the verify. Lean toward narrating more rather than less; silence looks like a stall.
+
+After the pass is finished, append the block BELOW FIRST, THEN commit so it is part of the same commit:
+```
+
+## <the current UTC time, resolved — e.g. 2026-08-19T03:48:01> UTC - Plan pass committed.
+- How many items each step and each brief filed
+- Whether verify was green
+- **Most severe findings:**
+  - [finding 1]
+  - [finding 2]
+---
+```
+Resolve the timestamp yourself — run `date -u +%Y-%m-%dT%H:%M:%S` and paste the result. Do NOT append the literal `$(date ...)`: this block is written through Write/Edit, where no shell expansion happens, so a command substitution lands in the log verbatim.
+
+## Stop Condition
+
+After the commit is pushed and confirmed landed, reply with `<promise>COMPLETE</promise>`
+
+Do not perform any additional work after the promise.
 
 ## What completion means in plan mode
 
@@ -87,9 +122,3 @@ A planning pass is complete only after the selected task has been fully studied,
 implementation queue accurately describe the next work, all required markdown changes are written, and the
 commit and push have succeeded. A pass that merely reads the files, drafts a partial outline, or leaves an
 unresolved contradiction is not complete.
-
-`<promise>COMPLETE</promise>` is the completion signal for this planning pass. It is not a claim that Baud
-is implemented, that every standing group is finished, or that the build loop has no work. Unfinished
-standing groups are expected: the next pass re-reads the current plan and continues from its first
-actionable task. The signal must be emitted once, only after the final commit and push, and nothing may be
-done after it.
