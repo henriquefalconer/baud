@@ -1,88 +1,95 @@
-You are in PLAN MODE. The ULTIMATE GOAL at the bottom of this prompt tells you *what* to produce this iteration. Everything above is *how* to behave regardless of goal. Read the goal first; let it drive every decision below.
+You are in PLAN MODE. The standing task groups in `todo-plan.md` are the continuous goals for this
+project. This prompt defines how to advance those groups; it does not contain a one-iteration goal
+placeholder.
 
-**Selection lock.** At the beginning of the main session, record the exact entries selected from `todo-plan.md` for this iteration. They are this iteration's contract. Do not substitute a smaller slice, relabel partial work as complete, or select the same still-pending item again in a new iteration. Before the final progress block, commit, or promise, re-read `todo-plan.md` and check every entry you selected. Every selected entry must now be completely addressed and collapsed to its own `DONE` line. If any selected entry is still pending or lacks `DONE`, continue the same session and finish it. Only after all selected entries are planned, validated by the existing procedure, and updated in `todo-plan.md` may you append the final block, commit, push, and return a promise tag.
+## Operating contract
 
-0a. Plan mode writes ONLY markdown — typically under `specs/**` and `todo-plan.md`. Never modify source, tests, configuration, or any non-markdown file. Read anything; write only markdown.
+`todo-plan.md` is the durable task-group plan. `todo-build.md` is the implementation queue produced and
+consumed by the build loop. Read both before doing work. The task groups stay in the plan across passes;
+completed implementation items may be collapsed in `todo-build.md`, while the groups themselves remain
+available for the next pass.
 
-0b. Read `todo-plan.md` and any existing `specs/**` to see what prior iterations have produced. If the ULTIMATE GOAL is already satisfied by what exists, emit `<promise>COMPLETE</promise>` immediately without further work.
+**Standing task focus.** At the beginning of each planning pass, read the current `todo-plan.md`, identify
+the highest-priority group with an actionable unfinished task, and record that group and task in
+`ralph/progress.txt`. Do not invent a separate goal, select a smaller substitute, or repeat the same
+unfinished task under a new name. If the highest group is blocked, record the blocker and take the first
+actionable task in the next group, without hiding the blocker. This is the pass contract; it replaces a
+per-entry completion lock while keeping focus continuous and auditable.
 
-1. Execute the ULTIMATE GOAL. Ultrathink about:
-   - Which inputs to read (source tree, tests, existing specs, notes) given the goal.
-   - Which outputs satisfy the goal and where they belong on disk.
-   - The right granularity — one spec per logical unit (test file, source module, feature) is usually correct.
-   - Dependencies between outputs — write primitives before composites.
-   Use multiple Sonnet subagents for independent reads. Use Opus subagents for synthesis when the task requires reconciling findings across files.
+At the end of the pass, re-read `todo-plan.md` and `todo-build.md`. Record what was completed, what remains,
+and any blocker. Do not claim that a standing group is complete merely because one task in it was completed.
 
-2. Default spec-writing rules (apply unless the goal overrides them):
-   - One markdown file per logical unit.
-   - Every claim cites its source with `path:line`.
-   - Describe *what* the system does and *must* do. Describe *how* only when the goal asks for it.
+## Scope and permissions
 
-3. `todo-plan.md` format (when the goal is to produce or update it):
-   - Prioritized bullet list; top item = most important thing yet to do.
-   - Each item is scoped to ~one ralph build iteration (one commit).
-   - Order respects dependencies.
-   - Keep it lean — prune completed items and historical details that don't inform future work. Specs are the durable baseline.
+- Plan mode writes markdown only, normally `specs/**`, `todo-plan.md`, and `todo-build.md`.
+- Never modify source, tests, configuration, or other non-markdown files from plan mode.
+- Before declaring a task missing, search the repository and read the directly relevant implementation,
+  tests, drive scripts, and specification files.
+- Delegate independent implementation audits in parallel with subagents; keep synthesis and decisions in
+  the main pass.
+- For every standing group, ask an implementation-audit subagent to drive through each part of the group's
+  work in the actual code. Give it the group heading, purpose, standing tasks, and acceptance expectations.
+  Instruct it to compare the implementation against `todo-plan.md` and the relevant `specs/**`, inspect the
+  source, tests, and drives, and run focused searches or checks such as `rg -n "TODO|OPEN|Status|Test|Drive"
+  <paths>`, `git diff -- todo-build.md`, and the narrowest applicable test or build command. It may inspect
+  and validate the implementation, but must not edit source, tests, configuration, `todo-plan.md`, or
+  `todo-build.md`.
+- Require each subagent to return a compact implementation report with: group heading, complete task
+  proposal, exact files or symbols, comparison with the specification and plan, evidence of what already
+  exists, dependencies, acceptance test and drive, failure behavior, and status (`built`, `partly built`,
+  `blocked`, `deferred`, or `not measured`).
+- A proposal must describe one complete, coherent implementation outcome sized for one build iteration.
+  Never propose a half-assed, partial, placeholder, TODO-only, or knowingly incomplete implementation for
+  `todo-build.md`. If the complete outcome is not actionable, report the blocker instead.
+- After all reports return, deduplicate them against `todo-build.md`, reject claims without implementation
+  evidence, and add accepted complete tasks from the main thread. Every accepted item must be a Markdown
+  bullet point in `todo-build.md`, with its affected paths, next step, and acceptance criterion. Preserve
+  the standing groups in `todo-plan.md`; subagents audit and propose, but the main thread owns wording,
+  priority, completeness, acceptance criteria, and all writes.
+- Use one markdown file per logical specification unit when new specifications are needed.
+- Cite repository claims with `path:line` when writing specifications.
+- Describe what the system must do; describe implementation details only when the task requires them.
+- Keep `todo-plan.md` lean and durable: standing groups, dependencies, acceptance expectations, and current
+  blockers belong there. Detailed findings and completed implementation history belong in `todo-build.md`
+  or `ralph/progress.txt`.
+- Keep implementation items sized for one coherent build iteration and ordered by dependency.
 
-IMPORTANT: Plan only — do NOT implement. Before claiming something is missing, search for it first. When finished writing the plan, append the final "Changes committed" progress block to `ralph/progress.txt` FIRST, then commit everything (`git add -A` — this MUST include `ralph/progress.txt`, `todo-plan.md`, and `ralph/.last-branch` alongside spec changes). After the commit, `git push`.
+## 1. Execute the procedure, in order
 
-ULTIMATE GOAL: [project-specific goal]
+1. **Prune `todo-build.md`** — read the whole file and delete every item that is marked DONE, in every spelling the file uses (§1a). Only DONE is deleted: `SETTLED`, `NOT A GAP`, `SUPERSEDED` and `BLOCKED` are standing decisions that stop settled questions being re-opened, and they survive every prune. Say how many you removed, and prove the file is clean the way §1a demands before you move on.
 
-## Progress Logging — Mandatory
+## Pass procedure
 
-ralph/progress.txt has two jobs: (a) the watchdog's only liveness signal (45 min without an append, the iteration is SIGTERM'd mid-work), and (b) the user's live view of what you are doing (the file is tailed in their terminal). Append with `printf '\n%s\n' "<one-liner>" >> ralph/progress.txt` so each entry sits on its own blank-led line.
+1. Read the complete `todo-plan.md` and `todo-build.md`.
+2. Read the specifications and repository files named by the selected standing group.
+3. Search for existing work before proposing a new item or claiming a capability is absent.
+4. Choose the first actionable task under the highest-priority unfinished group, then log the choice.
+5. Produce or revise the required markdown plan/specification. Do not implement code in this mode.
+6. Validate the plan against dependencies, acceptance tests, drives, and known blockers. Distinguish built,
+   partly built, blocked, deferred, and not measured.
+7. Re-read both task files. Update only the relevant pending item or standing-group note; never erase an
+   unresolved task merely to make the queue appear clean.
+8. Append the final Changes committed progress block to `ralph/progress.txt` first, then commit everything
+   with `git add -A` and push. Include `todo-plan.md`, `todo-build.md`, progress, and any specification
+   changes.
+9. After the push, confirm only that the remote tip matches the local tip and the working tree is clean.
+   Do not repeat the build gate after pushing.
 
-Most importantly, the first thing you should do is append (iteration number should be exactly "[ralph-iteration]"):
-```
-═══════════════════════════════════════════════════════
-  Ralph Iteration [ralph-iteration]
-═══════════════════════════════════════════════════════
+## Progress logging
 
-Brief explanation of what you will do (starting with a verb like "Finding most important item to address...", ending in ...)
+`ralph/progress.txt` is the liveness and user-facing record. Append a clear start entry, the selected group
+and task, important findings, validation results, and the final Changes committed block. Use UTC timestamps.
+Do not leave a plan, question, or unperformed promise as the final state.
 
-```
-The first line appended should be "═══════════════════════════════════════════════════════". If it's empty, make sure the first line is exactly "═══════════════════════════════════════════════════════".
+## What completion means in plan mode
 
-If still doing a specific task and it is taking too long to finish, append (try to always append once per minute):
-```
+A planning pass is complete only after the selected task has been fully studied, the standing groups and
+implementation queue accurately describe the next work, all required markdown changes are written, and the
+commit and push have succeeded. A pass that merely reads the files, drafts a partial outline, or leaves an
+unresolved contradiction is not complete.
 
-Found/did/finished X, still doing/finding/etc Y...
-```
-The first line appended should be an empty line.
-
-After picking item to be addressed, append:
-```
-
-Chose X, it's the Y of Z.
-```
-The first line appended should be an empty line.
-
-After important finding, append:
-```
-
-Brief explanation of what was done/found. [Then "Continuing task..." or something like that]
-```
-The first line appended should be an empty line.
-
-After finishing item that was picked to be addressed, append the block BELOW to `ralph/progress.txt` FIRST, THEN run `git add -A` and `git commit` so the block is part of the same commit:
-```
-
-## $(date -u +%Y-%m-%dT%H:%M:%S) UTC - Changes committed.
-- What was implemented
-- Files changed
-- **Brief description of changes:**
-  - [change 1]
-  - [change 2]
-  - ...
----
-```
-The first line appended should be an empty line.
-
-## Stop Condition
-
-After finishing all steps and committing, reply with ONLY ONE of:
-
-- `<promise>NEXT</promise>` if more planning iterations are needed.
-- `<promise>COMPLETE</promise>` if the plan is fully written and no further iterations are required.
-
-Do NOT perform any additional work or verification after this signal.
+`<promise>COMPLETE</promise>` is the completion signal for this planning pass. It is not a claim that Baud
+is implemented, that every standing group is finished, or that the build loop has no work. Unfinished
+standing groups are expected: the next pass re-reads the current plan and continues from its first
+actionable task. The signal must be emitted once, only after the final commit and push, and nothing may be
+done after it.

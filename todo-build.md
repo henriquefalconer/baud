@@ -5,14 +5,24 @@
 
 # BAUD — Implementation Plan (deterministic-hypervisor)
 
-baud runs a whole guest computer inside a virtual machine and makes that machine's entire execution a
-reproducible function of one input byte stream (the **tape**). It owns the machine at the
-hardware-virtualization layer (Linux KVM + Intel VT-x), replaces every source of nondeterminism the machine
-can see with a value computed from or seeded by the tape, then fuzzes the tape — snapshotting any moment,
-forking thousands of alternate continuations that share memory, rewinding, and re-running: a branching tree
-of universes explored in parallel.
+Focus on these files first; the whole project is readable:
 
-This plan is self-contained. Every milestone ends with a drive script that tests it through the CLI. Section
+- `todo-plan.md`
+- `todo-build.md`
+- `specs/README.md`
+
+Also read the design documents, source modules, tests, and drive scripts selected by the standing task group
+for the current pass. The group entries in `todo-plan.md` are the durable goals; this file is the terse,
+implementation-ready decomposition of the work still required to reach them.
+
+Implement the complete deterministic guest-machine system described by the plan: the KVM machine, real Linux
+boot and image pipeline, tape and observation contract, state capture and continuation, exploration engine,
+server and command surface, host substrate, full-distribution proof, and generic interactive target. Existing
+code is evidence, not permission to leave a placeholder. Every open item below must identify the complete
+outcome, affected paths, next step, and acceptance test. Never add a knowingly partial implementation.
+
+`todo-build.md` is the working queue. Keep open items terse (normally no more than six lines); collapse a
+resolved item to one `DONE` sentence. Every milestone ends with a drive script and the required gate. Section
 12 is the problem → specification → test matrix: every risk found in review is turned into a concrete
 guarantee and the test that proves it.
 
@@ -531,7 +541,7 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   isolation kernel params, pinning, `nested=1` when itself nested). `infra/machines/` composes bare-metal and
   nested-VM host definitions.
 - **Developer machine**: a bare-metal Dell XPS 13 9310 (Intel Tiger Lake) running **WSL2 Ubuntu**, where
-  `/dev/kvm` is available natively; run the build agent inside WSL2 (see `CLAUDE.md`). `rdseed`-exiting is
+  `/dev/kvm` is available natively; run the build agent inside WSL2 (see the project operating notes). `rdseed`-exiting is
   masked by Hyper-V here, so `rdseed` is handled by the build-time rewrite (§3.8); everything else is
   hardware-trapped.
 - **Test** (`doctor_checks_kvm`): `baud doctor` in WSL2 asserts `/dev/kvm` present, VT-x exposed, and the
@@ -583,7 +593,7 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
   program (the emulator example) inside the H7 Linux guest, driven only by the tape, and drive it to a defined
   goal with the framebuffer streamed live. Drive `drive/mario.sh` (§11.8):
   `interactive_probe_stream_is_identical` + `framebuffer_hashes_identical` across two boots, goal reachability,
-  shrink+replay, and the mandatory ~25%-screen live window. H8 is the flagship acceptance of the whole stack.
+  shrink+replay, and the mandatory live window at roughly one-quarter of the host display. H8 is the flagship acceptance of the whole stack.
 - **H9 — a full unmodified distro, cross-VM determinism.** Boot the **stock Ubuntu 18.04.1 LTS** image (§4.7)
   to the serial login prompt, take a **timed exit** at a fixed work-clock point, and dump a fingerprint; two
   independent VMs (`vm0`, `vm1` — separate processes on separate cores) on the same `(image, tape)` produce a
@@ -628,7 +638,7 @@ Full detail in `specs/baud-snapshot.md` (capture/restore/branch) and `specs/baud
 
 This section is an **example**, not a feature: it exercises the generic engine (§3–§10) on one arbitrary
 interactive program — the FCEUX NES emulator running **inside the H7 Linux guest** — and drives it to a goal
-(complete Super Mario Bros) from controller input alone, streaming the emulator live in a ~25%-screen window.
+(complete Super Mario Bros) from controller input alone, streaming the emulator live in a window at roughly one-quarter of the host display.
 It is the visible instance of §0's claim: any program on baud's deterministic Linux is a system baud's fuzzer
 explores to a chosen state, reproducibly.
 
@@ -677,9 +687,9 @@ explores to a chosen state, reproducibly.
 
 Read from NES RAM by the harness each frame (all confirmed against the SMB RAM map + the 6502 disassembly):
 
-- `x = mem[0x006D] * 256 + mem[0x0086]` — global horizontal position (`0x0086` on-screen x, `0x006D` page);
+- `x = mem[0x006D] * 256 + mem[0x0086]` — global horizontal position (`0x0086` viewport x, `0x006D` page);
   the primary progress signal.
-- `y = mem[0x00CE]` — on-screen vertical position; the grid's second dimension.
+- `y = mem[0x00CE]` — viewport height coordinate; the grid's second dimension.
 - `world = mem[0x075F]` (0-based), `area = mem[0x0760]`, `lives = mem[0x075A]`, `oper_mode = mem[0x0770]`
   (game mode: `01` normal play, `02` end-of-world, `03` end/dead).
 - **Completion is a derived condition, not a single flag** — SMB has no "game-completed" byte. The end state
@@ -721,14 +731,14 @@ Read from NES RAM by the harness each frame (all confirmed against the SMB RAM m
 
 ### 11.7 Live display, baud-stream, and the README GIF
 
-- **Per-frame capture (in the harness)**: each frame `gui.gdscreenshot()` returns the 256×240 screen (GD
+- **Per-frame capture (in the harness)**: each frame the emulator's frame-capture API returns the 256×240 frame (GD
   truecolor); the harness emits `[format tag][width:2][height:2][pixels]` on a frame port and `baud-stream`
   forwards it. Frames are a **derived artifact of the tape** — a pure function of (ROM, input) — so baud stores
   only the tape and regenerates identical frames on demand by replaying it (`fceux -playmovie` / re-run the
   harness). No video is stored.
-- **Live window (mandatory, every run), ~25% of the screen**, on the Windows desktop via WSLg:
+- **Live display (mandatory, every run), roughly one-quarter of the host display**, on the Windows desktop via WSLg:
   ```bash
-  SW=$(powershell.exe -NoProfile -Command '[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width' | tr -d '\r')
+  SW=$(powershell.exe -NoProfile -Command '[System.Windows.Forms.SystemInformation]::PrimaryMonitorSize.Width' | tr -d '\r')
   XW=$((SW/2)); YH=$((XW*240/256))          # NES 256:240 aspect preserved
   baud stream tail --run "$RUN" --format y4m \
     | ffplay -f yuv4mpegpipe -i - -an -framedrop -infbuf \
@@ -741,7 +751,7 @@ Read from NES RAM by the harness each frame (all confirmed against the SMB RAM m
   `baud stream tail --run <winning> --format y4m | ffmpeg -i - -vf "fps=30,scale=512:-1:flags=neighbor" -loop 0
   docs/mario.gif`, committed under `docs/` and embedded at the very top of `README.md` as the single centered
   reference. Because the GIF is re-derived from the winning tape it is a reproducible artifact of the run
-  (regenerable from the tape hash), not a hand-recorded screencast.
+  (regenerable from the tape hash), not a hand-recorded video.
 - **README hero copy** (describe the environment generically — never name the OS): *"**baud beats Super Mario
   Bros — and your program is no different.** baud runs any program inside a fully-deterministic environment it
   controls end to end, turns that program's entire input into one replayable tape, and lets its fuzzer explore

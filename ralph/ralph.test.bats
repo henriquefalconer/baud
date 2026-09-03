@@ -397,13 +397,35 @@ teardown() {
   [ "$wait_line" -lt "$accept_line" ]
 }
 
-@test "every main-loop prompt locks its selected entries until they are DONE" {
-  for prompt in prompt-build.md prompt-plan.md; do
-    grep -qF -- '**Selection lock.**' "$REPO/ralph/$prompt" || return 1
-    grep -qF -- 'beginning of the main session' "$REPO/ralph/$prompt" || return 1
-    grep -qF -- 'DONE' "$REPO/ralph/$prompt" || return 1
-    grep -qF -- 'commit, push, and return a promise tag' "$REPO/ralph/$prompt" || return 1
-  done
+@test "every main-loop prompt has a durable task-focus contract" {
+  # Build mode locks its selected implementation entries; plan mode keeps the
+  # standing groups continuous and chooses the first actionable task each pass.
+  grep -qF -- '**Selection lock.**' "$REPO/ralph/prompt-build.md"
+  grep -qF -- 'beginning of the main session' "$REPO/ralph/prompt-build.md"
+  grep -qF -- 'DONE' "$REPO/ralph/prompt-build.md"
+  grep -qF -- 'commit, push, and return a promise tag' "$REPO/ralph/prompt-build.md"
+
+  ! grep -qF -- '**Selection lock.**' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- '**Standing task focus.**' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'todo-plan.md' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'continuous goals' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'in parallel with subagents' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'For every standing group' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'drive through each part of the group' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'Never propose a half-assed' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'Every accepted item must be a Markdown' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- '## 1. Execute the procedure, in order' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- '**Prune `todo-build.md`**' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'Only DONE is deleted' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'not a claim that Baud' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'only after the final commit and push' "$REPO/ralph/prompt-plan.md"
+  ! grep -qF -- '<promise>NEXT</promise>' "$REPO/ralph/prompt-plan.md"
+
+  grep -qF -- '## Task-generation method' "$REPO/todo-plan.md"
+  grep -qF -- 'start an independent implementation-audit subagent in parallel' "$REPO/todo-plan.md"
+  grep -qF -- 'Walk every part of the group' "$REPO/todo-plan.md"
+  grep -qF -- 'Never propose a half-assed' "$REPO/todo-plan.md"
+  grep -qF -- 'Every accepted task must be written as a Markdown bullet' "$REPO/todo-plan.md"
 }
 
 # ── ledger helpers ────────────────────────────────────────────────────────────
