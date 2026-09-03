@@ -8022,3 +8022,25 @@ ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-co
 - Recorded all eight audit outcomes, proposal counts, prune proofs, queue review, blockers, and validation in this file.
 - Final task-file state: `todo-build.md` 1156 lines, 0 DONE items removed this pass, and no remaining DONE/completed item markers. `todo-plan.md` was unchanged.
 - Push and remote-tip confirmation follow this block before the completion promise.
+
+## 2026-09-03T23:58:53 UTC (6min) - Session usage — ralph-1 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2650 (summed from 9 session transcripts: main $0.0758 · subagents $0.1892)
+- tokens input 909,789 · cache-read 2,819,072 · cache-write 0 · output 22,235 · reasoning 4,827
+- context 85,704 tok peak of 272K (32%) across 34 inference calls, 1 drop(s), final 85,704
+- models gpt-5.6-luna $0.2650 (in 909,789 / out 27,062 / cache-read 2,819,072)
+- subagents (8) bg_delegate x8
+  - bg_delegate Audit G1: gpt-5.6-luna $0.0257, 5 inference calls
+  - bg_delegate Audit G2: gpt-5.6-luna $0.0223, 5 inference calls
+  - bg_delegate Audit G3: gpt-5.6-luna $0.0248, 5 inference calls
+  - bg_delegate Audit G4: gpt-5.6-luna $0.0236, 5 inference calls
+  - bg_delegate Audit G5: gpt-5.6-luna $0.0198, 4 inference calls
+  - bg_delegate Audit G6: gpt-5.6-luna $0.0249, 5 inference calls
+  - bg_delegate Audit G7: gpt-5.6-luna $0.0253, 6 inference calls
+  - bg_delegate Audit G8: gpt-5.6-luna $0.0229, 5 inference calls
+- transcript: ralph/.run/20260903T235322Z/001-ralph-1.json
+
+## 2026-09-03T23:58:56 UTC - RUN TOTALS (ralph shell loop)
+- sessions: 1; ralph iterations: 1
+- ralph ended COMPLETE
+- total cost $0.2650 (summed from session usage)
+---
