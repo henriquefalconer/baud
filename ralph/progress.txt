@@ -190,3 +190,5 @@ Re-read todo-build.md: all eight locked entries remain pending and none can hone
   - Full gate passed: 25 passed, 0 failed, 1 skipped.
 
 ---
+
+Pushing the validated commit and then checking that origin/main matches the local tip.
