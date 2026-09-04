@@ -323,3 +323,19 @@ The final gate reported only the documented rdtsc load flake; phase 6 passed it 
   - The selected G1-G7 integration items remain pending because the real Buildroot, UFFD, authenticated lifecycle, Ubuntu, and Mario paths are not complete.
 
 ---
+
+Repeating the focused verification in the foreground as requested.
+
+## 2026-09-04T02:13:29 UTC - Changes committed.
+
+- Re-ran the focused verification in the foreground as requested.
+
+- Files changed: ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - 147 focused tests passed with 0 failures.
+
+  - Existing aya deprecation warnings remain non-fatal.
+
+---
