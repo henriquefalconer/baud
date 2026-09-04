@@ -28,7 +28,11 @@
 use crate::dirty_ring::{self, RawDirtyGfn};
 use crate::page_store::{PageRef, PageStore, PAGE_SIZE};
 use crate::universe::{order_msrs_tsc_first, restore_plan, model_matches, ClockState, DeviceState, MsrWrite, RestoreStep, Universe, VcpuState};
-use kvm_bindings::{kvm_dirty_gfn, kvm_enable_cap, kvm_msr_entry, Msrs, KVM_CAP_DIRTY_LOG_RING, KVM_DIRTY_LOG_PAGE_OFFSET, KVM_MAX_CPUID_ENTRIES};
+use kvm_bindings::{
+    kvm_clock_data, kvm_dirty_gfn, kvm_enable_cap, kvm_mp_state, kvm_msr_entry,
+    kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, kvm_xsave, Msrs, KVM_CAP_DIRTY_LOG_RING,
+    KVM_DIRTY_LOG_PAGE_OFFSET, KVM_MAX_CPUID_ENTRIES,
+};
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
 use std::os::fd::AsRawFd;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
@@ -62,6 +66,8 @@ pub enum RestoreError {
          (specs/baud-snapshot.md §6 point 4: refused, no CPUID template active)"
     )]
     CpuMismatch { captured: u32, current: u32 },
+    #[error("universe field {field} has length {actual}, expected {expected}")]
+    InvalidStateLength { field: &'static str, actual: usize, expected: usize },
 }
 
 /// Copy `size_of::<T>()` bytes out of `v` verbatim. Every `T` this is called with below
@@ -81,15 +87,39 @@ unsafe fn struct_to_bytes<T>(v: &T) -> Vec<u8> {
 ///
 /// # Safety
 /// `v` is freshly `Default`-constructed (so every byte starts at a valid, kernel-accepted value
-/// for `T`, typically all-zero) before `bytes` is copied over it; the copy length is clamped to
-/// `size_of::<T>()`, so this never writes past `v`.
+/// for `T`, typically all-zero) before `bytes` is copied over it. Callers validate the exact
+/// length before entering this function, so truncated wire records cannot become zero-padded
+/// state.
 unsafe fn bytes_to_struct<T: Default>(bytes: &[u8]) -> T {
+    debug_assert_eq!(bytes.len(), std::mem::size_of::<T>());
     let mut v = T::default();
     let len = bytes.len().min(std::mem::size_of::<T>());
     // SAFETY: see function doc — `v` is live and exactly `size_of::<T>()` bytes, `len <=
     // size_of::<T>()`, and `bytes` has at least `len` bytes.
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), &mut v as *mut T as *mut u8, len) };
     v
+}
+
+fn validate_state_lengths(universe: &Universe) -> Result<(), RestoreError> {
+    macro_rules! exact {
+        ($field:expr, $name:literal, $ty:ty) => {
+            if $field.len() != std::mem::size_of::<$ty>() {
+                return Err(RestoreError::InvalidStateLength {
+                    field: $name,
+                    actual: $field.len(),
+                    expected: std::mem::size_of::<$ty>(),
+                });
+            }
+        };
+    }
+    exact!(universe.vcpu.regs, "regs", kvm_regs);
+    exact!(universe.vcpu.sregs, "sregs", kvm_sregs);
+    exact!(universe.vcpu.xsave, "xsave", kvm_xsave);
+    exact!(universe.vcpu.xcrs, "xcrs", kvm_xcrs);
+    exact!(universe.vcpu.events, "events", kvm_vcpu_events);
+    exact!(universe.vcpu.mp_state, "mp_state", kvm_mp_state);
+    exact!(universe.clock.kvm_clock, "kvm_clock", kvm_clock_data);
+    Ok(())
 }
 
 /// CPUID leaf 1's EAX (the x86 "processor signature": family/model/stepping) — the CPU-model
@@ -224,6 +254,7 @@ pub fn restore(
     universe: &Universe,
     template_active: bool,
 ) -> Result<(), RestoreError> {
+    validate_state_lengths(universe)?;
     let current_signature = cpuid_leaf1_eax(kvm)?;
     if !model_matches(universe.cpu_signature, current_signature, template_active) {
         return Err(RestoreError::CpuMismatch { captured: universe.cpu_signature, current: current_signature });
@@ -457,5 +488,38 @@ impl Drop for DirtyRing {
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.entries * std::mem::size_of::<kvm_dirty_gfn>());
         }
+    }
+}
+
+#[cfg(test)]
+mod state_validation_tests {
+    use super::*;
+
+    #[test]
+    fn truncated_register_state_is_rejected_before_kvm_restore() {
+        let universe = Universe {
+            ram: Vec::new(),
+            vcpu: VcpuState {
+                regs: vec![0; std::mem::size_of::<kvm_regs>() - 1],
+                sregs: vec![0; std::mem::size_of::<kvm_sregs>()],
+                msrs: Vec::new(),
+                xsave: vec![0; std::mem::size_of::<kvm_xsave>()],
+                xcrs: vec![0; std::mem::size_of::<kvm_xcrs>()],
+                events: vec![0; std::mem::size_of::<kvm_vcpu_events>()],
+                mp_state: vec![0; std::mem::size_of::<kvm_mp_state>()],
+            },
+            clock: ClockState {
+                kvm_clock: vec![0; std::mem::size_of::<kvm_clock_data>()],
+                tsc_khz: 1,
+                work_clock_base: 0,
+                rcb_anchor: 0,
+                tsc_deadline: 0,
+                tsc_aux: 0,
+                entropy_state: 0,
+            },
+            device: DeviceState { tape_cursor: 0, console: Vec::new() },
+            cpu_signature: 0,
+        };
+        assert!(matches!(validate_state_lengths(&universe), Err(RestoreError::InvalidStateLength { field: "regs", .. })));
     }
 }

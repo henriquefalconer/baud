@@ -42,9 +42,19 @@ pub async fn append_frame(
     Json(body): Json<AppendFrameBody>,
 ) -> Json<Value> {
     let now = unix_now() as i64;
-    let hash_bytes = match hex::decode_or_b64(&body.hash) {
-        Some(b) => b,
-        None => return Json(json!({ "error": "invalid hash encoding" })),
+    if body.width == 0 || body.height == 0 {
+        return Json(json!({ "error": "frame width and height must be non-zero" }));
+    }
+    let pixels = u64::from(body.width).saturating_mul(u64::from(body.height));
+    if pixels > 16_777_216 {
+        return Json(json!({ "error": "frame geometry exceeds 16 megapixels" }));
+    }
+    if !matches!(body.format.as_str(), "indexed8" | "rgb565" | "rgba8888") {
+        return Json(json!({ "error": "unsupported frame format" }));
+    }
+    let hash_bytes = match hex::decode_hash(&body.hash) {
+        Ok(b) => b,
+        Err(e) => return Json(json!({ "error": e })),
     };
 
     let result = sqlx::query(
@@ -123,10 +133,8 @@ pub async fn list_frames(
 //
 // When `kvm_run_meta` has a row for this run (a real `/run/kvm { run_id: ... }` boot,
 // todo.md §14's eighteenth-brick follow-up), this re-boots that exact kernel/cmdline/tape under
-// baud-multiverse and writes the *real* pixel bytes the guest produced. Runs with no such row —
-// every pre-pivot manually-seeded run (`POST /runs/:id/frames`, hash-only, no kernel/tape to
-// replay) — keep the prior synthetic-gradient-from-hash fallback so existing callers of that
-// route (drive/m/m5.sh, m8.sh, full-demo.sh) are unaffected.
+// baud-multiverse and writes the real pixel bytes the guest produced. Hash-only records without
+// replay metadata are rejected because a hash cannot be decoded back into guest pixels.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -566,69 +574,6 @@ async fn render_frames_from_real_restore(_params: RealRestoreParams) -> Result<V
     Err(json!({ "error": "real KVM restore-replay is only available on target_os = \"linux\"" }))
 }
 
-/// Pre-pivot fallback: the stored frame records contain only content hashes (the agent omits raw
-/// pixels to save bandwidth, `frame_records`'s "bytes are NOT stored here" convention) with no
-/// kernel/tape on record to replay — derive a deterministic synthetic frame from the stored hash
-/// instead, exactly as this route always has (VR2-M19: render writes real, reproducible bytes,
-/// just not the guest's *actual* pixels, since nothing recorded what those were).
-async fn render_frames_from_stored_hashes(
-    state: &AppState,
-    run_id: &str,
-    from_step: u64,
-    to_step: Option<u64>,
-) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
-    let from_step = from_step as i64;
-    let to_step_val = to_step.map(|v| v as i64);
-    let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
-        "SELECT node, step, width, height, format, hash
-         FROM frame_records
-         WHERE run_id = ? AND step >= ? AND (? IS NULL OR step <= ?)
-         ORDER BY step ASC"
-    )
-    .bind(run_id)
-    .bind(from_step)
-    .bind(to_step_val).bind(to_step_val)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| json!({ "error": format!("db error: {e}") }))?;
-
-    Ok(rows
-        .into_iter()
-        .map(|(_, _, w, h, _, hash)| {
-            let w = w as u32;
-            let h = h as u32;
-            (w, h, synthetic_frame_rgba(&hash, w, h))
-        })
-        .collect())
-}
-
-/// Generate a deterministic synthetic RGBA frame from a frame hash.
-///
-/// The hash acts as a seed so the same stored hash always produces the same
-/// pixels. The gradient pattern makes frames visually distinguishable.
-fn synthetic_frame_rgba(hash: &[u8], width: u32, height: u32) -> Vec<u8> {
-    // Use first 3 bytes of hash as colour offset
-    let r_off = hash.first().copied().unwrap_or(0);
-    let g_off = hash.get(1).copied().unwrap_or(0);
-    let b_off = hash.get(2).copied().unwrap_or(0);
-
-    let w = width as usize;
-    let h = height as usize;
-    let mut rgba = Vec::with_capacity(w * h * 4);
-    for y in 0..h {
-        for x in 0..w {
-            let r = r_off.wrapping_add((x * 255 / w.max(1)) as u8);
-            let g = g_off.wrapping_add((y * 255 / h.max(1)) as u8);
-            let b = b_off.wrapping_add(((x + y) * 127 / (w + h).max(1)) as u8);
-            rgba.push(r);
-            rgba.push(g);
-            rgba.push(b);
-            rgba.push(255); // alpha
-        }
-    }
-    rgba
-}
-
 // ---------------------------------------------------------------------------
 // GET /runs/:id/stream/tail — live frames (returns stored list for now)
 // ---------------------------------------------------------------------------
@@ -687,8 +632,8 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Strict hex decode for a stored `kvm_run_meta.tape_hex` value — unlike `hex::decode_or_b64`
-/// below (which exists to accept loose test-seeded hash strings on `POST /runs/:id/frames`),
+/// Strict hex decode for a stored `kvm_run_meta.tape_hex` value. Unlike the frame-hash decoder
+/// above, this accepts only the exact hexadecimal tape representation persisted by KVM runs,
 /// this must never silently treat malformed input as raw bytes: it feeds directly into
 /// `Multiverse::boot`'s tape.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
@@ -706,23 +651,37 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 // Simple hex / base64 decode helper
 mod hex {
-    pub fn decode_or_b64(s: &str) -> Option<Vec<u8>> {
-        // Try hex first
-        if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-            let bytes: Option<Vec<u8>> = (0..s.len())
+    use base64::Engine;
+
+    pub fn decode_hash(s: &str) -> Result<Vec<u8>, String> {
+        let bytes = if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            (0..s.len())
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-                .collect();
-            if let Some(b) = bytes {
-                if b.len() == 32 {
-                    return Some(b);
-                }
-            }
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "hash is not valid hexadecimal".to_string())?
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(s)
+                .map_err(|_| "hash must be a 32-byte hexadecimal or base64 value".to_string())?
+        };
+        if bytes.len() != 32 {
+            return Err(format!("frame hash must contain exactly 32 bytes, got {}", bytes.len()));
         }
-        // Accept any non-empty byte string as a fallback (for test data)
-        if !s.is_empty() {
-            return Some(s.as_bytes().to_vec());
-        }
-        None
+        Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hex::decode_hash;
+    use base64::Engine;
+
+    #[test]
+    fn frame_hash_decoder_requires_32_bytes() {
+        assert!(decode_hash("00").is_err());
+        assert_eq!(decode_hash(&"ab".repeat(32)).unwrap().len(), 32);
+        let encoded = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        assert_eq!(decode_hash(&encoded).unwrap().len(), 32);
     }
 }

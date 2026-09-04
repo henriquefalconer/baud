@@ -32,8 +32,8 @@ use crate::transport::Transport;
 /// In production mode (BAUD_WS_URL set): connects to baud-server via WebSocket
 /// and uses ChannelDrawSource to relay draws through the server's baud-driver.
 ///
-/// In scaffold/test mode (BAUD_WS_URL not set): uses a synthetic tape from
-/// BAUD_SEED (or 0) to drive the supervisor — same code path, no network.
+/// A production run requires BAUD_WS_URL. The explicit `run_scaffold` helper remains available
+/// to unit tests, but the process entry point never silently turns a missing server into a fake run.
 pub async fn run() -> Result<()> {
     tracing::info!("baud-tape-agent starting");
 
@@ -59,17 +59,10 @@ pub async fn run() -> Result<()> {
     let ws_url = std::env::var("BAUD_WS_URL").ok();
     let token = std::env::var("BAUD_TOKEN").unwrap_or_default();
 
-    let obs_stream = if let Some(url) = ws_url {
-        // Production mode: relay draws through the WebSocket → baud-server
-        run_with_relay(&mut supervisor, url, token).await?
-    } else {
-        // Scaffold / test mode: synthetic tape from seed
-        let seed = std::env::var("BAUD_SEED")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        run_scaffold(&mut supervisor, seed)
-    };
+    let url = ws_url.context(
+        "BAUD_WS_URL is required for a production agent run; use run_scaffold only in tests",
+    )?;
+    let obs_stream = run_with_relay(&mut supervisor, url, token).await?;
 
     tracing::info!("supervisor completed: {} observations", obs_stream.observations.len());
 

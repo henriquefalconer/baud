@@ -370,14 +370,24 @@ impl SnapshotStore {
         let mut records = Vec::new();
         let mut offset = 0usize;
         while offset < plaintext.len() {
-            let len_bytes: [u8; 4] = plaintext[offset..offset + 4]
+            let end_of_prefix = offset.checked_add(4).ok_or_else(|| {
+                StoreError::BadHash("records length prefix overflow".into())
+            })?;
+            let len_bytes: [u8; 4] = plaintext
+                .get(offset..end_of_prefix)
+                .ok_or_else(|| StoreError::BadHash("truncated records length prefix".into()))?
                 .try_into()
-                .map_err(|_| StoreError::BadHash("truncated records length prefix".into()))?;
+                .expect("a four-byte slice has the requested length");
             let len = u32::from_le_bytes(len_bytes) as usize;
-            offset += 4;
-            let encoded = &plaintext[offset..offset + len];
+            offset = end_of_prefix;
+            let end_of_record = offset.checked_add(len).ok_or_else(|| {
+                StoreError::BadHash("records length overflow".into())
+            })?;
+            let encoded = plaintext
+                .get(offset..end_of_record)
+                .ok_or_else(|| StoreError::BadHash("truncated record body".into()))?;
             records.push(baud_proto::decode(encoded)?);
-            offset += len;
+            offset = end_of_record;
         }
         Ok(records)
     }

@@ -390,3 +390,100 @@ Final validation for the implemented increment is green: baud-packages and baud-
   - Hash-only frame records return a diagnostic instead of fabricated pixels.
   - Mario requires a real ROM and refuses simulation or load-failure fallback.
 ---
+
+Push completed; confirming only the remote tip and clean working tree, with no post-push rebuild or test rerun.
+
+## 2026-09-04T03:17:45 UTC (49min) - Session usage — ralph-6 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.7027 (summed from 10 session transcripts: main $0.4265 · subagents $0.2762)
+- tokens input 1,465,359 · cache-read 17,333,760 · cache-write 0 · output 52,445 · reasoning 12,829
+- context 221,856 tok peak of 272K (82%) across 106 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.7027 (in 1,465,359 / out 65,274 / cache-read 17,333,760)
+- subagents (9) bg_delegate x7 · bg_run x2
+  - bg_delegate Study multiverse specs: gpt-5.6-luna $0.0267, 5 inference calls
+  - bg_delegate Study pipeline specs: gpt-5.6-luna $0.0225, 6 inference calls
+  - bg_delegate Study proof specs: gpt-5.6-luna $0.0258, 5 inference calls
+  - bg_delegate Search G1 code: gpt-5.6-luna $0.0215, 4 inference calls
+  - bg_delegate Search G2 G6 code: gpt-5.6-luna $0.0212, 4 inference calls
+  - bg_delegate Search G3 G4 code: gpt-5.6-luna $0.0302, 6 inference calls
+  - bg_delegate Search G5 G7 code: gpt-5.6-luna $0.0262, 6 inference calls
+  - bg_run Implement G1 wiring: gpt-5.6-luna $0.0742, 32 inference calls
+  - bg_run Implement G5 shrink: gpt-5.6-luna $0.0277, 9 inference calls
+- transcript: ralph/.run/20260904T004853Z/007-ralph-6.json
+- transcript: ralph/.run/20260904T004853Z/008-ralph-6.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 7 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address from @todo-build.md, then implementing and validating each one end to end.
+
+Chose these 7 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, and G7 real Mario guest proof — they are all 7 pending items in the queue.
+
+Starting G1 implementation investigation.
+
+G2 pipeline inspection found multiple existing contracts; checking implementation and tests before edits.
+
+Starting G3 snapshot and shell implementation review.
+
+G4 frame ingress now rejects unbounded geometry, unsupported formats, malformed hashes, and no longer contains hash-to-pixel synthesis; starting focused verification.
+
+Updated M11 to assert fail-closed hash-only rendering, keeping the drive aligned with the real-frame requirement.
+
+Frame validation changes are syntactically clean; awaiting focused test worker while reviewing remaining selected gaps.
+
+G3 restore now validates every fixed-size KVM state blob before any ioctl, preventing truncated wire state from being silently zero-padded.
+
+The test worker delegated the command again and exited before collecting results; running the required focused tests directly now.
+
+Snapshot-store record decoding now bounds-checks both length prefixes and bodies, turning truncated encrypted records into typed errors instead of panics.
+
+Focused verification is green: server (42), snapshot (32), agent (7), and snapshot-store (21) tests passed; preparing the required full gate.
+
+Launching the repository pre-push gate on the current tree, then I will repair every failure it reports.
+
+Gate passed KVM, package, server, workspace-test, and drive phases; it timed out in the long package-build phase and clippy failed, so I am inspecting the exact clippy diagnostics.
+
+Clippy failed from concurrent compiler memory exhaustion (os error 12), not a lint; rerunning it isolated with two build jobs to establish a clean diagnostic before the full gate retry.
+
+Isolated clippy is green with two compiler jobs; starting a clean full gate in the background so the long package build can finish without the prior 10-minute shell cap.
+
+Added a regression test proving truncated register state is rejected before restore; running the snapshot crate tests again before gate completion.
+
+The daemon now refuses non-loopback BAUD_ADDR values, preserving the localhost-only trust boundary instead of accepting accidental public exposure.
+
+Tightened frame format validation to the three formats the shared baud-proto/stream pipeline actually decodes; no unsupported YUV records can enter storage.
+
+No remaining server references to the removed synthetic frame renderer; continuing with gate monitoring.
+
+The clean gate remains in its uncontended H5 phase; all focused tests and isolated clippy are green, with no new failure output.
+
+Gate is still executing its long H5 hardware phase; preserving the live progress log while it completes.
+
+H5 passed in 160s on real KVM and the drive fan-out has started cleanly; waiting for the remaining gate phases before committing.
+
+The gate has now passed clippy and the completed frame drive alongside H5; remaining drive jobs are still running.
+
+All completed gate work remains green; the four H1-H4 real-KVM drives are finishing their isolated assertions.
+
+H1 has passed; H2 and H3 are still running under the gate with their own server/KVM processes, so I am leaving them uncontended rather than interrupting valid work.
+
+Gate H3 hit the documented rdtsc high-bit flake under concurrent load; the gate protocol permits it only if phase 6 isolation passes, so I am preserving the failure and waiting for that required evidence.
+
+The gate has passed all completed phases except the documented H3 RDTSC load flake; phase 5 is now running the required package-build drive.
+
+Phase 5 package CLI validation is compiling the changed workspace; no failure has been reported.
+
+Package-build CLI is now in its real server-backed image-build assertion; leaving it to finish rather than weakening or skipping the path.
+
+The package-build subprocess is still alive and its server is healthy; no timeout or error has appeared, so I am retaining the real verification path.
+
+The package drive is compiling the full pinned WSL kernel source as designed, not hanging; keeping the gate alive for its completion.
+
+No new gate failure; the real kernel build remains the only active work.
+
+Kernel compilation is advancing through generated objects; the gate process remains healthy.
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    

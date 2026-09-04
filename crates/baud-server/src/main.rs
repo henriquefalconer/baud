@@ -52,6 +52,9 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = std::env::var("BAUD_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:7734".to_owned())
         .parse()?;
+    if !addr.ip().is_loopback() {
+        anyhow::bail!("BAUD_ADDR must use a loopback address; refusing to expose the daemon on {addr}");
+    }
     info!("baud-server listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -210,9 +210,9 @@ cmp -s "$OUT_QOI" "$OUT_QOI2" || fail "M11.4: re-render produced different bytes
 pass "M11.4: re-rendering the same run reproduces byte-identical output"
 
 # ---------------------------------------------------------------------------
-# M11.5 — pre-pivot synthetic fallback still works (no kvm_run_meta row for this run)
+# M11.5 — hash-only records fail closed because hashes cannot be rendered into pixels
 # ---------------------------------------------------------------------------
-log "--- M11.5: synthetic fallback for a manually-seeded run (no kvm_run_meta row) ---"
+log "--- M11.5: hash-only render is rejected without replay metadata ---"
 LEGACY_RUN_OUT=$(BAUD_SERVER="$SRV" "$BAUD" run start \
     --spec examples/framedemo/spec.yaml \
     --seed 101 \
@@ -224,9 +224,9 @@ curl -sf -X POST "$SRV/runs/$LEGACY_RUN_ID/frames" -H "Content-Type: application
     -d "{\"node\": 0, \"step\": 0, \"width\": 4, \"height\": 4, \"format\": \"indexed8\", \"hash\": \"$HASH\"}" > /dev/null
 LEGACY_RENDER=$(curl -sf -X POST "$SRV/runs/$LEGACY_RUN_ID/stream/render" -H "Content-Type: application/json" \
     -d "{\"format\": \"qoi-seq\", \"out\": \"$OUT_LEGACY\"}")
-LEGACY_OK=$(echo "$LEGACY_RENDER" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))")
-[[ "$LEGACY_OK" == "True" ]] || fail "M11.5: synthetic-fallback render returned ok!=true: $LEGACY_RENDER"
-pass "M11.5: pre-pivot manually-seeded run still renders via the synthetic-gradient fallback"
+LEGACY_ERROR=$(echo "$LEGACY_RENDER" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error', ''))")
+echo "$LEGACY_ERROR" | grep -q "no replayable KVM image" || fail "M11.5: hash-only render was not rejected: $LEGACY_RENDER"
+pass "M11.5: pre-pivot hash-only frames fail closed instead of fabricating pixels"
 
 curl -sf "$SRV/health" > /dev/null || fail "baud-server is no longer healthy at the end of the run"
 pass "baud-server remained healthy throughout"
@@ -242,4 +242,4 @@ echo "  POST /run/kvm { run_id }     — real boot persists kernel/cmdline/tape 
 echo "  GET  /runs/:id/frames        — real frame row in the DB"
 echo "  POST /runs/:id/stream/render — real replay decodes to the guest's actual pixels"
 echo "  determinism                  — re-rendering reproduces byte-identical output"
-echo "  fallback                     — pre-pivot manually-seeded runs still use the synthetic path"
+echo "  fail-closed                  — hash-only manually-seeded runs are rejected without replay metadata"
