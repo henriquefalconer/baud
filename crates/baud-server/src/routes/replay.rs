@@ -93,9 +93,30 @@ pub async fn replay(
         Err(e) => return Json(json!({ "error": format!("db error fetching observations: {e}") })),
     };
 
-    // 5. Replay: re-generate observations deterministically from the same (seed, spec_hash)
-    // and verify they match the stored observations up to to_step.
-    let replay_obs = generate_replay_observations(seed as u64, &spec_hash, &spec_doc);
+    // 5. Prefer the exact tape recorded by a real KVM run. Re-seeding a PRNG here would
+    // silently replay a different input stream, which is especially easy to miss when the
+    // guest consumes only a prefix. The legacy seed path remains for pre-KVM rows that have no
+    // persisted tape metadata.
+    let stored_tape = sqlx::query_as::<_, (String,)>(
+        "SELECT tape_hex FROM kvm_run_meta WHERE run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_optional(&state.db)
+    .await;
+    let replay_tape = match stored_tape {
+        Ok(Some((tape_hex,))) => match decode_hex_tape(&tape_hex) {
+            Some(tape) => Some(tape),
+            None => return Json(json!({ "error": "stored KVM tape is malformed" })),
+        },
+        Ok(None) => body.tape_bytes.clone(),
+        Err(e) => return Json(json!({ "error": format!("db error fetching replay tape: {e}") })),
+    };
+    let replay_obs = generate_replay_observations(
+        replay_tape.as_deref(),
+        seed as u64,
+        &spec_hash,
+        &spec_doc,
+    );
 
     let to_step = body.to_step;
     let mut replayed = Vec::new();
@@ -176,6 +197,7 @@ pub async fn replay(
 /// Replay a spec through baud-multiverse using the stored tape (derived from seed).
 /// This is the real replay path: same (seed, spec) → same observation stream hash.
 fn generate_replay_observations(
+    tape: Option<&[u8]>,
     seed: u64,
     _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
@@ -184,10 +206,17 @@ fn generate_replay_observations(
     use rand_chacha::ChaCha20Rng;
     use rand::{RngCore, SeedableRng};
 
-    // Regenerate the same tape from seed (must match the tape used in the original run)
-    let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let mut tape_bytes = vec![0u8; 4096];
-    rng.fill_bytes(&mut tape_bytes);
+    // Old rows did not persist their tape, so retain their deterministic seed-derived replay.
+    // Real KVM rows and explicit replay requests take the exact bytes supplied by the caller.
+    let tape_bytes = match tape {
+        Some(bytes) => bytes.to_vec(),
+        None => {
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            let mut bytes = vec![0u8; 4096];
+            rng.fill_bytes(&mut bytes);
+            bytes
+        }
+    };
 
     let manifest = RunManifest {
         guests: spec_doc.nodes.iter().enumerate().map(|(i, n)| GuestSpec {
@@ -217,6 +246,16 @@ fn generate_replay_observations(
         value: ProbeValue::Utf8(e.value.to_string()),
         step: e.step,
     }).collect()
+}
+
+fn decode_hex_tape(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

@@ -192,3 +192,52 @@ Re-read todo-build.md: all eight locked entries remain pending and none can hone
 ---
 
 Pushing the validated commit and then checking that origin/main matches the local tip.
+
+## 2026-09-04T01:26:58 UTC (12min) - Session usage — ralph-2 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3452 (summed from 8 session transcripts: main $0.1985 · subagents $0.1466)
+- tokens input 743,178 · cache-read 8,116,224 · cache-write 0 · output 28,505 · reasoning 4,901
+- context 143,669 tok peak of 272K (53%) across 64 inference calls, monotonic
+- models gpt-5.6-luna $0.3452 (in 743,178 / out 33,406 / cache-read 8,116,224)
+- subagents (7) bg_delegate x6 · bg_run x1
+  - bg_delegate Study core specs: gpt-5.6-luna $0.0143, 4 inference calls
+  - bg_delegate Study data specs: gpt-5.6-luna $0.0226, 6 inference calls
+  - bg_delegate Study service specs: gpt-5.6-luna $0.0250, 7 inference calls
+  - bg_delegate Search VMM work: gpt-5.6-luna $0.0282, 6 inference calls
+  - bg_delegate Search snapshots work: gpt-5.6-luna $0.0275, 6 inference calls
+  - bg_delegate Search pipeline work: gpt-5.6-luna $0.0264, 5 inference calls
+  - bg_run Run full gate: gpt-5.6-luna $0.0026, 4 inference calls
+- transcript: ralph/.run/20260904T004853Z/002-ralph-2.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 3 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items to address, studying the specifications, then implementing and validating each item before pushing the result.
+
+Chose these 9 items: G1 stock-KVM run integration; G3 shared-memory branching and live shell proof; G2 real image pipeline and tape endpoint; G3 snapshot integrity and live shell; G4 independent proof and frame pipeline; G5 authenticated lifecycle and real replay surface; G6 real Ubuntu H9 blocker and proof; G7 real Mario guest proof; Gate timeout. They are the 9 pending entries of 9.
+
+Starting baseline workspace test after the required clean-host setup.
+
+Baseline found one reproducible-once RDTSC high-bit failure; isolating it before changing code.
+
+Fixed the agent relay so each synchronous draw now blocks for the server DrawResult and fails closed on EOF or an unexpected message. Running focused agent tests.
+
+The focused compile caught only an import regression from removing DrawResult; restored the public relay result type and rerunning the package tests.
+
+Replay now prefers the exact persisted KVM tape, validates its hex encoding, and only keeps seed regeneration for legacy rows without tape metadata. Running server tests.
+
+The validation worker ran before the import fix and correctly reported that deterministic compile failure. The focused packages are now green, so rerunning the exact full gate on the corrected tree.
+
+Full gate exposed a clippy never-loop lint in the new relay receive code. Simplified the one-result receive to satisfy the repository deny rules, with protocol mismatches still failing closed. Rerunning the exact gate.
+
+The corrected full gate is green under the repository rule: every unit passed, with only the documented RDTSC load flake, and its isolated rerun passed. The gate-timeout queue item is now collapsed to DONE; the larger G1-G7 integration entries remain open because this step did not complete them.
+
+## 2026-09-04T01:43:34 UTC - Changes committed.
+- Implemented server-backed draw delivery in the tape agent and exact-tape preference for replay.
+- Files changed: crates/baud-tape-agent/src/agent.rs, crates/baud-server/src/routes/replay.rs, todo-build.md, ralph/progress.txt.
+- **Brief description of changes:**
+  - The WebSocket relay now waits for each real DrawResult and reports EOF or protocol mismatches instead of injecting zero bytes.
+  - Replay reads and validates the persisted KVM tape before falling back to legacy seed replay for old rows.
+  - Focused agent/server tests pass, and drive/gate.sh passes under the documented RDTSC load-flake rule.
+  - The G1-G7 integration entries remain pending for the next step.
+---

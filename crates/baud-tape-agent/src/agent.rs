@@ -137,7 +137,7 @@ async fn run_with_relay(
 
     // WebSocket channels
     let (ws_out_tx, ws_out_rx) = tokio::sync::mpsc::channel::<Msg>(256);
-    let (ws_in_tx, _ws_in_rx) = tokio::sync::mpsc::channel::<Msg>(256);
+    let (ws_in_tx, ws_in_rx) = tokio::sync::mpsc::channel::<Msg>(256);
 
     // Spawn the WebSocket I/O task
     let ws_url_clone = ws_url.clone();
@@ -152,22 +152,25 @@ async fn run_with_relay(
     // and deliver DrawResults from baud-server back to the supervisor
     let ws_out_tx_relay = ws_out_tx.clone();
     let relay_task = tokio::task::spawn_blocking(move || -> Result<()> {
-        // This runs in a blocking thread to avoid blocking the async runtime
+        // This runs in a blocking thread to avoid blocking the async runtime.  The websocket
+        // reader remains async, but Tokio's bounded receiver provides a blocking receive here;
+        // every supervisor request therefore waits for the matching server result instead of
+        // receiving a fabricated zero-filled draw.
+        let mut ws_in_rx = ws_in_rx;
         while let Ok(req) = req_rx.recv() {
-            // Forward DrawRequest to baud-server via WebSocket
-            let msg = Msg::DrawRequest(req);
-            if ws_out_tx_relay.blocking_send(msg).is_err() {
-                break; // WebSocket channel closed
-            }
-            // Wait for DrawResult from baud-server
-            // ws_in_rx is async, so we use a simple timeout-based poll
-            // In a full implementation this would use a dedicated sync channel
-            // seeded from the async recv loop. Here we return a synthetic result
-            // until the async integration is complete.
-            let synthetic = DrawResult { bytes: vec![0u8; 8] };
-            if result_tx.send(synthetic).is_err() {
-                break;
-            }
+            ws_out_tx_relay
+                .blocking_send(Msg::DrawRequest(req))
+                .context("websocket output channel closed")?;
+
+            let result = match ws_in_rx.blocking_recv() {
+                Some(Msg::DrawResult(result)) => result,
+                Some(Msg::Eof) | None => anyhow::bail!("websocket closed while waiting for DrawResult"),
+                Some(other) => anyhow::bail!(
+                    "unexpected {:?} while waiting for DrawResult",
+                    std::mem::discriminant(&other)
+                ),
+            };
+            result_tx.send(result).context("supervisor draw channel closed")?;
         }
         Ok(())
     });
