@@ -89,3 +89,41 @@ Final prune step 7: no task-file edits were needed. Rechecked todo-build.md at 1
 - ralph ended COMPLETE
 - total cost $0.2409 (summed from session usage)
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important build items, studying the specifications, then implementing and validating the complete batch.
+
+Studying specs and build backlog in parallel before locking the batch.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof, G8 host module — they are all 8 pending items in todo-build.md.
+
+Auditing the existing implementations and acceptance coverage before touching production code.
+
+Metadata generation timed out; checking the repository state and toolchain before retrying.
+
+Added the first concrete queue change: a NixOS host module and reference machine definition; now checking syntax and package tests.
+
+Tightened persisted universe decoding to reject oversized bodies and trailing bytes, with a regression test for truncation-like corruption.
+
+The snapshot crate passes all 32 unit tests after the integrity guard; reviewing the gate outcome next.
+
+Documented the host module’s CPU and store rationale; no unrelated runtime code has been changed while the required gate runs.
+
+The validation subagent finished; collecting its durable report before deciding the iteration result.
+
+The single validation subagent timed out at the 600-second limit before reporting a gate result; I recorded the timeout as a new open queue item and will not claim green.
+
+Retrying the required gate directly now that the workspace has rebuilt, using the exact command and full timeout required by todo-build.md.
+
+Gate is green: 25 units passed and one package-build step was correctly skipped; G8 is now collapsed to DONE, while the remaining selected integration items stay open and are not being relabeled.

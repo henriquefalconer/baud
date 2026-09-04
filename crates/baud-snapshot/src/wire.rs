@@ -19,6 +19,7 @@
 // isn't a tape-device message.
 
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 
 use crate::page_store::{PageHash, PageStore, PAGE_SIZE};
 use crate::universe::{ClockState, DeviceState, Universe, VcpuState};
@@ -87,11 +88,26 @@ pub fn encode_universe_body(body: &UniverseBody) -> Result<Vec<u8>, WireError> {
 
 /// Decode a [`UniverseBody`] from CBOR bytes, checking the version byte.
 pub fn decode_universe_body(bytes: &[u8]) -> Result<UniverseBody, WireError> {
+    const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
     let (version, rest) = bytes.split_first().ok_or(WireError::Empty)?;
     if *version != WIRE_VERSION {
         return Err(WireError::UnsupportedVersion(*version));
     }
-    ciborium::from_reader(rest).map_err(|e| WireError::Decode(e.to_string()))
+    if rest.len() > MAX_BODY_BYTES {
+        return Err(WireError::Decode(format!(
+            "universe body exceeds {MAX_BODY_BYTES} byte limit"
+        )));
+    }
+    let mut cursor = Cursor::new(rest);
+    let body: UniverseBody = ciborium::from_reader(&mut cursor)
+        .map_err(|e| WireError::Decode(e.to_string()))?;
+    if cursor.position() as usize != rest.len() {
+        return Err(WireError::Decode(format!(
+            "trailing bytes after universe body: {}",
+            rest.len() - cursor.position() as usize
+        )));
+    }
+    Ok(body)
 }
 
 /// Rebuild a full [`Universe`] from a decoded [`UniverseBody`] plus a per-hash page fetcher (e.g.
@@ -187,6 +203,15 @@ mod tests {
     fn decode_rejects_unsupported_version() {
         let bytes = vec![0xFFu8, 0, 0];
         assert!(matches!(decode_universe_body(&bytes), Err(WireError::UnsupportedVersion(0xFF))));
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let mut store = PageStore::new();
+        let encoded = encode_universe_body(&sample_universe(&mut store).to_body()).unwrap();
+        let mut truncated = encoded.clone();
+        truncated.extend_from_slice(&[0x00, 0x01]);
+        assert!(matches!(decode_universe_body(&truncated), Err(WireError::Decode(_))));
     }
 
     #[test]
