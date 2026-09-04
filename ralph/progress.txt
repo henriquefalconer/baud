@@ -67,3 +67,25 @@ Final prune step 7: no task-file edits were needed. Rechecked todo-build.md at 1
   - Production run, replay, and verify paths still simulate or regenerate tapes instead of completing real stock-KVM execution.
   - The real Ubuntu 18.04.1 boot still stalls inside one KVM_RUN, and the G2 image pipeline and guest tape endpoint remain incomplete.
 ---
+
+## 2026-09-04T00:48:45 UTC (4min) - Session usage — ralph-1 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2409 (summed from 9 session transcripts: main $0.0479 · subagents $0.1930)
+- tokens input 881,752 · cache-read 1,972,736 · cache-write 0 · output 20,950 · reasoning 3,702
+- context 74,575 tok peak of 272K (27%) across 23 inference calls, monotonic
+- models gpt-5.6-luna $0.2409 (in 881,752 / out 24,652 / cache-read 1,972,736)
+- subagents (8) bg_delegate x8
+  - bg_delegate Audit G1: gpt-5.6-luna $0.0228, 4 inference calls
+  - bg_delegate Audit G2: gpt-5.6-luna $0.0252, 5 inference calls
+  - bg_delegate Audit G3: gpt-5.6-luna $0.0223, 4 inference calls
+  - bg_delegate Audit G4: gpt-5.6-luna $0.0235, 5 inference calls
+  - bg_delegate Audit G5: gpt-5.6-luna $0.0233, 6 inference calls
+  - bg_delegate Audit G6: gpt-5.6-luna $0.0269, 6 inference calls
+  - bg_delegate Audit G7: gpt-5.6-luna $0.0233, 6 inference calls
+  - bg_delegate Audit G8: gpt-5.6-luna $0.0257, 6 inference calls
+- transcript: ralph/.run/20260904T004443Z/001-ralph-1.json
+
+## 2026-09-04T00:48:47 UTC - RUN TOTALS (ralph shell loop)
+- sessions: 1; ralph iterations: 1
+- ralph ended COMPLETE
+- total cost $0.2409 (summed from session usage)
+---
