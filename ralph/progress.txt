@@ -1,0 +1,40 @@
+
+RULINGS: 8/8 briefs filed. Proposals received: G1=3, G2=4, G3=5, G4=5, G5=4, G6=1, G7=1, G8=5. Accepted complete queue outcomes: 7 new bullets (G2-G7, with G3 integrity folded into one outcome); existing G1/G3/G8 bullets retained. Rejected as duplicates or incomplete: overlapping G3 store/shell fragments and G8 deferred GC/remote/CPU-template work. Blocked dependencies remain visible in task bullets; no source or test implementation was changed.
+
+Second prune complete: todo-build.md now has 1238 lines and 0 DONE item markers. Every remaining DONE hit is prose, a status/table word, or an example output line, and was read.
+
+Plan validation: all 8 standing groups remain in todo-plan.md; each queued outcome names affected paths, dependencies, acceptance tests/drives, and failure behavior. Plan mode made Markdown and progress changes only.
+
+## 2026-09-04T00:11:06 UTC - Plan pass committed.
+
+- Items pruned: 0 DONE markers removed in step 1; 0 removed in step 7; 11 remaining DONE hits reviewed as prose/status/example text.
+
+- Audits filed: 8 groups. Proposals received: G1 3, G2 4, G3 5, G4 5, G5 4, G6 1, G7 1, G8 5. Seven new complete bullets accepted; duplicates and deferred fragments rejected.
+
+- Verify was not green. `bash drive/gate.sh` failed during phase 0 warm-up on stale/incompatible Rust metadata with E0460/E0463/E0786.
+
+- **Most severe findings:**
+
+  - The production verify/replay and legacy agent paths still use simulation or regenerate tapes instead of running the real KVM guest.
+
+  - The real Ubuntu 18.04.1 boot still stalls inside one KVM_RUN, and the G2 guest tape/image pipeline is not implemented.
+
+---
+
+Queue review correction: reordered the retained G8 host bullet after G7 so the queue follows the priority order G1 through G8. Final prune check remains 0 DONE item markers.
+
+## 2026-09-04T00:11:38 UTC - Plan pass committed.
+
+
+ Items pruned: 0 DONE markers removed in step 1; 0 removed in step 7; 11 remaining DONE hits reviewed as prose/status/example text.
+- Audits filed: 8 groups. Proposals received: G1 3, G2 4, G3 5, G4 5, G5 4, G6 1, G7 1, G8 5. Seven new complete bullets accepted; duplicates and deferred fragments rejected. Queue order corrected to G1 through G8.
+
+- Verify was not green. `bash drive/gate.sh` failed during phase 0 warm-up on stale/incompatible Rust metadata with E0460/E0463/E0786.
+
+- **Most severe findings:**
+
+  - The production verify/replay and legacy agent paths still use simulation or regenerate tapes instead of running the real KVM guest.
+
+  - The real Ubuntu 18.04.1 boot still stalls inside one KVM_RUN, and the G2 guest tape/image pipeline is not implemented.
+
+---
