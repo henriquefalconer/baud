@@ -77,15 +77,29 @@ pub async fn determinism(
         .execute(&state.db)
         .await;
 
-        // 3. Simulate a deterministic run: generate synthetic observations
-        // In a real implementation, this would launch the supervisor and collect real observations.
-        // For M3, we implement the verification harness: generate observations deterministically
-        // from (seed, spec_hash, run_index=0) — the same for both runs to prove determinism.
-        let synthetic_obs = run_spec_through_multiverse(seed, &spec_hash, &spec_doc);
+        // 3. Execute the workload and collect observations. A load or execution failure is a
+        // failed verification, never an empty stream that can accidentally look deterministic.
+        let observations = match run_spec_through_multiverse(seed, &spec_hash, &spec_doc) {
+            Ok(observations) => observations,
+            Err(error) => {
+                let _ = sqlx::query("UPDATE runs SET status = 'error', updated_at = ? WHERE id = ?")
+                    .bind(crate::state::unix_now() as i64)
+                    .bind(&run_id)
+                    .execute(&state.db)
+                    .await;
+                return Json(json!({
+                    "ok": false,
+                    "verified": false,
+                    "run_id": run_id,
+                    "error": error,
+                    "message": "determinism verification failed before an observation stream was produced"
+                }));
+            }
+        };
 
         // 4. Append observations to the run (in-process: write to SQLite + in-memory journal)
         let mut journal_hasher = blake3::Hasher::new();
-        for obs in &synthetic_obs {
+        for obs in &observations {
             let now = crate::state::unix_now() as i64;
             let value_bytes = serde_json::to_vec(&format!("{:?}", obs.value)).unwrap_or_default();
 
@@ -108,7 +122,7 @@ pub async fn determinism(
             .await;
         }
 
-        if i == 0 { first_obs_count = synthetic_obs.len(); }
+        if i == 0 { first_obs_count = observations.len(); }
 
         let stream_hash = hex_encode(journal_hasher.finalize().as_bytes());
 
@@ -219,7 +233,23 @@ pub async fn determinism_poisoned(
         .await;
 
         let mut journal_hasher = blake3::Hasher::new();
-        let base_obs = run_spec_through_multiverse(seed, &spec_hash, &spec_doc);
+        let base_obs = match run_spec_through_multiverse(seed, &spec_hash, &spec_doc) {
+            Ok(observations) => observations,
+            Err(error) => {
+                let _ = sqlx::query("UPDATE runs SET status = 'error', updated_at = ? WHERE id = ?")
+                    .bind(crate::state::unix_now() as i64)
+                    .bind(&run_id)
+                    .execute(&state.db)
+                    .await;
+                return Json(json!({
+                    "ok": false,
+                    "verified": false,
+                    "run_id": run_id,
+                    "error": error,
+                    "message": "poisoned verification failed before an observation stream was produced"
+                }));
+            }
+        };
 
         // Inject time-based poison: different for each run (appended after base observations)
         let poison = crate::state::unix_now();
@@ -443,7 +473,7 @@ fn run_spec_through_multiverse(
     seed: u64,
     _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
-) -> Vec<Observation> {
+) -> Result<Vec<Observation>, String> {
     use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
 
     // Build the run manifest from the spec doc.
@@ -465,20 +495,17 @@ fn run_spec_through_multiverse(
     // Load and run the multiverse.
     let mut mv = match Multiverse::load_from_manifest(manifest) {
         Ok(mv) => mv,
-        Err(e) => {
-            tracing::warn!("Multiverse::load failed: {e}; using empty observation stream");
-            return Vec::new();
-        }
+        Err(e) => return Err(format!("multiverse failed to load the workload: {e}")),
     };
 
     // run() is now infallible (returns ObservationStream directly, spec §5)
     let stream = mv.run(&mut tape_source);
-    stream.observations.iter().map(|e| Observation {
+    Ok(stream.observations.iter().map(|e| Observation {
         probe: e.probe.clone(),
         node: e.node as u16,
         value: ProbeValue::Utf8(e.value.to_string()),
         step: e.step,
-    }).collect()
+    }).collect())
 }
 
 /// Generate a deterministic tape from a seed (using ChaCha PRNG).

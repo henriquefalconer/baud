@@ -339,3 +339,37 @@ Repeating the focused verification in the foreground as requested.
   - Existing aya deprecation warnings remain non-fatal.
 
 ---
+
+The independent gate started before the final helper fix and captured the transient compile error. The corrected server crate now passes all tests; I am rerunning the exact repository gate on the current tree.
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 5 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address in @todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 8 pending entries in the current queue.
+
+
+
+Study found that the real Linux KVM path and low-level snapshot/device tests are present, but legacy verify/replay still use the pre-pivot supervisor and the image, shared-memory, Ubuntu, and Mario paths remain incomplete.
+
+
+
+Started G1 stock-KVM run integration. Changed verification and replay load failures to return structured non-success responses instead of empty streams that could be reported as deterministic or successful.
+
+
+
+The changed server crate passes all 41 tests. The first independent gate captured a transient compile error from before the final helper fix; the rerun on the corrected tree is green: 25 passed, 0 failed, 1 skipped in 4m50s.
+
+
+
+The selected queue still contains substantial unresolved implementation work, so I am not marking those broad entries DONE.
+
+Verification gate is green on the current tree. The selected broad entries are not all complete, so no DONE markers or final Changes committed block are being fabricated; committing the verified fail-closed fix for the next iteration to continue from.

@@ -111,12 +111,21 @@ pub async fn replay(
         Ok(None) => body.tape_bytes.clone(),
         Err(e) => return Json(json!({ "error": format!("db error fetching replay tape: {e}") })),
     };
-    let replay_obs = generate_replay_observations(
+    let replay_obs = match generate_replay_observations(
         replay_tape.as_deref(),
         seed as u64,
         &spec_hash,
         &spec_doc,
-    );
+    ) {
+        Ok(observations) => observations,
+        Err(error) => return Json(json!({
+            "ok": false,
+            "verified": false,
+            "original_run_id": id,
+            "error": error,
+            "message": "replay failed before an observation stream was produced"
+        })),
+    };
 
     let to_step = body.to_step;
     let mut replayed = Vec::new();
@@ -205,7 +214,7 @@ fn generate_replay_observations(
     seed: u64,
     _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
-) -> Vec<Observation> {
+) -> Result<Vec<Observation>, String> {
     use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
     use rand_chacha::ChaCha20Rng;
     use rand::{RngCore, SeedableRng};
@@ -236,20 +245,17 @@ fn generate_replay_observations(
 
     let mut mv = match Multiverse::load_from_manifest(manifest) {
         Ok(mv) => mv,
-        Err(e) => {
-            tracing::warn!("replay Multiverse::load failed: {e}");
-            return Vec::new();
-        }
+        Err(e) => return Err(format!("multiverse failed to load the workload: {e}")),
     };
 
     // run() is infallible (spec §5): errors surface as Crash observations
     let stream = mv.run(&mut tape_source);
-    stream.observations.iter().map(|e| Observation {
+    Ok(stream.observations.iter().map(|e| Observation {
         probe: e.probe.clone(),
         node: e.node as u16,
         value: ProbeValue::Utf8(e.value.to_string()),
         step: e.step,
-    }).collect()
+    }).collect())
 }
 
 fn decode_hex_tape(s: &str) -> Option<Vec<u8>> {
