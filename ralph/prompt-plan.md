@@ -17,9 +17,12 @@ finished. Later passes continue from the current files.
 0b. Read `todo-plan.md` and `todo-build.md`. The first names the continuous goals; the second holds the
 implementation work that can be executed by the build loop.
 0c. Read `AGENTS.md` and the design documents, source, tests, and drives named by the current standing groups.
-0d. **This session runs the procedure itself.** The main thread owns the group audits, task reconciliation,
-file writes, validation, commit, and push. Subagents may inspect code and run focused checks, but they never
-write task files or decide what gets merged. **You own every child you start**: hold its id, wait for every
+0d. **This session runs the procedure itself and coordinates it autonomously.** The main thread owns the
+group audits, task reconciliation, file writes, validation, commit, and push. Start and coordinate the audit
+agents through the harness without asking the user to manage them or approve intermediate steps. Subagents may
+inspect code and run focused checks, but they never write task files, prompt files, audit-report files, or
+other coordination artifacts, and they never decide what gets merged. Their prompts and reports must stay in
+the agent conversation or harness result. **You own every child you start**: hold its id, wait for every
 result, and let nothing outlive this pass.
 
 ## 1. Execute the procedure, in order
@@ -29,10 +32,12 @@ result, and let nothing outlive this pass.
   are standing decisions that stop settled questions being re-opened, and they survive every prune. Say how many you removed,
    and prove the file is clean the way §1a demands before you move on.
 2. **Audit every standing group.** Start one implementation-audit subagent for each group in parallel with
-   the others. Give each the exact group heading, purpose, standing tasks, current focus, and acceptance
-   expectations from `todo-plan.md`. It must walk every relevant source module, public path, test, drive,
-   integration, and failure path, then compare the actual code with `todo-plan.md`, the named design
-   documents, and `todo-build.md`.
+   the others, coordinating them entirely through the harness. Do not create a file containing an agent's
+   prompt, instructions, transcript, or report. Give each agent the exact group heading, purpose, standing
+   tasks, current focus, and acceptance expectations from `todo-plan.md`. It must walk every relevant source
+   module, public path, test, drive, integration, and failure path, then compare the actual code with
+   `todo-plan.md`, the named design documents, and `todo-build.md`. Collect each result directly, then do the
+   reconciliation yourself in the main thread.
 3. **Require evidence from every audit.** The subagent may run focused commands such as
    `rg -n "TODO|OPEN|Status|Test|Drive|blocked|deferred" <paths>`,
    `git diff -- todo-build.md`, and the narrowest relevant test or build command. It must return a compact
