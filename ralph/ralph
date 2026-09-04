@@ -49,6 +49,85 @@ set -uo pipefail
 # ralph iteration and reported in long after the script had moved on.
 set -m
 
+# Run a harness behind a tiny ancestor-exit supervisor. A normal TERM runs the traps
+# above, but a task runner may SIGKILL the ralph shell after cancellation. In that
+# case bash cannot run its traps. The supervisor asks the kernel for SIGTERM when
+# ralph dies, then forwards it to the harness and every descendant before waiting
+# for the harness to exit. This closes the orphan window even for forced teardown.
+ralph_exec() {
+  python3 -c '
+import ctypes, os, signal, sys
+
+PR_SET_ANCESTOR_EXIT = 1
+parent = os.getppid()
+if ctypes.CDLL(None).prctl(PR_SET_ANCESTOR_EXIT, signal.SIGTERM) != 0:
+    raise SystemExit("ralph: cannot install ancestor-exit signal")
+if os.getppid() != parent:
+    os.kill(os.getpid(), signal.SIGTERM)
+
+def descendants(root):
+    children = {}
+    try:
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/status") as fh:
+                    ppid = next(line for line in fh if line.startswith("PPid:")).split()[1]
+                children.setdefault(int(ppid), []).append(int(name))
+            except (OSError, StopIteration, ValueError):
+                continue
+    except OSError:
+        return []
+    found, pending = [], [root]
+    while pending:
+        for child_pid in children.get(pending.pop(), []):
+            found.append(child_pid)
+            pending.append(child_pid)
+    return found
+
+child = None
+
+def stop_tree(signum, _frame):
+    if child is None:
+        raise SystemExit(128 + signum)
+    # A bg_run child can detach from the process group. It is still a descendant
+    # while the harness is alive, so walk that tree before signalling the root.
+    pids = descendants(child)
+    for pid in list(reversed(pids)) + [child]:
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+    # Forced teardown must not leave a stubborn detached worker behind.
+    for pid in list(reversed(pids)) + [child]:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+signal.signal(signal.SIGTERM, stop_tree)
+signal.signal(signal.SIGINT, stop_tree)
+child = os.fork()
+if child == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+while True:
+    try:
+        _, status = os.waitpid(child, 0)
+        if os.WIFEXITED(status):
+            raise SystemExit(os.WEXITSTATUS(status))
+        if os.WIFSIGNALED(status):
+            raise SystemExit(128 + os.WTERMSIG(status))
+    except InterruptedError:
+        continue
+' "$@"
+}
+
+if [[ "${RALPH_GUARDED:-0}" != 1 ]]; then
+  RALPH_GUARDED=1 ralph_exec bash "$0" "$@"
+  exit $?
+fi
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 

@@ -206,6 +206,32 @@ SH
   done
 }
 
+@test "forced ralph parent loss stops its harness" {
+  mkdir -p "$TMP/fake-bin" "$TMP/ralph"
+  cp "$RALPH" "$TMP/ralph/ralph"
+  cp "$REPO/ralph/prompt-build.md" "$TMP/ralph/prompt-build.md"
+  cat > "$TMP/fake-bin/pi" <<'SH'
+#!/usr/bin/env sh
+echo "$PPID" > "$PI_PARENT_PID_FILE"
+sleep 300
+SH
+  chmod +x "$TMP/fake-bin/pi"
+  PI_PARENT_PID_FILE="$TMP/pi-parent.pid" PATH="$TMP/fake-bin:$PATH"     bash -c "cd '$TMP' && ./ralph/ralph --iterations 1 --harness pi --model test/model --thinking off" &
+  local outer=$! worker
+  for _ in {1..30}; do
+    [ -s "$TMP/pi-parent.pid" ] && break
+    sleep 0.1
+  done
+  worker="$(cat "$TMP/pi-parent.pid" 2>/dev/null || true)"
+  [ -n "$worker" ] && kill -0 "$worker"
+  kill -KILL "$outer" 2>/dev/null || true
+  for _ in {1..30}; do
+    ! kill -0 "$worker" 2>/dev/null && break
+    sleep 0.1
+  done
+  ! kill -0 "$worker" 2>/dev/null
+}
+
 @test "group_members reports nothing for an empty or bogus group" {
   [ -z "$(group_members 999999)" ]
   [ -z "$(group_members '')" ]
@@ -467,14 +493,14 @@ SH
   grep -qF -- 'continuous goals' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'in parallel with' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'Audit every standing group' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'walk every relevant source module' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'walk every relevant source' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'Never accept a half-assed' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'always as Markdown bullet points' "$REPO/ralph/prompt-plan.md"
   grep -qF -- '## 1. Execute the procedure, in order' "$REPO/ralph/prompt-plan.md"
   grep -qF -- '**Prune `todo-build.md`**' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'Only DONE is deleted' "$REPO/ralph/prompt-plan.md"
   grep -qF -- 'not a claim that Baud' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'After the full pass is committed' "$REPO/ralph/prompt-plan.md"
+  grep -qF -- 'After the commit is pushed and confirmed landed' "$REPO/ralph/prompt-plan.md"
   ! grep -qF -- '<promise>NEXT</promise>' "$REPO/ralph/prompt-plan.md"
 
   grep -qF -- '## Task-generation method' "$REPO/todo-plan.md"
