@@ -85,6 +85,20 @@ fn pages_dedup_by_plaintext_hash() {
 }
 
 #[test]
+fn get_page_rejects_decrypted_plaintext_with_wrong_address() {
+    let (root, _identity_dir, store) = open_test_store();
+    let run = RunId::new("run-b-integrity");
+    let page = store.put_page(&run, b"original page").unwrap();
+    let path = root.path().join("runs").join("run-b-integrity").join("pages")
+        .join(format!("{}.age", page.address.to_hex()));
+    let replacement = baud_keys::age_encrypt(TEST_RECIPIENT, b"tampered plaintext").unwrap();
+    std::fs::write(path, replacement).unwrap();
+
+    let err = store.get_page(&run, page).unwrap_err();
+    assert!(matches!(err, StoreError::IntegrityMismatch { kind: "page", .. }));
+}
+
+#[test]
 fn reconstruct_forks_from_nearest_node() {
     const LOCAL_RANGE: u64 = 32;
     let (_root, _identity_dir, store) = open_test_store();

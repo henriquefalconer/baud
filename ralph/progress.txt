@@ -127,3 +127,66 @@ The single validation subagent timed out at the 600-second limit before reportin
 Retrying the required gate directly now that the workspace has rebuilt, using the exact command and full timeout required by todo-build.md.
 
 Gate is green: 25 units passed and one package-build step was correctly skipped; G8 is now collapsed to DONE, while the remaining selected integration items stay open and are not being relabeled.
+
+## 2026-09-04T01:14:55 UTC (26min) - Session usage — ralph-1 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2616 (summed from 6 session transcripts: main $0.1468 · subagents $0.1148)
+- tokens input 628,606 · cache-read 5,388,800 · cache-write 0 · output 23,424 · reasoning 6,094
+- context 128,181 tok peak of 272K (47%) across 48 inference calls, monotonic
+- models gpt-5.6-luna $0.2616 (in 628,606 / out 29,518 / cache-read 5,388,800)
+- subagents (5) bg_delegate x4 · bg_run_pi_attested x1
+  - bg_delegate Study specifications: gpt-5.6-luna $0.0245, 5 inference calls
+  - bg_delegate Study backlog code: gpt-5.6-luna $0.0325, 11 inference calls
+  - bg_delegate Search implementation gaps: gpt-5.6-luna $0.0235, 4 inference calls
+  - bg_delegate Review test strategy: gpt-5.6-luna $0.0279, 5 inference calls
+  - bg_run_pi_attested e21a7fea: gpt-5.6-luna $0.0063, 2 inference calls
+- transcript: ralph/.run/20260904T004853Z/001-ralph-1.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in todo-build.md, studying the specifications, then implementing and validating the selected work.
+
+Resetting perf_event_paranoid before repository inspection.
+
+Inspecting todo-build.md, specs, and repository state.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 8 pending items in the queue.
+
+Searching each selected area before making changes.
+
+Reviewing live route and pipeline gaps identified by source search; next I will make fail-closed and validation fixes before the full gate.
+
+Added overflow-safe frame geometry validation and plaintext hash verification for stored pages and universes, with regression coverage. Running targeted tests next.
+
+Hardened authenticated transport framing: exact length validation now rejects short, oversized, mismatched, and malformed CBOR frames before decode/allocation. Waiting for the single gate subagent result.
+
+The selected queue remains open because the repository audits confirm G1/G2/G3/G5/G6/G7 still require large end-to-end work; I am preserving those entries rather than falsely collapsing partial fixes.
+
+Gate subagent is still executing the mandated full validation; no overlapping test run will be started.
+
+While the gate runs, checking that only intended source and progress files changed.
+
+Re-read todo-build.md: all eight locked entries remain pending and none can honestly be collapsed to DONE from these bounded fixes, so this iteration will close with NEXT after committing the verified changes.
+
+## 2026-09-04T01:25:53 UTC - Changes committed.
+
+- What was implemented
+
+- Files changed
+
+- **Brief description of changes:**
+
+  - Added checked frame geometry arithmetic so oversized dimensions fail as typed malformed input instead of wrapping.
+
+  - Added plaintext BLAKE3 verification when reading encrypted snapshot pages and universe bodies.
+
+  - Added exact length-prefix validation for tape-agent stdio and WebSocket CBOR frames, with regression tests.
+
+  - Full gate passed: 25 passed, 0 failed, 1 skipped.
+
+---

@@ -118,6 +118,19 @@ impl SnapshotStore {
         Ok(baud_keys::age_decrypt(identity_path, &ciphertext)?)
     }
 
+    fn read_and_verify(&self, path: &Path, expected: Sha, kind: &'static str) -> Result<Vec<u8>, StoreError> {
+        let plaintext = self.read_and_decrypt(path)?;
+        let actual = Sha::of(&plaintext);
+        if actual != expected {
+            return Err(StoreError::IntegrityMismatch {
+                kind,
+                expected: expected.to_hex(),
+                actual: actual.to_hex(),
+            });
+        }
+        Ok(plaintext)
+    }
+
     // -- manifest --------------------------------------------------------------------------------
 
     pub fn put_manifest(&self, run: &RunId, manifest: &RunManifest) -> Result<(), StoreError> {
@@ -169,7 +182,7 @@ impl SnapshotStore {
     }
 
     pub fn get_page(&self, run: &RunId, page: PageRef) -> Result<Vec<u8>, StoreError> {
-        self.read_and_decrypt(&self.page_body_path(run, page.address))
+        self.read_and_verify(&self.page_body_path(run, page.address), page.address, "page")
     }
 
     // -- nodes / universes -------------------------------------------------------------------------
@@ -253,7 +266,7 @@ impl SnapshotStore {
         let n = self.read_node(run, node)?;
         let hash_hex = n.universe.ok_or_else(|| StoreError::NoUniverseAtNode(node.to_hex()))?;
         let hash = Sha::from_hex(&hash_hex)?;
-        self.read_and_decrypt(&self.universe_body_path(run, hash))
+        self.read_and_verify(&self.universe_body_path(run, hash), hash, "universe")
     }
 
     /// Walk from `target` up through `parent` links to the nearest node (inclusive of `target`

@@ -9,6 +9,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum FrameError {
+    #[error("frame geometry is too large: {width}x{height} pixels in {format:?}")]
+    GeometryOverflow { width: u32, height: u32, format: PixFmt },
     #[error("frame size mismatch: expected {expected} bytes, got {got}")]
     SizeMismatch { expected: usize, got: usize },
 }

@@ -28,7 +28,9 @@ pub fn fingerprint(
     height: u32,
     format: &PixFmt,
 ) -> Result<baud_proto::Hash, FrameError> {
-    let expected = expected_size(width, height, format);
+    let expected = checked_expected_size(width, height, format).ok_or_else(|| {
+        FrameError::GeometryOverflow { width, height, format: format.clone() }
+    })?;
     if buf.len() != expected {
         return Err(FrameError::SizeMismatch {
             expected,
@@ -41,12 +43,19 @@ pub fn fingerprint(
 
 /// Expected byte length for a frame with given dimensions and format.
 pub fn expected_size(width: u32, height: u32, format: &PixFmt) -> usize {
-    let pixels = (width as usize) * (height as usize);
-    match format {
-        PixFmt::Rgba8888 => pixels * 4,
-        PixFmt::Rgb565   => pixels * 2,
-        PixFmt::Indexed8 => pixels,
-    }
+    checked_expected_size(width, height, format).unwrap_or(usize::MAX)
+}
+
+/// Compute the exact byte count without allowing dimension multiplication to wrap.
+/// Frame records come from an untrusted guest, so overflow is malformed input.
+fn checked_expected_size(width: u32, height: u32, format: &PixFmt) -> Option<usize> {
+    let pixels = (width as usize).checked_mul(height as usize)?;
+    let bytes_per_pixel = match format {
+        PixFmt::Rgba8888 => 4,
+        PixFmt::Rgb565 => 2,
+        PixFmt::Indexed8 => 1,
+    };
+    pixels.checked_mul(bytes_per_pixel)
 }
 
 /// Convert an indexed8 frame to RGBA8888 using a greyscale palette.
@@ -156,6 +165,12 @@ mod tests {
     fn fingerprint_wrong_size() {
         let buf = vec![0u8; 3]; // too small for 1x1 RGBA
         assert!(fingerprint(&buf, 1, 1, &PixFmt::Rgba8888).is_err());
+    }
+
+    #[test]
+    fn fingerprint_rejects_geometry_overflow() {
+        let err = fingerprint(&[], u32::MAX, u32::MAX, &PixFmt::Rgba8888).unwrap_err();
+        assert!(matches!(err, FrameError::GeometryOverflow { .. }));
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub enum StoreError {
     ManifestNotFound(String),
     #[error("malformed hash: {0}")]
     BadHash(String),
+    #[error("content hash mismatch for {kind}: expected {expected}, got {actual}")]
+    IntegrityMismatch { kind: &'static str, expected: String, actual: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json encode/decode error: {0}")]

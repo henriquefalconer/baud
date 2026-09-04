@@ -16,6 +16,26 @@
 use anyhow::Result;
 use baud_proto::Msg;
 
+/// Maximum framed payload accepted from an agent/server peer. Keep this equal to the
+/// protocol's largest byte field plus a small framing allowance, and reject bad lengths before
+/// handing bytes to the CBOR decoder.
+const MAX_FRAME_PAYLOAD: usize = baud_proto::MAX_BYTES_LEN + 1024;
+
+fn decode_framed(data: &[u8]) -> Result<Msg> {
+    if data.len() < 4 {
+        anyhow::bail!("short length-prefixed frame: {} bytes", data.len());
+    }
+    let declared = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+    if declared == 0 || declared > MAX_FRAME_PAYLOAD {
+        anyhow::bail!("invalid frame length {declared} (maximum {MAX_FRAME_PAYLOAD})");
+    }
+    let payload = data.get(4..).unwrap();
+    if payload.len() != declared {
+        anyhow::bail!("frame length mismatch: header declares {declared}, payload has {}", payload.len());
+    }
+    baud_proto::decode(payload).map_err(|e| anyhow::anyhow!("invalid framed CBOR message: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Transport trait
 // ---------------------------------------------------------------------------
@@ -68,12 +88,12 @@ impl Transport for StdioTransport {
             Err(e) => return Err(e.into()),
         }
         let len = u32::from_be_bytes(len_buf) as usize;
-        if len == 0 {
-            return Ok(None);
+        if len == 0 || len > MAX_FRAME_PAYLOAD {
+            anyhow::bail!("invalid frame length {len} (maximum {MAX_FRAME_PAYLOAD})");
         }
-        let mut buf = vec![0u8; len];
-        self.stdin.read_exact(&mut buf)?;
-        let msg = baud_proto::decode(&buf).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut payload = vec![0u8; len];
+        self.stdin.read_exact(&mut payload)?;
+        let msg = baud_proto::decode(&payload).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Some(msg))
     }
 }
@@ -228,18 +248,10 @@ pub async fn run_ws_loop(
         match ws_msg {
             Ok(WsMessage::Binary(data)) => {
                 // Length-prefixed CBOR: skip 4-byte length prefix
-                if data.len() < 4 {
-                    tracing::warn!("WebSocket: short frame ({} bytes)", data.len());
-                    continue;
-                }
-                let payload = &data[4..];
-                match baud_proto::decode(payload) {
-                    Ok(msg) => {
-                        if in_tx.send(msg).await.is_err() {
-                            break; // receiver dropped
-                        }
-                    }
-                    Err(e) => tracing::warn!("WebSocket: decode error: {e}"),
+                let msg = decode_framed(&data)
+                    .map_err(|e| anyhow::anyhow!("WebSocket frame rejected: {e}"))?;
+                if in_tx.send(msg).await.is_err() {
+                    break; // receiver dropped
                 }
             }
             Ok(WsMessage::Close(_)) => {
@@ -257,4 +269,25 @@ pub async fn run_ws_loop(
     // Abort the send task if the receive loop exited
     send_task.abort();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn framed_decoder_requires_exact_declared_length() {
+        let payload = baud_proto::encode(&Msg::Log { bytes: b"ok".to_vec(), step: 1 }).unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        assert!(decode_framed(&frame).is_err());
+    }
+
+    #[test]
+    fn framed_decoder_rejects_oversized_length_before_allocation() {
+        let frame = (u32::MAX).to_be_bytes();
+        let err = decode_framed(&frame).unwrap_err().to_string();
+        assert!(err.contains("invalid frame length"));
+    }
 }
