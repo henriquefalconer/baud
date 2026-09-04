@@ -38,3 +38,32 @@ Queue review correction: reordered the retained G8 host bullet after G7 so the q
   - The real Ubuntu 18.04.1 boot still stalls inside one KVM_RUN, and the G2 guest tape/image pipeline is not implemented.
 
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
+
+Analysing baud and auditing every standing task group, then reconciling the implementation queue, validating the markdown, and committing and pushing the complete planning pass.
+
+Specs re-derived. Auditing 8 groups: G1 deterministic machine core, G2 real Linux boot and image pipeline, G3 snapshot/branching/live continuation, G4 tape/observations/exploration/proof, G5 server/command surface, G6 full distro validation, G7 generic interactive target, G8 host/packaging/security/release operations.
+
+Audits G1, G2, G3, and G7 returned. Their evidence confirms existing queue coverage; no duplicates accepted from those briefs. Waiting for G4, G5, G6, and G8 before reconciliation.
+
+All eight audits returned. Reconciliation: G1, G2, G3, G4, G5, G6, G7, and G8 proposals match existing complete queue outcomes; accepted 0 new bullets, merged 0, rejected 0 as duplicates or unsupported splits. G8 also surfaced placement and capability-check defects, but they belong inside the existing host outcome and are not separate complete tasks.
+
+RULINGS review: retained all standing decisions and every existing actionable bullet; no DONE item markers were present. Dependencies remain ordered G1/G2 before G3-G7, with G8 after the G1 host contract. Current hard blockers are the production simulation paths, real image/tape endpoint, Ubuntu stall, and Mario packaging.
+
+Verify: `bash drive/gate.sh` was not green. Phase 0 warm-up stopped on stale/incompatible Rust artifacts with E0460/E0463/E0786, including invalid .rmeta files and missing baud-stream/tape/fingerprint crates; no behavioral gate phases ran.
+
+Final prune step 7: no task-file edits were needed. Rechecked todo-build.md at 1168 lines; DONE-marker regex finds 0 item markers. The 11 case-insensitive DONE hits are prose, status text, examples, or command output descriptions, and SETTLED/NOT A GAP/SUPERSEDED/BLOCKED decisions were preserved.
+
+## 2026-09-04T00:47:55 UTC - Plan pass committed.
+- Step 1 pruned 0 DONE items from 1168 lines; step 2 audited 8 standing groups; briefs filed: G1 1 proposal, G2 1, G3 2, G4 1, G5 1, G6 1, G7 1, G8 1, for 9 proposals total; step 5 accepted 0, merged 0, rejected 9 as duplicates or unsupported splits; step 6 reviewed 9 proposals; step 7 pruned 0 items and reviewed 11 remaining DONE prose hits; step 8 found no dependency or queue contradiction.
+- Verify was not green. `bash drive/gate.sh` stopped in phase 0 warm-up with stale/incompatible Rust metadata errors E0460/E0463/E0786.
+- **Most severe findings:**
+  - Production run, replay, and verify paths still simulate or regenerate tapes instead of completing real stock-KVM execution.
+  - The real Ubuntu 18.04.1 boot still stalls inside one KVM_RUN, and the G2 image pipeline and guest tape endpoint remain incomplete.
+---
