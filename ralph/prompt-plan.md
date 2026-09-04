@@ -84,16 +84,50 @@ hit must be prose, never an item marker. Record the real counts and before/after
 - A stalled run gets bounded diagnostics before behavioral changes. A timeout is never success.
 - Keep the repository clean and include all markdown, progress, and queue changes in the same commit.
 
-## Progress logging
+## Progress Logging — Mandatory
 
-`ralph/progress.txt` is the liveness and user-facing record. Append a start entry, the selected planning focus,
-subagent audit results, prune counts, queue changes, validation, and the final Changes committed block. Use
-UTC timestamps. Never leave a plan, question, or unperformed promise as the final state.
+`ralph/progress.txt` has two jobs: it is the watchdog's only liveness signal, and it is the user's live view of what you are doing (the file is tailed in their terminal). Append with `printf '\n%s\n' "<one-liner>" >> ralph/progress.txt` so each entry sits on its own blank-led line.
 
-## Completion signal
+The first thing you do is append:
+```
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
 
-After the full pass is committed, pushed, and confirmed landed, reply with exactly:
+Brief explanation of what you will do (starting with a verb like "Analysing baud and auditing every queued group...", ending in ...)
 
-`<promise>COMPLETE</promise>`
+```
+The first line appended must be exactly "═══════════════════════════════════════════════════════".
 
-This closes the planning pass only. It does not close the continuous task groups or the build loop.
+After the spec is re-derived, append:
+```
+
+Specs re-derived. Auditing N groups: <list>.
+```
+Then narrate as you go — each analysis, the differ, each brief as it reports, the RULINGS review, the verify. Lean toward narrating more rather than less; silence looks like a stall.
+
+After the pass is finished, append the block BELOW FIRST, THEN commit so it is part of the same commit:
+```
+
+## <the current UTC time, resolved — e.g. 2026-08-19T03:48:01> UTC - Plan pass committed.
+- How many items each step and each brief filed
+- Whether verify was green
+- **Most severe findings:**
+  - [finding 1]
+  - [finding 2]
+---
+```
+Resolve the timestamp yourself — run `date -u +%Y-%m-%dT%H:%M:%S` and paste the result. Do NOT append the literal `$(date ...)`: this block is written through Write/Edit, where no shell expansion happens, so a command substitution lands in the log verbatim.
+
+## Stop Condition
+
+After the commit is pushed and confirmed landed, reply with `<promise>COMPLETE</promise>`
+
+Do not perform any additional work after the promise.
+
+## What completion means in plan mode
+
+A planning pass is complete only after the selected task has been fully studied, the standing groups and
+implementation queue accurately describe the next work, all required markdown changes are written, and the
+commit and push have succeeded. A pass that merely reads the files, drafts a partial outline, or leaves an
+unresolved contradiction is not complete.
