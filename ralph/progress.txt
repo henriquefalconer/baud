@@ -555,3 +555,23 @@ Focused server and stream suites are green, and the validation subagent independ
 The required gate completed with all units passing except the documented RDTSC load flake; phase 6 isolation passed, matching repository policy. Inspecting the failure log to confirm no regression before committing.
 
 Iteration work is not yet closed: G1-G7 remain pending after re-read, so no queue item is being relabeled DONE. Preserving the verified replay/frame/spec improvements in a commit while the next continuation handles the remaining real KVM/image/Ubuntu/Mario integrations.
+
+## 2026-09-04T04:15:37 UTC - Changes committed.
+
+- What was implemented: replay input/hash safety, per-frame geometry validation, and frame-format specification alignment.
+
+- Files changed: crates/baud-server/src/routes/replay.rs, crates/baud-server/src/routes/runs.rs, crates/baud-server/src/routes/verify.rs, crates/baud-stream/src/frame.rs, specs/baud-guest-harness.md, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Replay rejects absent or malformed tape input instead of regenerating a seed-based stream.
+
+  - Replay stores typed values and verifies bounded prefixes with protocol encoding.
+
+  - FrameProcessor accepts geometry and format declared by each frame.
+
+  - The harness specification now names only the three implemented pixel formats.
+
+  - Focused tests and the required gate passed under the documented RDTSC load-flake policy.
+
+---
