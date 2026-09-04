@@ -84,6 +84,8 @@ pub enum OpcodeResult {
     /// (e.g. a `PROBE` whose declared key length exceeds the buffered bytes, or a `GOAL`/
     /// `VIOLATION` name that is not valid UTF-8).
     MalformedPayload,
+    /// The guest attempted to create a record larger than the protocol limit.
+    OversizedPayload,
 }
 
 /// The host-side model of the tape device: a pure function of the tape bytes and the guest's own
@@ -98,6 +100,8 @@ pub struct TapeDevice {
     outbound: Vec<u8>,
     /// Finalized records the VMM has not yet drained ([`TapeDevice::drain_records`]).
     records: Vec<Msg>,
+    /// Prevent a guest from growing one outbound record without bound.
+    outbound_overflowed: bool,
     last_result: OpcodeResult,
     /// Set once a read has hit end-of-tape (`read_past_end_is_fixed`'s assertion target). Sticky
     /// for the life of the device — once the guest has seen the sentinel, it stays observably true
@@ -114,6 +118,7 @@ impl TapeDevice {
             tape,
             outbound: Vec::new(),
             records: Vec::new(),
+            outbound_overflowed: false,
             last_result: OpcodeResult::Ok,
             hit_eot: false,
         }
@@ -136,7 +141,14 @@ impl TapeDevice {
     /// Serve a PIO/MMIO write at `off` carrying byte `b` (specs/baud-tape-device.md §3).
     pub fn pio_write(&mut self, off: u16, b: u8) {
         match off {
-            reg::DATA => self.outbound.push(b),
+            reg::DATA => {
+                const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+                if self.outbound.len() < MAX_RECORD_BYTES {
+                    self.outbound.push(b);
+                } else {
+                    self.outbound_overflowed = true;
+                }
+            }
             reg::CONTROL => self.finalize_record(b),
             // Writes to any other offset (including the read-only STATUS register) are absorbed
             // silently — matches `baud_vcpu::OpenBusFallback`'s write side.
@@ -203,14 +215,19 @@ impl TapeDevice {
         let remaining_bits = remaining.min(0x7f) as u8;
         let error_bit = match self.last_result {
             OpcodeResult::Ok => 0u8,
-            OpcodeResult::UnknownOpcode | OpcodeResult::MalformedPayload => 0x80,
+            OpcodeResult::UnknownOpcode | OpcodeResult::MalformedPayload | OpcodeResult::OversizedPayload => 0x80,
         };
         remaining_bits | error_bit
     }
 
     fn finalize_record(&mut self, opcode_byte: u8) {
         let payload = std::mem::take(&mut self.outbound);
+        let overflowed = std::mem::take(&mut self.outbound_overflowed);
         let step = self.cursor;
+        if overflowed {
+            self.last_result = OpcodeResult::OversizedPayload;
+            return;
+        }
         match ControlOp::from_byte(opcode_byte) {
             Some(ControlOp::Probe) => match parse_probe(&payload) {
                 Some((probe, value)) => {

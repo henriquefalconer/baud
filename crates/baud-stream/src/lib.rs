@@ -12,6 +12,10 @@ pub mod qoi;
 pub mod y4m;
 pub mod frame;
 
+/// Maximum raw frame payload accepted from a guest. Conversion to RGBA can allocate four times
+/// the input, so reject unreasonable geometry before hashing or rendering it.
+const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
 pub use frame::{FrameProcessor, FrameError, ProcessedFrame};
 pub use qoi::encode_qoi;
 pub use y4m::Y4mWriter;
@@ -31,6 +35,9 @@ pub fn fingerprint(
     let expected = checked_expected_size(width, height, format).ok_or_else(|| {
         FrameError::GeometryOverflow { width, height, format: format.clone() }
     })?;
+    if expected > MAX_FRAME_BYTES {
+        return Err(FrameError::GeometryTooLarge { limit: MAX_FRAME_BYTES, got: expected });
+    }
     if buf.len() != expected {
         return Err(FrameError::SizeMismatch {
             expected,
@@ -170,7 +177,13 @@ mod tests {
     #[test]
     fn fingerprint_rejects_geometry_overflow() {
         let err = fingerprint(&[], u32::MAX, u32::MAX, &PixFmt::Rgba8888).unwrap_err();
-        assert!(matches!(err, FrameError::GeometryOverflow { .. }));
+        assert!(matches!(err, FrameError::GeometryTooLarge { .. } | FrameError::GeometryOverflow { .. }));
+    }
+
+    #[test]
+    fn fingerprint_rejects_oversized_frame_before_conversion() {
+        let err = fingerprint(&[], 16_384, 16_384, &PixFmt::Rgba8888).unwrap_err();
+        assert!(matches!(err, FrameError::GeometryTooLarge { .. }));
     }
 
     #[test]

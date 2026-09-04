@@ -269,6 +269,18 @@ fn frame_opcode_with_zero_pixel_bytes_is_still_well_formed() {
 }
 
 #[test]
+fn oversized_record_is_rejected_without_queueing() {
+    let mut dev = TapeDevice::new(Vec::new());
+    for _ in 0..(16 * 1024 * 1024 + 1) {
+        dev.pio_write(reg::DATA, 0x41);
+    }
+    dev.pio_write(reg::CONTROL, ControlOp::Log as u8);
+    assert_eq!(dev.last_opcode_result(), OpcodeResult::OversizedPayload);
+    assert!(dev.drain_records().is_empty());
+    assert_ne!(dev.pio_read(reg::STATUS) & 0x80, 0);
+}
+
+#[test]
 fn unknown_opcode_byte_is_reported_and_queues_nothing() {
     let mut dev = TapeDevice::new(vec![]);
     dev.pio_write(reg::DATA, 1);

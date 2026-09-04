@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
 use crate::page_store::{PageHash, PageStore, PAGE_SIZE};
-use crate::universe::{ClockState, DeviceState, Universe, VcpuState};
+use crate::universe::{ClockState, DeviceState, MsrWrite, Universe, VcpuState};
 
 const WIRE_VERSION: u8 = 1;
 
@@ -40,6 +40,8 @@ pub enum WireError {
     PageFetchFailed { hash: String, reason: String },
     #[error("page {hash}: expected {expected} bytes, got {actual}")]
     WrongPageLength { hash: String, expected: usize, actual: usize },
+    #[error("universe body contains malformed state: {0}")]
+    MalformedState(String),
     #[error("page {hash}: fetched bytes hash to a different address ({actual}) — corrupt or substituted page")]
     PageContentMismatch { hash: String, actual: String },
 }
@@ -107,7 +109,40 @@ pub fn decode_universe_body(bytes: &[u8]) -> Result<UniverseBody, WireError> {
             rest.len() - cursor.position() as usize
         )));
     }
+    validate_body(&body)?;
     Ok(body)
+}
+
+/// Validate limits that serde cannot express. These checks run before a caller allocates one
+/// page per hash or hands opaque register bytes to KVM.
+fn validate_body(body: &UniverseBody) -> Result<(), WireError> {
+    const MAX_RAM_PAGES: usize = 1 << 20;
+    const MAX_STATE_FIELD_BYTES: usize = 1 << 20;
+    if body.ram_page_hashes.len() > MAX_RAM_PAGES {
+        return Err(WireError::MalformedState(format!(
+            "RAM page count {} exceeds {MAX_RAM_PAGES}", body.ram_page_hashes.len()
+        )));
+    }
+    for (name, bytes) in [
+        ("regs", &body.vcpu.regs),
+        ("sregs", &body.vcpu.sregs),
+        ("xsave", &body.vcpu.xsave),
+        ("xcrs", &body.vcpu.xcrs),
+        ("events", &body.vcpu.events),
+        ("mp_state", &body.vcpu.mp_state),
+        ("kvm_clock", &body.clock.kvm_clock),
+        ("console", &body.device.console),
+    ] {
+        if bytes.len() > MAX_STATE_FIELD_BYTES {
+            return Err(WireError::MalformedState(format!(
+                "{name} field exceeds {MAX_STATE_FIELD_BYTES} bytes"
+            )));
+        }
+    }
+    if body.vcpu.msrs.len() > MAX_STATE_FIELD_BYTES / std::mem::size_of::<MsrWrite>() {
+        return Err(WireError::MalformedState("MSR list is too large".to_owned()));
+    }
+    Ok(())
 }
 
 /// Rebuild a full [`Universe`] from a decoded [`UniverseBody`] plus a per-hash page fetcher (e.g.

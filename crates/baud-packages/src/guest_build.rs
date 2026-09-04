@@ -155,6 +155,12 @@ mod tests {
     fn build_guest_image_fails_fast_on_a_non_kernel_tree_before_touching_initramfs() {
         let dir = tempfile::tempdir().unwrap();
         let kernel_dir = tempfile::tempdir().unwrap();
+        let config_fragment = dir.path().join("fragment.config");
+        fs::write(
+            &config_fragment,
+            "CONFIG_BAUD_TAPE_DEVICE=y\n# CONFIG_RTC_CLASS is not set\n# CONFIG_HPET_TIMER is not set\n",
+        )
+        .unwrap();
         let entries = [InitramfsFileEntry {
             archive_path: "init".to_string(),
             mode: 0o755,
@@ -166,7 +172,7 @@ mod tests {
         let cfg = GuestImageBuildConfig {
             kernel: KernelBuildConfig {
                 kernel_src: kernel_dir.path(),
-                config_fragment: kernel_dir.path(),
+                config_fragment: &config_fragment,
                 cc: "gcc-13",
                 jobs: Some(1),
             },
@@ -243,7 +249,11 @@ mod tests {
         write_stub_kernel_tree(kernel_dir.path());
 
         let fragment = work.path().join("minimal.config");
-        fs::write(&fragment, "CONFIG_BAUD_STUB=y\n").unwrap();
+        fs::write(
+            &fragment,
+            "CONFIG_BAUD_TAPE_DEVICE=y\n# CONFIG_RTC_CLASS is not set\n# CONFIG_HPET_TIMER is not set\nCONFIG_BAUD_STUB=y\n",
+        )
+        .unwrap();
         let init_src = work.path().join("init");
         fs::write(&init_src, b"#!stub-init-binary").unwrap();
         let helper_src = work.path().join("helper");

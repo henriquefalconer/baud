@@ -134,6 +134,8 @@ pub async fn replay(
 
     let replay_stream_hash = hex_encode(replay_hash.finalize().as_bytes());
 
+    // A replay with no observations is a failed execution, not a successful empty stream.
+    // Keep the diagnostic response, but never let it become a verified replay.
     // 7. Insert replayed observations into SQLite under replay_run_id
     for obs in &replayed {
         let value_bytes = serde_json::to_vec(&format!("{:?}", obs.value)).unwrap_or_default();
@@ -161,12 +163,14 @@ pub async fn replay(
 
     let (original_stream_hash, verified) = if let Some(stored_hash) = &original_stored_hash {
         // Compare replay stream hash against stored original hash
-        let v = replay_stream_hash == *stored_hash || orig_obs_count == 0;
+        // An empty prefix is not evidence of a successful replay. A stored hash is the
+        // authority, including for a run that happened to emit no observations.
+        let v = replay_stream_hash == *stored_hash;
         (stored_hash.clone(), v)
     } else {
         // No stored hash: best-effort fallback using count equality
         let hash_placeholder = format!("<no-stored-hash-for-{}>", id);
-        let v = replayed.len() == orig_obs_count || orig_obs_count == 0;
+        let v = replayed.len() == orig_obs_count && !replayed.is_empty();
         (hash_placeholder, v)
     };
 

@@ -22,6 +22,8 @@ pub enum StoreError {
     BadHash(String),
     #[error("content hash mismatch for {kind}: expected {expected}, got {actual}")]
     IntegrityMismatch { kind: &'static str, expected: String, actual: String },
+    #[error("invalid {kind} length: expected {expected} bytes, got {actual}")]
+    InvalidLength { kind: &'static str, expected: usize, actual: usize },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("json encode/decode error: {0}")]

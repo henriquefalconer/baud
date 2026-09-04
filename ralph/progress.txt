@@ -241,3 +241,85 @@ The corrected full gate is green under the repository rule: every unit passed, w
   - Focused agent/server tests pass, and drive/gate.sh passes under the documented RDTSC load-flake rule.
   - The G1-G7 integration entries remain pending for the next step.
 ---
+
+## 2026-09-04T01:44:31 UTC (18min) - Session usage — ralph-3 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2920 (summed from 7 session transcripts: main $0.1536 · subagents $0.1384)
+- tokens input 679,630 · cache-read 6,137,856 · cache-write 0 · output 27,780 · reasoning 5,754
+- context 130,860 tok peak of 272K (48%) across 58 inference calls, monotonic
+- models gpt-5.6-luna $0.2920 (in 679,630 / out 33,534 / cache-read 6,137,856)
+- subagents (6) bg_delegate x5 · bg_run x1
+  - bg_delegate Study core specs: gpt-5.6-luna $0.0213, 4 inference calls
+  - bg_delegate Study service specs: gpt-5.6-luna $0.0281, 6 inference calls
+  - bg_delegate Study package specs: gpt-5.6-luna $0.0244, 5 inference calls
+  - bg_delegate Audit G1 G2: gpt-5.6-luna $0.0292, 7 inference calls
+  - bg_delegate Audit snapshots server: gpt-5.6-luna $0.0264, 5 inference calls
+  - bg_run Run validation gate: gpt-5.6-luna $0.0090, 7 inference calls
+- transcript: ralph/.run/20260904T004853Z/003-ralph-3.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the specifications and selecting the 10 most important pending items, then implementing and validating that batch end to end.
+
+Reading the build queue and repository layout.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are the 8 pending items in the queue.
+
+Inspecting implementation inventory and tests before edits.
+
+Starting G1 implementation review: tracing production callers and real KVM entry points.
+
+Found the real KVM route already wired; the remaining hard gaps are stale simulation verification, CoW backend, and Mario fixture fallback. Implementing fail-closed boundaries and strict validation rather than preserving synthetic success.
+
+Applying the required host perf setting before real-KVM validation.
+
+Added bounded frame and persisted-page validation, then checking compilation before broader integration work.
+
+The first focused run exposed legacy store tests using short pseudo-pages; updated them to the strict 4096-byte page contract and rerunning.
+
+Replay now refuses empty-stream success and preserves exact stored-tape authority; running server and workspace compile checks.
+
+Image assembly now enforces the kernel tape-device contract before any build or initramfs work; updating and running package tests.
+
+Focused tests are green. Running the repository-defined full gate now, including real-KVM drive scripts.
+
+The gate found the new build-time lint was stricter than the existing minimal kernel fixture, which intentionally has no in-tree tape driver; removed that misplaced check and keeping lint at the explicit image-lint boundary. Re-running the failing package path in isolation.
+
+The isolated package build is green after removing the incompatible misplaced lint; repeating the exact full gate for final evidence.
+
+Full gate is green: 26 units passed with no flakes. The audit confirms the selected G1-G7 items still have major real-path gaps, so I am not relabeling them DONE; preserving the queue contract while committing the verified boundary fixes.
+
+Added a regression proving oversized guest records fail closed without queueing or clearing the status error bit; running the focused test set once more.
+
+The independent test worker confirms 147 focused tests passed. Re-running the exact gate after the added regression test before committing.
+
+The final gate reported only the documented rdtsc load flake; phase 6 passed it in isolation, so the repository rule counts this validation green. The larger G1-G7 contracts remain open and are not being mislabeled DONE.
+
+## 2026-09-04T02:11:49 UTC - Changes committed.
+
+- Added bounded frame, tape-record, snapshot-wire, and persisted-page validation.
+
+- Tightened replay verification so empty streams cannot claim success.
+
+- Files changed: crates/baud-stream/src/{lib.rs,frame.rs}; crates/baud-tape-device/src/{lib.rs,tests.rs}; crates/baud-snapshot/src/wire.rs; crates/baud-snapshot-store/src/{error.rs,store.rs,tests.rs}; crates/baud-server/src/routes/replay.rs; ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Guest-originated frame and tape payloads now fail closed before unbounded conversion or buffering.
+
+  - Snapshot wire decoding bounds opaque state and RAM page references.
+
+  - Snapshot-store pages require the canonical 4096-byte size on write and read.
+
+  - Replay no longer treats an empty or count-only result as verified evidence.
+
+  - Focused tests passed, and the full gate passed under its documented rdtsc load-flake rule.
+
+  - The selected G1-G7 integration items remain pending because the real Buildroot, UFFD, authenticated lifecycle, Ubuntu, and Mario paths are not complete.
+
+---

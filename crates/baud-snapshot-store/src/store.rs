@@ -176,13 +176,21 @@ impl SnapshotStore {
     /// `put_page`). Returns the same [`PageRef`] for identical plaintext across any number of
     /// calls without re-encrypting (dedup by plaintext hash, §4).
     pub fn put_page(&self, run: &RunId, page: &[u8]) -> Result<PageRef, StoreError> {
+        const PAGE_SIZE: usize = 4096;
+        if page.len() != PAGE_SIZE {
+            return Err(StoreError::InvalidLength { kind: "page", expected: PAGE_SIZE, actual: page.len() });
+        }
         let hash = Sha::of(page);
         self.write_body_if_absent(&self.page_body_path(run, hash), page)?;
         Ok(PageRef { address: hash })
     }
 
     pub fn get_page(&self, run: &RunId, page: PageRef) -> Result<Vec<u8>, StoreError> {
-        self.read_and_verify(&self.page_body_path(run, page.address), page.address, "page")
+        let bytes = self.read_and_verify(&self.page_body_path(run, page.address), page.address, "page")?;
+        if bytes.len() != 4096 {
+            return Err(StoreError::InvalidLength { kind: "page", expected: 4096, actual: bytes.len() });
+        }
+        Ok(bytes)
     }
 
     // -- nodes / universes -------------------------------------------------------------------------

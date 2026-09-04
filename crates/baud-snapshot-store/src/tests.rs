@@ -88,10 +88,10 @@ fn pages_dedup_by_plaintext_hash() {
 fn get_page_rejects_decrypted_plaintext_with_wrong_address() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-b-integrity");
-    let page = store.put_page(&run, b"original page").unwrap();
+    let page = store.put_page(&run, &[0x11u8; 4096]).unwrap();
     let path = root.path().join("runs").join("run-b-integrity").join("pages")
         .join(format!("{}.age", page.address.to_hex()));
-    let replacement = baud_keys::age_encrypt(TEST_RECIPIENT, b"tampered plaintext").unwrap();
+    let replacement = baud_keys::age_encrypt(TEST_RECIPIENT, &[0x22u8; 4096]).unwrap();
     std::fs::write(path, replacement).unwrap();
 
     let err = store.get_page(&run, page).unwrap_err();
