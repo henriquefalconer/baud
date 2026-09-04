@@ -226,7 +226,9 @@ pub async fn render(
                 }
             }
         }
-        Ok(None) => render_frames_from_stored_hashes(&state, &run_id, from_step, to_step).await,
+        Ok(None) => Err(json!({
+            "error": "frame pixels are unavailable: this run has no replayable KVM image and stored hashes cannot be rendered"
+        })),
         Err(e) => Err(json!({ "error": format!("db error: {e}") })),
     };
 

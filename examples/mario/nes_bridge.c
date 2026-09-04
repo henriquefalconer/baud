@@ -529,8 +529,12 @@ static int has_flag(int argc, char *argv[], const char *flag) {
 int main(int argc, char *argv[]) {
     const char *rom_path   = get_arg(argc, argv, "--rom=");
     const char *steps_str  = get_arg(argc, argv, "--steps=");
-    int sim_mode           = has_flag(argc, argv, "--sim") || (rom_path == NULL);
+    int sim_mode           = has_flag(argc, argv, "--sim");
     int max_steps          = steps_str ? atoi(steps_str) : 0;  /* 0 = unlimited */
+    if (sim_mode || rom_path == NULL) {
+        fprintf(stderr, "nes_bridge: a real --rom=<path> is required; simulation mode is not supported\n");
+        return 2;
+    }
 
     /* Static NES state on the stack (deterministic layout, no heap allocation) */
     static NES nes;
@@ -546,17 +550,11 @@ int main(int argc, char *argv[]) {
     sim.y_pos = 176;    /* start on ground */
     sim.on_ground = 1;
 
-    /* Load ROM if in real mode */
-    if (!sim_mode && rom_path) {
-        if (load_rom(&nes, rom_path) != 0) {
-            fprintf(stderr, "nes_bridge: falling back to simulation mode\n");
-            sim_mode = 1;
-        } else {
-            fprintf(stderr, "nes_bridge: ROM loaded, reset PC=0x%04X\n", nes.pc);
-        }
-    } else if (sim_mode) {
-        fprintf(stderr, "nes_bridge: simulation mode (no ROM)\n");
+    if (load_rom(&nes, rom_path) != 0) {
+        fprintf(stderr, "nes_bridge: refusing to continue after ROM load failure\n");
+        return 2;
     }
+    fprintf(stderr, "nes_bridge: ROM loaded, reset PC=0x%04X\n", nes.pc);
 
     /* Frame buffer (static, on the data segment — fixed layout for no-PIE) */
     static unsigned char framebuf[NES_FRAME_BYTES];

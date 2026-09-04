@@ -74,6 +74,13 @@ pub fn hash_image(bzimage_bytes: &[u8], initramfs_bytes: &[u8]) -> (String, Stri
 /// `build_reproducible_initramfs`) and write both into `cfg.output_dir`. Real I/O: shells out to
 /// `make`/`merge_config.sh` and reads every `initramfs_entries` source file from disk.
 pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildResult> {
+    let fragment = fs::read_to_string(cfg.kernel.config_fragment).with_context(|| {
+        format!("failed to read kernel config fragment at {}", cfg.kernel.config_fragment.display())
+    })?;
+    let lint = crate::image::lint_kernel_config(&fragment);
+    if !lint.ok() {
+        anyhow::bail!("guest kernel config fragment violates the image contract: {:?}", lint.violations);
+    }
     let bzimage_src = build_bzimage(&cfg.kernel)?;
     let bzimage_bytes = fs::read(&bzimage_src)
         .with_context(|| format!("failed to read built bzImage at {}", bzimage_src.display()))?;
