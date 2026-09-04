@@ -184,15 +184,15 @@ pub async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<Value> {
-    let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64, i64, String, i64, i64)>(
-        "SELECT id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, budget_minutes, status, created_at, updated_at FROM runs WHERE id = ?"
+    let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64, String, i64, i64)>(
+        "SELECT id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, status, created_at, updated_at FROM runs WHERE id = ?"
     )
     .bind(&id)
     .fetch_optional(&state.db)
     .await;
 
     match row {
-        Ok(Some((id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, _b2, status, ca, ua))) => {
+        Ok(Some((id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, status, ca, ua))) => {
             // exit_code: 0=completed, 1=error/aborted, 2=goal/violation (spec baud-cli.md §4)
             let exit_code: u8 = match status.as_str() {
                 "crashed" | "goal" | "violation_found" => 2,

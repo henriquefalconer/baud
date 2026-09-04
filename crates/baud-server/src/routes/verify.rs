@@ -101,7 +101,9 @@ pub async fn determinism(
         let mut journal_hasher = blake3::Hasher::new();
         for obs in &observations {
             let now = crate::state::unix_now() as i64;
-            let value_bytes = serde_json::to_vec(&format!("{:?}", obs.value)).unwrap_or_default();
+            // Persist the typed protocol value, not its Debug rendering, so a bounded replay can
+            // reconstruct the exact original observation hash later.
+            let value_bytes = serde_json::to_vec(&obs.value).unwrap_or_default();
 
             // Feed into stream hash (over the serialized observation)
             let obs_cbor = baud_proto::encode(&baud_proto::Msg::Observe(obs.clone()))

@@ -486,4 +486,72 @@ The package drive is compiling the full pinned WSL kernel source as designed, no
 No new gate failure; the real kernel build remains the only active work.
 
 Kernel compilation is advancing through generated objects; the gate process remains healthy.
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+
+## 2026-09-04T03:51:00 UTC - Ralph iteration 7 result.
+
+- Implemented bounded frame ingress and removed hash-only synthetic rendering.
+- Enforced production tape-agent WebSocket configuration and fail-closed relay behavior.
+- Added strict fixed-size KVM restore-state validation, including truncated-register regression coverage.
+- Hardened snapshot-store record parsing against truncated length prefixes and bodies.
+- Enforced loopback-only server binding and strict supported frame formats.
+- Updated M11 to require diagnostic failure for hash-only frame rendering.
+- Focused verification passed: server, snapshot, snapshot-store, and tape-agent tests; isolated clippy passed.
+- Exact gate result: 25 passed, 0 failed, 1 documented H3 load flake. The required isolated rerun passed, so repository policy counts the gate as passing.
+- The seven broad G1-G7 queue entries remain open. The changes above are boundary fixes, not completion of their real KVM, image, shared-memory, authenticated lifecycle, Ubuntu, or Mario end-to-end contracts.
+
+## 2026-09-04T04:01:47 UTC - Foreground gate rerun.
+
+- Ran `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && CARGO_BUILD_JOBS=2 bash drive/gate.sh` in the foreground.
+- Result: 24 passed, 0 regressions, 1 skipped, and the known `rdtsc_guest_reproduces_high_bits_across_boots` load flake. The isolated rerun passed in 3 seconds.
+- The command exits 1 because `drive/gate.sh` reports the flake as not green, although AGENTS.md explicitly says this exact isolated-flake case counts as passing.
+
+## 2026-09-04T04:02:22 UTC (45min) - Session usage — ralph-7 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $1.1086 (summed from 9 session transcripts: main $0.9309 · subagents $0.1776)
+- tokens input 1,258,664 · cache-read 39,868,416 · cache-write 0 · output 49,567 · reasoning 12,259
+- context 255,938 tok peak of 272K (94%) across 247 inference calls, 1 drop(s), final 75,365, resumed 1x
+- models gpt-5.6-luna $1.1086 (in 1,258,664 / out 61,826 / cache-read 39,868,416)
+- subagents (8) bg_delegate x7 · bg_run x1
+  - bg_delegate Study core specs: gpt-5.6-luna $0.0250, 4 inference calls
+  - bg_delegate Study pipeline specs: gpt-5.6-luna $0.0236, 4 inference calls
+  - bg_delegate Study server specs: gpt-5.6-luna $0.0246, 5 inference calls
+  - bg_delegate Study proof specs: gpt-5.6-luna $0.0264, 6 inference calls
+  - bg_delegate Search KVM paths: gpt-5.6-luna $0.0275, 5 inference calls
+  - bg_delegate Search snapshot paths: gpt-5.6-luna $0.0257, 5 inference calls
+  - bg_delegate Search remaining paths: gpt-5.6-luna $0.0213, 5 inference calls
+  - bg_run Verify frame validation: gpt-5.6-luna $0.0035, 3 inference calls
+- transcript: ralph/.run/20260904T004853Z/009-ralph-7.json
+- transcript: ralph/.run/20260904T004853Z/010-ralph-7.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 8 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address in @todo-build.md, then implementing and verifying each one end to end.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 8 of 8 pending items.
+
+Selection correction: re-read todo-build.md shows 7 pending entries, G1 through G7; the existing G8 and Gate bullets are already DONE and are not selected.
+
+Found and corrected the frame-format specification drift: the harness now emits the Rgba8888 tag and w*h*4 bytes, matching baud-proto, tape-device, and stream validation. Continuing with production-path failures.
+
+Running the focused server tests after tightening replay input handling.
+
+Replay now stores typed values and computes bounded prefix hashes from the same wire encoding; running its focused tests.
+
+The specification review rejected an RGB24 alias; the harness example now uses the existing raw frame operation and numeric Rgba8888 tag, with the supported format set stated explicitly.
+
+Focused replay tests passed before formatting; the repository-wide formatter reports pre-existing style drift outside this change, so I am not rewriting unrelated crates.
+
+Fixed the lifecycle status query to read budget_minutes once; the previous duplicate column could silently misalign status fields. Continuing validation and root-cause cleanup.
+
+Extended FrameProcessor with per-frame geometry and format validation, plus a regression test for resolution/format changes; the stream unit suite is green.
+
+Focused server and stream suites are green, and the validation subagent independently confirmed server replay and package tests. Starting the required full gate before deciding the next concrete fixes.
+
+The required gate completed with all units passing except the documented RDTSC load flake; phase 6 isolation passed, matching repository policy. Inspecting the failure log to confirm no regression before committing.
+
+Iteration work is not yet closed: G1-G7 remain pending after re-read, so no queue item is being relabeled DONE. Preserving the verified replay/frame/spec improvements in a commit while the next continuation handles the remaining real KVM/image/Ubuntu/Mario integrations.

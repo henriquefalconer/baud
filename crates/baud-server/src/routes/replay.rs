@@ -106,10 +106,25 @@ pub async fn replay(
     let replay_tape = match stored_tape {
         Ok(Some((tape_hex,))) => match decode_hex_tape(&tape_hex) {
             Some(tape) => Some(tape),
-            None => return Json(json!({ "error": "stored KVM tape is malformed" })),
+            None => return Json(json!({
+                "ok": false,
+                "verified": false,
+                "error": "stored KVM tape is malformed"
+            })),
         },
-        Ok(None) => body.tape_bytes.clone(),
-        Err(e) => return Json(json!({ "error": format!("db error fetching replay tape: {e}") })),
+        Ok(None) => match body.tape_bytes {
+            Some(tape) if !tape.is_empty() => Some(tape),
+            Some(_) | None => return Json(json!({
+                "ok": false,
+                "verified": false,
+                "error": "replay input is unavailable: no stored KVM tape and no explicit tape_bytes"
+            })),
+        },
+        Err(e) => return Json(json!({
+            "ok": false,
+            "verified": false,
+            "error": format!("db error fetching replay tape: {e}")
+        })),
     };
     let replay_obs = match generate_replay_observations(
         replay_tape.as_deref(),
@@ -147,7 +162,7 @@ pub async fn replay(
     // Keep the diagnostic response, but never let it become a verified replay.
     // 7. Insert replayed observations into SQLite under replay_run_id
     for obs in &replayed {
-        let value_bytes = serde_json::to_vec(&format!("{:?}", obs.value)).unwrap_or_default();
+        let value_bytes = serde_json::to_vec(&obs.value).unwrap_or_default();
         let _ = sqlx::query(
             "INSERT INTO observations (run_id, step, node, probe, value, recorded_at)
              VALUES (?, ?, ?, ?, ?, ?)"
@@ -171,20 +186,28 @@ pub async fn replay(
         .count();
 
     let (original_stream_hash, verified) = if let Some(stored_hash) = &original_stored_hash {
-        // Compare replay stream hash against stored original hash
-        // An empty prefix is not evidence of a successful replay. A stored hash is the
-        // authority, including for a run that happened to emit no observations.
-        let v = replay_stream_hash == *stored_hash;
-        (stored_hash.clone(), v)
+        // A full-run hash cannot verify a prefix replay. For `to_step`, hash the exact original
+        // prefix from the durable observation rows; for a full replay, retain the stored hash as
+        // the authority. This prevents a truncated replay from being reported as a mismatch merely
+        // because it was intentionally bounded, while still rejecting any changed observation.
+        let expected_hash = if to_step.is_some() {
+            hash_observation_prefix(&original_obs, to_step)
+        } else {
+            stored_hash.clone()
+        };
+        let v = replay_stream_hash == expected_hash && !replayed.is_empty();
+        (expected_hash, v)
     } else {
-        // No stored hash: best-effort fallback using count equality
+        // Legacy rows without a stream hash have no cryptographic replay authority. Count equality
+        // is retained only for rows that supplied an explicit tape above, and an empty stream never
+        // becomes a successful verification.
         let hash_placeholder = format!("<no-stored-hash-for-{}>", id);
         let v = replayed.len() == orig_obs_count && !replayed.is_empty();
         (hash_placeholder, v)
     };
 
     Json(json!({
-        "ok": true,
+        "ok": verified,
         "original_run_id": id,
         "replay_run_id": replay_run_id,
         "seed": seed,
@@ -258,6 +281,31 @@ fn generate_replay_observations(
     }).collect())
 }
 
+fn hash_observation_prefix(
+    rows: &[(i64, i64, String, Vec<u8>, i64)],
+    to_step: Option<u64>,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for (step, node, probe, value, _) in rows {
+        if to_step.is_some_and(|limit| *step as u64 > limit) {
+            break;
+        }
+        let typed_value = serde_json::from_slice(value).unwrap_or_else(|_| {
+            ProbeValue::Utf8(String::from_utf8_lossy(value).into_owned())
+        });
+        let observation = Observation {
+            probe: probe.clone(),
+            node: *node as u16,
+            value: typed_value,
+            step: *step as u64,
+        };
+        if let Ok(encoded) = baud_proto::encode(&baud_proto::Msg::Observe(observation)) {
+            hasher.update(&encoded);
+        }
+    }
+    hex_encode(hasher.finalize().as_bytes())
+}
+
 fn decode_hex_tape(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -270,4 +318,36 @@ fn decode_hex_tape(s: &str) -> Option<Vec<u8>> {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_hash_matches_the_protocol_observation_encoding() {
+        let rows = vec![
+            (0, 2, "banner".to_owned(), serde_json::to_vec(&ProbeValue::Utf8("ready".into())).unwrap(), 0),
+            (1, 2, "score".to_owned(), serde_json::to_vec(&ProbeValue::U64(7)).unwrap(), 0),
+        ];
+        let mut expected = blake3::Hasher::new();
+        for (step, node, probe, value, _) in &rows {
+            let observation = Observation {
+                probe: probe.clone(),
+                node: *node as u16,
+                value: serde_json::from_slice(value).unwrap(),
+                step: *step as u64,
+            };
+            expected.update(&baud_proto::encode(&baud_proto::Msg::Observe(observation)).unwrap());
+        }
+        assert_eq!(hash_observation_prefix(&rows, None), hex_encode(expected.finalize().as_bytes()));
+        assert_ne!(hash_observation_prefix(&rows, Some(0)), hash_observation_prefix(&rows, None));
+    }
+
+    #[test]
+    fn malformed_hex_tape_is_rejected() {
+        assert!(decode_hex_tape("0").is_none());
+        assert!(decode_hex_tape("zz").is_none());
+        assert_eq!(decode_hex_tape("00ff"), Some(vec![0, 255]));
+    }
 }

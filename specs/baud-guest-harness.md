@@ -125,14 +125,16 @@ A graphical SUT emits one frame per step for `baud-stream`. The byte layout — 
 `specs/baud-tape-device.md` §4 and consumed by `specs/baud-stream.md` §3. The harness only assembles it:
 
 ```lua
-local px = capture_rgb24()                   -- w*h*3 bytes from the SUT
-dev:write(string.char(FORMAT_RGB24))
+local px = capture_frame()                    -- Rgba8888, w*h*4 bytes from the SUT
+dev:write(string.char(0))                     -- baud-proto::PixFmt::Rgba8888
 dev:write(u32le(w)); dev:write(u32le(h)); dev:write(px)
 dev:write_opcode("FRAME")
 ```
 
 Frames are a pure function of the tape, so only the tape is journaled; `baud-stream` re-derives identical
-frames by replay (`baud-stream` §5). No pixels are stored during a fuzz run.
+frames by replay (`baud-stream` §5). No pixels are stored during a fuzz run. The supported pixel formats
+are exactly `Rgba8888`, `Rgb565`, and `Indexed8`; the harness must preserve the selected format and bytes
+without an RGB24 alias or conversion.
 
 ---
 

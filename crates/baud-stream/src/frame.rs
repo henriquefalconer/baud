@@ -48,17 +48,32 @@ impl FrameProcessor {
         }
     }
 
-    /// Ingest a raw frame buffer at the given virtual step.
+    /// Ingest a raw frame buffer at the processor's configured geometry.
     /// Returns the processed frame (or error if size mismatch).
     pub fn ingest(&mut self, step: u64, buf: &[u8], hash_only: bool) -> Result<&ProcessedFrame, FrameError> {
-        let hash = fingerprint(buf, self.width, self.height, &self.format)?;
-        let rgba = to_rgba(buf, &self.format);
+        self.ingest_frame(step, self.width, self.height, self.format.clone(), buf, hash_only)
+    }
+
+    /// Ingest a frame whose geometry and pixel format arrive with the frame record.
+    /// A processor may therefore handle a stream that changes resolution or format without
+    /// silently validating new bytes against the first frame's dimensions.
+    pub fn ingest_frame(
+        &mut self,
+        step: u64,
+        width: u32,
+        height: u32,
+        format: PixFmt,
+        buf: &[u8],
+        hash_only: bool,
+    ) -> Result<&ProcessedFrame, FrameError> {
+        let hash = fingerprint(buf, width, height, &format)?;
+        let rgba = to_rgba(buf, &format);
         let record = FrameRecord {
             node: self.node,
             step,
-            width: self.width,
-            height: self.height,
-            format: self.format.clone(),
+            width,
+            height,
+            format,
             hash: hash.clone(),
             bytes: if hash_only { None } else { Some(buf.to_vec()) },
         };
@@ -136,6 +151,21 @@ mod tests {
         let repeat = proc.ingest(2, &frame_b, true).unwrap().record.hash.clone();
         assert_eq!(repeat, hash_b, "identical content must produce an identical fingerprint");
         assert!(proc.is_duplicate(&repeat));
+    }
+
+    #[test]
+    fn ingest_accepts_geometry_declared_by_each_frame() {
+        let mut proc = FrameProcessor::new(0, 4, 4, PixFmt::Indexed8);
+        let frame = proc
+            .ingest_frame(7, 2, 1, PixFmt::Rgba8888, &[1, 2, 3, 255, 4, 5, 6, 255], true)
+            .unwrap();
+        assert_eq!((frame.record.width, frame.record.height), (2, 1));
+        assert_eq!(frame.record.format, PixFmt::Rgba8888);
+        assert!(frame.record.bytes.is_none());
+
+        // The next frame may return to the processor's original format and dimensions.
+        proc.ingest(8, &[9; 16], true).unwrap();
+        assert_eq!(proc.frames.len(), 2);
     }
 
     #[test]
