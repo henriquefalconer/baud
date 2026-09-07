@@ -104,10 +104,10 @@ Brief explanation of what you will do (starting with a verb like "Analysing baud
 ```
 The first line appended must be exactly "═══════════════════════════════════════════════════════".
 
-After the spec is re-derived, append:
+After every spec's reasoning behind implementation is re-derived, append:
 ```
 
-Specs re-derived. Auditing N groups: <list>.
+Every spec's reasoning behind implementation re-derived. Auditing N groups: <list>.
 ```
 Then narrate as you go — each analysis, the differ, each brief as it reports, the RULINGS review, the verify. Lean toward narrating more rather than less; silence looks like a stall.
 
