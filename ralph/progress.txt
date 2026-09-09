@@ -710,3 +710,46 @@ Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching an
 Repository inspection confirms the queue is intentionally exposing simulation and fixture paths; I am now collecting the parallel specification audits before changing code.
 
 The requested repeat is running in the foreground now: executing the repository gate without backgrounding it.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
+
+Analysing baud and auditing every standing task group, then reconciling the build queue and pushing the plan pass.
+
+═══════════════════════════════════════════════════════
+
+  Ralph (Plan Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Analysing baud and auditing every standing task group, then reconciling the implementation queue, validating the markdown, and committing and pushing the complete planning pass.
+
+Step 1 prune complete: removed 2 DONE item markers from todo-build.md, reducing it from 48 to 46 lines. The remaining DONE hit is only the procedure prose; auditing all eight standing groups now.
+
+All eight implementation audits are running in parallel. Step 1 removed 2 items; the queue now has 7 pending bullets. I am waiting for evidence from each group before reconciling duplicates or adding work.
+
+The specification index confirms the audit scope spans core KVM, boot, tape, snapshots, server, packages, observation, security, and target contracts. No source changes are being made in plan mode.
+
+Queue review is paused until all eight evidence briefs arrive. No proposal will be accepted on a claim without paths, symbols, tests, drives, dependencies, acceptance, and failure behavior.
+
+All eight audits returned. Reconciliation found the seven existing bullets complete and non-duplicate. Accepted 0 new bullets, merged 0, rejected 0; G3 confirmed both existing outcomes are needed, G6 offered decomposition that would be partial, and G8 remains deferred or prerequisite-dependent with no new bullet. The queue stays ordered G1 through G7.
+
+Queue review complete: all seven bullets are complete outcomes with affected paths, dependencies, acceptance tests or drives, and explicit failure behavior. Plan validation passed after fixing a trailing blank line; no implementation files changed. The required gate is not rerun in plan mode, so verification is green for markdown reconciliation only, not for the implementation.
+
+Final prune complete: todo-build.md is 45 lines and has 0 DONE item markers. The sole case-insensitive DONE hit is procedure prose at line 25; no standing decision was removed.
+
+## 2026-09-09T23:07:32 UTC - Plan pass committed.
+- Step 1 pruned 2 DONE items from 48 lines; step 2 audited 8 groups; 8 briefs filed with G1=1, G2=1, G3=2, G4=1, G5=1, G6=1, G7=1, and G8=1 audit record. Step 5 accepted 0 new bullets, merged 0, and rejected 0; all 7 existing queue outcomes were retained. Step 6 reviewed every queued bullet. Step 7 pruned 0 items from the final 45-line queue and confirmed 0 DONE item markers, with 1 remaining DONE prose hit. Step 8 validated dependencies, acceptance fields, drives, failure behavior, and markdown formatting.
+- Verify was green for markdown reconciliation only. The implementation gate was not rerun in plan mode.
+- **Most severe findings:**
+  - Production routes still use simulation or legacy replay paths instead of the complete real stock-KVM and stored-snapshot execution path.
+  - The real guest tape/image pipeline, shared-memory UFFD branching, authenticated lifecycle, and persisted shell-into path remain incomplete.
+  - Real Ubuntu H9 still stalls before the login banner, and Mario remains a simulation/fixture path rather than a real FCEUX guest proof.
+---
