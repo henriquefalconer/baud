@@ -7,10 +7,14 @@
 # The loop: one session per item on that list, running while sessions answer
 # <promise>NEXT</promise>, until one answers <promise>COMPLETE</promise>.
 #
+# IMPORTANT: The ralph script shall not have specialized logic for any specific prompt for any reason
+# whatsoever. Whatever sought-after rules and patterns behind any prompt-specific logic shall be
+# enforced at the layer of the prompt file itself and the scripts mentioned in the prompt file.
+#
 # The prompt file is the single tuning surface — it is piped in verbatim with
 # [ralph-iteration] substituted, so editing it steers the very next iteration.
 # It lives in ralph/ and defaults to prompt-build.md; -p names a different one
-# (prompt-submittal, prompt-plan.md, …), which is how one orchestrator drives
+# (prompt-sculpt.md, prompt-inventory.md, …), which is how one orchestrator drives
 # three different loops without a second copy of this script.
 #
 # TOOL SET — validated 2026-07-24 by asking a live browser-enabled session
@@ -55,8 +59,8 @@ set -m
 # ralph dies, then forwards it to the harness and every descendant before waiting
 # for the harness to exit. This closes the orphan window even for forced teardown.
 ralph_exec() {
-  python3 -c '
-import ctypes, os, signal, sys
+  exec python3 -c '
+import ctypes, os, signal, sys, time
 
 PR_SET_ANCESTOR_EXIT = 1
 parent = os.getppid()
@@ -87,45 +91,93 @@ def descendants(root):
     return found
 
 child = None
+interrupted = None
+owned = {}
+deadline = None
+
+def identity(pid):
+    try:
+        fields = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+        return fields[19] if fields[0] != "Z" else None
+    except OSError:
+        return None
+
+def terminate(signum):
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
 def stop_tree(signum, _frame):
+    global interrupted, deadline
+    if interrupted is not None:
+        return
+    interrupted = signum
+    deadline = time.monotonic() + 210
     if child is None:
-        raise SystemExit(128 + signum)
-    # A bg_run child can detach from the process group. It is still a descendant
-    # while the harness is alive, so walk that tree before signalling the root.
-    pids = descendants(child)
-    for pid in list(reversed(pids)) + [child]:
-        try:
-            os.kill(pid, signum)
-        except ProcessLookupError:
-            pass
-    # Forced teardown must not leave a stubborn detached worker behind.
-    for pid in list(reversed(pids)) + [child]:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        return
+    for pid in descendants(child) + [child]:
+        start = identity(pid)
+        if start is not None:
+            owned[pid] = start
+    # Let the shell await its session wrapper before escalating to descendants.
+    try:
+        os.kill(child, signum)
+    except ProcessLookupError:
+        pass
 
 signal.signal(signal.SIGTERM, stop_tree)
 signal.signal(signal.SIGINT, stop_tree)
+blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+if interrupted is not None:
+    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    terminate(interrupted)
+supervisor = os.getpid()
 child = os.fork()
 if child == 0:
+    ctypes.CDLL(None).prctl(PR_SET_ANCESTOR_EXIT, signal.SIGTERM)
+    if os.getppid() != supervisor:
+        os._exit(1)
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     os.execvp(sys.argv[1], sys.argv[1:])
+signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+status = None
 while True:
     try:
-        _, status = os.waitpid(child, 0)
-        if os.WIFEXITED(status):
+        if status is None:
+            pid, result = os.waitpid(child, os.WNOHANG)
+            if pid:
+                status = result
+        if interrupted is not None:
+            alive = [pid for pid, start in owned.items() if identity(pid) == start]
+            if status is not None or time.monotonic() >= deadline:
+                for pid in alive:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if status is None:
+                    _, status = os.waitpid(child, 0)
+                reap_deadline = time.monotonic() + 5
+                while any(identity(pid) == start for pid, start in owned.items()):
+                    if time.monotonic() >= reap_deadline:
+                        break
+                    time.sleep(0.01)
+                terminate(interrupted)
+        elif status is not None:
+            if os.WIFSIGNALED(status):
+                terminate(os.WTERMSIG(status))
             raise SystemExit(os.WEXITSTATUS(status))
-        if os.WIFSIGNALED(status):
-            raise SystemExit(128 + os.WTERMSIG(status))
+        time.sleep(0.05)
     except InterruptedError:
         continue
 ' "$@"
 }
 
 if [[ "${RALPH_GUARDED:-0}" != 1 ]]; then
-  RALPH_GUARDED=1 ralph_exec bash "$0" "$@"
-  exit $?
+  export RALPH_GUARDED=1
+  ralph_exec bash "$0" "$@"
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -156,6 +208,9 @@ BUDGET_TOTAL_USD="${RALPH_BUDGET_TOTAL_USD:-}"
 BUDGET_RESERVE_USD="${RALPH_BUDGET_RESERVE_USD:-2.00}"
 GROUP_WAIT_MAX="${RALPH_GROUP_WAIT_MAX:-900}"
 RESUME_MAX="${RALPH_RESUME_MAX:-4}"      # resumes allowed within one iteration
+FAILURE_MAX=3
+SESSION_WRAPPER=()
+FINISH_COMMAND=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -167,7 +222,7 @@ while [[ $# -gt 0 ]]; do
     -w|--watchdog)       WATCHDOG="$2"; shift 2 ;;
     -b|--budget)         BUDGET_USD="$2"; shift 2 ;;
     -B|--budget-total)   BUDGET_TOTAL_USD="$2"; shift 2 ;;
-    -h|--help)           sed -n '2,41p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)           awk 'NR == 1 { next } !/^#/ { exit } { print }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "ralph: unknown option $1 (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -206,6 +261,38 @@ PROMPT_NAME="$(basename "$PROMPT_NAME")"
 PROMPT_FILE="ralph/$PROMPT_NAME"
 [[ -f "$PROMPT_FILE" ]] || { echo "ralph: $PROMPT_FILE missing" >&2; exit 1; }
 mkdir -p "$RUNDIR"
+# Optional trusted prompt metadata. JSON argv arrays are never shell-evaluated.
+# The wrapper receives the actual harness argv once, with stdin/stdout unchanged.
+# Prompts without metadata keep the ordinary loop and ledger behavior.
+python3 - "$PROMPT_FILE" "$RUNDIR/policy" <<'PY' || exit 2
+import json, pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+matches = re.findall(r'^<!-- ralph-session: (.*?) -->$', text, re.M)
+if len(matches) > 1:
+    raise SystemExit("ralph: duplicate session policy")
+if "<!-- ralph-session:" in text and not matches:
+    raise SystemExit("ralph: malformed session policy")
+p = json.loads(matches[0]) if matches else {}
+if not isinstance(p, dict) or set(p) - {"wrapper", "finish", "iterations", "resumes", "failures"}:
+    raise SystemExit("ralph: invalid session policy")
+base = pathlib.Path(sys.argv[2]); base.mkdir(exist_ok=True)
+for key in ("wrapper", "finish"):
+    argv = p.get(key, [])
+    if not isinstance(argv, list) or (argv and not argv[0]) or any(not isinstance(a, str) or "\0" in a for a in argv):
+        raise SystemExit("ralph: invalid policy argv")
+    (base / key).write_bytes(b"".join(a.encode() + b"\0" for a in argv))
+for key in ("iterations", "resumes", "failures"):
+    if key in p:
+        if type(p[key]) is not int or p[key] < (1 if key == "failures" else 0):
+            raise SystemExit("ralph: invalid policy count")
+        (base / key).write_text(str(p[key]))
+PY
+mapfile -d '' -t SESSION_WRAPPER < "$RUNDIR/policy/wrapper"
+mapfile -d '' -t FINISH_COMMAND < "$RUNDIR/policy/finish"
+[[ ! -f "$RUNDIR/policy/iterations" ]] || MAX_ITER="$(< "$RUNDIR/policy/iterations")"
+[[ ! -f "$RUNDIR/policy/resumes" ]] || RESUME_MAX="$(< "$RUNDIR/policy/resumes")"
+[[ ! -f "$RUNDIR/policy/failures" ]] || FAILURE_MAX="$(< "$RUNDIR/policy/failures")"
+export RALPH_RUN_DIR="$REPO_ROOT/$RUNDIR"
 touch "$PROGRESS"
 git rev-parse --abbrev-ref HEAD > ralph/.last-branch 2>/dev/null || true
 
@@ -288,6 +375,7 @@ LAST_JSON=""
 LAST_RAW_JSON=""
 USAGE_DEFERRED=0
 ITER_JSONS=()
+USAGE_OBSERVERS=()
 ITER_SECS=0
 ITER_COST_START=0
 
@@ -359,13 +447,28 @@ reap_sessions() {
     say "stopping session group $pgid (${members% })"
     kill -TERM -"$pgid" 2>/dev/null || true
   done
-  sleep 2
+  local deadline=$(( SECONDS + 185 )) pending
+  while :; do
+    pending=0
+    for pgid in $SESSION_PGIDS; do
+      [ -z "$(group_members "$pgid")" ] || pending=1
+    done
+    (( pending && SECONDS < deadline )) || break
+    sleep 0.1
+  done
   for pgid in $SESSION_PGIDS; do
     [ -n "$(group_members "$pgid")" ] && kill -KILL -"$pgid" 2>/dev/null || true
   done
 }
-trap 'reap_sessions; exit 130' INT
-trap 'reap_sessions; exit 143' TERM
+interrupt_exit() {
+  local sig="$1"
+  trap '' INT TERM
+  reap_sessions
+  trap - EXIT "$sig"
+  kill -s "$sig" "$$"
+}
+trap 'interrupt_exit INT' INT
+trap 'interrupt_exit TERM' TERM
 trap 'reap_sessions' EXIT
 
 
@@ -1141,8 +1244,50 @@ if mode == "usage":
     if not path:
         print(f"- session {sid} has no transcript under {sessions_roots()[0]}")
         raise SystemExit(0)
+    receipts = [src + '.processes/receipt.json' for src in sources]
+    observed = any(os.path.exists(p) for p in receipts)
+    # New observed runs never use timestamp-only shell attribution.
+    if observed:
+        PI_RE = re.compile(r'(?!)')
+        PI_LAUNCHERS.clear()
     root = discover(path, sessions_roots())
     nodes = list(walk(root))
+    seen_ids = {s.id for s in nodes if s.id}
+    seen_paths = {os.path.realpath(s.path) for s in nodes}
+    receipt_nodes = {}
+    receipt_messages = {}
+    for receipt in receipts:
+        if not os.path.exists(receipt):
+            continue
+        try:
+            audit = json.load(open(receipt))
+            if not audit.get('complete', False):
+                print(f'- WARNING: process observation did not finish: {receipt}')
+            for rec in audit['pi']:
+                if rec['status'] != 'attributed':
+                    print(f"- WARNING: {rec['status']} (pid {rec['pid']}, receipt {receipt})")
+                for t in rec.get('transcripts', []):
+                    sid_child = t['session_id']
+                    if sid_child in seen_ids or os.path.realpath(t['path']) in seen_paths:
+                        continue
+                    child = Session(t['captured'], 'pi process', sid_child)
+                    messages = [e['message'] for e in entries(t['captured'])
+                                if e.get('type') == 'message' and e.get('message', {}).get('role') == 'assistant']
+                    fingerprints = receipt_messages.setdefault(sid_child, set())
+                    fresh = []
+                    for message, call in zip(messages, child.calls):
+                        key = json.dumps(message, sort_keys=True)
+                        if key not in fingerprints:
+                            fingerprints.add(key)
+                            fresh.append(call)
+                    if sid_child in receipt_nodes:
+                        receipt_nodes[sid_child].calls.extend(fresh)
+                    else:
+                        child.calls = fresh
+                        receipt_nodes[sid_child] = child
+                        nodes.append(child)
+        except (OSError, ValueError, KeyError, TypeError):
+            print(f'- WARNING: unattributed Pi descendant: unreadable receipt {receipt}')
     subs = nodes[1:]
     main_cost = root.cost()
     sub_cost = sum(s.cost() for s in subs)
@@ -1158,7 +1303,7 @@ if mode == "usage":
     cost_file = os.environ.get("RALPH_PI_COST_FILE")
     if cost_file:
         with open(cost_file, "a") as fh:
-            fh.write(f"{total:.4f}\n")
+            fh.write(f"{total!r}\n")
     tok = {k: sum(c[k] for s in nodes for c in s.calls) for k in ("in", "cr", "cw", "out", "reasoning")}
     print("- tokens input {in:,} · cache-read {cr:,} · cache-write {cw:,} · output {out:,} · reasoning {reasoning:,}".format(**tok))
     if root.calls:
@@ -1310,7 +1455,8 @@ watchdog() { # <pid> <label>
   local pid="$1" label="$2" start last now idle
   start=$(date +%s)
   while kill -0 "$pid" 2>/dev/null; do
-    sleep 30
+    # Keep signal traps responsive while a foreground harness wrapper cleans up.
+    sleep 1
     kill -0 "$pid" 2>/dev/null || return 0
     [[ "$WATCHDOG" -le 0 ]] && continue
     last=$(stat -c %Y "$PROGRESS" 2>/dev/null || stat -f %m "$PROGRESS" 2>/dev/null || echo "$start")
@@ -1354,6 +1500,17 @@ watchdog() { # <pid> <label>
 log_usage() {
   local label="$1"; shift
   if [[ "$HARNESS" == pi ]]; then
+    local observer source
+    for source in "$@"; do
+      if (( ${#USAGE_OBSERVERS[@]} )); then
+        mkdir -p "$source.processes"
+        touch "$source.processes/receipt.json.stop"
+      fi
+    done
+    for observer in ${USAGE_OBSERVERS[@]+"${USAGE_OBSERVERS[@]}"}; do
+      wait "$observer" || say "usage process observer failed"
+    done
+    USAGE_OBSERVERS=()
     local f
     {
       printf '\n## %s UTC (%s) - Session usage — %s [%s/%s]%s\n' \
@@ -1361,6 +1518,20 @@ log_usage() {
       RALPH_PI_COST_FILE="$COST_FILE" pi_transcript usage "$@"
       for f in "$@"; do printf -- '- transcript: %s\n' "$f"; done
     } >> "$PROGRESS"
+    # Do not break a live child's inherited PATH. Retain its shim on an incomplete
+    # flush; its receipt and ledger warning explain why cleanup was deferred.
+    for source in "$@"; do
+      python3 - "$source.processes" <<'PY'
+import json, pathlib, shutil, sys
+base = pathlib.Path(sys.argv[1])
+try:
+    audit = json.loads((base / 'receipt.json').read_text())
+    if audit.get('complete') and all('exit_observed_at' in r for r in audit['pi']):
+        shutil.rmtree(base / 'bin', ignore_errors=True)
+except (OSError, ValueError, KeyError):
+    pass
+PY
+    done
     return 0
   fi
   if [[ "$HARNESS" == codex ]]; then
@@ -1843,7 +2014,7 @@ PY
 # for the harness to exit. This closes the orphan window even for forced teardown.
 harness_exec() {
   python3 -c '
-import ctypes, os, signal, sys
+import ctypes, os, signal, sys, time
 
 PR_SET_ANCESTOR_EXIT = 1
 parent = os.getppid()
@@ -1874,46 +2045,385 @@ def descendants(root):
     return found
 
 child = None
+interrupted = None
+owned = {}
+deadline = None
+
+def identity(pid):
+    try:
+        fields = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()
+        return fields[19] if fields[0] != "Z" else None
+    except OSError:
+        return None
+
+def terminate(signum):
+    receipt = os.environ.get("RALPH_SESSION_SIGNAL_FILE")
+    if receipt:
+        with open(receipt, "w") as stream:
+            stream.write(str(signum))
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
 def stop_tree(signum, _frame):
+    global interrupted, deadline
+    if interrupted is not None:
+        return
+    interrupted = signum
+    deadline = time.monotonic() + 180
     if child is None:
-        raise SystemExit(128 + signum)
-    # A bg_run child can detach from the process group. It is still a descendant
-    # while the harness is alive, so walk that tree before signalling the root.
-    pids = descendants(child)
-    for pid in list(reversed(pids)) + [child]:
-        try:
-            os.kill(pid, signum)
-        except ProcessLookupError:
-            pass
-    # Forced teardown must not leave a stubborn detached worker behind.
-    for pid in list(reversed(pids)) + [child]:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        return
+    for pid in descendants(child) + [child]:
+        start = identity(pid)
+        if start is not None:
+            owned[pid] = start
+    try:
+        os.kill(child, signum)
+    except ProcessLookupError:
+        pass
 
 signal.signal(signal.SIGTERM, stop_tree)
 signal.signal(signal.SIGINT, stop_tree)
+blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+if interrupted is not None:
+    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+    terminate(interrupted)
 child = os.fork()
 if child == 0:
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     os.execvp(sys.argv[1], sys.argv[1:])
+signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+status = None
 while True:
     try:
-        _, status = os.waitpid(child, 0)
-        if os.WIFEXITED(status):
+        if status is None:
+            pid, result = os.waitpid(child, os.WNOHANG)
+            if pid:
+                status = result
+        if interrupted is not None and (status is not None or time.monotonic() >= deadline):
+            for pid, start in owned.items():
+                if identity(pid) != start:
+                    continue
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if status is None:
+                _, status = os.waitpid(child, 0)
+            reap_deadline = time.monotonic() + 5
+            while any(identity(pid) == start for pid, start in owned.items()):
+                if time.monotonic() >= reap_deadline:
+                    break
+                time.sleep(0.01)
+            terminate(interrupted)
+        elif interrupted is None and status is not None:
+            if os.WIFSIGNALED(status):
+                terminate(os.WTERMSIG(status))
             raise SystemExit(os.WEXITSTATUS(status))
-        if os.WIFSIGNALED(status):
-            raise SystemExit(128 + os.WTERMSIG(status))
+        time.sleep(0.05)
     except InterruptedError:
         continue
 ' "$@"
 }
 
+# The only executable shim is iteration-owned, never installed in the user's bin.
+# Resolve Pi before changing PATH. Wrappers may set RALPH_PI_CHILD_EXECUTABLE
+# to their canonical downstream Pi, while the root still enters the wrapper.
+# The Python shebang and os.execv preserve the
+# launch PID; no intermediary shell, output pipe, or lifecycle supervisor.
+prepare_pi_usage() { # <stdout path>
+  local real_pi python
+  real_pi="$(type -P pi)" || return 1
+  python="$(type -P python3)" || return 1
+  python3 - "$1.processes" "$real_pi" "$python" <<'PY'
+import json, os, pathlib, sys
+base = pathlib.Path(sys.argv[1]).resolve()
+base.mkdir(parents=True, exist_ok=True)
+shim = base / 'bin'
+shim.mkdir(mode=0o700)
+real = os.path.realpath(sys.argv[2])
+child_real = os.path.realpath(os.environ.get('RALPH_PI_CHILD_EXECUTABLE', real))
+code = '''import json, os, pathlib, sys, time
+BASE = pathlib.Path(BASE_VALUE)
+REAL = REAL_VALUE
+def proc(pid):
+    try:
+        fields = pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        return dict(pid=pid, start_time=fields[19], ppid=int(fields[1]), state=fields[0])
+    except (OSError, IndexError, ValueError):
+        return dict(pid=pid, start_time='unknown', ppid=os.getppid())
+r = proc(os.getpid())
+r.update(command=[REAL, *sys.argv[1:]], executable=REAL, cwd=os.getcwd(),
+         discovered_at=time.time(), files=[], lineage=[])
+p = r['ppid']
+while p > 1 and p not in [a['pid'] for a in r['lineage']]:
+    a = proc(p); r['lineage'].append(a); p = a['ppid']
+key = str(r['pid']) + '-' + r['start_time']
+r['metadata'] = str(BASE / (key + '.sessions.jsonl'))
+# Capture inherited writable descriptors before exec, including JSON stdout.
+for fd in ('1', '2'):
+    try:
+        target = pathlib.Path(os.readlink('/proc/self/fd/' + fd))
+        s = target.stat()
+        if target.is_file():
+            r['files'].append(dict(path=str(target.resolve()), device=s.st_dev, inode=s.st_ino))
+    except OSError:
+        pass
+path = BASE / (key + '.launch.json')
+with path.with_suffix('.tmp').open('w') as f:
+    json.dump(r, f); f.flush(); os.fsync(f.fileno())
+path.with_suffix('.tmp').replace(path)
+os.environ['RALPH_PI_LAUNCH_RECEIPT'] = str(path)
+# CLI extensions are explicit and load even with --no-extensions. This hook only
+# records SessionManager identity. It does not change session storage or prompts.
+os.execv(REAL, [REAL, '--extension', str(BASE / 'bin' / 'session.mjs'), *sys.argv[1:]])
+'''.replace('BASE_VALUE', repr(str(base))).replace('REAL_VALUE', repr(child_real))
+(shim / 'pi').write_text('#!' + os.path.abspath(sys.argv[3]) + '\n' + code)
+(shim / 'pi').chmod(0o700)
+(shim / 'session.mjs').write_text('''import { readFileSync, appendFileSync, statSync } from 'node:fs';
+export default function(pi) {
+  const launch = JSON.parse(readFileSync(process.env.RALPH_PI_LAUNCH_RECEIPT, 'utf8'));
+  // A nested absolute-path invocation must not impersonate its parent's receipt.
+  if (launch.pid !== process.pid) return;
+  const record = (_event, ctx) => {
+    const path = ctx.sessionManager.getSessionFile();
+    if (!path) return;
+    let file = { path, session_id: ctx.sessionManager.getSessionId() };
+    try { const s = statSync(path); file.device = s.dev; file.inode = s.ino; } catch {}
+    appendFileSync(launch.metadata, JSON.stringify(file) + '\\n');
+  };
+  pi.on('session_start', record);
+  pi.on('message_end', record);
+  pi.on('session_shutdown', record);
+}
+''')
+print(real)
+PY
+}
+
+observe_pi_usage() { # <main pid> <receipt path> <resolved executable> <wait bound>
+  python3 - "$@" "$$" <<'PY'
+"""Linux, iteration-scoped passive process receipts. Never signals observed work."""
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+
+def process(pid):
+    try:
+        base = Path('/proc') / str(pid)
+        fields = (base / 'stat').read_text().rsplit(')', 1)[1].split()
+        return {'pid': int(pid), 'start_time': fields[19], 'ppid': int(fields[1]),
+                'state': fields[0]}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def identity(p):
+    return (p['pid'], p['start_time'])
+
+
+def extend(known, snapshot):
+    """Only a currently matching parent identity can establish a new edge."""
+    changed = True
+    while changed:
+        changed = False
+        for p in snapshot.values():
+            parent = snapshot.get(p['ppid'])
+            if identity(p) not in known and parent and identity(parent) in known:
+                known[identity(p)] = dict(p, ancestor=identity(parent), discovered_at=time.time())
+                changed = True
+
+
+def candidates(pid, argv, cwd):
+    found = []
+    for i, arg in enumerate(argv[:-1]):
+        if arg == '--session' and ('/' in argv[i + 1] or argv[i + 1].endswith('.jsonl')):
+            found.append(Path(cwd) / argv[i + 1])
+    try:
+        for fd in (Path('/proc') / str(pid) / 'fd').iterdir():
+            try:
+                target = Path(os.readlink(fd))
+                info = (fd.parent.parent / 'fdinfo' / fd.name).read_text()
+                flags = int(next(line.split()[1] for line in info.splitlines() if line.startswith('flags:')), 8)
+                if target.is_absolute() and stat.S_ISREG(fd.stat().st_mode) and flags & os.O_ACCMODE:
+                    found.append(target)
+            except (OSError, ValueError, StopIteration):
+                pass
+    except OSError:
+        pass
+    out = []
+    for path in set(found):
+        try:
+            s = path.stat()
+            out.append({'path': str(path.resolve()), 'device': s.st_dev, 'inode': s.st_ino})
+        except OSError:
+            pass
+    return out
+
+
+def resolve(record):
+    """Read only files witnessed on this process, after its identity disappears."""
+    transcripts = {}
+    files = list(record.get('files', []))
+    # Explicit SessionManager metadata is tied to the shim's exact exec identity.
+    try:
+        for line in Path(record['metadata']).read_text().splitlines():
+            f = json.loads(line)
+            if 'inode' in f and f not in files:
+                files.append(f)
+    except (KeyError, OSError, ValueError):
+        pass
+    argv = record.get('command', [])
+    options = {}
+    for i, arg in enumerate(argv):
+        if arg in ('--session-id', '--session-dir') and i + 1 < len(argv):
+            options[arg] = argv[i + 1]
+        elif arg.startswith(('--session-id=', '--session-dir=')):
+            key, value = arg.split('=', 1); options[key] = value
+    # An explicit launch id plus its explicit directory is direct evidence.
+    # No default session directory or timestamp window is inferred.
+    if options.get('--session-id') and options.get('--session-dir'):
+        directory = Path(record.get('cwd', '/')) / options['--session-dir']
+        for p in directory.glob('**/*.jsonl'):
+            try:
+                with p.open() as stream:
+                    h = json.loads(stream.readline())
+                if h.get('type') == 'session' and h.get('id') == options['--session-id']:
+                    s = p.stat()
+                    files.append({'path': str(p.resolve()), 'device': s.st_dev, 'inode': s.st_ino})
+            except (OSError, ValueError, AttributeError):
+                pass
+    for f in files:
+        try:
+            p = Path(f['path']); s = p.stat()
+            if (s.st_dev, s.st_ino) != (f['device'], f['inode']):
+                continue
+            with p.open() as stream:
+                rows = [json.loads(line) for line in stream if line.strip()]
+            if not rows or rows[0].get('type') != 'session' or not rows[0].get('id'):
+                continue
+            # Persisted sessions and JSON-mode stdout have different event shapes.
+            messages = []
+            for row in rows:
+                if row.get('type') in ('message', 'message_end'):
+                    m = row.get('message', {})
+                    if m.get('role') == 'assistant':
+                        messages.append(m)
+            if not messages or any(not isinstance(m.get('usage', {}).get('cost', {}).get('total'), (int, float)) for m in messages):
+                continue
+            sid = rows[0]['id']
+            if f.get('session_id', sid) != sid:
+                continue
+            normalized = [rows[0]] + [{'type': 'message', 'message': m} for m in messages]
+            transcripts[sid] = (f, normalized)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return transcripts
+
+
+def monitor(root, receipt):
+    receipt = receipt.resolve()
+    owner = process(int(sys.argv[5]))
+    root_record = process(root)
+    known = {} if root_record is None else {identity(root_record): dict(root_record, discovered_at=time.time())}
+    records = {}
+    pi = os.path.realpath(os.environ.get('RALPH_PI_CHILD_EXECUTABLE', sys.argv[3]))
+    pi_hosts = set()
+    deadline = None
+    stop = Path(str(receipt) + '.stop')
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        snapshot = {p['pid']: p for name in os.listdir('/proc') if name.isdigit() if (p := process(name))}
+        extend(known, snapshot)
+        # Synchronous launch receipts survive a complete fork/exec/exit between polls.
+        for launch in receipt.parent.glob('*.launch.json'):
+            r = json.loads(launch.read_text())
+            key = identity(r)
+            known.setdefault(key, r)
+            records.setdefault(key, r)
+        for key, owned in list(known.items()):
+            p = snapshot.get(key[0])
+            live = p and identity(p) == key and p['state'] != 'Z'
+            if live:
+                try:
+                    base = Path('/proc') / str(p['pid'])
+                    argv = (base / 'cmdline').read_bytes().decode(errors='replace').rstrip('\0').split('\0')
+                    cwd = os.readlink(base / 'cwd')
+                    # Receipts cover fast launches. Also retain witnessed absolute
+                    # executable launches below the actual main Pi. A basename or
+                    # timestamp alone never establishes a Pi identity.
+                    is_pi = any(os.path.isabs(arg) and os.path.realpath(arg) == pi
+                                for arg in argv[:2])
+                    if is_pi:
+                        ancestor = owned.get('ancestor')
+                        below_pi = False
+                        visited = set()
+                        while ancestor and tuple(ancestor) not in visited:
+                            ancestor = tuple(ancestor)
+                            visited.add(ancestor)
+                            if ancestor in pi_hosts:
+                                below_pi = True
+                                break
+                            ancestor = known.get(ancestor, {}).get('ancestor')
+                        pi_hosts.add(key)
+                        if below_pi and key not in records:
+                            records[key] = dict(owned, command=argv, executable=pi,
+                                                cwd=cwd, files=[])
+                    if key in records:
+                        r = records[key]
+                        r['last_seen_at'] = time.time()
+                        for f in candidates(p['pid'], argv, cwd):
+                            if f not in r['files']:
+                                r['files'].append(f)
+                except OSError:
+                    pass
+            elif key in records:
+                records[key].setdefault('exit_observed_at', time.time())
+        current_owner = process(owner['pid']) if owner else None
+        stopping = stop.exists() or not current_owner or identity(current_owner) != identity(owner)
+        if stopping and deadline is None:
+            deadline = time.monotonic() + float(sys.argv[4])
+        live_children = any('exit_observed_at' not in r for r in records.values())
+        finished = stopping and (not live_children or time.monotonic() >= deadline)
+        for key, r in records.items():
+            if 'exit_observed_at' in r and ('transcripts' not in r or finished):
+                # Inherited main stdout/stderr is not evidence of child usage.
+                main_output = str(receipt.parent)[:-len('.processes')]
+                r['files'] = [f for f in r['files'] if f['path'] not in
+                              (main_output, main_output + '.err')]
+                resolved = resolve(r)
+                r['transcripts'] = []
+                for sid, (source, rows) in resolved.items():
+                    dest = receipt.parent / (str(key[0]) + '-' + key[1] + '-' + str(len(r['transcripts'])) + '.jsonl')
+                    dest.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                    r['transcripts'].append(dict(source, session_id=sid, captured=str(dest)))
+                r['status'] = 'attributed' if resolved else 'unattributed Pi descendant: missing or malformed transcript'
+            elif 'exit_observed_at' not in r:
+                r['status'] = 'unattributed Pi descendant: process still live'
+        data = {'root': root_record, 'observed_at': time.time(), 'complete': finished,
+                'processes': list(known.values()), 'pi': list(records.values()),
+                'accounting_complete': finished and all(r['status'] == 'attributed' for r in records.values()),
+                'limitation': 'PATH bypasses are not guaranteed; known unresolved launches are incomplete.'}
+        tmp = Path(str(receipt) + '.tmp'); tmp.write_text(json.dumps(data, indent=2)); tmp.replace(receipt)
+        if finished:
+            break
+        time.sleep(0.1)
+
+
+if __name__ == '__main__':
+    monitor(int(sys.argv[1]), Path(sys.argv[2]))
+PY
+}
+
 # run_session <label> <prompt-file> — writes the session's final text to
 # $RESULT_FILE. Do NOT call inside $( ): see the RESULT_FILE note above.
 run_session() {
-  local label="$1" pf="$2" sid="${3:-}" out rc pid pgid t0 result_file
+  local label="$1" pf="$2" sid="${3:-}" out rc pid pgid t0 result_file real_pi shim_path
   local -a resume_args=()
   # Codex resumes with a subcommand; the other two take a flag, and pi's is --session,
   # which reopens the same transcript file (verified: the resumed turn appends to it).
@@ -1928,6 +2438,8 @@ run_session() {
   out="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.json"
   LAST_JSON="$out"
   LAST_RAW_JSON="$out"
+  local RALPH_SESSION_SIGNAL_FILE="$out.signal"
+  export RALPH_SESSION_SIGNAL_FILE
   if [ -n "$sid" ]; then
     say "session $SESSION_N [$label] RESUMING $sid (model=$MODEL_LABEL)"
   else
@@ -1936,25 +2448,40 @@ run_session() {
   result_file="$RUNDIR/$(printf '%03d' "$SESSION_N")-$label.result.txt"
   if [[ "$HARNESS" == codex ]]; then
     if [ -n "$sid" ]; then
-      harness_exec codex exec resume "$sid" "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
+      harness_exec ${SESSION_WRAPPER[@]+"${SESSION_WRAPPER[@]}"} codex exec resume "$sid" "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
     else
-      harness_exec codex exec "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
+      harness_exec ${SESSION_WRAPPER[@]+"${SESSION_WRAPPER[@]}"} codex exec "${HARNESS_ARGS[@]}" -o "$result_file" < "$pf" > "$out" 2> "$out.err" &
     fi
   elif [[ "$HARNESS" == pi ]]; then
     # A child the session starts with `pi -p` reads these to run on the same model and
     # level as its parent; the prompts name them as $RALPH_MODEL / $RALPH_THINKING.
-    RALPH_MODEL="$MODEL" RALPH_THINKING="$THINKING" \
-      harness_exec pi "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+    real_pi="$(prepare_pi_usage "$out")" || return 1
+    shim_path="$(cd "$out.processes/bin" && pwd)"
+    PATH="$shim_path:$PATH" RALPH_MODEL="$MODEL" RALPH_THINKING="$THINKING" \
+    PI_CHROME_USE_RECORD_DIR="$RUNDIR/recordings/$(printf '%03d' "$SESSION_N")-$label" \
+      harness_exec ${SESSION_WRAPPER[@]+"${SESSION_WRAPPER[@]}"} "$real_pi" "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
   else
-    harness_exec claude "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
+    harness_exec ${SESSION_WRAPPER[@]+"${SESSION_WRAPPER[@]}"} claude "${HARNESS_ARGS[@]}" ${resume_args[@]+"${resume_args[@]}"} < "$pf" > "$out" 2> "$out.err" &
   fi
   pid=$!
+  if [[ "$HARNESS" == pi ]]; then
+    observe_pi_usage "$pid" "$out.processes/receipt.json" "$real_pi" "$GROUP_WAIT_MAX" &
+    USAGE_OBSERVERS+=( "$!" )
+  fi
   pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
   [ -n "$pgid" ] && SESSION_PGIDS="$SESSION_PGIDS $pgid"
   watchdog "$pid" "$label"
   wait "$pid"; rc=$?
   # `wait` returns when THIS claude exits; subagents it spawned live on.
   await_group "$pgid" "$label"
+  # A background shell wait exposes only 128+signal. The supervisor records an
+  # actual observed signal separately, so an ordinary exit 130 is never guessed.
+  if [[ -f "$RALPH_SESSION_SIGNAL_FILE" ]]; then
+    case "$(< "$RALPH_SESSION_SIGNAL_FILE")" in
+      2) interrupt_exit INT ;;
+      15) interrupt_exit TERM ;;
+    esac
+  fi
   SESSION_SECS=$(( $(date +%s) - t0 ))   # read by log_usage for the header
   ITER_JSONS+=( "$out" )
   ITER_SECS=$(( ITER_SECS + SESSION_SECS ))
@@ -1978,6 +2505,19 @@ run_session() {
   else
     jsonfield "$out" result > "$RESULT_FILE" 2>/dev/null || : > "$RESULT_FILE"
   fi
+  if (( rc != 0 )); then
+    : > "$RESULT_FILE"
+    python3 - "$LAST_JSON" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+try:
+    value = json.loads(p.read_text())
+    value["is_error"] = True
+    p.write_text(json.dumps(value))
+except (OSError, ValueError):
+    pass
+PY
+  fi
   return 0
 }
 
@@ -1988,18 +2528,18 @@ run_session() {
 # not a stylistic choice.
 # The tools a session has differ by harness, and a prompt that names the wrong ones
 # sends the model looking for a ToolSearch it does not have. Each note names what is
-# actually there. On pi the browser is ralph/pi-chrome (installed as a pi package) and
-# a subagent is a `pi -p` child under bg_run, since that is what the transcript ledger
-# and the quiescence check follow.
+# actually there. On pi the browser is @hfalconer/pi-chrome-use (a pi package, the user's own Chrome
+# through its connected extension) and a subagent is a `pi -p` child under bg_run, since
+# that is what the transcript ledger and the quiescence check follow.
 env_note() {
   if [[ "$HARNESS" == pi ]]; then
     cat <<'ENVNOTE'
 
 ## Environment
-- Repo: the current working directory. Stack per the specs and CLAUDE.md.
+- Repo: the current working directory. Stack per the specs and AGENTS.md.
 - You run with full permissions. Nothing asks you to confirm a tool call.
 - The bash tool's `timeout` is in SECONDS here, 600 at most for anything you wait on; a prompt written for a harness that counts milliseconds ("600000 ms") means 600 on this one, and 600000 would be a week.
-- Browser: the chrome_* tools own a real Chrome window. chrome_open gives a tabId; chrome_eval returns JSON from the page (measure with it, never from a screenshot); chrome_input sends real clicks, hovers and keys; chrome_tabs resizes, lists and closes. A chrome_eval is aborted after its timeoutMs (600000 at most), so a job that runs for minutes must detach itself and be polled. Open new tabs; never reuse a tabId from an earlier session. Close every tab you opened.
+- Browser: the Chrome tools drive the user's own running Chrome, on their real profile with its sessions and cookies. Start with find_chrome_windows (window ids), then list_tabs on a window (tab ids, order and the selected tab, read passively from Chrome's own records). open_url opens a background tab without selecting it or focusing Chrome (the tab lives in the window_id its result returns, which may differ from the one asked for: use the returned window_id from then on); There is no tool that opens a window: a new window would bring Chrome to the front, so work in background tabs of an existing window. evaluate_browser returns the expression's JSON (measure with it, never from a screenshot); chrome_dom_action, chrome_locator_action and chrome_cua send real clicks, hovers and keys; tab_action screenshot saves an image file and returns its path; chrome_set_file_input attaches a file or a whole folder tree to a page in the background, never through a native picker; close_tab closes a tab you opened. Every call names window_id and tab_id. Open new tabs; never reuse a tab id from an earlier session, never touch a tab you did not open, and close every tab you opened.
 - Subagents: start one as a background task running pi — `bg_run` with isAgent true and the command `pi -p --model "$RALPH_MODEL" --thinking "$RALPH_THINKING" "$(cat /path/to/prompt.txt)"` (both variables are set in your environment; write the prompt to a file first, and pass it as the argument — the task runner gives the child no stdin, so `< file` reaches nothing). It has the same tools you have, including the browser. Its result arrives as a <background-task-notification> **while you keep working** — in this headless run, ending your turn exits the process and kills every background task, so a notification can never wake you afterwards. Never end your turn to wait for a task; wait inside the turn by running `sleep 30` in bash (one call at a time, never past 600 s) and checking bg_status until the task has finished. The same holds for a server you start with bg_run: it lives exactly as long as your turn. bg_delegate is read-only (no bash, no browser) and fits study and searches only. Use parallel children for study and searches, a single child for ralph/tests (backpressure), children for complex reasoning — and wait for every one of them before you finish, since nothing you started survives your exit.
 ENVNOTE
     return
@@ -2007,7 +2547,7 @@ ENVNOTE
   cat <<'ENVNOTE'
 
 ## Environment
-- Repo: the current working directory. Stack per the specs and CLAUDE.md.
+- Repo: the current working directory. Stack per the specs and AGENTS.md.
 - You run with full permissions and Chrome attached.
 - Browser/computer use: when verifying user-facing or HTTP behavior, load the browser tools in ONE ToolSearch call and drive the app in a real tab; use the computer tool for screenshots/clicks as needed. Create new tabs; never reuse old tab IDs.
 - If no browser is attached, you may search this filesystem for a Chrome or Chromium executable and launch it yourself, then carry on with the browser automation tools.
@@ -2094,8 +2634,8 @@ ralph_loop() { # <phase-label> <extra-context> -> 0 = COMPLETE, 1 = stopped
         return 1
       fi
       fails=$((fails + 1))
-      say "iteration $ITER [$phase]: still no promise tag after $tries resume(s) ($fails/3 consecutive) — retrying the slot"
-      (( fails >= 3 )) && { say "aborting: 3 consecutive abnormal exits at iteration $ITER"; return 1; }
+      say "iteration $ITER [$phase]: still no promise tag after $tries resume(s) ($fails/$FAILURE_MAX consecutive) — retrying the slot"
+      (( fails >= FAILURE_MAX )) && { say "aborting: $FAILURE_MAX consecutive abnormal exits at iteration $ITER"; return 1; }
       continue
     fi
     flush_iteration_usage "ralph-$ITER"
@@ -2127,9 +2667,13 @@ TOTAL_COST="$(spent_usd)"
 say "run totals: $SESSION_N session(s), \$$TOTAL_COST"
 
 # Commit the ledger so it is never left sitting uncommitted in the working tree.
-git add -A && git commit -q -m "ralph: run totals" && git push -q \
-  && say "run totals committed and pushed" \
-  || say "run totals written to $PROGRESS but not committed (nothing to commit, or push failed)"
+if (( ${#FINISH_COMMAND[@]} )); then
+  "${FINISH_COMMAND[@]}" || { say "run finalization failed"; ralph_rc=1; }
+else
+  git add -A && git commit -q -m "ralph: run totals" && git push -q \
+    && say "run totals committed and pushed" \
+    || say "run totals written to $PROGRESS but not committed (nothing to commit, or push failed)"
+fi
 
 if (( ralph_rc != 0 )); then
   say "stopped during Ralph after $((ITER - 1)) iteration(s)"

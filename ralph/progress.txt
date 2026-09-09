@@ -685,3 +685,28 @@ ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-c
 - ralph ended 
 - total cost $0.0000 (summed from session usage)
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications and repository, then implementing and validating the selected batch.
+
+Resetting the required perf counter setting before repository inspection.
+
+Reading the build queue and repository shape now.
+
+The queue has eight pending entries, so all eight are locked for this iteration.
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all pending items in todo-build.md.
+
+Repository inspection confirms the queue is intentionally exposing simulation and fixture paths; I am now collecting the parallel specification audits before changing code.
+
+The requested repeat is running in the foreground now: executing the repository gate without backgrounding it.

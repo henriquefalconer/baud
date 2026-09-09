@@ -21,6 +21,10 @@ setup() {
   REPO="${BATS_TEST_DIRNAME}/.."
   RALPH="${REPO}/ralph/ralph"
   TMP="$(mktemp -d)"
+  # Source-time file operations belong to this test, never the caller's checkout.
+  mkdir -p "$TMP/ralph"
+  printf 'Fixture task.\n' > "$TMP/ralph/prompt-build.md"
+  cd "$TMP"
 
   # Source the script's definitions without running the loop.
   python3 - "$RALPH" > "$TMP/lib.sh" <<'PY'
@@ -209,7 +213,7 @@ SH
 @test "forced ralph parent loss stops its harness" {
   mkdir -p "$TMP/fake-bin" "$TMP/ralph"
   cp "$RALPH" "$TMP/ralph/ralph"
-  cp "$REPO/ralph/prompt-build.md" "$TMP/ralph/prompt-build.md"
+  printf 'Fixture task. Report <promise>COMPLETE</promise> when done.\n' > "$TMP/ralph/prompt-build.md"
   cat > "$TMP/fake-bin/pi" <<'SH'
 #!/usr/bin/env sh
 echo "$PPID" > "$PI_PARENT_PID_FILE"
@@ -225,7 +229,7 @@ SH
   worker="$(cat "$TMP/pi-parent.pid" 2>/dev/null || true)"
   [ -n "$worker" ] && kill -0 "$worker"
   kill -KILL "$outer" 2>/dev/null || true
-  for _ in {1..30}; do
+  for _ in {1..400}; do
     ! kill -0 "$worker" 2>/dev/null && break
     sleep 0.1
   done
@@ -318,8 +322,8 @@ SH
 }
 
 @test "the script traps INT, TERM and EXIT to reap sessions" {
-  grep -q "trap 'reap_sessions; exit 130' INT" "$RALPH"
-  grep -q "trap 'reap_sessions; exit 143' TERM" "$RALPH"
+  grep -q "trap 'interrupt_exit INT' INT" "$RALPH"
+  grep -q "trap 'interrupt_exit TERM' TERM" "$RALPH"
   grep -q "trap 'reap_sessions' EXIT" "$RALPH"
 }
 
@@ -477,37 +481,6 @@ SH
   accept_line=$(grep -n '^    if \[\[ -z "\$p" \]\]; then' "$RALPH" | head -1 | cut -d: -f1)
   [ -n "$wait_line" ] && [ -n "$accept_line" ]
   [ "$wait_line" -lt "$accept_line" ]
-}
-
-@test "every main-loop prompt has a durable task-focus contract" {
-  # Build mode locks its selected implementation entries; plan mode keeps the
-  # standing groups continuous and chooses the first actionable task each pass.
-  grep -qF -- '**Selection lock.**' "$REPO/ralph/prompt-build.md"
-  grep -qF -- 'beginning of the main session' "$REPO/ralph/prompt-build.md"
-  grep -qF -- 'DONE' "$REPO/ralph/prompt-build.md"
-  grep -qF -- 'commit, push, and return a promise tag' "$REPO/ralph/prompt-build.md"
-
-  ! grep -qF -- '**Selection lock.**' "$REPO/ralph/prompt-plan.md"
-  ! grep -qF -- '**Selection lock.**' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'todo-plan.md' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'continuous goals' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'in parallel with' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'Audit every standing group' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'walk every relevant source' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'Never accept a half-assed' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'always as Markdown bullet points' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- '## 1. Execute the procedure, in order' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- '**Prune `todo-build.md`**' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'Only DONE is deleted' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'not a claim that Baud' "$REPO/ralph/prompt-plan.md"
-  grep -qF -- 'After the commit is pushed and confirmed landed' "$REPO/ralph/prompt-plan.md"
-  ! grep -qF -- '<promise>NEXT</promise>' "$REPO/ralph/prompt-plan.md"
-
-  grep -qF -- '## Task-generation method' "$REPO/todo-plan.md"
-  grep -qF -- 'start an independent implementation-audit subagent in parallel' "$REPO/todo-plan.md"
-  grep -qF -- 'Walk every part of the group' "$REPO/todo-plan.md"
-  grep -qF -- 'Never propose a half-assed' "$REPO/todo-plan.md"
-  grep -qF -- 'Every accepted task must be written as a Markdown bullet' "$REPO/todo-plan.md"
 }
 
 # ── ledger helpers ────────────────────────────────────────────────────────────
@@ -912,7 +885,7 @@ JSONL
 @test "the real Ralph process records a Codex run end to end" {
     mkdir -p "$TMP/fake-bin" "$TMP/ralph"
     cp "$RALPH" "$TMP/ralph/ralph"
-    cp "$REPO/ralph/prompt-build.md" "$TMP/ralph/prompt-build.md"
+    printf 'Fixture task. Report <promise>COMPLETE</promise> when done.\n' > "$TMP/ralph/prompt-build.md"
     cat > "$TMP/fake-bin/git" <<'SH'
 #!/usr/bin/env bash
 if [[ "$1" == rev-parse ]]; then printf '%s\n' main; fi
@@ -1131,9 +1104,9 @@ pi_fixture() { # builds $PI_HOME and $PI_MAIN, $PI_STDOUT
     : > "$COST_FILE"
     log_usage ralph-1 "$PI_STDOUT"
     grep -qF -- 'UTC (1min) - Session usage — ralph-1 [pi/anthropic/claude-haiku-4-5] [off]' "$PROGRESS" || return 1
-    # 0.0361673 + 0.0156 + 0.0024113 + 0.0100 + 0.0042 = 0.0684
+    # Exact cost is 0.0683786; only the human-readable ledger rounds to 0.0684.
     grep -qF -- '- cost $0.0684 (summed from 4 session transcripts: main $0.0362 · subagents $0.0280 · 1 agent without a transcript $0.0042 from the parent'"'"'s own record)' "$PROGRESS" || return 1
-    [ "$(cat "$COST_FILE")" = "0.0684" ] || return 1
+    python3 -c 'import sys, math; assert math.isclose(float(open(sys.argv[1]).read()), 0.0683786, rel_tol=0, abs_tol=1e-15)' "$COST_FILE" || return 1
     grep -qF -- '- tokens input 38 · cache-read 101,505 · cache-write 33,840 · output 556 · reasoning 0' "$PROGRESS" || return 1
     grep -qE -- '- context 21,258 tok peak( of 200K \(11%\))? across 5 inference calls, monotonic$' "$PROGRESS" || return 1
     grep -qF -- '- models claude-haiku-4-5 $0.0542 (in 35 / out 551 / cache-read 101,505) · claude-sonnet-5 $0.0100' "$PROGRESS" || return 1
@@ -1146,6 +1119,26 @@ pi_fixture() { # builds $PI_HOME and $PI_MAIN, $PI_STDOUT
     ! grep -qF -- ' — /' "$PROGRESS" || return 1
     ! grep -qF -- '- session: ' "$PROGRESS" || return 1
     ! grep -qF -- 'ended with an error' "$PROGRESS" || return 1
+}
+
+@test "process receipts add a script child once across resumes and warn on missing usage" {
+    pi_fixture
+    local child="$TMP/child.jsonl"
+    printf '%s\n' '{"type":"session","id":"owned-child"}' '{"type":"message","message":{"role":"assistant","usage":{"input":7,"cost":{"total":0.5}}}}' > "$child"
+    mkdir -p "$PI_STDOUT.processes"
+    python3 - "$PI_STDOUT.processes/receipt.json" "$child" "$PI_MAIN" <<'PY'
+import json, sys
+child = {'session_id': 'owned-child', 'path': sys.argv[2], 'captured': sys.argv[2]}
+main = {'session_id': 'main-0001', 'path': sys.argv[3], 'captured': sys.argv[3]}
+json.dump({'pi': [{'pid': 1, 'status': 'attributed', 'transcripts': [child, child, main]},
+                  {'pid': 2, 'status': 'unattributed Pi descendant: missing or malformed transcript'}]}, open(sys.argv[1], 'w'))
+PY
+    HARNESS=pi MODEL=m THINKING_TAG="" SESSION_SECS=1
+    log_usage receipt "$PI_STDOUT" "$PI_STDOUT"
+    [ "$(grep -c 'Session usage' "$PROGRESS")" -eq 1 ] || return 1
+    grep -qF -- '- cost $0.5560 (summed from 3 session transcripts' "$PROGRESS" || return 1
+    grep -qF -- 'WARNING: unattributed Pi descendant' "$PROGRESS" || return 1
+    [ "$(grep -c 'owned-child:' "$PROGRESS")" -eq 1 ] || return 1
 }
 
 @test "pi ledger flags a resumed iteration and reads the session from the last stdout" {
@@ -1388,6 +1381,13 @@ printf 'env RALPH_MODEL=%s\nenv RALPH_THINKING=%s\n' "${RALPH_MODEL:-}" "${RALPH
 if [[ "$1" == --offline && "$2" == --list-models ]]; then
   printf 'provider   model  context  max-out  thinking  images\nanthropic  claude-haiku-4-5  200K  64K  yes  yes\n'; exit 0
 fi
+if [[ "${PI_FAKE_CHILD_EXEC:-}" == 1 ]]; then
+  printf '%s\n' '{"type":"session","id":"script-child"}' '{"type":"message_end","message":{"role":"assistant","usage":{"input":7,"cost":{"total":0.25}}}}'
+  exit 0
+fi
+if [[ "${PI_FAKE_CHILD:-}" == 1 ]]; then
+  PI_FAKE_CHILD_EXEC=1 pi -p 'script child' > "$PI_ARGS_LOG.child.jsonl"
+fi
 sid="fake-$(date +%s%N 2>/dev/null || date +%s)-$RANDOM"
 for ((i=1; i<=$#; i++)); do
   if [[ "${!i}" == "--session" ]]; then j=$((i + 1)); sid="${!j}"; fi
@@ -1445,7 +1445,7 @@ PY
     # Not deferred: one ledger entry per invocation, priced from the transcript.
     grep -qF -- 'Session usage — first [pi/anthropic/claude-haiku-4-5]' "$PROGRESS" || return 1
     grep -qF -- '- cost $0.0200 (summed from 1 session transcript: main $0.0200)' "$PROGRESS" || return 1
-    [ "$(cat "$COST_FILE")" = "0.0200" ] || return 1
+    python3 -c 'import sys; assert float(open(sys.argv[1]).read()) == 0.02' "$COST_FILE" || return 1
     run_session second "$TMP/prompt.txt" "$sid"
     grep -qx -- '--session' "$TMP/pi-args.txt" || return 1
     grep -qx -- "$sid" "$TMP/pi-args.txt" || return 1
@@ -1457,7 +1457,7 @@ PY
 @test "the real Ralph process records a pi run end to end" {
     mkdir -p "$TMP/fake-bin" "$TMP/ralph" "$TMP/pi-home"
     cp "$RALPH" "$TMP/ralph/ralph"
-    cp "$REPO/ralph/prompt-build.md" "$TMP/ralph/prompt-build.md"
+    printf 'Fixture task. Report <promise>COMPLETE</promise> when done.\n' > "$TMP/ralph/prompt-build.md"
     cat > "$TMP/fake-bin/git" <<'SH'
 #!/usr/bin/env bash
 if [[ "$1" == rev-parse ]]; then printf '%s\n' main; fi
@@ -1489,7 +1489,7 @@ SH
 @test "the real Ralph process resumes a pi session that ended without a promise" {
     mkdir -p "$TMP/fake-bin" "$TMP/ralph" "$TMP/pi-home"
     cp "$RALPH" "$TMP/ralph/ralph"
-    cp "$REPO/ralph/prompt-build.md" "$TMP/ralph/prompt-build.md"
+    printf 'Fixture task. Report <promise>COMPLETE</promise> when done.\n' > "$TMP/ralph/prompt-build.md"
     printf '#!/usr/bin/env bash\nif [[ "$1" == rev-parse ]]; then printf "%%s\\n" main; fi\nexit 0\n' > "$TMP/fake-bin/git"
     chmod +x "$TMP/fake-bin/git"
     write_fake_pi "$TMP/fake-bin"
@@ -1512,7 +1512,7 @@ SH
 @test "the real Ralph process stops a pi run at the per-session budget" {
     mkdir -p "$TMP/fake-bin" "$TMP/ralph" "$TMP/pi-home"
     cp "$RALPH" "$TMP/ralph/ralph"
-    cp "$REPO/ralph/prompt-build.md" "$TMP/ralph/prompt-build.md"
+    printf 'Fixture task. Report <promise>COMPLETE</promise> when done.\n' > "$TMP/ralph/prompt-build.md"
     printf '#!/usr/bin/env bash\nif [[ "$1" == rev-parse ]]; then printf "%%s\\n" main; fi\nexit 0\n' > "$TMP/fake-bin/git"
     chmod +x "$TMP/fake-bin/git"
     write_fake_pi "$TMP/fake-bin"
@@ -1649,7 +1649,11 @@ PY
     eval "$(sed -n '/^env_note() {/,/^}/p' "$RALPH")"
     HARNESS=pi
     run env_note
-    [[ "$output" == *"chrome_open"* ]] || return 1
+    [[ "$output" == *"find_chrome_windows"* ]] || return 1
+    [[ "$output" == *"open_url"* ]] || return 1
+    [[ "$output" == *"chrome_set_file_input"* ]] || return 1
+    [[ "$output" == *"real profile"* ]] || return 1
+    [[ "$output" != *"chrome_open"* ]] || return 1
     [[ "$output" == *'bg_run'* ]] || return 1
     [[ "$output" == *'pi -p --model "$RALPH_MODEL" --thinking "$RALPH_THINKING" "$(cat /path/to/prompt.txt)"'* ]] || return 1
     [[ "$output" != *'< /path/to/prompt.txt'* ]] || return 1
@@ -1665,7 +1669,7 @@ PY
     run env_note
     [[ "$output" == *"ToolSearch"* ]] || return 1
     [[ "$output" == *"Agent tool"* ]] || return 1
-    [[ "$output" != *"chrome_open"* ]] || return 1
+    [[ "$output" != *"find_chrome_windows"* ]] || return 1
     HARNESS=codex
     run env_note
     [[ "$output" == *"Agent tool"* ]] || return 1
@@ -1698,25 +1702,517 @@ PY
     [ "$(jsonfield "$TMP/wake2.meta" is_error)" = "True" ] || return 1
 }
 
-@test "a pi session's tabs share exactly one Chrome window of its own" {
-    [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ] || skip "Chrome not installed"
-    pi --offline --list-models claude-haiku-4-5 2>/dev/null | grep -q claude-haiku-4-5 || skip "haiku not available"
-    # Two sessions, two tabs each: each session's tabs share one window, the sessions' differ.
-    local prompt='Call chrome_open twice, both on "about:blank" (width 1000, height 700). Then chrome_eval "location.href" on each. Do not close them. End with <promise>NEXT</promise>'
-    ( cd "$TMP" && printf '%s\n' "$prompt" | pi -p --mode json --model anthropic/claude-haiku-4-5 --thinking off > s1.json 2>/dev/null ) &
-    ( cd "$TMP" && printf '%s\n' "$prompt" | pi -p --mode json --model anthropic/claude-haiku-4-5 --thinking off > s2.json 2>/dev/null ) &
-    wait
-    run node - <<'JS'
-const info = await (await fetch("http://127.0.0.1:9222/json/version")).json();
-const ws = new WebSocket(info.webSocketDebuggerUrl); await new Promise(r => ws.addEventListener("open", r, {once:true}));
-let id=0; const pend=new Map(); ws.addEventListener("message", ev=>{const m=JSON.parse(ev.data); if(pend.has(m.id)){pend.get(m.id)(m.result||m.error); pend.delete(m.id);} });
-const send=(method,params={})=>new Promise(res=>{const n=++id; pend.set(n,res); ws.send(JSON.stringify({id:n,method,params}));});
-const {targetInfos}=await send("Target.getTargets"); const pages=targetInfos.filter(t=>t.type==="page" && t.url==="about:blank");
-const byWin=new Map(); for (const t of pages) { const w=await send("Browser.getWindowForTarget",{targetId:t.targetId}); byWin.set(w.windowId,(byWin.get(w.windowId)||0)+1); }
-console.log(JSON.stringify([...byWin.values()].sort()));
-for (const t of pages) await send("Target.closeTarget",{targetId:t.targetId}); ws.close();
+@test "every pi session records its screen and tabs under the run directory" {
+    fn=$(sed -n '/^run_session() {/,/^}/p' "$RALPH")
+    [[ "$fn" == *'PI_CHROME_USE_RECORD_DIR="$RUNDIR/recordings/'* ]] || return 1
+}
+
+@test "the runtime names the browser tools that exist" {
+    for f in "$RALPH"; do
+        ! grep -qE 'chrome_open|chrome_tabs|chrome_eval|chrome_input|chrome_screenshot|chrome_navigate|chrome_console' "$f" || return 1
+    done
+}
+
+
+@test "ralph runtime embeds all helper logic without sibling script invocations" {
+    run python3 - "$RALPH" <<'PYTEST'
+import re, sys
+s = open(sys.argv[1]).read()
+assert not re.search(r'ralph/[^\s\"\']*\.(?:py|sh|mjs)\b', s)
+assert 'os.execv(REAL,' in s
+assert 'PATH="$shim_path:$PATH"' in s
+assert 'harness_exec ${SESSION_WRAPPER[@]+"${SESSION_WRAPPER[@]}"} "$real_pi"' in s
+PYTEST
+    [ "$status" -eq 0 ]
+}
+
+@test "shim receipts include fast detached print children exactly once and exclude unrelated Pi" {
+    pi_fixture
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/pi-real.mjs" <<'JS'
+#!/usr/bin/env node
+import { writeFileSync, readFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const handlers = {};
+const at = args.indexOf('--extension');
+if (at >= 0) (await import(args[at + 1])).default({ on: (name, fn) => handlers[name] = fn });
+const file = process.env.CHILD_SESSION;
+const ctx = { sessionManager: { getSessionFile: () => file, getSessionId: () => 'fast-child' } };
+handlers.session_start?.({}, ctx);
+let rows;
+try { rows = readFileSync(file, 'utf8'); } catch { rows = JSON.stringify({type:'session', id:'fast-child'}) + '\n'; }
+rows += JSON.stringify({ type:'message', message:{role:'assistant', timestamp:Number(process.env.CHILD_TURN), usage:{input:7,cost:{total:0.25}}}}) + '\n';
+writeFileSync(file, rows);
+handlers.message_end?.({}, ctx);
+handlers.session_shutdown?.({}, ctx);
+if (process.env.RALPH_PI_LAUNCH_RECEIPT) {
+  const receipt = JSON.parse(readFileSync(process.env.RALPH_PI_LAUNCH_RECEIPT));
+  if (receipt.pid !== process.pid) throw Error('shim added an intermediary process');
+}
 JS
-    [ "$status" -eq 0 ] || return 1
-    # Two windows holding two tabs each (a stale blank tab elsewhere would add a 1).
-    [[ "$output" == *"2,2"* ]] || return 1
+    chmod +x "$TMP/bin/pi-real.mjs"
+    ln -s pi-real.mjs "$TMP/bin/pi"
+    local original_path="$PATH"
+    PATH="$TMP/bin:$PATH"
+    local real
+    real="$(prepare_pi_usage "$PI_STDOUT")"
+    [ "$real" = "$TMP/bin/pi-real.mjs" ] || return 1
+    # Both launches and their short-lived launcher finish BEFORE observation.
+    # start_new_session detaches the exec without changing who owns its receipt.
+    PATH="$PI_STDOUT.processes/bin:$PATH" CHILD_SESSION="$TMP/fast.jsonl" python3 - <<'PYTEST'
+import os, subprocess
+for turn in ('1', '2'):
+    subprocess.run(['sh', '-c', 'exec pi -p "ordinary text prompt"'],
+                   env=dict(os.environ, CHILD_TURN=turn), start_new_session=True, check=True)
+PYTEST
+    CHILD_SESSION="$TMP/unrelated.jsonl" CHILD_TURN=9 "$real" -p unrelated
+    mkdir -p "$TMP/fake"
+    printf '#!/bin/sh\nexit 0\n' > "$TMP/fake/pi"; chmod +x "$TMP/fake/pi"
+    "$TMP/fake/pi" -p unrelated
+    touch "$PI_STDOUT.processes/receipt.json.stop"
+    observe_pi_usage 99999999 "$PI_STDOUT.processes/receipt.json" "$real" 0
+    python3 - "$PI_STDOUT.processes/receipt.json" <<'PYTEST'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r['accounting_complete'], r
+assert len(r['pi']) == 2, r
+assert all(p['status'] == 'attributed' and p['lineage'] and p['start_time'] != 'unknown' for p in r['pi'])
+assert len({(p['pid'], p['start_time']) for p in r['pi']}) == 2
+PYTEST
+    HARNESS=pi MODEL=m THINKING_TAG="" SESSION_SECS=1
+    log_usage shim "$PI_STDOUT" "$PI_STDOUT"
+    grep -qF -- '- cost $0.5560 (summed from 3 session transcripts' "$PROGRESS" || return 1
+    ! grep -q WARNING "$PROGRESS" || return 1
+    [ "$(grep -c 'fast-child:' "$PROGRESS")" -eq 1 ] || return 1
+    [ ! -d "$PI_STDOUT.processes/bin" ] || return 1
+    PATH="$original_path"
+}
+
+@test "known launch without transcript warns and never claims complete accounting" {
+    pi_fixture
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/pi"; chmod +x "$TMP/bin/pi"
+    PATH="$TMP/bin:$PATH"
+    local real
+    real="$(prepare_pi_usage "$PI_STDOUT")"
+    PATH="$PI_STDOUT.processes/bin:$PATH" pi -p fast
+    touch "$PI_STDOUT.processes/receipt.json.stop"
+    observe_pi_usage 99999999 "$PI_STDOUT.processes/receipt.json" "$real" 0
+    HARNESS=pi MODEL=m THINKING_TAG="" SESSION_SECS=1
+    log_usage missing "$PI_STDOUT"
+    grep -q 'WARNING: unattributed Pi descendant: missing or malformed transcript' "$PROGRESS" || return 1
+    python3 - "$PI_STDOUT.processes/receipt.json" <<'PYTEST'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r['complete'] and not r['accounting_complete']
+assert len(r['pi']) == 1
+PYTEST
+}
+
+
+@test "embedded observer rejects PID reuse and replaced transcript inodes" {
+    run python3 - "$RALPH" "$TMP" <<'PYTEST'
+import json, pathlib, sys
+s = pathlib.Path(sys.argv[1]).read_text()
+code = s.split('observe_pi_usage() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+m = {'__name__': 'test'}
+exec(code, m)
+old = dict(pid=10, start_time='1', ppid=1)
+known = {m['identity'](old): old}
+m['extend'](known, {10: dict(old, start_time='2'), 11: dict(pid=11, start_time='3', ppid=10)})
+assert len(known) == 1
+p = pathlib.Path(sys.argv[2]) / 'session.jsonl'
+p.write_text('{"type":"session","id":"x"}\n{"type":"message","message":{"role":"assistant","usage":{"cost":{"total":0.25}}}}\n')
+s = p.stat()
+r = dict(files=[dict(path=str(p), device=s.st_dev, inode=s.st_ino)])
+assert m['resolve'](r)
+p.rename(p.with_suffix('.old'))
+p.write_text(p.with_suffix('.old').read_text())
+assert not m['resolve'](r)
+PYTEST
+    [ "$status" -eq 0 ]
+}
+
+@test "bounded flush exposes live known children without signalling them or removing their shim" {
+    pi_fixture
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nsleep 1\n' > "$TMP/bin/pi"; chmod +x "$TMP/bin/pi"
+    PATH="$TMP/bin:$PATH"
+    local real
+    real="$(prepare_pi_usage "$PI_STDOUT")"
+    # The foreground controller reaps its child normally after the zero-wait
+    # observer flush. No test or accounting code terminates that child.
+    PATH="$PI_STDOUT.processes/bin:$PATH" python3 - "$TMP/lib.sh" "$PI_STDOUT" "$real" <<'PYTEST'
+import json, os, pathlib, subprocess, sys, time
+source = pathlib.Path(sys.argv[2] + '.processes')
+p = subprocess.Popen(['pi', '-p', 'live'], start_new_session=True)
+try:
+    deadline = time.monotonic() + 5
+    while not list(source.glob('*.launch.json')):
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    (source / 'receipt.json.stop').touch()
+    subprocess.run(['bash', '-c', 'lib="$1"; receipt="$2"; real="$3"; set --; source "$lib"; observe_pi_usage 99999999 "$receipt" "$real" 0',
+                    'test', sys.argv[1], str(source / 'receipt.json'), sys.argv[3]], check=True)
+    audit = json.loads((source / 'receipt.json').read_text())
+    assert audit['complete'] and not audit['accounting_complete']
+    assert audit['pi'][0]['status'].endswith('process still live')
+    assert p.poll() is None
+finally:
+    assert p.wait(timeout=5) == 0
+PYTEST
+    HARNESS=pi MODEL=m THINKING_TAG="" SESSION_SECS=1
+    log_usage live "$PI_STDOUT"
+    grep -q 'WARNING: unattributed Pi descendant: process still live' "$PROGRESS" || return 1
+    [ -x "$PI_STDOUT.processes/bin/pi" ]
+}
+
+
+@test "run_session main bypasses shim while script child joins the same usage ledger" {
+    mkdir -p "$TMP/bin" "$TMP/run" "$TMP/pi-home"
+    write_fake_pi "$TMP/bin"
+    printf 'prompt\n' > "$TMP/prompt.txt"
+    export PI_ARGS_LOG="$TMP/pi-args.txt" PI_CODING_AGENT_DIR="$TMP/pi-home" PI_FAKE_CHILD=1
+    export PATH="$TMP/bin:$PATH"
+    eval "$(python3 - "$RALPH" <<'PYTEST'
+import sys
+s = open(sys.argv[1]).read()
+print(s[s.index('run_session() {'):s.index('# ── prompt assembly')])
+PYTEST
+    )"
+    HARNESS=pi MODEL=m THINKING=off MODEL_LABEL=m
+    HARNESS_ARGS=( -p --mode json )
+    RUNDIR="$TMP/run" RESULT_FILE="$TMP/result.txt" PROGRESS="$TMP/progress.txt" COST_FILE="$TMP/costs.txt"
+    : > "$PROGRESS"; : > "$COST_FILE"
+    run_session child "$TMP/prompt.txt"
+    grep -qF -- '- cost $0.2700 (summed from 2 session transcripts' "$PROGRESS" || return 1
+    ! grep -q WARNING "$PROGRESS" || return 1
+    [ "$(grep -c 'Session usage' "$PROGRESS")" -eq 1 ] || return 1
+    python3 - "$RUNDIR/001-child.json.processes/receipt.json" <<'PYTEST'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r['accounting_complete'] and len(r['pi']) == 1, r
+assert r['pi'][0]['transcripts'][0]['session_id'] == 'script-child'
+PYTEST
+    [ ! -d "$RUNDIR/001-child.json.processes/bin" ]
+}
+
+@test "observer attributes a witnessed absolute Pi child without a PATH receipt" {
+    pi_fixture
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/pi" <<'SH'
+#!/bin/bash
+if [[ "${1:-}" == child ]]; then
+  printf '%s\n' '{"type":"session","id":"absolute-child"}' '{"type":"message_end","message":{"role":"assistant","usage":{"cost":{"total":0.123456789}}}}'
+  sleep 1
+else
+  sleep 0.3
+  "$0" child > "$ABSOLUTE_OUTPUT"
+fi
+SH
+    chmod +x "$TMP/bin/pi"
+    export ABSOLUTE_OUTPUT="$TMP/absolute.jsonl"
+    "$TMP/bin/pi" &
+    local root=$!
+    observe_pi_usage "$root" "$PI_STDOUT.processes/receipt.json" "$TMP/bin/pi" 2 &
+    local observer=$!
+    wait "$root"
+    touch "$PI_STDOUT.processes/receipt.json.stop"
+    wait "$observer"
+    python3 - "$PI_STDOUT.processes/receipt.json" <<'PYTEST'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r['accounting_complete'] and len(r['pi']) == 1, r
+assert r['pi'][0]['transcripts'][0]['session_id'] == 'absolute-child'
+PYTEST
+    HARNESS=pi MODEL=m THINKING_TAG="" SESSION_SECS=1
+    log_usage absolute "$PI_STDOUT"
+    python3 - "$COST_FILE" <<'PYTEST'
+import sys, math
+assert math.isclose(float(open(sys.argv[1]).read()), 0.179424089, rel_tol=0, abs_tol=1e-15)
+PYTEST
+    ! grep -q WARNING "$PROGRESS"
+}
+
+# Inline fixtures and assertions. No companion Python module is required.
+policy_case() {
+  RALPH_TEST_SCRIPT="$RALPH" run python3 - "$1" <<'PY'
+#!/usr/bin/env python3
+"""Generic prompt policy tests with isolated commands, no model or inventory."""
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+class PolicyTest(unittest.TestCase):
+    def fixture(self, policy):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+        (root / 'ralph').mkdir()
+        (root / 'bin').mkdir()
+        (root / 'sessions').mkdir()
+        shutil.copy2(pathlib.Path(os.environ['RALPH_TEST_SCRIPT']), root / 'ralph/ralph')
+        (root / 'ralph/arbitrary.txt').write_text('<!-- ralph-session: ' + json.dumps(policy) + ' -->\nUnrelated prompt.\n')
+        (root / 'bin/git').write_text('#!/bin/sh\nexit 0\n')
+        (root / 'bin/pi').write_text('''#!/usr/bin/env python3
+import json, os, pathlib, signal, sys
+if '--list-models' in sys.argv:
+    print('test model 1M')
+    sys.exit(0)
+with open('launches', 'a') as f: f.write('launch\\n')
+if os.environ.get('ORDINARY_130'):
+    sys.exit(130)
+if os.environ.get('ACTUAL_SIGINT'):
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
+header = dict(type='session', id='fixture', cwd=os.getcwd())
+message = dict(role='assistant', model='model', stopReason='stop', usage=dict(input=1, output=1, cost=dict(total=0.01)), content=[dict(type='text', text='<promise>COMPLETE</promise>')])
+pathlib.Path(os.environ['PI_CODING_AGENT_SESSION_DIR'], 'test_fixture.jsonl').write_text(json.dumps(header)+'\\n'+json.dumps(dict(type='message', message=message))+'\\n')
+print(json.dumps(header))
+print(json.dumps(dict(type='message_end', message=message)))
+''')
+        for name in ('git', 'pi'):
+            (root / 'bin' / name).chmod(0o755)
+        env = dict(os.environ, PATH=str(root / 'bin') + ':' + os.environ['PATH'], PI_CODING_AGENT_SESSION_DIR=str(root / 'sessions'))
+        env.pop('RALPH_GUARDED', None)
+        return root, env
+
+    def run_cli(self, root, env):
+        return subprocess.run(['./ralph/ralph', '--prompt', 'arbitrary.txt', '--model', 'test/model', '--thinking', 'medium', '--harness', 'pi'], cwd=root, env=env, capture_output=True, text=True, timeout=20)
+
+    def test_wrapper_receives_literal_argv_once_and_finish_runs_afterward(self):
+        root, env = self.fixture(dict(wrapper=['python3', 'wrap.py', 'literal;$(false)'], finish=['python3', 'finish.py'], iterations=1, resumes=0, failures=1))
+        (root / 'wrap.py').write_text('''import json, os, subprocess, sys
+assert sys.argv[1] == 'literal;$(false)'
+assert os.path.isabs(sys.argv[2])
+with open('argv.json', 'w') as f: json.dump(sys.argv[2:], f)
+result = subprocess.run(sys.argv[2:])
+open('cleaned', 'w').write('yes')
+sys.exit(result.returncode)
+''')
+        (root / 'finish.py').write_text("from pathlib import Path\nassert Path('cleaned').read_text() == 'yes'\nPath('finished').write_text('yes')\n")
+        result = self.run_cli(root, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((root / 'launches').read_text(), 'launch\n')
+        self.assertTrue((root / 'finished').exists())
+        argv = json.loads((root / 'argv.json').read_text())
+        self.assertEqual(argv[1:], ['-p', '--mode', 'json', '--model', 'test/model', '--thinking', 'medium'])
+
+    def test_normal_exit_130_does_not_interrupt_calling_loop(self):
+        root, env = self.fixture(dict(iterations=1, resumes=0, failures=1))
+        env['ORDINARY_130'] = '1'
+        command = 'n=0; while :; do n=$((n+1)); ./ralph/ralph --prompt arbitrary.txt --model test/model --harness pi && echo second >> legs; [ "$n" -lt 2 ] || break; done; echo returned'
+        result = subprocess.run(['bash', '-c', command], cwd=root, env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'returned')
+        self.assertEqual((root / 'launches').read_text(), 'launch\nlaunch\n')
+        self.assertFalse((root / 'legs').exists())
+
+    def test_actual_child_sigint_is_not_converted_to_exit_130(self):
+        root, env = self.fixture(dict(iterations=1, resumes=0, failures=1))
+        env['ACTUAL_SIGINT'] = '1'
+        result = self.run_cli(root, env)
+        self.assertEqual(result.returncode, -2, result.stderr)
+        self.assertEqual((root / 'launches').read_text(), 'launch\n')
+
+    def test_invalid_metadata_never_launches(self):
+        for policy in (dict(wrapper='echo nope'), dict(resumes=-1), dict(unknown=True)):
+            with self.subTest(policy=policy):
+                root, env = self.fixture(policy)
+                result = self.run_cli(root, env)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse((root / 'launches').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()
+PY
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "session-policy: wrapper receives literal argv once and finish runs afterward" {
+  policy_case PolicyTest.test_wrapper_receives_literal_argv_once_and_finish_runs_afterward
+}
+
+@test "session-policy: normal exit 130 does not interrupt calling loop" {
+  policy_case PolicyTest.test_normal_exit_130_does_not_interrupt_calling_loop
+}
+
+@test "session-policy: actual child sigint is not converted to exit 130" {
+  policy_case PolicyTest.test_actual_child_sigint_is_not_converted_to_exit_130
+}
+
+@test "session-policy: invalid metadata never launches" {
+  policy_case PolicyTest.test_invalid_metadata_never_launches
+}
+
+# Inline fixtures and assertions. No companion Python module is required.
+interrupt_case() {
+  RALPH_TEST_SCRIPT="$RALPH" run python3 - "$1" <<'PY'
+#!/usr/bin/env python3
+"""Real interactive Bash tests. All commands and git writes stay in a fixture."""
+import os
+import pathlib
+import pty
+import select
+import shutil
+import signal
+import tempfile
+import time
+import unittest
+
+RALPH = pathlib.Path(os.environ['RALPH_TEST_SCRIPT'])
+
+
+class InterruptTest(unittest.TestCase):
+    def test_terminal_interrupt_stops_entire_while_list(self):
+        self.terminal_case(False)
+
+    def test_terminal_interrupt_awaits_declared_wrapper_cleanup(self):
+        self.terminal_case(True)
+
+    def test_sigterm_awaits_declared_wrapper_cleanup(self):
+        self.terminal_case(True, term=True)
+
+    def terminal_case(self, wrapped, term=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / 'ralph').mkdir()
+            (root / 'bin').mkdir()
+            shutil.copy2(RALPH, root / 'ralph/ralph')
+            policy = '<!-- ralph-session: {"wrapper":["python3","wrap.py"]} -->\n' if wrapped else ''
+            (root / 'ralph/arbitrary.txt').write_text(policy + 'Test only.\n')
+            (root / 'wrap.py').write_text('''import os, pathlib, signal, subprocess, sys, time
+child = subprocess.Popen(sys.argv[1:], start_new_session=True)
+sentinel = subprocess.Popen(['sleep', '300'], start_new_session=True)
+interrupted = None
+def stop(sig, frame):
+    global interrupted
+    if interrupted is None:
+        interrupted = sig
+        child.terminate()
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+child.wait()
+time.sleep(.35)
+sentinel.terminate()
+sentinel.wait()
+pathlib.Path('wrapper-cleaned').write_text('yes')
+if interrupted:
+    signal.signal(interrupted, signal.SIG_DFL)
+    os.kill(os.getpid(), interrupted)
+''')
+            (root / 'bin/git').write_text('#!/bin/sh\nexit 0\n')
+            (root / 'bin/pi').write_text('''#!/usr/bin/env python3
+import os, pathlib, signal, subprocess, time
+child = subprocess.Popen(['sleep', '300'])
+pathlib.Path('ready').write_text(str(os.getpid()) + ' ' + str(child.pid))
+def stop(sig, frame):
+    child.terminate()
+    child.wait()
+    signal.signal(sig, signal.SIG_DFL)
+    os.kill(os.getpid(), sig)
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+while True: time.sleep(.05)
+''')
+            for name in ('git', 'pi'):
+                (root / 'bin' / name).chmod(0o755)
+            pid, fd = pty.fork()
+            if pid == 0:
+                os.chdir(root)
+                os.environ.update(PATH=str(root / 'bin') + ':' + os.environ['PATH'], PS1='TEST_PROMPT> ', PROMPT_COMMAND='')
+                os.execvp('bash', ['bash', '--noprofile', '--norc', '-i'])
+            output = bytearray()
+
+            def until(predicate, seconds=45):
+                deadline = time.monotonic() + seconds
+                while not predicate():
+                    self.assertLess(time.monotonic(), deadline, output.decode(errors='replace'))
+                    if select.select([fd], [], [], .05)[0]:
+                        output.extend(os.read(fd, 65536))
+
+            owned = {}
+
+            def state(child):
+                try:
+                    fields = pathlib.Path(f'/proc/{child}/stat').read_text().rsplit(')', 1)[1].split()
+                    return fields[19], int(fields[1]), fields[0]
+                except OSError:
+                    return None
+
+            def live(child, start):
+                current = state(child)
+                return current and current[0] == start and current[2] != 'Z'
+
+            try:
+                until(lambda: b'TEST_PROMPT> ' in output)
+                output.clear()
+                command = 'echo first >> legs; ./ralph/ralph --prompt arbitrary.txt --model test/model --thinking medium --harness pi'
+                if not term:
+                    command = 'while :; do ' + command + ' && { echo second >> legs; ./ralph/ralph --model test/model --thinking medium --harness pi; }; done'
+                os.write(fd, (command + '\n').encode())
+                until(lambda: (root / 'ready').exists())
+                leader = os.tcgetpgrp(fd)
+                owned[leader] = state(leader)[0]
+                changed = True
+                while changed:
+                    changed = False
+                    for path in pathlib.Path('/proc').glob('[0-9]*'):
+                        child = int(path.name)
+                        info = state(child)
+                        if info and info[1] in owned and child not in owned:
+                            owned[child] = info[0]
+                            changed = True
+                output.clear()
+                if term:
+                    os.kill(leader, signal.SIGTERM)
+                else:
+                    os.write(fd, b'\x03')
+                until(lambda: b'TEST_PROMPT> ' in output)
+                self.assertEqual((root / 'legs').read_text(), 'first\n')
+                if wrapped:
+                    self.assertEqual((root / 'wrapper-cleaned').read_text(), 'yes')
+                for child, start in owned.items():
+                    self.assertFalse(live(child, start), f'Owned descendant {child} survived')
+                os.write(fd, b'exit\n')
+                os.waitpid(pid, 0)
+                pid = None
+            finally:
+                # Only identities created by this fixture are eligible for cleanup.
+                for child, start in owned.items():
+                    try:
+                        if live(child, start):
+                            os.kill(child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if pid is not None:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                os.close(fd)
+
+
+if __name__ == '__main__':
+    unittest.main()
+PY
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "interrupt: terminal interrupt stops entire while list" {
+  interrupt_case InterruptTest.test_terminal_interrupt_stops_entire_while_list
+}
+
+@test "interrupt: terminal interrupt awaits declared wrapper cleanup" {
+  interrupt_case InterruptTest.test_terminal_interrupt_awaits_declared_wrapper_cleanup
+}
+
+@test "interrupt: sigterm awaits declared wrapper cleanup" {
+  interrupt_case InterruptTest.test_sigterm_awaits_declared_wrapper_cleanup
 }
