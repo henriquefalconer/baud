@@ -175,6 +175,14 @@ echo "$SHELL_OUT"
 echo "$SHELL_OUT" | grep -q "test result: ok" || fail "H5.6: shell_into_universe_resumes FAILED"
 pass "H5.6: shell_into_universe_resumes — a restored universe's console matches the captured tail and keeps taking live input, byte-identical to a straight run"
 
+# Persisted store reopening and zero-exit cancellation exercise the server's real shell worker.
+log "Running persisted shell and cancellation regressions..."
+SERVER_SHELL_OUT=$(cargo test -q -p baud-server routes::shell_into::tests -- --test-threads=1 2>&1)
+echo "$SERVER_SHELL_OUT"
+echo "$SERVER_SHELL_OUT" | grep -qE 'test result: ok\. [1-9][0-9]* passed' \
+    || fail "H5.7: persisted shell/cancellation tests did not pass"
+pass "H5.7: persisted shell resumes and cancellation interrupts a zero-exit guest"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

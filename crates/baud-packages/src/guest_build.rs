@@ -94,6 +94,16 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
                 entry.archive_path
             )
         })?;
+        // Do not silently replace userspace RDSEED with UD2. The VMM needs relocated site
+        // metadata and an active trap handler to execute those instructions safely.
+        if contents.starts_with(b"\x7fELF") {
+            let sites = crate::rdseed::scan_rdseed_opcodes(&contents).with_context(|| {
+                format!("failed to scan rdseed in initramfs entry '{}'", entry.archive_path)
+            })?;
+            anyhow::ensure!(sites.is_empty(),
+                "initramfs entry '{}' contains {} RDSEED instructions; userspace rewrite-site relocation and trap handling are required",
+                entry.archive_path, sites.len());
+        }
         entries.push(InitramfsEntry::regular(entry.archive_path.clone(), entry.mode, contents));
     }
     let initramfs_bytes = build_reproducible_initramfs(&entries)?;

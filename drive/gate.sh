@@ -70,6 +70,15 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# All gate children inherit one dynamically selected four-CPU affinity mask. The
+# drive pool may still overlap I/O-heavy units, but it can never spread CPU work
+# beyond these cores.
+GATE_CPUS="$(BAUD_CPU_LIMIT=4 "$REPO_ROOT/drive/select-free-cpus.sh")"
+taskset -pc "$GATE_CPUS" $$ >/dev/null
+export BAUD_CPU_LIMIT=4
+say_cpu="gate: CPU affinity ${GATE_CPUS} (dynamic least-busy selection)"
+printf '%s\n' "$say_cpu"
+
 JOBS=8
 H5_FIRST=1
 SKIP_CARGO=0

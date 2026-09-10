@@ -1763,7 +1763,7 @@ fn generated_outcome_to_json(outcome: GeneratedBranchOutcome) -> Value {
 /// guest whose RAM is mostly one shared zero page would otherwise redo that 65536 times per
 /// persist. `seen` short-circuits every repeat within this one call, same content-addressed-dedup
 /// idea `PageStore::intern` already applies one layer further in (`page_store.rs`).
-fn persist_universe(
+pub(crate) fn persist_universe(
     store: &SnapshotStore,
     run_id: &str,
     universe: &baud_snapshot::Universe,

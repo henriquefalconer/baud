@@ -10,6 +10,8 @@
 
 mod routes;
 #[cfg(target_os = "linux")]
+mod cpu_affinity;
+#[cfg(target_os = "linux")]
 mod rdseed_sites;
 mod state;
 
@@ -20,8 +22,10 @@ use tracing::info;
 
 pub use state::AppState;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let pinned_cpus = cpu_affinity::pin_to_quiet_cpus()?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_env("BAUD_LOG")
@@ -42,6 +46,19 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    #[cfg(target_os = "linux")]
+    info!(?pinned_cpus, "baud-server pinned to dynamically selected CPUs");
+
+    // Apply affinity before creating any runtime threads so workers, blocking tasks,
+    // and their children inherit the same two-CPU mask.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     let state = AppState::new().await?;
     let app = build_router(state);
 

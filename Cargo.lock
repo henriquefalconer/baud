@@ -573,6 +573,7 @@ dependencies = [
  "baud-vcpu",
  "blake3",
  "futures-util",
+ "libc",
  "rand 0.8.7",
  "rand_chacha 0.3.1",
  "serde",

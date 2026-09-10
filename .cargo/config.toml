@@ -1,0 +1,12 @@
+# Keep ordinary cargo invocations bounded without requiring a project-specific command.
+# The wrappers choose the least-busy visible CPUs for each compiler/test process. The
+# baud-server and baud-multiverse runtime binaries use two; other cargo test binaries use four.
+[build]
+jobs = 4
+rustc-wrapper = "drive/cargo-rustc-wrapper.sh"
+
+[target.x86_64-unknown-linux-gnu]
+runner = "drive/cargo-test-runner.sh"
+
+[env]
+RUST_TEST_THREADS = { value = "4", force = true }

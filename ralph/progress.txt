@@ -753,3 +753,96 @@ Final prune complete: todo-build.md is 45 lines and has 0 DONE item markers. The
   - The real guest tape/image pipeline, shared-memory UFFD branching, authenticated lifecycle, and persisted shell-into path remain incomplete.
   - Real Ubuntu H9 still stalls before the login banner, and Mario remains a simulation/fixture path rather than a real FCEUX guest proof.
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
+
+Analysing baud and auditing every queued group, then reconciling the plan and build queue, validating the markdown, and pushing the completed pass.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in @todo-build.md, studying the specifications, then implementing and verifying the complete batch.
+
+Chose these 7 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 7 pending items in todo-build.md.
+
+Inspecting the seven locked queue entries and their real execution paths before edits.
+
+Starting the locked batch with the host prerequisite and a focused snapshot integrity test.
+
+Snapshot integrity is green in isolation; running the single required workspace build/test probe to expose remaining root causes.
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration [ralph-iteration] (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the real implementation and verification path.
+
+Chose these 7 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 7 pending items in todo-build.md.
+
+G3 shared-memory branching: replaced anonymous guest RAM allocation with a memfd-backed GuestMemory mapping, preserving fixed addresses and dirty-ring behavior while making the real backing shareable for UFFD branches. Running the focused compile now.
+
+G2 image pipeline: executable initramfs payloads now pass through the decoder-based rdseed rewrite before reproducible archive assembly and hashing; non-ELF payloads remain unchanged. Testing package code.
+
+G5 lifecycle identity: closure hashes now cover the complete validated spec document, including files, environment, argv, and adapters, so provisioning cannot acknowledge two different guest inputs as the same closure. Checking server tests.
+
+Focused package and server tests are green, including real KVM route, snapshot resume/branch, shell session, frame, and fingerprint tests. Formatting the touched Rust files before the full gate.
+
+The repository-wide formatter check exposes pre-existing formatting drift in unrelated baud-vcpu and baud-tracing files; I restored those untouched files and verified the touched diff is whitespace-clean. Running the multiverse tests against the memfd-backed KVM allocation.
+
+The full baud-multiverse suite is green: 230 passed, including real KVM boot, tape input, branching, snapshot round-trip, shell resume, frames, fingerprint, and watchdog coverage. Running the required repository gate now.
+
+User requested CPU-limited verification. Running cargo test --workspace pinned to CPUs 0-3 with four build jobs and four test threads.
+
+CPU limiting is now project-default: .cargo/config.toml caps Cargo build jobs and test threads at four, compiler/test wrappers dynamically select the least-busy visible CPUs, and gate.sh pins its entire process group to one such four-CPU mask. Verifying a plain cargo test and the gate affinity path.
+
+Plain cargo test now succeeds with the project config and inherits the wrapper, four build jobs, and four test threads. Starting the complete CPU-limited gate with dynamic affinity; it will inherit the selected four cores throughout.
+
+Continuing the locked build step: checking the four-item CPU-limit change, the gate result, and every selected queue item before deciding the next implementation work.
+
+Added regression coverage for the dynamic CPU selector and Cargo four-thread defaults so the seamless CPU cap cannot silently regress. Running the non-slow gate harness checks.
+
+Added daemon-level CPU affinity: baud-server now samples /proc/stat, selects the four quietest CPUs within its inherited mask, applies sched_setaffinity before creating Tokio state, and fails startup if the cap cannot be installed. Running focused server tests.
+
+baud-server startup verification passed: logs show pinned_cpus=[3,5,6,7] and the daemon listened successfully before the timeout stopped it. Restarting the full four-core gate after this final source change.
+
+baud-server and baud-multiverse commonly run together: baud-server imports baud-multiverse and executes its KVM loops in-process, so one process affinity mask covers both. Reduced that shared daemon mask from four to the two least-busy CPUs while leaving Cargo/gate compilation at four.
+
+Verified the daemon now logs exactly two dynamically selected CPUs, [2, 3], before listening. Starting the gate again; its outer build/test work remains four-core limited, while each baud-server process narrows itself to two cores for its in-process baud-multiverse loops.
+
+Resuming the locked build batch. Daemon affinity verification passed with all four threads sharing two CPUs. Reviewing current changes for correctness before further implementation.
+
+Review found and fixed two regressions in unfinished changes: spec-input hashing now sorts environment keys, and image assembly rejects unresolved userspace RDSEED instead of emitting UD2 without relocation metadata. Replay hex decoding now rejects non-ASCII before slicing, with regression cases for Unicode input. No queue item is claimed complete.
+
+Implemented capability-sized XSAVE2 capture/restore and explicit errors for short MSR reads/writes. Added extended-payload conversion tests and strict destination-size validation tests. Running snapshot unit tests plus real-KVM snapshot and shell continuation checks; the broad G3 item remains open pending complete acceptance.
+
+Strict MSR restore exposed KVM rejecting MSR_KVM_ASYNC_PF_INT at entry 99 of 129 because this VMM has no in-kernel LAPIC. Verified kvm_pv_enable_async_pf_int in the host kernel sources. Capture now excludes only that reset-zero inapplicable register and rejects nonzero state; all remaining MSR writes must complete. Retesting real snapshot and shell paths.
+
+Continuing the locked batch after successful XSAVE2 snapshot and shell continuation tests. Checking maintained H5 coverage and persisted shell behavior next.
+
+G3 shell continuation now uses cancellation-aware KVM stepping with a signal kicker, a two-second post-EOF grace period, and bounded output-task shutdown. Added real-KVM tests for persisted-store reopening with bidirectional I/O and cancellation of a guest with zero exits; H5 now runs server shell tests. Verification running, no DONE claim yet.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+## 2026-09-10T00:33:31 UTC - Changes committed at user request.
+- Implemented dynamic CPU affinity for Cargo runners and daemon startup before Tokio thread creation, shared memfd RAM allocation, capability-sized XSAVE2 capture/restore, strict MSR completion checks, and cancellable persisted shell continuation.
+- Added replay Unicode-input validation, stable spec-input serialization, and rejection of unresolved userspace RDSEED during image assembly.
+- Files changed include .cargo/config.toml, drive affinity helpers and tests, H5, baud-server, baud-multiverse, baud-packages, baud-snapshot, Cargo.lock, and this progress log.
+- Verification: snapshot unit tests 36 passed; real-KVM snapshot round-trip and shell continuation passed; server shell tests 4 passed; replay/spec-input regression tests passed; package tests 44 passed and 2 ignored; live daemon check confirmed all threads share two CPUs.
+- Full gate runs were interrupted during CPU-limit changes. No complete full-gate result applies to this final tree. The locked build queue remains incomplete; no selected entry is marked DONE and no completion promise is made.
+---

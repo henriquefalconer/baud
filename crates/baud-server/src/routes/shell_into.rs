@@ -60,20 +60,31 @@ async fn handle_socket(socket: WebSocket, store: Arc<SnapshotStore>, run_id: Str
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-    let guest_task = tokio::task::spawn_blocking(move || {
-        run_shell_session(store.as_ref(), &run_id, &node_id, input_rx, output_tx)
+    let cancellation = super::run_kvm::CancelGuard::new();
+    let flag = cancellation.flag();
+    let send_failure = flag.clone();
+    let mut guest_task = tokio::task::spawn_blocking(move || {
+        run_shell_session(store.as_ref(), &run_id, &node_id, input_rx, output_tx, flag)
     });
 
     let send_task = tokio::spawn(async move {
         while let Some(bytes) = output_rx.recv().await {
             if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                send_failure.store(true, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
         }
         let _ = ws_tx.send(Message::Close(None)).await;
     });
 
-    while let Some(msg) = ws_rx.next().await {
+    loop {
+        let msg = tokio::select! {
+            result = &mut guest_task => {
+                let _ = result;
+                break;
+            }
+            msg = ws_rx.next() => match msg { Some(msg) => msg, None => break },
+        };
         match msg {
             // The "no more input" sentinel (see this module's header doc) — stop reading and let
             // the guest loop drain whatever real input already arrived, but do not send a `Close`
@@ -93,8 +104,19 @@ async fn handle_socket(socket: WebSocket, store: Arc<SnapshotStore>, run_id: Str
     }
     drop(input_tx);
 
-    let _ = guest_task.await;
-    let _ = send_task.await;
+    // Preserve queued input after EOF, but bound a guest stuck inside one KVM_RUN.
+    if !guest_task.is_finished() {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), &mut guest_task).await;
+    }
+    drop(cancellation);
+    if !guest_task.is_finished() {
+        let _ = guest_task.await;
+    }
+    let mut send_task = send_task;
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut send_task).await.is_err() {
+        send_task.abort();
+        let _ = send_task.await;
+    }
 }
 
 /// Reconstruct the persisted universe and hand off to [`drive_shell_session`] — the store-touching
@@ -106,6 +128,7 @@ fn run_shell_session(
     node_id: &str,
     input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     output_tx: mpsc::UnboundedSender<Vec<u8>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     let universe = match reconstruct_universe(store, run_id, node_id) {
         Ok(u) => u,
@@ -122,6 +145,7 @@ fn run_shell_session(
             return Err(msg);
         }
     };
+    mv.set_cancel_flag(cancel);
     drive_shell_session(&mut mv, input_rx, output_tx)
 }
 
@@ -132,6 +156,7 @@ fn drive_shell_session(
     mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     output_tx: mpsc::UnboundedSender<Vec<u8>>,
 ) -> Result<(), String> {
+    let _kicker = mv.arm_cancel_kicker();
     let mut last_len = mv.console_output().len();
     // The captured history itself (`universe.device.console`) so a client sees the same tail
     // `baud-multiverse`'s own `shell_into_universe_resumes` test asserts on, not just growth from
@@ -179,12 +204,16 @@ fn drive_shell_session(
             };
         }
 
-        match mv.step_exit() {
+        if output_tx.is_closed() {
+            return Ok(());
+        }
+        match mv.step_exit_cancellable() {
             Ok(baud_vcpu::DispatchOutcome::Halted) => {
                 flush_new_output(mv, &mut last_len, &output_tx);
                 return Ok(());
             }
             Ok(_) => {}
+            Err(baud_vcpu::RunLoopError::Cancelled) => return Ok(()),
             Err(e) => {
                 flush_new_output(mv, &mut last_len, &output_tx);
                 let _ = output_tx.send(format!("\r\n[shell-into: determinism hole: {e}]\r\n").into_bytes());
@@ -207,6 +236,53 @@ fn flush_new_output(mv: &Multiverse, last_len: &mut usize, output_tx: &mpsc::Unb
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cancelled_shell_stops_even_when_guest_makes_no_exits() {
+        let kernel = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/spin-guest/bzImage");
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, _output_rx) = mpsc::unbounded_channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, WORK_CLOCK_K, vec![], None).unwrap();
+            mv.set_cancel_flag(worker_cancel);
+            done_tx.send(drive_shell_session(&mut mv, input_rx, output_tx)).unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), Ok(()));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn persisted_shell_universe_resumes_with_bidirectional_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity_path = dir.path().join("identity.txt");
+        let identity = baud_keys::generate_identity_file();
+        let recipient = baud_keys::parse_public_key(&identity).unwrap();
+        std::fs::write(&identity_path, identity).unwrap();
+        let store = SnapshotStore::open_with_keys(dir.path(), recipient.clone(), Some(identity_path.clone()));
+        let mut mv = Multiverse::boot(&shell_guest_kernel_path(), "console=ttyS0", 0, WORK_CLOCK_K, vec![], None).unwrap();
+        mv.run_until_console_len(2, 100_000).unwrap();
+        let universe = mv.snapshot(&mut baud_snapshot::PageStore::default()).unwrap();
+        let (run, node) = super::super::run_kvm::persist_universe(&store, "shell-proof", &universe).unwrap();
+        drop(mv);
+        drop(universe);
+        drop(store);
+        let store = SnapshotStore::open_with_keys(dir.path(), recipient, Some(identity_path));
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        input_tx.send(b"hi\r".to_vec()).unwrap();
+        drop(input_tx);
+        run_shell_session(&store, &run, &node, input_rx, output_tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false))).unwrap();
+        let mut output = Vec::new();
+        while let Ok(bytes) = output_rx.try_recv() { output.extend(bytes); }
+        assert_eq!(output, b"$ hi\n$ ");
+    }
 
     fn shell_guest_kernel_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../baud-multiverse/tests/fixtures/shell-guest/bzImage")

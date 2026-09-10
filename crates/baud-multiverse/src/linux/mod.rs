@@ -33,13 +33,15 @@ use kvm_bindings::{
 };
 use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd, VmFd};
 use perf_event::{Builder, Counter};
+use std::ffi::CString;
 use std::io;
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::time::Duration;
 use tracing::info;
-use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+use vm_memory::{Address, Bytes, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
-/// The guest-RAM backend type this boot flow uses throughout — a single anonymous-mmap region, no
+/// The guest-RAM backend type this boot flow uses throughout. Allocation uses a zeroed memfd-backed mapping, no
 /// dirty-page tracking here (that is `baud-snapshot`'s `KVM_CAP_DIRTY_LOG_RING` job, §5).
 pub type GuestMemory = GuestMemoryMmap<()>;
 
@@ -306,8 +308,22 @@ fn allocate_and_register_guest_ram(
     ram_size: usize,
     log_dirty_pages: bool,
 ) -> Result<GuestMemory, BootError> {
-    let guest_mem = GuestMemory::from_ranges(&[(GuestAddress(layout::GUEST_RAM_START), ram_size)])
+    // A memfd-backed mapping is shareable between branch VMs and is the required backing for
+    // userfaultfd minor-fault CoW. Keep the file inside GuestMemory's FileOffset so it remains
+    // alive for exactly as long as KVM can access the mapping.
+    let name = CString::new("baud-guest-ram")
         .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(BootError::GuestMemory(ram_size, io::Error::last_os_error().to_string()));
+    }
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.set_len(ram_size as u64)
+        .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
+    let guest_mem = GuestMemory::from_ranges_with_files(&[
+        (GuestAddress(layout::GUEST_RAM_START), ram_size, Some(FileOffset::new(file, 0))),
+    ])
+    .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
 
     let host_addr = guest_mem
         .get_host_address(GuestAddress(layout::GUEST_RAM_START))
@@ -1178,7 +1194,7 @@ impl Multiverse {
     /// With no flag installed this spawns nothing, installs no signal handler, and can never
     /// deliver a signal — the guest's exit sequence is untouched, which is the whole determinism
     /// contract [`set_cancel_flag`](Self::set_cancel_flag) makes.
-    fn arm_cancel_kicker(&self) -> baud_vcpu::linux::CancelKicker {
+    pub fn arm_cancel_kicker(&self) -> baud_vcpu::linux::CancelKicker {
         baud_vcpu::linux::CancelKicker::arm(self.cancel.clone())
     }
 
@@ -1210,7 +1226,7 @@ impl Multiverse {
     /// `KVM_RUN` broken out of by this run's own [`CancelKicker`](baud_vcpu::linux::CancelKicker)
     /// returns [`RunLoopError::Cancelled`] instead of transparently re-entering the ioctl that
     /// kick was sent to escape. Identical to `step_exit` when no flag is installed.
-    fn step_exit_cancellable(&mut self) -> Result<baud_vcpu::DispatchOutcome, RunLoopError> {
+    pub fn step_exit_cancellable(&mut self) -> Result<baud_vcpu::DispatchOutcome, RunLoopError> {
         baud_vcpu::linux::run_one_exit_cancellable(
             &mut self.guest.vcpu,
             &mut self.bus,

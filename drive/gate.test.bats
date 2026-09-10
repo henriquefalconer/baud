@@ -51,6 +51,20 @@ kvm_holders() {
     [[ "$output" == *"--jobs"* ]]
 }
 
+@test "CPU selector returns at most four CPUs from the current affinity mask" {
+    run env BAUD_CPU_LIMIT=4 ./drive/select-free-cpus.sh
+    [ "$status" -eq 0 ]
+    [ "$(tr ',' '\n' <<< "$output" | grep -c .)" -le 4 ]
+    [ "$(tr ',' '\n' <<< "$output" | sort -u | wc -l)" -eq "$(tr ',' '\n' <<< "$output" | wc -l)" ]
+}
+
+@test "cargo defaults cap compiler jobs and test threads" {
+    run grep -q '^jobs = 4$' .cargo/config.toml
+    [ "$status" -eq 0 ]
+    run grep -q 'RUST_TEST_THREADS.*value = "4"' .cargo/config.toml
+    [ "$status" -eq 0 ]
+}
+
 @test "gate rejects an unknown option instead of silently ignoring it" {
     run ./drive/gate.sh --definitely-not-an-option
     [ "$status" -eq 2 ]

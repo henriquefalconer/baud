@@ -47,6 +47,7 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 futures-util = { workspace = true }
 base64 = "0.22"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

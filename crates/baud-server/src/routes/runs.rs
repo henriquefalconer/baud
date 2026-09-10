@@ -109,15 +109,27 @@ pub async fn start(
 }
 
 fn compute_closure_hash(spec_doc: &baud_init::parse::SpecDoc) -> String {
-    // Build a deterministic closure hash from the spec.
-    // In a full implementation, this would call baud-packages::build().
-    // For now: hash the nix ref + node names as a stable placeholder.
-    let input = format!(
-        "{}:{}",
-        spec_doc.nix,
-        spec_doc.nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(",")
-    );
-    format!("blake3:{}", hex_encode(blake3::hash(input.as_bytes()).as_bytes()))
+    // Hash the complete validated document. Files, environment, argv, and adapters all change
+    // the guest inputs and therefore must change the identity recorded before acknowledgement.
+    // Convert through Value so object keys, including the environment HashMap, have stable
+    // ordering across independent parses and processes.
+    let value = serde_json::to_value(spec_doc).expect("SpecDoc is serializable");
+    let input = serde_json::to_vec(&value).expect("JSON Value is serializable");
+    format!("blake3:{}", hex_encode(blake3::hash(&input).as_bytes()))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn spec_input_hash_is_independent_of_environment_insertion_order() {
+        let a = baud_init::lint("nix: test\nenv:\n  A: one\n  B: two\n").unwrap();
+        let b = baud_init::lint("nix: test\nenv:\n  B: two\n  A: one\n").unwrap();
+        assert_eq!(compute_closure_hash(&a), compute_closure_hash(&b));
+        let changed = baud_init::lint("nix: test\nenv:\n  A: changed\n  B: two\n").unwrap();
+        assert_ne!(compute_closure_hash(&a), compute_closure_hash(&changed));
+    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

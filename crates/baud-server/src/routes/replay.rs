@@ -307,7 +307,7 @@ fn hash_observation_prefix(
 }
 
 fn decode_hex_tape(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -348,6 +348,8 @@ mod tests {
     fn malformed_hex_tape_is_rejected() {
         assert!(decode_hex_tape("0").is_none());
         assert!(decode_hex_tape("zz").is_none());
+        assert!(decode_hex_tape("0€").is_none());
+        assert!(decode_hex_tape("é").is_none());
         assert_eq!(decode_hex_tape("00ff"), Some(vec![0, 255]));
     }
 }
