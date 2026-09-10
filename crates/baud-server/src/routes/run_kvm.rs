@@ -712,7 +712,7 @@ fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<Bran
 /// ([`Multiverse::set_cancel_flag`](baud_multiverse::linux::Multiverse::set_cancel_flag)) so an
 /// abandoned run stops between exits instead of running to completion — see [`CancelGuard`].
 #[allow(clippy::too_many_arguments)]
-fn boot_run_and_drain(
+pub(crate) fn boot_run_and_drain(
     kernel_path: &Path,
     cmdline: &str,
     tape: Vec<u8>,
@@ -829,6 +829,36 @@ fn boot_run_and_drain(
     };
     let records = mv.drain_tape_records();
     Ok(((halt.console_output, halt.ram_hash, None, None), records))
+}
+
+/// Re-run a persisted KVM request with its exact image, device, and tape inputs. Replay routes use
+/// this entry point instead of the legacy `Multiverse` simulator, so a missing image or unsupported
+/// host capability becomes an execution error rather than a synthetic observation stream.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn replay_real_records(
+    kernel_path: &Path,
+    cmdline: &str,
+    tape: Vec<u8>,
+    initramfs: Option<&[u8]>,
+    periodic_timer: Option<(u64, u8, u32)>,
+    virtio_rng: Option<(u64, u8, u32)>,
+    virtio_blk: Option<(baud_multiverse::virtio_blk::BlockBase, u8, u32)>,
+    acpi: bool,
+) -> Result<Vec<baud_proto::Msg>, String> {
+    let (_outcome, records) = boot_run_and_drain(
+        kernel_path,
+        cmdline,
+        tape,
+        initramfs,
+        periodic_timer,
+        virtio_rng,
+        virtio_blk,
+        acpi,
+        None,
+        None,
+        None,
+    )?;
+    Ok(records)
 }
 
 /// Re-boot a real KVM guest and return only the `Msg::Frame` records it produced, in order — the

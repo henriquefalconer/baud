@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
 use crate::routes::server::LogEntry;
+use baud_tape::{Backend, types::{SandboxSpec, TapeState}};
 
 /// Shared application state, cloned into every request handler.
 #[derive(Clone)]
@@ -24,6 +25,9 @@ pub struct AppState {
     /// `/run/kvm/resume` (todo.md §14: "a real prerequisite for any SnapshotStore-backed
     /// resume/persist route").
     pub snapshot_store: Arc<SnapshotStore>,
+    /// Long-lived sandbox backend. Keeping this instance alive is required because the local
+    /// backend owns the in-memory lifecycle map; creating one per request loses the sandbox.
+    pub tape_backend: Arc<dyn Backend>,
 }
 
 impl AppState {
@@ -34,12 +38,41 @@ impl AppState {
         let pool = SqlitePool::connect(&db_url).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
 
+        let local_backend = Arc::new(baud_tape_local::LocalBackend::new());
+        let persisted_tapes = sqlx::query_as::<_, (String, String, u32, u32, u32, u32, u32, Option<String>, i64)>(
+            "SELECT id, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, created_at FROM tapes WHERE state != 'deleted'"
+        )
+        .fetch_all(&pool)
+        .await?;
+        for (id, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, created_at) in persisted_tapes {
+            let tape_state = match state.as_str() {
+                "creating" => TapeState::Creating,
+                "running" => TapeState::Running,
+                "stopped" => TapeState::Stopped,
+                "archived" => TapeState::Archived,
+                other => TapeState::Unknown(other.to_owned()),
+            };
+            let spec = SandboxSpec {
+                vcpus,
+                memory_mib,
+                disk_mib,
+                auto_stop_secs,
+                auto_archive_secs,
+                image,
+                ..Default::default()
+            };
+            if let Err(error) = local_backend.adopt_existing(&id, spec, tape_state, created_at as u64).await {
+                tracing::warn!(%id, %error, "could not reattach persisted local tape");
+            }
+        }
+
         Ok(AppState {
             db: pool,
             started_at: unix_now(),
             budget_minutes_used: Arc::new(Mutex::new(0)),
             log_buffer: Arc::new(RwLock::new(Vec::new())),
             snapshot_store: Arc::new(open_snapshot_store()?),
+            tape_backend: local_backend,
         })
     }
 }

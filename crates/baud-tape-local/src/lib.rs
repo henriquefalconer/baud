@@ -201,6 +201,37 @@ impl Default for LocalBackend {
     }
 }
 
+impl LocalBackend {
+    /// Reattach a sandbox recorded by the server before it restarted. The local backend keeps
+    /// lifecycle state in memory, so without this recovery hook a durable SQLite row would point
+    /// at a directory that every later request considered missing.
+    pub async fn adopt_existing(
+        &self,
+        id: impl Into<String>,
+        spec: SandboxSpec,
+        state: TapeState,
+        created_at: u64,
+    ) -> Result<()> {
+        let id = id.into();
+        let root = self.sandbox_root(&id);
+        if !root.is_dir() {
+            bail!("cannot adopt sandbox {id}: root {root:?} does not exist");
+        }
+        let stopped_at = matches!(state, TapeState::Stopped).then_some(Instant::now());
+        let entry = SandboxEntry {
+            id: id.clone(),
+            spec,
+            state,
+            root,
+            created_at,
+            last_active: Instant::now(),
+            stopped_at,
+        };
+        self.sandboxes.lock().await.insert(id, entry);
+        Ok(())
+    }
+}
+
 fn detect_lima() -> bool {
     // Check if limactl is available
     std::process::Command::new("limactl")
@@ -395,6 +426,22 @@ mod tests {
         assert_eq!(status.state, TapeState::Running);
         assert_eq!(status.vcpus, 1);
         assert_eq!(status.memory_mib, 1024);
+    }
+
+    #[tokio::test]
+    async fn adopt_existing_recovers_a_sandbox_after_backend_restart() {
+        let base = std::env::temp_dir().join(format!("baud-restart-test-{}", uuid::Uuid::new_v4()));
+        let first = LocalBackend::with_base_dir(base.clone());
+        let spec = SandboxSpec::default();
+        let id = first.create(&spec).await.expect("create");
+        drop(first);
+
+        let second = LocalBackend::with_base_dir(base);
+        second.adopt_existing(&id, spec, TapeState::Running, 123).await.expect("adopt");
+        let status = second.status(&id).await.expect("status after adopt");
+        assert_eq!(status.id, id);
+        assert_eq!(status.created_at, 123);
+        assert_eq!(status.state, TapeState::Running);
     }
 
     #[tokio::test]

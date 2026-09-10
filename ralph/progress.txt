@@ -1205,3 +1205,61 @@ Repeating the exact pre-push gate in the foreground as requested, then recording
   - Foreground gate: 24 passed, 0 regressions, one documented rdtsc load flake passed in isolation; package build skipped as unchanged.
 
 ---
+
+## 2026-09-10T05:56:31 UTC (1h41min) - Session usage — ralph-4 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5407 (summed from 8 session transcripts: main $0.3811 · subagents $0.1597)
+- tokens input 1,090,242 · cache-read 14,274,048 · cache-write 0 · output 31,010 · reasoning 8,565
+- context 155,574 tok peak of 272K (57%) across 128 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.5407 (in 1,090,242 / out 39,575 / cache-read 14,274,048)
+- subagents (7) pi process x7
+  - delegate-00af52b141665dfe49247f3e00e6471e: gpt-5.6-luna $0.0258, 6 inference calls
+  - delegate-4cb18373894a43b65f51d4f4c94f0cb4: gpt-5.6-luna $0.0236, 5 inference calls
+  - delegate-60f645832e87519c900e9f5594f7e36f: gpt-5.6-luna $0.0225, 5 inference calls
+  - delegate-bbbe7271b627fbb26fd8d0c059e8ba43: gpt-5.6-luna $0.0236, 5 inference calls
+  - delegate-7b92052fc4062fa2d24e75d3450fbf13: gpt-5.6-luna $0.0272, 7 inference calls
+  - delegate-e6fe8a593cd55efe8e24331052313301: gpt-5.6-luna $0.0262, 7 inference calls
+  - 01a08988-1674-7482-8c94-4c67a820f78a: gpt-5.6-luna $0.0109, 4 inference calls
+- transcript: ralph/.run/20260910T003437Z/005-ralph-4.json
+- transcript: ralph/.run/20260910T003437Z/006-ralph-4.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 5 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items to address, studying the specifications, and then implementing and validating the complete batch.
+
+Started iteration 5 and reset perf_event_paranoid for native KVM validation.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 8 pending items in todo-build.md.
+
+Baseline verification: running the workspace tests before modifying the selected production paths.
+
+G2/G5 in flight: wiring one persistent backend into tape creation, lifecycle, exec, and endpoint routes so SQLite state cannot drift from the live sandbox.
+
+Backend delegation is implemented; running focused server tests and clippy compilation to catch route/state integration errors.
+
+Snapshot-store clear-index validation now recomputes node identity and has a tamper regression; running focused tests.
+
+Hardened tape transitions to conditional state changes and cleanup on database failure; rerunning server tests after the lifecycle edits.
+
+Added restart recovery for persisted local tapes, reattaching existing sandbox directories before serving requests. Compiling the affected crates now.
+
+Added a regression for backend restart recovery; running local backend tests and the snapshot-store suite once more.
+
+The validation worker only launched a child gate and exited before its result; running the required gate directly now and keeping the terminal result.
+
+G1 replay cutover is in flight: persisted KVM metadata now has a real reboot path, with legacy replay retained only for rows that predate KVM metadata. Compiling and testing replay now.
+
+Real replay metadata path compiles and replay unit tests pass; rerunning the full required gate after the G1 cutover.
+
+The full repository gate is green after the real replay cutover and persistent backend recovery: 25 passed, 0 failed, 1 cached package skip. Reviewing the selected queue and final diff before committing.
+
+## 2026-09-10T06:28:28 UTC - Changes committed.
+- Added real-KVM replay through persisted boot metadata, persistent tape backend delegation and restart recovery, conditional lifecycle transitions, and snapshot node identity verification.
+- Files changed: crates/baud-server/src/routes/replay.rs, crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/tapes.rs, crates/baud-server/src/state.rs, crates/baud-snapshot-store/src/store.rs, crates/baud-snapshot-store/src/tests.rs, crates/baud-tape-local/src/lib.rs, ralph/progress.txt.
+- **Brief description of changes:**
+  - New replay requests reboot the recorded kernel and device configuration instead of regenerating observations through the legacy engine when KVM metadata exists.
+  - Tape routes now use one live backend instance, delegate lifecycle and exec calls, clean up failed database inserts, and reattach local sandboxes after restart.
+  - Snapshot node indexes recompute their content-addressed identity before use, with tamper coverage.
+- Verification: `bash drive/gate.sh` passed with 25 passed, 0 failed, and 1 cached package skip; focused replay, server, snapshot-store, and local-backend tests passed.
+---

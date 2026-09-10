@@ -65,6 +65,21 @@ fn snapshot_store_bodies_are_ciphertext() {
 }
 
 #[test]
+fn read_node_rejects_a_tampered_clear_index() {
+    let (root, _identity_dir, store) = open_test_store();
+    let run = RunId::new("run-node-integrity");
+    let node = store.put_universe(&run, None, 4, (0, 4), b"state").unwrap();
+    let path = root.path().join("runs").join("run-node-integrity").join("nodes")
+        .join(format!("{}.json", node.to_hex()));
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["at_step"] = serde_json::json!(5);
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let err = store.read_node(&run, node).unwrap_err();
+    assert!(matches!(err, StoreError::IntegrityMismatch { kind: "node identity", .. }));
+}
+
+#[test]
 fn pages_dedup_by_plaintext_hash() {
     let (_root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-b");

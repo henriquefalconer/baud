@@ -22,6 +22,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use crate::AppState;
+use baud_tape::types::SandboxSpec;
 
 /// Convenience alias: routes return either a JSON success or a (status, JSON error).
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -65,28 +66,21 @@ pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreateTapeBody>,
 ) -> Json<Value> {
-    let id = format!("tape-{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>());
     let now = crate::state::unix_now() as i64;
 
-    // Create the local backend sandbox
+    // Allocate through the one backend instance owned by AppState. The returned ID is the
+    // backend's authoritative identity, not a server-side placeholder.
     let backend_name = body.backend.clone();
-    let tape_id = match backend_name.as_str() {
-        "local" => {
-            // Create a local sandbox via baud-tape-local
-            match create_local_sandbox(&id, body.image.as_deref()).await {
-                Ok(local_id) => local_id,
-                Err(e) => {
-                    return Json(json!({ "error": format!("failed to create local sandbox: {e}") }));
-                }
-            }
-        }
-        "daytona" => {
-            // Daytona requires API key; return stub for now
-            return Json(json!({ "error": "daytona backend requires keys init; use --backend local for development" }));
-        }
-        other => {
-            return Json(json!({ "error": format!("unknown backend: {other}") }));
-        }
+    if backend_name != "local" {
+        return Json(json!({ "error": format!("backend {backend_name:?} is unavailable; only the configured local backend is enabled") }));
+    }
+    let spec = SandboxSpec {
+        image: body.image.clone(),
+        ..Default::default()
+    };
+    let tape_id = match state.tape_backend.create(&spec).await {
+        Ok(id) => id,
+        Err(e) => return Json(json!({ "error": format!("failed to create local sandbox: {e}") })),
     };
 
     // Record in SQLite
@@ -117,24 +111,11 @@ pub async fn create(
             "created_at": now,
             "updated_at": now,
         })),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Err(e) => {
+            let _ = state.tape_backend.delete(&tape_id).await;
+            Json(json!({ "error": format!("db error: {e}") }))
+        }
     }
-}
-
-async fn create_local_sandbox(tape_id: &str, image: Option<&str>) -> Result<String, String> {
-    use baud_tape_local::LocalBackend;
-    use baud_tape::{Backend, types::SandboxSpec};
-
-    let backend = LocalBackend::new();
-    let spec = SandboxSpec {
-        image: image.map(|s| s.to_owned()),
-        ..Default::default()
-    };
-    backend.create(&spec).await.map_err(|e| e.to_string())?;
-    // Use the tape_id as our tracking ID (the local sandbox will have its own ID)
-    // For simplicity, we store our ID and manage the local backend separately
-    // In a full implementation, the server would hold a reference to the backend
-    Ok(tape_id.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +206,7 @@ pub async fn start(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult {
+    state.tape_backend.start(&id).await.map_err(|e| server_error(format!("backend start failed: {e}")))?;
     update_tape_state(&state, &id, "stopped", "running").await
 }
 
@@ -236,6 +218,7 @@ pub async fn stop(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult {
+    state.tape_backend.stop(&id).await.map_err(|e| server_error(format!("backend stop failed: {e}")))?;
     update_tape_state(&state, &id, "running", "stopped").await
 }
 
@@ -247,6 +230,7 @@ pub async fn restore(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult {
+    state.tape_backend.restore(&id).await.map_err(|e| server_error(format!("backend restore failed: {e}")))?;
     update_tape_state(&state, &id, "archived", "running").await
 }
 
@@ -278,6 +262,8 @@ pub async fn ensure(
                 }
             };
             if new_state != tape_state.as_str() {
+                state.tape_backend.ensure(&id).await
+                    .map_err(|e| server_error(format!("backend ensure failed: {e}")))?;
                 let now = crate::state::unix_now() as i64;
                 let _ = sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ?")
                     .bind(new_state)
@@ -291,12 +277,13 @@ pub async fn ensure(
     }
 }
 
-async fn update_tape_state(state: &AppState, id: &str, _from: &str, to: &str) -> ApiResult {
+async fn update_tape_state(state: &AppState, id: &str, from: &str, to: &str) -> ApiResult {
     let now = crate::state::unix_now() as i64;
-    let result = sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ?")
+    let result = sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ? AND state = ?")
         .bind(to)
         .bind(now)
         .bind(id)
+        .bind(from)
         .execute(&state.db)
         .await;
 
@@ -318,6 +305,9 @@ pub async fn kill(
     Path(id): Path<String>,
 ) -> ApiResult {
     let now = crate::state::unix_now() as i64;
+    if let Err(e) = state.tape_backend.delete(&id).await {
+        return Err(server_error(format!("backend delete failed: {e}")));
+    }
     let result = sqlx::query("UPDATE tapes SET state = 'deleted', updated_at = ? WHERE id = ?")
         .bind(now)
         .bind(&id)
@@ -368,30 +358,13 @@ pub async fn exec(
         ));
     }
 
-    // Run the command in the tape's sandbox directory.
-    // For local backend: sandbox root is temp_dir/baud-local/{id}.
-    // This routes exec through the per-tape directory, not the server CWD.
-    let sandbox_root = std::env::temp_dir().join("baud-local").join(&id);
-    // Ensure the directory exists (it may have been created by LocalBackend::create).
-    if let Err(e) = std::fs::create_dir_all(&sandbox_root) {
-        return Err(server_error(format!("cannot access sandbox dir {sandbox_root:?}: {e}")));
-    }
-    let shell_cmd = cmd.join(" ");
-    let out = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(&shell_cmd)
-        .current_dir(&sandbox_root)
-        .output()
-        .await;
-
-    match out {
-        Ok(output) => Ok(Json(json!({
-            "exit_code": output.status.code().unwrap_or(-1),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-        }))),
-        Err(e) => Err(server_error(format!("exec failed: {e}"))),
-    }
+    let output = state.tape_backend.exec(&id, &cmd).await
+        .map_err(|e| server_error(format!("exec failed: {e}")))?;
+    Ok(Json(json!({
+        "exit_code": output.exit_code,
+        "stdout": output.stdout,
+        "stderr": output.stderr,
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -414,8 +387,10 @@ pub async fn reconstruct(
         Ok(Some(_)) => {}
     }
 
-    // Create a new tape as the reconstruction
-    let new_id = uuid::Uuid::new_v4().to_string();
+    // Create a real replacement sandbox before recording it. A database row alone is not a
+    // reconstruction because later exec/endpoint requests need a live backend object.
+    let new_id = state.tape_backend.create(&SandboxSpec::default()).await
+        .map_err(|e| server_error(format!("failed to create reconstruction sandbox: {e}")))?;
     let now = crate::state::unix_now() as i64;
     let insert = sqlx::query(
         "INSERT INTO tapes (id, state, backend, created_at, updated_at) VALUES (?, 'running', 'local', ?, ?)"
@@ -452,7 +427,11 @@ pub async fn endpoint(
         .await;
 
     match row {
-        Ok(Some((url,))) => Ok(Json(json!({ "id": id, "url": url }))),
+        Ok(Some((_url,))) => {
+            let url = state.tape_backend.endpoint(&id).await
+                .map_err(|e| server_error(format!("backend endpoint failed: {e}")))?;
+            Ok(Json(json!({ "id": id, "url": url })))
+        }
         Ok(None) => Err(not_found(format!("tape {id} not found"))),
         Err(e) => Err(server_error(format!("db error: {e}"))),
     }

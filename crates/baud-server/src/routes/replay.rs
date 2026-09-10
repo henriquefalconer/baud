@@ -126,12 +126,14 @@ pub async fn replay(
             "error": format!("db error fetching replay tape: {e}")
         })),
     };
-    let replay_obs = match generate_replay_observations(
+    let replay_obs = match replay_real_or_legacy(
+        &state,
+        &run_id,
         replay_tape.as_deref(),
         seed as u64,
         &spec_hash,
         &spec_doc,
-    ) {
+    ).await {
         Ok(observations) => observations,
         Err(error) => return Json(json!({
             "ok": false,
@@ -230,7 +232,61 @@ pub async fn replay(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Replay a spec through baud-multiverse using the stored tape (derived from seed).
+/// Prefer the persisted real-KVM boot contract. Legacy rows without `kvm_run_meta` have no
+/// image to boot, so they retain the old deterministic path only for historical compatibility.
+/// New rows never silently turn a missing real input into a claimed KVM replay.
+async fn replay_real_or_legacy(
+    state: &AppState,
+    run_id: &str,
+    tape: Option<&[u8]>,
+    seed: u64,
+    spec_hash: &str,
+    spec_doc: &baud_init::parse::SpecDoc,
+) -> Result<Vec<Observation>, String> {
+    let meta = sqlx::query_as::<_, (
+        String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>,
+        Option<i64>, Option<i64>, Option<i64>, bool, Option<String>, Option<i64>, Option<i64>
+    )>(
+        "SELECT kernel_path, cmdline, initramfs_path, periodic_timer_period_rcb, \
+         periodic_timer_vector, periodic_timer_max_ticks, virtio_rng_seed, virtio_rng_vector, \
+         virtio_rng_max_exits, acpi, virtio_blk_image_path, virtio_blk_vector, virtio_blk_max_exits \
+         FROM kvm_run_meta WHERE run_id = ?"
+    )
+    .bind(run_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| format!("db error fetching real replay metadata: {e}"))?;
+
+    let Some((kernel, cmdline, initramfs_path, period, timer_vector, max_ticks, rng_seed,
+              rng_vector, rng_max_exits, acpi, blk_path, blk_vector, blk_max_exits)) = meta else {
+        return generate_replay_observations(tape, seed, spec_hash, spec_doc);
+    };
+    let tape = tape.ok_or_else(|| "real replay input tape is unavailable".to_owned())?.to_vec();
+    let initramfs = initramfs_path.as_deref().map(crate::routes::run_kvm::read_initramfs)
+        .transpose()?;
+    let periodic = period.zip(timer_vector).zip(max_ticks)
+        .map(|((period, vector), max)| (period as u64, vector as u8, max as u32));
+    let rng = rng_seed.zip(rng_vector).zip(rng_max_exits)
+        .map(|((seed, vector), max)| (seed as u64, vector as u8, max as u32));
+    let blk = match (blk_path, blk_vector, blk_max_exits) {
+        (Some(path), Some(vector), Some(max)) => Some((
+            crate::routes::run_kvm::open_virtio_blk_image(&path, crate::routes::run_kvm::virtio_blk_image_size_limit())?,
+            vector as u8,
+            max as u32,
+        )),
+        (None, None, None) => None,
+        _ => return Err("real replay metadata has an incomplete virtio-blk configuration".into()),
+    };
+    let records = tokio::task::spawn_blocking(move || crate::routes::run_kvm::replay_real_records(
+        std::path::Path::new(&kernel), &cmdline, tape, initramfs.as_deref(), periodic, rng, blk, acpi,
+    )).await.map_err(|e| format!("real replay task failed: {e}"))??;
+    Ok(records.into_iter().filter_map(|record| match record {
+        baud_proto::Msg::Observe(observation) => Some(observation),
+        _ => None,
+    }).collect())
+}
+
+/// Replay a spec through the legacy deterministic engine using the stored tape.
 /// This is the real replay path: same (seed, spec) → same observation stream hash.
 fn generate_replay_observations(
     tape: Option<&[u8]>,

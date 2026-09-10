@@ -208,7 +208,28 @@ impl SnapshotStore {
     pub fn read_node(&self, run: &RunId, node: NodeId) -> Result<Node, StoreError> {
         let path = self.node_path(run, node);
         let bytes = fs::read(&path).map_err(|_| StoreError::NodeNotFound(node.to_hex()))?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let decoded: Node = serde_json::from_slice(&bytes)?;
+        let stored_id = Sha::from_hex(&decoded.id)?;
+        if stored_id != node {
+            return Err(StoreError::IntegrityMismatch {
+                kind: "node identity",
+                expected: node.to_hex(),
+                actual: decoded.id,
+            });
+        }
+        let parent = decoded.parent.as_deref().map(Sha::from_hex).transpose()?;
+        let computed = Sha::of_node_identity(parent, decoded.at_step, decoded.tape_range);
+        if computed != node {
+            return Err(StoreError::IntegrityMismatch {
+                kind: "node identity",
+                expected: node.to_hex(),
+                actual: computed.to_hex(),
+            });
+        }
+        if let Some(universe) = decoded.universe.as_deref() {
+            Sha::from_hex(universe)?;
+        }
+        Ok(decoded)
     }
 
     /// Record a branch point with no captured universe yet (this crate's extension beyond the
