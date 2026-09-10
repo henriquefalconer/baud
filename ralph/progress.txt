@@ -2073,3 +2073,61 @@ The foreground gate completed with 24 passed, 1 skipped, and h6 failing only und
   - Re-ran h6 in isolation after the gate-only failure; the isolated real fleet test passed.
 
 ---
+
+## 2026-09-10T15:04:33 UTC (46min) - Session usage — ralph-9 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3606 (summed from 8 session transcripts: main $0.1848 · subagents $0.1758)
+- tokens input 910,130 · cache-read 7,214,080 · cache-write 0 · output 28,543 · reasoning 7,208
+- context 137,285 tok peak of 272K (50%) across 67 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.3606 (in 910,130 / out 35,751 / cache-read 7,214,080)
+- subagents (7) pi process x7
+  - delegate-0d282e7ca354a6e4a7fe1b2811aa1d45: gpt-5.6-luna $0.0183, 3 inference calls
+  - delegate-1a689520374ad1f08b3d355d5ffb9f4c: gpt-5.6-luna $0.0288, 7 inference calls
+  - delegate-76a5fe657fe5b8f93c7816815652be8f: gpt-5.6-luna $0.0268, 5 inference calls
+  - delegate-3a4aba2a4ab8d0a6d529808e3e8bd155: gpt-5.6-luna $0.0293, 6 inference calls
+  - delegate-b145963643ccbac33ef9dfab2bb2978c: gpt-5.6-luna $0.0248, 5 inference calls
+  - delegate-9248254601b6d779e81c01415a93a429: gpt-5.6-luna $0.0247, 3 inference calls
+  - delegate-beae21d5437b9dd459951fbd0696c7cc: gpt-5.6-luna $0.0230, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/010-ralph-9.json
+- transcript: ralph/.run/20260910T073659Z/011-ralph-9.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 10 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications, and then implementing and validating the selected batch.
+
+Started iteration 10 progress logging.
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract — they are the 10 highest-priority pending implementation items in todo-build.md; G8 relocate distributed validation images remains outside this selection.
+
+Reading the durable plan and specification index before changing code.
+
+Beginning focused verification of the current image, tape, snapshot, host, and route implementations before selecting concrete root-cause fixes.
+
+Added real pending COM1 IRQ4 staging to Multiverse so queued shell input reaches interrupt-driven guests; compiling the multiverse path now.
+
+The IRQ4 staging compiles in focused tests; running the full multiverse unit suite to catch constructor and run-loop regressions.
+
+The first IRQ4 attempt exposed a regression: polling guests received an interrupt before PIC setup. Gated injection on the guest-unmasked IRQ4 state and rerunning shell continuation.
+
+Added a shared per-run cancellation registry and wired abort to signal the pre-acknowledged worker token; focused server compilation will validate the ownership seam.
+
+Focused verification is green after the IRQ4 gate: multiverse 244 tests passed after the polling regression fix, server 49 tests passed; the subagent also confirmed baud-server is binary-only, so cargo test -p baud-server --lib is not a valid command.
+
+Running the repository gate now as the required integration validation; no queue item will be marked DONE without its real acceptance path.
+
+The gate timed out at 600 seconds after all visible drives passed, before its final summary; rerunning the exact gate to obtain a terminal result rather than inferring green.
+
+The gate launcher survived the tool timeout with workspace tests still running; waiting inside one bounded call for that exact validation to finish, not starting a substitute.
+
+The latest gate workspace tests are green and all completed drives are green, but the 600-second wrapper ended before h6 emitted a result. Running h6 alone to obtain the required isolation evidence.
+
+Isolated H6 exposed the host safety root cause: the daemon selected two SMT siblings as if they were two cores, so capacity was one. Reworked daemon affinity selection to rank and select whole sibling groups.
+
+The sibling-safe affinity unit tests pass; rerunning H6 isolation to verify real fleet capacity and KVM execution on separate physical-core groups.
+
+H6 now passes with two physical-core sibling groups and the focused route/server tests remain green. The selected contracts are still open because real image, guest driver, UFFD, lifecycle, Ubuntu, and Mario acceptance paths are not complete.

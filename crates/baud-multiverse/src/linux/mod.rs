@@ -652,6 +652,9 @@ pub struct Multiverse {
     /// with no flag installed executes exactly the same sequence it did before this field
     /// existed, and a run with one installed but never set does too.
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Host input queued while the guest was blocked on COM1. The next userspace run stages
+    /// ISA IRQ4 through KVM so interrupt-driven guests wake without polling.
+    console_irq_pending: bool,
 }
 
 /// The default real wall-clock budget a booted or restored [`Multiverse`] gives its plain
@@ -975,6 +978,7 @@ impl Multiverse {
             watchdog_budget: DEFAULT_WATCHDOG_BUDGET,
             periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET,
             cancel: None,
+            console_irq_pending: false,
         })
     }
 
@@ -1100,6 +1104,7 @@ impl Multiverse {
             watchdog_budget: DEFAULT_WATCHDOG_BUDGET,
             periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET,
             cancel: None,
+            console_irq_pending: false,
         })
     }
 
@@ -1302,6 +1307,7 @@ impl Multiverse {
     /// returns [`RunLoopError::Cancelled`] instead of transparently re-entering the ioctl that
     /// kick was sent to escape. Identical to `step_exit` when no flag is installed.
     pub fn step_exit_cancellable(&mut self) -> Result<baud_vcpu::DispatchOutcome, RunLoopError> {
+        self.stage_pending_console_irq()?;
         baud_vcpu::linux::run_one_exit_cancellable(
             &mut self.guest.vcpu,
             &mut self.bus,
@@ -1324,6 +1330,7 @@ impl Multiverse {
         &mut self,
         watchdog: &std::sync::atomic::AtomicBool,
     ) -> Result<baud_vcpu::DispatchOutcome, RunLoopError> {
+        self.stage_pending_console_irq()?;
         baud_vcpu::linux::run_one_exit_cancellable_with_watchdog(
             &mut self.guest.vcpu,
             &mut self.bus,
@@ -1383,13 +1390,40 @@ impl Multiverse {
     /// a live shell") — [`Console::enqueue_input`] does the actual work; this just reaches through
     /// the device bus the way [`console_output`](Self::console_output) does for the output side.
     pub fn enqueue_console_input(&mut self, bytes: &[u8]) -> usize {
-        self.bus.console.enqueue_input(bytes)
+        let accepted = self.bus.console.enqueue_input(bytes);
+        if accepted != 0 {
+            self.console_irq_pending = true;
+        }
+        accepted
+    }
+
+    /// Stage a queued COM1 receive interrupt for the next KVM entry.
+    fn stage_pending_console_irq(&mut self) -> Result<(), RunLoopError> {
+        if !self.console_irq_pending || !self.bus.pic().irq_unmasked(4) {
+            return Ok(());
+        }
+        let mut events = self
+            .guest
+            .vcpu
+            .get_vcpu_events()
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        events.interrupt.injected = 1;
+        events.interrupt.nr = crate::pic8259::isa_irq_vector(4);
+        events.interrupt.soft = 0;
+        self.guest
+            .vcpu
+            .set_vcpu_events(&events)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        self.console_irq_pending = false;
+        Ok(())
     }
 
     /// Drive exactly one `KVM_RUN` + dispatch cycle (`baud_vcpu::linux::run_one_exit`) without
     /// waiting for `Hlt` — the building block an interactive session needs instead of
     /// [`run_to_first_halt`](Self::run_to_first_halt), which by design stops there.
     pub fn step_exit(&mut self) -> Result<baud_vcpu::DispatchOutcome, DeterminismHole> {
+        self.stage_pending_console_irq()
+            .map_err(|e| DeterminismHole(e.to_string()))?;
         baud_vcpu::linux::run_one_exit(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
     }
 

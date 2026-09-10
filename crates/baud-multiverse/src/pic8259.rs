@@ -199,6 +199,13 @@ impl Pic8259 {
     pub fn slave_imr(&self) -> u8 {
         self.slave.imr
     }
+
+    /// Whether the master PIC has unmasked the legacy IRQ line. The VMM uses this gate before
+    /// injecting a queued device wake, so a guest that only polls COM1 is not handed an interrupt
+    /// vector before it has initialized its PIC/IDT.
+    pub fn irq_unmasked(&self, irq: u8) -> bool {
+        irq < 8 && self.master.imr & (1u8 << irq) == 0
+    }
 }
 
 impl Bus for Pic8259 {

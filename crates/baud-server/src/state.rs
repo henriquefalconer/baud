@@ -4,7 +4,8 @@
 use anyhow::{Context, Result};
 use baud_snapshot_store::SnapshotStore;
 use sqlx::SqlitePool;
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{atomic::AtomicBool, Arc, RwLock};
 use tokio::sync::Mutex;
 
 use crate::routes::server::LogEntry;
@@ -31,9 +32,43 @@ pub struct AppState {
     /// Long-lived sandbox backend. Keeping this instance alive is required because the local
     /// backend owns the in-memory lifecycle map; creating one per request loses the sandbox.
     pub tape_backend: Arc<dyn Backend>,
+    /// One cancellation flag per acknowledged run. Every worker that owns a run receives the
+    /// same flag, so an abort cannot merely change SQLite while the real task keeps running.
+    pub run_cancellations: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl AppState {
+    /// Register the cancellation token before acknowledging a run to the client.
+    pub fn register_run(&self, run_id: &str) -> Arc<AtomicBool> {
+        let token = Arc::new(AtomicBool::new(false));
+        self.run_cancellations
+            .write()
+            .expect("run cancellation registry poisoned")
+            .insert(run_id.to_owned(), Arc::clone(&token));
+        token
+    }
+
+    /// Cancel a live run. Missing IDs are reported to the caller instead of creating a token
+    /// that no worker will ever observe.
+    pub fn cancel_run(&self, run_id: &str) -> bool {
+        self.run_cancellations
+            .read()
+            .expect("run cancellation registry poisoned")
+            .get(run_id)
+            .map(|token| {
+                token.store(true, std::sync::atomic::Ordering::SeqCst);
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn remove_run(&self, run_id: &str) {
+        self.run_cancellations
+            .write()
+            .expect("run cancellation registry poisoned")
+            .remove(run_id);
+    }
+
     pub async fn new() -> Result<Self> {
         let db_url =
             std::env::var("BAUD_DB").unwrap_or_else(|_| "sqlite://baud.sqlite?mode=rwc".to_owned());
@@ -90,6 +125,7 @@ impl AppState {
             log_buffer: Arc::new(RwLock::new(Vec::new())),
             snapshot_store: Arc::new(open_snapshot_store()?),
             tape_backend: local_backend,
+            run_cancellations: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }

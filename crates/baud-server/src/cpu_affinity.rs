@@ -3,6 +3,7 @@
 
 //! Keep the daemon and all of its Tokio worker threads on four currently quiet CPUs.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::thread;
@@ -57,23 +58,39 @@ pub fn pin_to_quiet_cpus() -> io::Result<Vec<usize>> {
         .into_iter()
         .map(|(cpu, idle, total)| (cpu, (idle, total)))
         .collect();
-    let mut ranked: Vec<(usize, u64)> = second
+    // Rank physical-core groups, not individual logical CPUs. Selecting two quiet sibling
+    // threads from one core would leave KVM with one physical core of capacity and make the
+    // daemon advertise a fleet size it cannot safely run.
+    let groups = sibling_groups(&allowed);
+    let mut ranked: Vec<(usize, u64, Vec<usize>)> = groups
         .into_iter()
-        .filter(|(cpu, _, _)| allowed.contains(cpu))
-        .map(|(cpu, idle, total)| {
-            let (old_idle, old_total) = before.get(&cpu).copied().unwrap_or((0, 0));
-            let idle_delta = idle.saturating_sub(old_idle);
-            let total_delta = total.saturating_sub(old_total).max(1);
-            (cpu, idle_delta.saturating_mul(100_000) / total_delta)
+        .map(|group| {
+            let score = group
+                .iter()
+                .map(|cpu| {
+                    let (idle, total) = second
+                        .iter()
+                        .find(|(candidate, _, _)| candidate == cpu)
+                        .map(|(_, idle, total)| (*idle, *total))
+                        .unwrap_or((0, 0));
+                    let (old_idle, old_total) = before.get(cpu).copied().unwrap_or((0, 0));
+                    let idle_delta = idle.saturating_sub(old_idle);
+                    let total_delta = total.saturating_sub(old_total).max(1);
+                    idle_delta.saturating_mul(100_000) / total_delta
+                })
+                .sum::<u64>()
+                / group.len().max(1) as u64;
+            let first = group[0];
+            (first, score, group)
         })
         .collect();
-    ranked.sort_by(|(cpu_a, idle_a), (cpu_b, idle_b)| {
+    ranked.sort_by(|(cpu_a, idle_a, _), (cpu_b, idle_b, _)| {
         idle_b.cmp(idle_a).then_with(|| cpu_a.cmp(cpu_b))
     });
     let selected: Vec<usize> = ranked
         .into_iter()
-        .take(CPU_LIMIT.min(allowed.len()))
-        .map(|(cpu, _)| cpu)
+        .take(CPU_LIMIT)
+        .flat_map(|(_, _, group)| group)
         .collect();
     if selected.is_empty() {
         return Err(io::Error::new(
@@ -93,12 +110,55 @@ pub fn pin_to_quiet_cpus() -> io::Result<Vec<usize>> {
     Ok(selected)
 }
 
+fn sibling_groups(allowed: &[usize]) -> Vec<Vec<usize>> {
+    let allowed_set: std::collections::HashSet<usize> = allowed.iter().copied().collect();
+    let mut groups = BTreeMap::<usize, Vec<usize>>::new();
+    for &cpu in allowed {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
+        let siblings = fs::read_to_string(path)
+            .ok()
+            .map(|text| parse_cpu_list(text.trim()))
+            .filter(|values| !values.is_empty())
+            .unwrap_or_else(|| vec![cpu]);
+        let mut group: Vec<usize> = siblings
+            .into_iter()
+            .filter(|sibling| allowed_set.contains(sibling))
+            .collect();
+        group.sort_unstable();
+        group.dedup();
+        if group.is_empty() {
+            group.push(cpu);
+        }
+        groups.entry(group[0]).or_insert(group);
+    }
+    groups.into_values().collect()
+}
+
+fn parse_cpu_list(text: &str) -> Vec<usize> {
+    text.split(',')
+        .flat_map(|part| {
+            part.split_once('-')
+                .map(|(start, end)| {
+                    let start = start.trim().parse::<usize>().unwrap_or(0);
+                    let end = end.trim().parse::<usize>().unwrap_or(start);
+                    (start..=end).collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| part.trim().parse::<usize>().ok().into_iter().collect())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
-    fn daemon_affinity_is_at_most_two_cpus() {
+    fn daemon_affinity_stays_within_two_physical_core_groups() {
         let cpus = super::pin_to_quiet_cpus().expect("Linux affinity must be available");
         assert!(!cpus.is_empty());
-        assert!(cpus.len() <= 2);
+        assert!(super::sibling_groups(&cpus).len() <= 2);
+    }
+
+    #[test]
+    fn parses_sibling_ranges() {
+        assert_eq!(super::parse_cpu_list("0,2-3"), vec![0, 2, 3]);
     }
 }

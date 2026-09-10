@@ -137,11 +137,19 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
             if let Err(e) = tx.commit().await {
                 return Json(json!({ "error": format!("db commit error: {e}") }));
             }
+            state.register_run(&run_id);
             let db = state.db.clone();
             let run_id_clone = run_id.clone();
             let tape_id_clone = tape_id.clone();
+            let cancellation = state
+                .run_cancellations
+                .read()
+                .expect("run cancellation registry poisoned")
+                .get(&run_id)
+                .cloned()
+                .expect("run token registered before acknowledgement");
             tokio::spawn(async move {
-                provision_run(&db, &run_id_clone, &tape_id_clone).await;
+                provision_run(&db, &run_id_clone, &tape_id_clone, cancellation).await;
             });
             Json(json!({
                 "id": run_id,
@@ -191,7 +199,15 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Background task: transition the durably journaled tape and run to active ownership.
 /// There is no fake sleep here. A real backend integration can replace the single transition,
 /// but it must keep the run and its tape in matching states.
-async fn provision_run(db: &sqlx::SqlitePool, run_id: &str, tape_id: &str) {
+async fn provision_run(
+    db: &sqlx::SqlitePool,
+    run_id: &str,
+    tape_id: &str,
+    cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let now = crate::state::unix_now() as i64;
     let mut tx = match db.begin().await {
         Ok(tx) => tx,
@@ -359,6 +375,10 @@ pub async fn abort(State(state): State<AppState>, Path(id): Path<String>) -> Jso
             Json(json!({ "error": format!("run {id} not found or not in an abortable state") }))
         }
         Ok(_) => {
+            // Signal the worker before returning the durable aborted state. The worker may be
+            // inside KVM or a backend call, but it now has the same cancellation token that was
+            // registered before acknowledgement.
+            state.cancel_run(&id);
             let _ = sqlx::query(
                 "UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = (SELECT tape_id FROM runs WHERE id = ?) AND state IN ('creating','running')"
             )
