@@ -1349,3 +1349,21 @@ Reverted an accidental workspace-wide rustfmt sweep, restored only the iteration
   - Stabilized cooperative raw-RDTSC high-bit verification with a fixed nonzero epoch.
   - Made the M3 generic-core guard ignore its own vocabulary definition and removed stale workload terms.
 ---
+
+## 2026-09-10T07:32:44 UTC (1h04min) - Session usage — ralph-6 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3103 (summed from 5 session transcripts: main $0.2538 · subagents $0.0565)
+- tokens input 584,010 · cache-read 8,259,072 · cache-write 0 · output 23,594 · reasoning 6,246
+- context 155,465 tok peak of 272K (57%) across 85 inference calls, monotonic
+- models gpt-5.6-luna $0.3103 (in 584,010 / out 29,840 / cache-read 8,259,072)
+- subagents (4) pi process x4
+  - delegate-3b25983eb201e3d5ed6745dc3efc80aa: gpt-5.6-luna $0.0296, 8 inference calls
+  - delegate-7a17e723da042990a04e5a96538d8ecc: gpt-5.6-luna $0.0069, 3 inference calls
+  - delegate-4c4f597a2d5ab5b13182c43d28d64b8e: gpt-5.6-luna $0.0164, 3 inference calls
+  - 01a08a15-a1fb-70c4-ae23-07bfcece710d: gpt-5.6-luna $0.0036, 2 inference calls
+- transcript: ralph/.run/20260910T003437Z/008-ralph-6.json
+
+## 2026-09-10T07:32:50 UTC - RUN TOTALS (ralph shell loop)
+- sessions: 8; ralph iterations: 6
+- ralph ended COMPLETE
+- total cost $2.6131 (summed from session usage)
+---
