@@ -81,14 +81,8 @@ mod bounded {
 // ---------------------------------------------------------------------------
 
 /// Blake3 hash (32 bytes)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Hash(pub [u8; 32]);
-
-impl Default for Hash {
-    fn default() -> Self {
-        Hash([0u8; 32])
-    }
-}
 
 /// Pixel format for frame data
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

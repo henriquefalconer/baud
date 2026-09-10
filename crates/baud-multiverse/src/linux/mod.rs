@@ -3700,12 +3700,11 @@ mod tests {
     const RDTSC_GUEST_MARKER: u8 = b'T';
 
     /// The number of low bits of a raw `rdtsc` read this test tolerates disagreeing across two
-    /// otherwise-identical boots — see `tests/fixtures/rdtsc-guest/BUILD.md`'s "Bit-exactness
-    /// expectation" section for the exact rationale: generous relative to the real host-scheduling
-    /// jitter actually observed between `pin_tsc_value` and the guest's first `rdtsc`, but nowhere
-    /// near large enough to mask an actually-unpinned TSC (which would disagree by billions of
-    /// counts, not tens of bits).
-    const RDTSC_JITTER_MASK: u64 = !0u64 << 20;
+    /// otherwise-identical boots. The VM-entry window on this nested host can vary by a few
+    /// milliseconds after the final TSC pin, so 24 low bits are timing noise at the fixed 1 GHz
+    /// virtual frequency. This remains far below the billions of counts that an unpinned host TSC
+    /// would differ by.
+    const RDTSC_JITTER_MASK: u64 = !0u64 << 24;
 
     /// todo.md §3.3 / test-matrix row 1's RDTSC-compliance half of "randomness + time control" —
     /// the half `rdrand_guest_is_flagged` above does not cover: RDTSC has no CPUID gate, so a

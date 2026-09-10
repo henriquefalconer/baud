@@ -118,15 +118,10 @@ impl CapabilityChecks for LinuxChecks {
     /// `baud-packages`' build-time `rdseed`→`UD2` rewrite plus `ud2-enforce.patch`'s
     /// `handle_baud_ud2_exit`.
     ///
-    /// **This reports whether the patched module is *loaded right now*, which is a different
-    /// question from whether it exists**, and it deliberately stays `false`: that module is only
-    /// ever swapped in transiently, by `drive/manual/h3-enforced-{rdtsc,rdrand,rdseed}.sh`, each of which
-    /// unconditionally restores the stock module on exit (CLAUDE.md). Every other process on this
-    /// host — including whatever calls this — therefore runs against the stock module, and
-    /// reporting otherwise would overclaim guarantees the running kernel does not provide
-    /// (`capability_is_recorded_and_not_overclaimed`). Wiring this to a real runtime check (e.g. a
-    /// `KVM_CHECK_EXTENSION` for `KVM_EXIT_BAUD_DETERMINISM`, which the patches do not add yet)
-    /// is the outstanding work here, not the enforcement logic itself.
+    /// This checks the running kernel's exported symbol table rather than the source tree or a
+    /// build artifact. The three handlers are private to the patched VMX module, so their
+    /// simultaneous presence is the host-side evidence that the module currently in use carries
+    /// the RDTSC/RDRAND/UD2 exit paths. A missing or unreadable kallsyms file fails closed.
     ///
     /// The probe module's finding that this host's VMX microcode does not allow setting
     /// `SECONDARY_EXEC_RDSEED_EXITING` (`kernel-module/baud-enforced/BUILD.md`'s "Result") is **no
@@ -135,12 +130,29 @@ impl CapabilityChecks for LinuxChecks {
     /// no secondary control is needed — the `UD2`'s `#UD` is already trapped by the exception
     /// bitmap stock KVM sets unconditionally.
     fn enforced_module_present(&self) -> bool {
-        false
+        enforced_handlers_loaded()
     }
 
     fn topology(&self) -> Topology {
         read_topology()
     }
+}
+
+fn enforced_handlers_loaded() -> bool {
+    fs::read_to_string("/proc/kallsyms")
+        .map(|kallsyms| enforced_handlers_in(&kallsyms))
+        .unwrap_or(false)
+}
+
+fn enforced_handlers_in(kallsyms: &str) -> bool {
+    [
+        "handle_baud_rdtsc_exit",
+        "handle_baud_rdtscp_exit",
+        "handle_baud_rdrand_exit",
+        "handle_baud_ud2_exit",
+    ]
+    .iter()
+    .all(|symbol| kallsyms.lines().any(|line| line.split_whitespace().last() == Some(symbol)))
 }
 
 fn cpuinfo_flag(flag: &str) -> bool {
@@ -282,5 +294,13 @@ mod tests {
         assert_eq!(parse_cpu_list("0-3"), vec![0, 1, 2, 3]);
         assert_eq!(parse_cpu_list("4"), vec![4]);
         assert_eq!(parse_cpu_list(""), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn enforced_probe_requires_every_live_handler() {
+        let complete = "0000 t handle_baud_rdtsc_exit\n0000 t handle_baud_rdtscp_exit\n0000 t handle_baud_rdrand_exit\n0000 t handle_baud_ud2_exit\n";
+        assert!(enforced_handlers_in(complete));
+        assert!(!enforced_handlers_in("0000 t handle_baud_rdtsc_exit\n"));
+        assert!(!enforced_handlers_in("0000 t unrelated\n"));
     }
 }

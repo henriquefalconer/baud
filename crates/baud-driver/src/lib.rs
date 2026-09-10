@@ -163,6 +163,10 @@ pub struct DriverState {
     pub reservoir: Vec<Tape>,
     pub generation: u64,
     pub partition_state: bool,
+    pub input_mask: u8,
+    pub crash_up_ticks: u64,
+    /// Number of completed runs assigned to each configured grid bucket.
+    pub grid_bucket_counts: Vec<u64>,
     /// `ChaCha20Rng::get_word_pos()` — the *unrecorded* internal scheduling draws
     /// (`draw_raw_u64`/`draw_raw_f64`, used to pick mutate/splice indices and reservoir
     /// replacement) advance `rng` without writing anything to any `Tape`, so a resumed driver
@@ -200,6 +204,9 @@ pub struct Driver {
     generation: u64,
     /// Stateful weather partition state (for Markov draw_weather)
     partition_state: bool,
+    input_mask: u8,
+    crash_up_ticks: u64,
+    grid_bucket_counts: Vec<u64>,
 }
 
 impl Driver {
@@ -207,6 +214,7 @@ impl Driver {
     /// Spec: `Driver::new(seed: u64, strategy: StrategySpec, tactics: TacticsSpec) -> Self`
     pub fn new(seed: u64, strategy: StrategySpec, tactics: TacticsSpec) -> Self {
         let rng = ChaCha20Rng::seed_from_u64(seed);
+        let grid_bucket_count = strategy.buckets.len();
         Driver {
             seed,
             strategy,
@@ -221,6 +229,9 @@ impl Driver {
             live_tape: Tape::new(seed),
             generation: 0,
             partition_state: false,
+            input_mask: 0,
+            crash_up_ticks: 0,
+            grid_bucket_counts: vec![0; grid_bucket_count],
         }
     }
 
@@ -235,16 +246,25 @@ impl Driver {
         self.run_cursor = 0;
         self.live_tape = Tape::new(self.seed);
 
+        // A configured grid is a deterministic round-robin over named buckets. It prevents a
+        // long run from starving later dimensions while keeping the schedule independent of hash
+        // map iteration order or wall-clock timing.
+        let grid_bucket = if self.strategy.buckets.is_empty() {
+            None
+        } else {
+            Some((self.generation as usize) % self.strategy.buckets.len())
+        };
+
         // Decide scheduling: extend best, mutate, or splice from reservoir
         let use_replay = !self.best.choices.is_empty() && self.generation > 0;
         if use_replay {
             // Alternate: generation % 3 == 0 → splice, else extend/mutate
             let g = self.generation;
-            if g % 3 == 0 && !self.reservoir.is_empty() {
+            if grid_bucket.is_some_and(|bucket| bucket.is_multiple_of(3)) && !self.reservoir.is_empty() {
                 // Splice from reservoir
                 let idx = (self.draw_raw_u64() as usize) % self.reservoir.len();
                 self.replay_tape = self.reservoir[idx].clone();
-            } else if g % 3 == 1 {
+            } else if grid_bucket.map_or(g % 3 == 1, |bucket| bucket % 3 == 1) {
                 // Mutate: copy best, flip some choices
                 let mut mutated = self.best.clone();
                 let n = mutated.choices.len();
@@ -279,6 +299,10 @@ impl Driver {
     /// End a run, providing the scores observed. Updates best/reservoir.
     pub fn end_run(&mut self, observations: &[(String, f64)]) {
         let score = self.compute_score(observations);
+        if !self.strategy.buckets.is_empty() {
+            let bucket = ((self.generation.saturating_sub(1)) as usize) % self.strategy.buckets.len();
+            self.grid_bucket_counts[bucket] = self.grid_bucket_counts[bucket].saturating_add(1);
+        }
         if score > self.best_score || self.best.choices.is_empty() {
             self.best = self.live_tape.clone();
             self.best_score = score;
@@ -325,6 +349,9 @@ impl Driver {
             reservoir: self.reservoir.clone(),
             generation: self.generation,
             partition_state: self.partition_state,
+            input_mask: self.input_mask,
+            crash_up_ticks: self.crash_up_ticks,
+            grid_bucket_counts: self.grid_bucket_counts.clone(),
             rng_word_pos: self.rng.get_word_pos(),
         }
     }
@@ -341,6 +368,13 @@ impl Driver {
         self.reservoir = state.reservoir;
         self.generation = state.generation;
         self.partition_state = state.partition_state;
+        self.input_mask = state.input_mask;
+        self.crash_up_ticks = state.crash_up_ticks;
+        self.grid_bucket_counts = if state.grid_bucket_counts.len() == self.strategy.buckets.len() {
+            state.grid_bucket_counts
+        } else {
+            vec![0; self.strategy.buckets.len()]
+        };
         self.rng.set_word_pos(state.rng_word_pos);
     }
 
@@ -356,20 +390,36 @@ impl Driver {
     /// caller sees (previously the choice recorded all 8 raw bytes while draw_bits(8) only ever
     /// surfaced byte 0, so ~7/8 of mutations were invisible to callers using draw_bits(8)).
     pub fn draw_bits(&mut self, n: u32) -> Vec<u8> {
-        assert!(n <= 64, "draw_bits: n must be <= 64");
+        if n > 64 {
+            self.record_draw(Vec::new());
+            return Vec::new();
+        }
         let raw = self.next_raw_u64();
-        let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+        let mask = if n == 64 { u64::MAX } else if n == 0 { 0 } else { (1u64 << n) - 1 };
         let value = raw & mask;
-        let byte_count = ((n + 7) / 8) as usize;
-        // Little-endian encoding
-        let bytes = value.to_le_bytes()[..byte_count].to_vec();
+        let byte_count = n.div_ceil(8) as usize;
+        let mut bytes = value.to_le_bytes()[..byte_count].to_vec();
+        if let Some(InputTactic::StatefulMask { p_flip }) = self.tactics.input.first() {
+            let probability = p_flip.clamp(0.0, 1.0);
+            for byte in &mut bytes {
+                let previous = self.input_mask;
+                let random = (raw >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
+                if random < probability {
+                    *byte ^= previous;
+                }
+                self.input_mask = *byte;
+            }
+        }
         self.record_draw(bytes.clone());
         bytes
     }
 
     /// Draw an integer in [lo, hi] (inclusive).
     pub fn draw_int(&mut self, lo: i64, hi: i64) -> i64 {
-        assert!(lo <= hi, "draw_int: lo must be <= hi");
+        if lo > hi {
+            self.record_draw(Vec::new());
+            return lo;
+        }
         if lo == hi {
             // Record a zero-width draw so tapes stay aligned
             self.record_draw(lo.to_le_bytes().to_vec());
@@ -382,7 +432,10 @@ impl Driver {
 
     /// Draw from a weighted choice distribution. Returns the chosen index.
     pub fn draw_choice(&mut self, weights: &[u32]) -> usize {
-        assert!(!weights.is_empty(), "draw_choice: weights must be non-empty");
+        if weights.is_empty() {
+            let _ = self.draw_u64();
+            return 0;
+        }
         let total: u64 = weights.iter().map(|&w| w as u64).sum();
         // A malformed tactic set must not trigger an arithmetic panic. Consume the draw so
         // replay alignment stays stable, then use the first choice as the documented neutral
@@ -404,13 +457,21 @@ impl Driver {
 
     /// Draw a geometric "hold" value with given mean.
     pub fn draw_hold(&mut self, mean: u32) -> u32 {
+        let mean = match self.tactics.input.first() {
+            Some(InputTactic::Hold { geom_mean }) if geom_mean.is_finite() && *geom_mean >= 1.0 =>
+                (*geom_mean).round().min(u32::MAX as f64) as u32,
+            _ => mean,
+        };
         if mean == 0 { return 0; }
         // Geometric distribution: P(X = k) = (1 - p)^k * p where p = 1/mean
         let p = 1.0 / (mean as f64);
-        let u = self.draw_f64();
+        if p >= 1.0 {
+            self.record_draw(0u32.to_le_bytes().to_vec());
+            return 0;
+        }
+        let u = self.draw_f64().max(f64::MIN_POSITIVE);
         // Inverse CDF: k = floor(log(u) / log(1-p))
-        let k = (u.ln() / (1.0 - p).ln()) as u32;
-        k
+        (u.ln() / (1.0 - p).ln()) as u32
     }
 
     /// Draw a Markov weather state (partition on/off).
@@ -418,10 +479,16 @@ impl Driver {
     /// Stateful: `partition_state` is remembered across calls.
     /// - When OFF: transition to ON with probability `p_start`.
     /// - When ON: transition to OFF with probability `p_stop`.
-    /// Returns 1 if partition is active after this draw, 0 otherwise.
+    ///   Returns 1 if partition is active after this draw, 0 otherwise.
     ///
     /// The transition draw is recorded on the tape, making weather reproducible via replay.
     pub fn draw_weather(&mut self, p_start: f64, p_stop: f64) -> u8 {
+        let (p_start, p_stop) = match self.tactics.weather.first() {
+            Some(WeatherTactic::MarkovPartition { p_start, p_stop }) => (*p_start, *p_stop),
+            _ => (p_start, p_stop),
+        };
+        let p_start = p_start.clamp(0.0, 1.0);
+        let p_stop = p_stop.clamp(0.0, 1.0);
         let u = self.draw_f64();
         if self.partition_state {
             // Currently ON: transition to OFF with p_stop
@@ -493,7 +560,7 @@ impl Driver {
             let mut deduped: Vec<Vec<u8>> = Vec::new();
             let mut prev: Option<&Vec<u8>> = None;
             for c in &current.choices {
-                let skip = prev.map_or(false, |p| p == c);
+                let skip = prev == Some(c);
                 if !skip {
                     deduped.push(c.clone());
                 }
@@ -564,7 +631,7 @@ impl Driver {
             let val = observations.iter()
                 .filter(|(name, _)| name == probe_name)
                 .map(|(_, v)| *v)
-                .last()
+                .next_back()
                 .unwrap_or(0.0);
             scores.push(val);
         }
@@ -653,7 +720,7 @@ mod tests {
         d.begin_run();
         for n in [1u32, 8, 16, 32, 64] {
             let v = d.draw_bits(n);
-            assert_eq!(v.len(), ((n + 7) / 8) as usize, "draw_bits({n}) should return ceil({n}/8) bytes");
+            assert_eq!(v.len(), n.div_ceil(8) as usize, "draw_bits({n}) should return ceil({n}/8) bytes");
         }
     }
 
@@ -678,7 +745,7 @@ mod tests {
         d.begin_run();
         for _ in 0..100 {
             let v = d.draw_int(3, 10);
-            assert!(v >= 3 && v <= 10, "draw_int(3,10) = {v}");
+            assert!((3..=10).contains(&v), "draw_int(3,10) = {v}");
         }
     }
 
@@ -976,5 +1043,62 @@ mod tests {
         };
         let d = Driver::new(42, StrategySpec::default(), tactics);
         assert_eq!(d.seed(), 42);
+    }
+
+    #[test]
+    fn configured_tactics_are_reproducible_and_persisted() {
+        let tactics = TacticsSpec {
+            input: vec![InputTactic::StatefulMask { p_flip: 1.0 }],
+            weather: vec![WeatherTactic::MarkovPartition { p_start: 1.0, p_stop: 0.0 }],
+        };
+        let mut a = Driver::new(7, StrategySpec::default(), tactics.clone());
+        a.begin_run();
+        let first = a.draw_bits(8);
+        assert_eq!(a.draw_weather(0.0, 0.0), 1);
+        let state = a.export_state();
+        a.begin_run();
+        let expected = a.draw_bits(8);
+        let expected_weather = a.draw_weather(0.0, 0.0);
+
+        let mut b = Driver::new(7, StrategySpec::default(), tactics);
+        b.apply_state(state);
+        b.begin_run();
+        assert_ne!(first, expected);
+        assert_eq!(expected, b.draw_bits(8));
+        assert_eq!(expected_weather, b.draw_weather(0.0, 0.0));
+    }
+
+    #[test]
+    fn configured_grid_buckets_are_balanced_and_persisted() {
+        let strategy = StrategySpec {
+            buckets: vec!["input".into(), "weather".into(), "restarts".into()],
+            ..StrategySpec::default()
+        };
+        let mut driver = Driver::new_simple(11, strategy);
+        for _ in 0..6 {
+            driver.begin_run();
+            driver.end_run(&[]);
+        }
+        let state = driver.export_state();
+        assert_eq!(state.grid_bucket_counts, vec![2, 2, 2]);
+        let mut resumed = Driver::new_simple(
+            11,
+            StrategySpec { buckets: vec!["input".into(), "weather".into(), "restarts".into()], ..StrategySpec::default() },
+        );
+        resumed.apply_state(state);
+        for _ in 0..3 {
+            resumed.begin_run();
+            resumed.end_run(&[]);
+        }
+        assert_eq!(resumed.export_state().grid_bucket_counts, vec![3, 3, 3]);
+    }
+
+    #[test]
+    fn malformed_draw_parameters_use_neutral_results() {
+        let mut d = make_driver(9);
+        d.begin_run();
+        assert!(d.draw_bits(65).is_empty());
+        assert_eq!(d.draw_int(4, 2), 4);
+        assert_eq!(d.draw_choice(&[]), 0);
     }
 }

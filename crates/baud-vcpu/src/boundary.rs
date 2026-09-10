@@ -39,6 +39,13 @@ pub struct ExecPoint {
 }
 
 impl ExecPoint {
+    /// Return true only when every recorded part of the architectural boundary agrees. This is
+    /// intentionally stricter than comparing RIP and RCB, because a repeated instruction address
+    /// with different register or stack state is a different interrupt landing point.
+    pub fn has_same_identity(&self, other: &ExecPoint) -> bool {
+        self == other
+    }
+
     /// Does this point already carry enough identity to be unambiguous against `other`, or does
     /// it need the stack-checksum tie-breaker? (`rcx` is orthogonal — always included when the
     /// guest is genuinely mid-`rep`, never added just to disambiguate.)
@@ -70,6 +77,9 @@ pub trait PmuStepper {
     /// Single-step exactly one instruction under `KVM_GUESTDBG_SINGLESTEP | BLOCKIRQ` and report
     /// the point landed on (step 3).
     fn step(&mut self) -> Result<ExecPoint, Self::Error>;
+    /// Reject a single-step result that crossed the requested boundary. A PMU counter read must
+    /// never silently turn an overshoot into a successful injection or fingerprint.
+    fn reject_overshoot(&mut self, point: &ExecPoint) -> Result<(), Self::Error>;
     /// `KVM_GET_VCPU_EVENTS`' `ready_for_interrupt_injection` (step 4).
     fn ready_for_interrupt_injection(&mut self) -> bool;
     /// Set `request_interrupt_window` and re-enter until the window opens (step 4's fallback).
@@ -176,6 +186,9 @@ pub fn run_to_events<S: PmuStepper>(
         // `PmuStepper::check_cancelled`.
         stepper.check_cancelled()?;
         point = stepper.step()?;
+        if point.rcb > target_rcb {
+            stepper.reject_overshoot(&point)?;
+        }
         if stepper.is_halted() {
             return Ok(RunToEventsOutcome::Halted(point));
         }
@@ -207,6 +220,9 @@ pub fn inject_at<S: PmuStepper>(
         // stops between two steps rather than at the end of the tick (`check_cancelled`'s doc).
         stepper.check_cancelled()?;
         point = stepper.step()?;
+        if point.rcb > target_rcb {
+            stepper.reject_overshoot(&point)?;
+        }
         if stepper.is_halted() {
             return Ok(InjectOutcome::Halted(point));
         }
@@ -241,6 +257,7 @@ mod tests {
         injectable_after_windows: u32,
         injected: Option<(u8, ExecPoint)>,
         steps_taken: u32,
+        step_delta: u64,
         /// When `Some(r)`, `step()` marks the guest halted the moment its `rcb` reaches `r` —
         /// models a guest whose own natural halt falls before the requested target boundary.
         halt_at_rcb: Option<u64>,
@@ -262,6 +279,7 @@ mod tests {
                 injectable_after_windows,
                 injected: None,
                 steps_taken: 0,
+                step_delta: 1,
                 halt_at_rcb: None,
                 halted: false,
                 cancel_after_steps: None,
@@ -302,7 +320,7 @@ mod tests {
         }
 
         fn step(&mut self) -> Result<ExecPoint, Self::Error> {
-            self.rcb += 1;
+            self.rcb += self.step_delta;
             self.steps_taken += 1;
             if let Some(halt_at) = self.halt_at_rcb {
                 if self.rcb >= halt_at {
@@ -310,6 +328,10 @@ mod tests {
                 }
             }
             Ok(self.point_at(self.rcb))
+        }
+
+        fn reject_overshoot(&mut self, _point: &ExecPoint) -> Result<(), Self::Error> {
+            Err("boundary overshoot")
         }
 
         fn ready_for_interrupt_injection(&mut self) -> bool {
@@ -361,6 +383,15 @@ mod tests {
         // Armed strictly before the target by MARGIN, then stepped the remainder one at a time.
         assert_eq!(stepper.armed, Some(1_000 - MARGIN));
         assert_eq!(stepper.steps_taken as u64, MARGIN);
+    }
+
+    #[test]
+    fn rejects_a_step_that_overshoots_the_target() {
+        let mut stepper = ScriptedStepper::new(1_000, 0);
+        stepper.step_delta = 3;
+        let err = inject_at(&mut stepper, 1_000, 42).expect_err("overshoot must fail closed");
+        assert_eq!(err, "boundary overshoot");
+        assert!(stepper.injected.is_none());
     }
 
     #[test]
@@ -491,8 +522,10 @@ mod tests {
         let a = ExecPoint { rip: 1, gp_regs: [0; 16], rcb: 1, rcx: None, stack_checksum: None };
         let b = ExecPoint { rip: 1, gp_regs: [0; 16], rcb: 1, rcx: None, stack_checksum: None };
         assert!(a.collides_without_stack_checksum(&b));
+        assert!(a.has_same_identity(&b));
 
         let c = ExecPoint { stack_checksum: Some(7), ..a.clone() };
         assert!(!a.collides_without_stack_checksum(&c));
+        assert!(!a.has_same_identity(&c));
     }
 }

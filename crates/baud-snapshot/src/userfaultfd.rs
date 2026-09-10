@@ -16,6 +16,10 @@ const UFFDIO_REGISTER_MODE_MISSING: u64 = 1 << 0;
 const UFFDIO_REGISTER_MODE_WP: u64 = 1 << 1;
 const UFFDIO_REGISTER_MODE_MINOR: u64 = 1 << 2;
 const UFFDIO_WRITEPROTECT_MODE_WP: u64 = 1 << 0;
+// ioctl capability bits returned by UFFDIO_API, matching linux/userfaultfd.h.
+const UFFDIO_REGISTER_IOC: u64 = 1 << 0;
+const UFFDIO_WRITEPROTECT_IOC: u64 = 1 << 6;
+const UFFDIO_CONTINUE_IOC: u64 = 1 << 7;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -76,6 +80,10 @@ pub enum Error {
     Api(u64, u64),
     #[error("userfaultfd rejected requested feature {0:#x}")]
     MissingFeature(u64),
+    #[error("userfaultfd rejected required ioctl capability {0:#x}")]
+    MissingIoctl(u64),
+    #[error("userfaultfd range is not page aligned")]
+    UnalignedRange,
 }
 
 /// A registered range that can be write-protected and populated from a shared memfd.
@@ -89,6 +97,10 @@ pub struct CowRegion {
 impl CowRegion {
     /// Open a nonblocking userfaultfd and negotiate minor-fault plus write-protect support.
     pub fn open(start: u64, len: u64) -> Result<Self, Error> {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        if page == 0 || !start.is_multiple_of(page) || len == 0 || !len.is_multiple_of(page) {
+            return Err(Error::UnalignedRange);
+        }
         let fd =
             unsafe { libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | libc::O_NONBLOCK) };
         if fd < 0 {
@@ -108,6 +120,10 @@ impl CowRegion {
         }
         if api.features & UFFD_FEATURE_MINOR == 0 {
             return Err(Error::MissingFeature(UFFD_FEATURE_MINOR));
+        }
+        let required_ioctls = UFFDIO_REGISTER_IOC | UFFDIO_WRITEPROTECT_IOC | UFFDIO_CONTINUE_IOC;
+        if api.ioctls & required_ioctls != required_ioctls {
+            return Err(Error::MissingIoctl(required_ioctls & !api.ioctls));
         }
         let mut registration = Register {
             range: Range { start, len },
@@ -140,12 +156,17 @@ impl CowRegion {
 
     /// Resolve a minor fault by continuing from the shared backing mapping at `source`.
     pub fn continue_from(&self, address: u64, length: u64, source: u64) -> Result<(), Error> {
-        if address < self.start || length > self.len || address - self.start > self.len - length {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "UFFD range outside registered region",
-            )
-            .into());
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        if page == 0
+            || !address.is_multiple_of(page)
+            || length == 0
+            || !length.is_multiple_of(page)
+            || !source.is_multiple_of(page)
+            || address < self.start
+            || length > self.len
+            || address - self.start > self.len - length
+        {
+            return Err(Error::UnalignedRange);
         }
         let mut request = Continue {
             range: Range {
@@ -171,5 +192,11 @@ mod tests {
         assert_eq!(UFFDIO_REGISTER, 0xC020AA00);
         assert_eq!(UFFDIO_WRITEPROTECT, 0xC018AA06);
         assert_eq!(UFFDIO_CONTINUE, 0xC028AA07);
+    }
+
+    #[test]
+    fn unaligned_regions_fail_before_touching_userfaultfd() {
+        assert!(matches!(CowRegion::open(1, 4096), Err(Error::UnalignedRange)));
+        assert!(matches!(CowRegion::open(0, 0), Err(Error::UnalignedRange)));
     }
 }

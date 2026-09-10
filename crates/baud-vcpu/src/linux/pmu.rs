@@ -357,6 +357,13 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
         self.read_point()
     }
 
+    fn reject_overshoot(&mut self, point: &ExecPoint) -> io::Result<()> {
+        Err(io::Error::other(format!(
+            "determinism boundary overshoot: target crossed at rcb {}",
+            point.rcb
+        )))
+    }
+
     fn ready_for_interrupt_injection(&mut self) -> bool {
         self.vcpu.get_kvm_run().ready_for_interrupt_injection != 0
     }
