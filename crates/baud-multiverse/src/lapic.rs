@@ -9,7 +9,7 @@
 // `acpi=off` and no MADT, so the kernel's LAPIC-ID probe at this address fell through to the
 // generic `OpenBusFallback` (reads back `0xFFFFFFFF`), which the kernel correctly read as "No
 // local APIC present" and fell back to legacy-PIC-style interrupt handling
-// (`tests/fixtures/linux-guest/BUILD.md`'s own finding). Once a guest's MADT actually advertises a
+// (`../../examples/linux-guest/BUILD.md`'s own finding). Once a guest's MADT actually advertises a
 // LAPIC, `0xFFFFFFFF`/absorbed-writes is no longer a valid "device absent" signal for MMIO the way
 // it is for PCI config space (`crate::pci`) -- the kernel's real `arch/x86/kernel/apic/apic.c`
 // driver starts reading/writing real LAPIC registers expecting real hardware semantics, and a

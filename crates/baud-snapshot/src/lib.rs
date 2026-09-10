@@ -67,6 +67,7 @@
 
 #![allow(dead_code)]
 
+pub mod branch;
 pub mod dirty_ring;
 pub mod msr;
 pub mod page_store;
@@ -81,8 +82,12 @@ pub mod linux;
 pub mod userfaultfd;
 
 #[cfg(target_os = "linux")]
+pub mod backing;
+
+#[cfg(target_os = "linux")]
 mod xsave;
 
+pub use branch::{BranchMode, FallbackReason};
 pub use dirty_ring::{harvest, RawDirtyGfn, DIRTY_BIT, RESET_BIT};
 pub use page_store::{PageHash, PageRef, PageStore, PAGE_SIZE};
 pub use tree::{NodeId, Tree};

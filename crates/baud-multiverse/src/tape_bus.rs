@@ -22,6 +22,9 @@ pub const TAPE_DEVICE_BASE: u16 = 0x0500;
 /// Highest offset `TapeDevice` serves (`baud_tape_device::reg::STATUS` = 0x10) plus headroom for
 /// future registers without immediately colliding with the next device.
 pub const TAPE_DEVICE_LEN: u16 = 0x18;
+/// MMIO alias used by a guest shim that cannot issue legacy port I/O. It is deliberately below
+/// the LAPIC window and the virtio-mmio window, so both transports expose the same device model.
+pub const TAPE_DEVICE_MMIO_BASE: u64 = 0xFEBF_0000;
 
 /// Wraps a [`TapeDevice`] as a [`Bus`], anchored at [`TAPE_DEVICE_BASE`].
 pub struct TapeBus {
@@ -51,6 +54,16 @@ impl TapeBus {
     pub(crate) fn in_range(port: u16) -> Option<u16> {
         if (TAPE_DEVICE_BASE..TAPE_DEVICE_BASE + TAPE_DEVICE_LEN).contains(&port) {
             Some(port - TAPE_DEVICE_BASE)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn in_mmio_range(addr: u64) -> Option<u16> {
+        if (TAPE_DEVICE_MMIO_BASE..TAPE_DEVICE_MMIO_BASE + u64::from(TAPE_DEVICE_LEN))
+            .contains(&addr)
+        {
+            Some((addr - TAPE_DEVICE_MMIO_BASE) as u16)
         } else {
             None
         }
@@ -90,11 +103,27 @@ impl Bus for TapeBus {
         // Ports outside the window: absorbed silently, matching OpenBusFallback's write side.
     }
 
-    fn mmio_read(&mut self, _addr: u64, data: &mut [u8]) {
-        data.fill(OPEN_BUS_BYTE); // the tape device is PIO-only in this milestone
+    fn mmio_read(&mut self, addr: u64, data: &mut [u8]) {
+        match Self::in_mmio_range(addr) {
+            Some(off) => {
+                if let Some(first) = data.first_mut() {
+                    *first = self.device.pio_read(off);
+                }
+                if data.len() > 1 {
+                    data[1..].fill(OPEN_BUS_BYTE);
+                }
+            }
+            None => data.fill(OPEN_BUS_BYTE),
+        }
     }
 
-    fn mmio_write(&mut self, _addr: u64, _data: &[u8]) {}
+    fn mmio_write(&mut self, addr: u64, data: &[u8]) {
+        if let Some(off) = Self::in_mmio_range(addr) {
+            if let Some(&byte) = data.first() {
+                self.device.pio_write(off, byte);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +160,22 @@ mod tests {
         let mut data = [0u8; 2];
         bus.pio_read(0x60, &mut data); // PS/2 controller port, well outside the window
         assert_eq!(data, [OPEN_BUS_BYTE, OPEN_BUS_BYTE]);
+    }
+
+    #[test]
+    fn mmio_alias_uses_the_same_tape_cursor_and_records() {
+        let mut bus = TapeBus::new(vec![0x33]);
+        let mut data = [0u8; 1];
+        bus.mmio_read(TAPE_DEVICE_MMIO_BASE + u64::from(reg::DATA), &mut data);
+        assert_eq!(data, [0x33]);
+        bus.mmio_write(
+            TAPE_DEVICE_MMIO_BASE + u64::from(reg::CONTROL),
+            &[ControlOp::MarkBranch as u8],
+        );
+        assert!(matches!(
+            bus.device_mut().drain_records().as_slice(),
+            [Msg::MarkBranch { step: 1 }]
+        ));
     }
 
     #[test]

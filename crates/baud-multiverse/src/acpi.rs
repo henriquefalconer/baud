@@ -23,7 +23,7 @@
 // hazard is `APIC_ICR`'s busy bit, which this stub always clears). `Multiverse::write_acpi_tables`
 // (`linux/mod.rs`) is the real boot-path wiring (opt-in — call it after `boot`/
 // `boot_with_rdseed_sites` and before the first run, on a guest whose cmdline enables ACPI).
-// `tests/fixtures/linux-guest/minimal.config` now carries `CONFIG_ACPI=y` (compiled-in-but-inert
+// `../../examples/linux-guest/minimal.config` now carries `CONFIG_ACPI=y` (compiled-in-but-inert
 // for every fixture that still boots with `acpi=off`, the same precedent this file's `BUILD.md`
 // already documents for `HPET_TIMER`) and, real bugs found getting a real kernel to actually use
 // it: `CONFIG_PCI=y` is also required (`ACPI_PCI_CONFIGURED`, `include/acpi/platform/aclinux.h`,

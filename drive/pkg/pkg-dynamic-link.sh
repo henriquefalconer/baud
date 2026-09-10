@@ -14,7 +14,7 @@
 # `ld-linux-x86-64.so.2` + `libc.so.6` (this host's glibc *is* the guest's glibc — identical x86_64
 # Linux ABI, no cross-build needed) plus the `/lib64/...` symlink the binary's own `PT_INTERP`
 # names, and boots it twice against the already-built `linux-guest` bzImage on real /dev/kvm — see
-# `crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md`'s "dynamically-linked init" section
+# `examples/linux-guest/BUILD.md`'s "dynamically-linked init" section
 # for the full account.
 #
 # Needs gcc + this host's own /lib/x86_64-linux-gnu/{ld-linux-x86-64.so.2,libc.so.6} (both already

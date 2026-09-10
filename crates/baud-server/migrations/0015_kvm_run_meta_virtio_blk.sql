@@ -5,7 +5,7 @@
 -- optional `virtio_blk` spec (attach a read-only content-addressed base image + in-memory
 -- copy-on-write overlay, deliver its used-buffer interrupt at a caller-specified vector --
 -- `Multiverse::enable_virtio_pci_blk`/`run_to_first_halt_with_virtio_pci_blk`, already
--- real-hardware-verified against `tests/fixtures/linux-guest/virtio_blk_init.c`). Persist it
+-- real-hardware-verified against `../../examples/linux-guest/virtio_blk_init.c`). Persist it
 -- alongside the existing virtio_rng columns so `stream::render`'s real-replay path can reboot the
 -- exact same guest. `virtio_blk_image_path` (not the image bytes) is stored, mirroring
 -- `initramfs_path`'s own path-not-content convention -- a real disk image can be far larger than an

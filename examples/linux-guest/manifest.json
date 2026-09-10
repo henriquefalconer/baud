@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "name": "linux-guest",
+  "kernel": {
+    "path": "bzImage",
+    "sha256": "849fe92d37cc4f044377003245bb46fbf34450d7269bf7b5a261a07b426de9d4"
+  },
+  "initramfs": {
+    "path": "initramfs.cpio.gz",
+    "sha256": "b81c5e8ecbea57e631c1c67923338fc02c3db547fc208aeec4c83f8c5d1a0fc9"
+  },
+  "kernel_config": {
+    "path": "minimal.config",
+    "sha256": "86042af412f8ea85be26056c98ac0ee451eff939c646bc9d11d1efb9e5e63f15"
+  },
+  "build": {
+    "kernel": "Linux 6.18 x86_64 bzImage",
+    "initramfs": "deterministic newc archive",
+    "source_of_truth": "examples/linux-guest/BUILD.md"
+  }
+}

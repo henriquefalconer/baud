@@ -153,6 +153,13 @@ impl Host {
 
     /// Physical cores available for VMs: total physical cores minus housekeeping reservation.
     /// SMT adds no capacity (specs/baud-host.md §5) — sibling threads are never double-counted.
+    /// Return the measured physical-core groups used for placement. The logical CPU ids are the
+    /// values accepted by `sched_setaffinity`, so callers can report the exact inherited-mask
+    /// view instead of reconstructing topology from a count.
+    pub fn topology(&self) -> &Topology {
+        &self.topology
+    }
+
     pub fn capacity(&self) -> usize {
         self.topology
             .cores

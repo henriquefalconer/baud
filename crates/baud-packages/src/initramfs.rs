@@ -5,7 +5,7 @@
 // reproducible initramfs builder ... driven by that pipeline rather than hand-built per a
 // fixture's BUILD.md"). Every real guest fixture in this repo so far builds its initramfs by
 // shelling out to the host's `cpio`/`gzip` by hand (see
-// `crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md`'s "Regenerating the initramfs"
+// `examples/linux-guest/BUILD.md`'s "Regenerating the initramfs"
 // recipe: `touch -h -d '@1'; find . -print0 | sort -z | cpio -o -H newc -R +0:+0 --reproducible
 // --null | gzip -9n`). This module is that same recipe as real, tested Rust code with no
 // dependency on the host having `cpio`/`gzip` installed at all -- the newc cpio format is written

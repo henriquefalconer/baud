@@ -18,6 +18,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -148,8 +149,16 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
                 .get(&run_id)
                 .cloned()
                 .expect("run token registered before acknowledgement");
+            let registry = Arc::clone(&state.run_cancellations);
             tokio::spawn(async move {
                 provision_run(&db, &run_id_clone, &tape_id_clone, cancellation).await;
+                // The token must cover the whole worker lifetime, but retaining it after the
+                // worker exits would make the ownership registry grow without bound and let a
+                // later abort appear to cancel work that no longer exists.
+                registry
+                    .write()
+                    .expect("run cancellation registry poisoned")
+                    .remove(&run_id_clone);
             });
             Json(json!({
                 "id": run_id,

@@ -32,7 +32,7 @@ echo ""
 REPO_ROOT="$(pwd)"
 BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
 BAUD="$REPO_ROOT/target/debug/baud"
-FIXTURE_DIR="$REPO_ROOT/crates/baud-multiverse/tests/fixtures/linux-guest"
+FIXTURE_DIR="$REPO_ROOT/examples/linux-guest"
 KERNEL="$FIXTURE_DIR/bzImage"
 INITRAMFS="$FIXTURE_DIR/virtio_blk_initramfs.cpio.gz"
 DB_FILE="$(mktemp -u -t baud-pkg-boot-virtio-blk-cli-XXXXXX.sqlite)"
@@ -67,7 +67,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Same fixed formula tests/fixtures/linux-guest/virtio_blk_init.c's own /init expects at sector 0
+# Same fixed formula examples/linux-guest/virtio_blk_init.c's own /init expects at sector 0
 # (crates/baud-multiverse/src/linux/mod.rs's virtio_blk_test_base_image): byte i is i % 256,
 # repeating every 256 bytes -- 4 sectors, matching the primitive-level and route-level tests.
 python3 -c "

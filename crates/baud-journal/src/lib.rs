@@ -151,7 +151,10 @@ impl Journal {
             for entry in &index {
                 let path = run_dir.join("chunks").join(&entry.chunk_addr);
                 let bytes = fs::read(&path).map_err(|e| {
-                    JournalError::Io(format!("read chunk {} while reopening: {e}", entry.chunk_addr))
+                    JournalError::Io(format!(
+                        "read chunk {} while reopening: {e}",
+                        entry.chunk_addr
+                    ))
                 })?;
                 stream_hasher.update(&bytes);
             }

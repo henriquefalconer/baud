@@ -384,7 +384,7 @@ Final validation for the implemented increment is green: baud-packages and baud-
 
 ## 2026-09-04T03:16:52 UTC - Changes committed.
 - Rejected synthetic frame rendering and Mario simulation fallback, and enforced the tape-driver image contract.
-- Files changed: crates/baud-multiverse/tests/fixtures/linux-guest/minimal.config, crates/baud-packages/src/guest_build.rs, crates/baud-server/src/routes/stream.rs, examples/mario/nes_bridge.c, ralph/progress.txt.
+- Files changed: examples/linux-guest/minimal.config, crates/baud-packages/src/guest_build.rs, crates/baud-server/src/routes/stream.rs, examples/mario/nes_bridge.c, ralph/progress.txt.
 - **Brief description of changes:**
   - Image composition validates the supplied kernel configuration fragment before building.
   - Hash-only frame records return a diagnostic instead of fabricated pixels.
@@ -2408,3 +2408,72 @@ Foreground gate is green: 25 passed, 0 failed, 1 skipped; preparing the required
   - Full foreground gate passed: 25 passed, 0 failed, 1 skipped.
 
 ---
+
+## 2026-09-10T17:33:42 UTC (20min) - Session usage — ralph-14 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2761 (summed from 5 session transcripts: main $0.2088 · subagents $0.0673)
+- tokens input 448,210 · cache-read 7,951,360 · cache-write 0 · output 22,900 · reasoning 6,053
+- context 136,778 tok peak of 272K (50%) across 70 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2761 (in 448,210 / out 28,953 / cache-read 7,951,360)
+- subagents (4) pi process x4
+  - delegate-fe48fb8c79ad7aecf1d2dc2133f53ddf: gpt-5.6-luna $0.0215, 4 inference calls
+  - delegate-0085b14dc4f399bdc786e7f7506a4d79: gpt-5.6-luna $0.0243, 5 inference calls
+  - delegate-dc12526f05e4cc34ee83ee6d79eab9a3: gpt-5.6-luna $0.0185, 4 inference calls
+  - 01a08c54-c542-71e3-a8e3-889bdce15f1c: gpt-5.6-luna $0.0030, 1 inference calls
+- transcript: ralph/.run/20260910T073659Z/019-ralph-14.json
+- transcript: ralph/.run/20260910T073659Z/020-ralph-14.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 15 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected item through the real implementation and verification path.
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract, G8 relocate distributed validation images — they are all 10 pending items in the queue.
+
+Starting G8 relocate distributed validation images. Moving the authoritative linux guest image out of the multiverse crate and rewriting every test and drive reference to examples.
+
+The first relocation pass found relative crate-local paths still pointing at the deleted fixture directory. Rewriting those runtime paths now, then compiling to catch every missed reference.
+
+The authoritative image files now live under examples/linux-guest and all discovered references are rewritten. Delegating the workspace build and tests while I inspect the real-image and remaining endpoint paths.
+
+The doctor route still returned null placeholders for tool checks. Replacing them with explicit command-backed booleans so API consumers cannot mistake an unverified capability for success, then adding focused coverage.
+
+Added a gate invariant that rejects stale crate-fixture paths and verifies the relocated kernel, initramfs, config, and provenance manifest before any drive runs.
+
+Added examples/linux-guest/manifest.json with byte hashes and made the gate verify those hashes, so relocated distributed artifacts have a checked provenance boundary rather than only a moved directory.
+
+Workspace tests are green after relocation and doctor changes: 235 multiverse tests, 45 package tests, 54 server tests, and the remaining crates passed, with only the existing ignored hardware/build cases. Continuing the locked batch instead of treating this as completion.
+
+Added a real process-local private-COW guest RAM backing with memfd, MAP_PRIVATE isolation tests, and explicit lifetime ownership; persisted universes still correctly require full restore. Also fixed run-token cleanup after worker termination so the shared lifecycle registry cannot leak completed ownership.
+
+Starting the required drive gate now. This validates that the relocation, lifecycle, and existing real-KVM paths still pass together before further debugging.
+
+The gate passed warm-up, all cargo checks, h0-h9, m9-m13, package drives, h6, and block cancellation. It hit the 600-second command limit during the newly invalidated full kernel-build phase, so I am isolating that phase and checking its actual state rather than treating timeout as success.
+
+The isolated kernel-build phase completed successfully and produced a real bzImage/initramfs pair with a stable image hash. The parent gate was killed before its final summary, so rerunning the gate now should reuse the new build stamp and reach the actual final result.
+
+The second gate run passed every queued drive and workspace test, then reached the long gated image phase again because package-source changes invalidate its stamp. I am recording that concrete green evidence and will rerun the final gate only after the remaining implementation work is closed.
+
+Clippy remains green with only existing warnings after the new backing and lifecycle changes. Running the dedicated two-build reproducibility drive now to close the image relocation acceptance instead of relying on the moved byte artifact alone.
+
+Added a streaming Ubuntu artifact manifest to fetch.sh. It records the pinned release and SHA256/size for the raw rootfs, kernel, and initrd without loading the 2.2 GiB rootfs into memory.
+
+Hardened the Mario bridge ROM boundary: mapper and NROM geometry are validated, trainers and PRG/CHR payloads require exact reads, and truncation fails before execution. The bridge still requires a supplied ROM and does not synthesize frames.
+
+Added the snapshot branch-mode contract and fallback reasons as serializable types, with a test that rejects any full-restore result being reported as write-set scaled. The live multiverse branch API still needs to consume this contract before G3 can be marked done.
+
+The dedicated reproducibility drive passed after 772.67 seconds: two independent kernel-source builds produced byte-identical bzImages. Together with the green H-series drive, generic-core test, relocated manifest, and stale-path gate invariant, G8 image relocation is now fully closed and collapsed to DONE.
+
+Extended the tape endpoint with a real MMIO alias sharing the same cursor, parser, and record queue as PIO, and routed it through DeviceBus with focused round-trip coverage. This gives the guest image a documented fallback transport without duplicating device semantics.
+
+The real tape MMIO alias test is green and the two-build image drive completed. Running the full required gate once more with the valid image-build stamp, now that the latest code paths are in place.
+
+The long gate exposed a tooling bug in the new relocation guard: rg is only available through the agent PATH and was absent from the gate child. Replaced it with system grep, verified the guard passes, and will rerun the gate with the check actually active.
+
+The corrected full gate is green: 26 passed, 0 failed, 0 skipped in 18m22s, including the 675-second real image-build CLI phase. Re-reading the locked queue confirms G8 relocation is DONE; the other selected contracts remain open because their real end-to-end paths are not yet complete, so I am not collapsing them to false DONE lines.
+
+Committing the verified changes now. The gate is green and the relocated-image item is closed; the remaining locked items stay open in todo-build.md with their real implementation paths intact for the next continuation.

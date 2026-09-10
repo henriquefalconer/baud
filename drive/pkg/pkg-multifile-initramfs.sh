@@ -11,7 +11,7 @@
 # (`crates/baud-multiverse/src/linux/mod.rs`): it builds a 2-file initramfs (`/init` execs a
 # bundled `/helper`) via that pipeline at test time, then boots it twice against the already-built
 # `linux-guest` bzImage on real /dev/kvm — see
-# `crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md`'s "pipeline-built multi-file
+# `examples/linux-guest/BUILD.md`'s "pipeline-built multi-file
 # initramfs" section for the full account.
 #
 # Needs musl-gcc only (no kernel source tree, no kernel rebuild — reuses the checked-in bzImage) —

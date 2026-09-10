@@ -8,7 +8,7 @@
 # reproducible (two from-source builds, byte-identical bzImage). This script instead proves the
 # *wiring* around it: a real `baud image build` CLI invocation against a real running
 # `baud-server`, using the exact kernel-source-tree + config-fragment + single-file-initramfs
-# recipe `crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md` documents by hand, ending in
+# recipe `examples/linux-guest/BUILD.md` documents by hand, ending in
 # a real `bzImage` + `initramfs.cpio.gz` pair plus spec §4.5's image identity hash.
 #
 # Needs a real kernel source tree (CLAUDE.md: ~/wsl-kernel-src/src, or set BAUD_KERNEL_SRC),
@@ -52,7 +52,7 @@ REPO_ROOT="$(pwd)"
 BAUD="$REPO_ROOT/target/debug/baud"
 BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
 DB_FILE="$(mktemp -u -t baud-pkg-build-cli-XXXXXX.sqlite)"
-FIXTURE_DIR="$REPO_ROOT/crates/baud-multiverse/tests/fixtures/linux-guest"
+FIXTURE_DIR="$REPO_ROOT/examples/linux-guest"
 
 cleanup() {
     if [[ -n "${SERVER_PID:-}" ]]; then

@@ -1705,7 +1705,7 @@ impl Multiverse {
     /// RAM right here still observes state no later than that final small stretch of guest code
     /// (`sync()` + `reboot()`, in `checkpoint_init.c`'s case) rather than a wall-clock point or a
     /// full boot's raw console/RAM comparison (both of which embed real-hardware RCB/TSC read
-    /// jitter, see `tests/fixtures/linux-guest/BUILD.md`'s "known, deliberate non-goal" section).
+    /// jitter, see `../../examples/linux-guest/BUILD.md`'s "known, deliberate non-goal" section).
     /// Returns the tick trace, the stop condition, and every tape-device record drained along the
     /// way (not just a `MarkBranch` match) — earlier versions of this function called
     /// `drain_records()` once per tick purely to *look for* `MarkBranch` and threw the rest away,
@@ -5140,20 +5140,20 @@ mod tests {
         );
     }
 
-    /// `tests/fixtures/linux-guest/`'s real, compiled (not hand-assembled) Linux 6.18 kernel and
+    /// `../../examples/linux-guest/`'s real, compiled (not hand-assembled) Linux 6.18 kernel and
     /// initramfs -- see that directory's `BUILD.md` for exact provenance/regeneration and the three
     /// real bugs (two in this crate, one in `baud-vcpu`) this fixture's first real boot caught.
     fn linux_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/linux-guest/bzImage")
     }
 
     fn linux_guest_initramfs() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/linux-guest/initramfs.cpio.gz");
+            .join("../../examples/linux-guest/initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest initramfs fixture")
     }
 
-    /// The exact marker `tests/fixtures/linux-guest/init.c`'s `/init` writes (via raw `outb` to
+    /// The exact marker `../../examples/linux-guest/init.c`'s `/init` writes (via raw `outb` to
     /// COM1, not `write(1, ...)` -- that directory's `BUILD.md` explains why) right before it powers
     /// off, asserted verbatim so a change to either side is caught rather than silently drifting.
     const LINUX_GUEST_MARKER: &str = "baud-guest: minimal kernel reached /init\n";
@@ -5164,7 +5164,7 @@ mod tests {
     /// (`run_to_first_halt_with_periodic_timer`) rather than any pre-known tick count -- the guest's
     /// own scheduler timer needs are satisfied by the same `KVM_INTERRUPT` mechanism the
     /// hand-assembled `timer-guest` fixture already exercises, with no LAPIC device model needed
-    /// (`tests/fixtures/linux-guest/BUILD.md` explains why).
+    /// (`../../examples/linux-guest/BUILD.md` explains why).
     ///
     /// Asserts two boots of the same image+tape each independently reach `/init`'s marker and halt
     /// cleanly after the *same number* of periodic ticks (its own real-hardware-observed
@@ -5297,12 +5297,12 @@ mod tests {
         );
     }
 
-    /// `tests/fixtures/linux-guest/virtio_rng_init.c`'s `/init`: opens `/dev/hwrng` and reads from
+    /// `../../examples/linux-guest/virtio_rng_init.c`'s `/init`: opens `/dev/hwrng` and reads from
     /// it, rather than printing a fixed marker -- the payload for the real, not hand-assembled,
     /// counterpart to `virtio_rng_interrupt_reaches_the_guests_own_isr`.
     fn linux_guest_virtio_rng_initramfs() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/linux-guest/virtio_rng_initramfs.cpio.gz");
+            .join("../../examples/linux-guest/virtio_rng_initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest virtio_rng initramfs fixture")
     }
 
@@ -5542,7 +5542,7 @@ mod tests {
     /// specs/baud-multiverse.md §4.3's `init_powers_off_deterministically`: "a clean VMM-detected
     /// shutdown at an identical exit point across two boots." Reuses the same real `linux-guest`
     /// fixture and open-ended periodic-timer engine as [`guest_kernel_boots_to_userspace`] — its
-    /// `/init` (`tests/fixtures/linux-guest/init.c`) calls `reboot(RB_POWER_OFF)` right after
+    /// `/init` (`../../examples/linux-guest/init.c`) calls `reboot(RB_POWER_OFF)` right after
     /// printing its marker (§4.3's exact shutdown path, a real triple-fault the run loop resolves to
     /// `VcpuExit::Shutdown`/`HaltOutcome`, not a hand-assembled `hlt` loop like `hello-guest`). Two
     /// boots of the same image+tape must land the halt at the identical instruction
@@ -5589,14 +5589,14 @@ mod tests {
         );
     }
 
-    /// `tests/fixtures/linux-guest/virtio_blk_init.c`'s `/init`: discovers a real virtio-pci-legacy
+    /// `../../examples/linux-guest/virtio_blk_init.c`'s `/init`: discovers a real virtio-pci-legacy
     /// block device (via `/sys/class/block/vda/dev`, same devtmpfsd-race workaround as
     /// `virtio_rng_init.c`), reads sector 0, then writes and reads back sector 1 — the real,
     /// not-hand-assembled-fixture, driver-exercising counterpart todo.md §14 item 5's "no real-KVM
     /// fixture actually exercises virtio-blk end to end" gap named.
     fn linux_guest_virtio_blk_initramfs() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/linux-guest/virtio_blk_initramfs.cpio.gz");
+            .join("../../examples/linux-guest/virtio_blk_initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest virtio_blk initramfs fixture")
     }
 
@@ -5784,7 +5784,7 @@ mod tests {
             return;
         }
 
-        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest");
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/linux-guest");
         let scratch = tempfile::tempdir().unwrap();
 
         let compile = |source: &str, output: &std::path::Path| {
@@ -5902,7 +5902,7 @@ mod tests {
             return;
         }
 
-        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest");
+        let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/linux-guest");
         let scratch = tempfile::tempdir().unwrap();
         let init_bin = scratch.path().join("dynamic_init");
         let status = std::process::Command::new("gcc")
@@ -5977,7 +5977,7 @@ mod tests {
         );
     }
 
-    /// `tests/fixtures/linux-guest/entropy_init.c` -- a second `/init` for the same, already-built
+    /// `../../examples/linux-guest/entropy_init.c` -- a second `/init` for the same, already-built
     /// `linux-guest` kernel (no kernel rebuild needed: OS-entropy determinism is a userspace-visible
     /// property this fixture's own `minimal.config` already supports -- `CONFIG_DEVTMPFS_MOUNT=y`
     /// gives it `/dev/urandom` for free). It calls `getrandom()` four times and reads `/dev/urandom`
@@ -5986,7 +5986,7 @@ mod tests {
     /// interrupt-driven tty transmit path never drains).
     fn linux_guest_entropy_initramfs() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/linux-guest/entropy_initramfs.cpio.gz");
+            .join("../../examples/linux-guest/entropy_initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest entropy_initramfs fixture")
     }
 
@@ -6260,13 +6260,13 @@ mod tests {
         );
     }
 
-    /// `tests/fixtures/linux-guest/checkpoint_init.c` -- a third `/init` for the same already-built
+    /// `../../examples/linux-guest/checkpoint_init.c` -- a third `/init` for the same already-built
     /// kernel: identical to `init.c` except it finalizes one extra tape-device `MARK_BRANCH` record
     /// (`outb(1, 0x508)`) right before powering off, so a test can hash guest RAM at that exact,
     /// guest-chosen instant (see this fixture's `BUILD.md` for why).
     fn linux_guest_checkpoint_initramfs() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/linux-guest/checkpoint_initramfs.cpio.gz");
+            .join("../../examples/linux-guest/checkpoint_initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest checkpoint_initramfs fixture")
     }
 

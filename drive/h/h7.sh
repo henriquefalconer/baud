@@ -7,7 +7,7 @@
 # the first, foundational leg for real: a real, compiled (not hand-assembled) Linux 6.18 kernel
 # booting through baud-multiverse's real KVM boot flow, driven by H4's open-ended periodic-timer-
 # injection engine, all the way to a real /init process that prints a marker and cleanly powers off
-# -- tests/fixtures/linux-guest/BUILD.md has the full account, including three real bugs this
+# -- examples/linux-guest/BUILD.md has the full account, including three real bugs this
 # fixture's first real boot caught (two in baud-multiverse, one in baud-vcpu). The OS-entropy leg
 # and a guest-driven-checkpoint double-boot RAM-hash comparison remain open (todo.md §14).
 #
@@ -107,7 +107,7 @@ echo ""
 echo "=== H7 (partial) milestone: ALL CHECKS PASSED ==="
 echo ""
 echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
-echo "  - A real, compiled Linux 6.18 kernel (tests/fixtures/linux-guest/, not a hand-assembled"
+echo "  - A real, compiled Linux 6.18 kernel (examples/linux-guest/, not a hand-assembled"
 echo "    payload) boots through baud-multiverse's real KVM boot flow to a real /init process"
 echo "  - H4's open-ended periodic-timer-injection engine, not a pre-known tick count, drives the"
 echo "    guest's own scheduler timer needs — no LAPIC device model needed (see that fixture's"

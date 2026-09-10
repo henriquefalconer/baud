@@ -99,4 +99,24 @@ if [[ ! -f rootfs.raw ]] || [[ "ubuntu-18.04-server-cloudimg-amd64.img" -nt root
     trap - EXIT
 fi
 
-log "done. rootfs.raw / vmlinuz-generic / initrd-generic are ready in $OUT_DIR"
+# Keep a machine-readable identity beside the external artifacts. H9 compares this exact build
+# across VM boots, so a directory with a silently replaced rootfs must never look ready.
+python3 - "$OUT_DIR" "$BUILD" <<'PY'
+import hashlib, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+manifest = {"build": sys.argv[2], "artifacts": {}}
+for name in ("rootfs.raw", "vmlinuz-generic", "initrd-generic"):
+    path = root / name
+    manifest["artifacts"][name] = {"bytes": path.stat().st_size, "sha256": sha256(path)}
+(root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+PY
+
+log "done. rootfs.raw / vmlinuz-generic / initrd-generic / manifest.json are ready in $OUT_DIR"

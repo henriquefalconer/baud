@@ -56,7 +56,7 @@ pub struct RunKvmBody {
     /// A real, unmodified Linux kernel's own scheduler calibration (`calibrate_delay`) needs
     /// periodic timer interrupts to make forward progress at all — `run_to_first_halt`'s plain
     /// `KVM_RUN` loop injects nothing, so such a guest hangs forever under it
-    /// (`tests/fixtures/linux-guest/BUILD.md`'s documented finding; H4's own
+    /// (`../../examples/linux-guest/BUILD.md`'s documented finding; H4's own
     /// `run_to_first_halt_with_periodic_timer` exists exactly to solve this, todo.md §14 item 1).
     /// Every hand-assembled fixture in this workspace before the real Linux guest never needed
     /// this, so it stays optional and `None` (the default) preserves this route's exact prior
@@ -94,7 +94,7 @@ pub struct RunKvmBody {
     /// used-buffer interrupt delivered at a caller-specified vector
     /// (`Multiverse::run_to_first_halt_with_virtio_pci_blk`, or the three-device periodic-timer
     /// combinator when `periodic_timer` is also set) — hardware-proven against
-    /// `tests/fixtures/linux-guest/virtio_blk_init.c`'s real `virtio_pci_legacy`+`virtio_blk`
+    /// `../../examples/linux-guest/virtio_blk_init.c`'s real `virtio_pci_legacy`+`virtio_blk`
     /// drivers but, before this field, reachable only from a Rust test calling `Multiverse`
     /// directly, never through the CLI/server path (todo.md §14 item 5's last-open "boot/cmdline/
     /// CLI wiring" gap — the concrete prerequisite for H9's Ubuntu boot). A caller wanting a real
@@ -2662,12 +2662,12 @@ mod tests {
 
     fn linux_guest_kernel_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../baud-multiverse/tests/fixtures/linux-guest/bzImage")
+            .join("../baud-multiverse/../../examples/linux-guest/bzImage")
     }
 
     fn linux_guest_initramfs() -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../baud-multiverse/tests/fixtures/linux-guest/initramfs.cpio.gz");
+            .join("../baud-multiverse/../../examples/linux-guest/initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest initramfs fixture")
     }
 
@@ -2872,7 +2872,7 @@ mod tests {
 
     fn linux_guest_virtio_blk_initramfs() -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../baud-multiverse/tests/fixtures/linux-guest/virtio_blk_initramfs.cpio.gz");
+            .join("../baud-multiverse/../../examples/linux-guest/virtio_blk_initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest virtio_blk initramfs fixture")
     }
 
@@ -3078,7 +3078,7 @@ mod tests {
 
     fn linux_guest_checkpoint_initramfs() -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../baud-multiverse/tests/fixtures/linux-guest/checkpoint_initramfs.cpio.gz");
+            .join("../baud-multiverse/../../examples/linux-guest/checkpoint_initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest checkpoint initramfs fixture")
     }
 
@@ -3089,7 +3089,7 @@ mod tests {
     /// server-route-level proof that gap is closed, mirroring
     /// `run_kvm_boots_a_real_linux_guest_with_initramfs_and_periodic_timer`'s own doc but for the
     /// branch path. Uses the same real, unmodified Linux 6.18 kernel as that test, plus the
-    /// `checkpoint_initramfs.cpio.gz` variant (`tests/fixtures/linux-guest/BUILD.md`) whose `/init`
+    /// `checkpoint_initramfs.cpio.gz` variant (`../../examples/linux-guest/BUILD.md`) whose `/init`
     /// issues one `MARK_BRANCH` right before powering off — `baud-multiverse`'s own
     /// `double_boot_ram_hash_identical` test proves this same fixture reaches that checkpoint via
     /// `run_until_branch_or_halt_with_periodic_timer` directly; this proves the *route*

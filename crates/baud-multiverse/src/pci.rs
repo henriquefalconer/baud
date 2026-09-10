@@ -97,7 +97,7 @@ const HOST_BRIDGE_DEVICE_ID: u16 = 0x0000;
 /// reads the 16-bit `PCI_CLASS_DEVICE` word at offset 0x0A expecting exactly `PCI_CLASS_BRIDGE_HOST`
 /// (`0x0600`), and the swapped byte order answered `0x0006` instead, so `raw_pci_ops` was never set
 /// at all ("PCI: Fatal: No config space access function found") — confirmed by booting
-/// `tests/fixtures/linux-guest/virtio_blk_init.c` on real `/dev/kvm` before this fix.
+/// `../../examples/linux-guest/virtio_blk_init.c` on real `/dev/kvm` before this fix.
 const HOST_BRIDGE_CLASS_CODE: u32 = 0x0600_0000;
 
 /// Configuration-space register offsets this bridge answers with a non-zero value (PCI Local Bus
@@ -187,7 +187,7 @@ pub struct PciVirtioFunction {
     /// ACPI/`$PIR` table to program it, nothing else would ever give this register a real value.
     /// Real-hardware finding: leaving it at `0` (the pre-fix default) makes a real
     /// `virtio_pci_legacy`/`virtio_blk` driver print "can't find IRQ for PCI INT A" and fail probe
-    /// with `-ENOSPC`, confirmed booting `tests/fixtures/linux-guest/virtio_blk_init.c` — the same
+    /// with `-ENOSPC`, confirmed booting `../../examples/linux-guest/virtio_blk_init.c` — the same
     /// "no BIOS exists, so the VMM must pre-program what a BIOS normally would" role baud already
     /// plays for e.g. `boot_params`/e820 (§4.2).
     interrupt_line: u8,

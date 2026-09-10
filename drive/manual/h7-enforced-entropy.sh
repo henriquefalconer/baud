@@ -45,7 +45,7 @@
 # H7_ENTROPY_REPEATS=N to rerun the double-boot test N times in place (one module swap, not N) to
 # keep an eye on this; a FAIL now is a real regression, not expected residual flakiness.
 #
-#   Reuses `tests/fixtures/linux-guest/` (H7's boot-to-userspace fixture) — `entropy_init.c` /
+#   Reuses `examples/linux-guest/` (H7's boot-to-userspace fixture) — `entropy_init.c` /
 #   `entropy_initramfs.cpio.gz` are a second `/init` for the *same* already-built kernel (no
 #   rebuild needed: entropy determinism is userspace-visible) that calls `getrandom()` x4 and reads
 #   `/dev/urandom` x4, hex-encoding each 32-byte read out the raw-outb COM1 endpoint `init.c` uses.

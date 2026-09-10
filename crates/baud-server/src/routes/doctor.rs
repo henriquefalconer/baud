@@ -11,6 +11,14 @@ use serde_json::{json, Value};
 /// On macOS the supervisor requires a Linux kernel — LocalBackend runs inside a
 /// lima VM. This function checks: (a) limactl is on PATH, (b) at least one VM
 /// instance is in "Running" state. Returns true/false rather than null.
+fn command_succeeds(command: &str, args: &[&str]) -> bool {
+    std::process::Command::new(command)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn check_local_backend_vm() -> bool {
     // Check if limactl is installed
     let limactl = std::process::Command::new("which")
@@ -61,9 +69,11 @@ pub async fn doctor(_state: State<AppState>) -> Json<Value> {
         "age_key_path": report.age_key_path.as_ref().map(|p| p.to_string_lossy().to_string()),
         "secrets_file_exists": report.secrets_file_exists,
         "is_recipient": report.is_recipient,
-        // Stubs for items checked at later milestones
-        "daytona_reachable": null,
-        "cross_toolchain_ok": null,
+        // These checks are concrete booleans. A missing optional tool is a failed check,
+        // never a null value that callers can accidentally treat as success.
+        "daytona_reachable": command_succeeds("daytona", &["status"]),
+        "cross_toolchain_ok": command_succeeds("cargo", &["--version"])
+            && command_succeeds("gcc-13", &["--version"]),
         // local_backend_vm_ok: on macOS the supervisor needs a lima/colima VM (Linux kernel).
         // Check whether limactl is installed and a baud VM instance is available.
         "local_backend_vm_ok": check_local_backend_vm(),
@@ -73,6 +83,24 @@ pub async fn doctor(_state: State<AppState>) -> Json<Value> {
             "enforced_capable": host.is_enforced_capable(),
             "reason": host.reason,
             "capacity": host.capacity(),
+            "housekeeping_reserved": host.topology().housekeeping_reserved,
+            "cores": host.topology().cores,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_succeeds;
+
+    #[test]
+    fn command_check_fails_closed_for_missing_program() {
+        assert!(!command_succeeds("baud-command-that-does-not-exist", &[]));
+    }
+
+    #[test]
+    fn command_check_reports_a_real_program() {
+        assert!(command_succeeds("true", &[]));
+        assert!(!command_succeeds("false", &[]));
+    }
 }

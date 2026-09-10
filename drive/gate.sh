@@ -314,6 +314,32 @@ export BAUD_GATE_PREBUILT=1
 # Paths are relative to drive/; the unit's log name is the basename, so a log stays
 # `03-h5.log` rather than picking up the directory.
 
+# The distributed Linux image is an example artifact, not a crate fixture. Keep this check in
+# the required gate so a new drive or source path cannot quietly restore the old dependency.
+if grep -R -n --exclude-dir=target --exclude-dir=.git --exclude=gate.sh \
+    -E 'crates/baud-multiverse/tests/fixtures/linux-guest|tests/fixtures/linux-guest' \
+    crates examples drive >/dev/null; then
+    echo "gate: stale linux-guest fixture path found; use examples/linux-guest" >&2
+    exit 1
+fi
+for required in examples/linux-guest/{bzImage,initramfs.cpio.gz,minimal.config,BUILD.md,manifest.json}; do
+    if [[ ! -f "$required" ]]; then
+        echo "gate: relocated image artifact missing: $required" >&2
+        exit 1
+    fi
+done
+python3 - <<'PY'
+import hashlib, json
+from pathlib import Path
+root = Path("examples/linux-guest")
+manifest = json.loads((root / "manifest.json").read_text())
+for section in ("kernel", "initramfs", "kernel_config"):
+    entry = manifest[section]
+    digest = hashlib.sha256((root / entry["path"]).read_bytes()).hexdigest()
+    if digest != entry["sha256"]:
+        raise SystemExit(f"gate: {section} hash does not match examples/linux-guest/manifest.json")
+PY
+
 FANOUT=(
     h/h7 pkg/pkg-multifile-initramfs pkg/pkg-dynamic-link h/h2 h/h3
     m/m9 pkg/pkg-virtio-rng-branch-resume-cli pkg/pkg-boot-cli h/h4
@@ -373,8 +399,8 @@ KSRC="${BAUD_KERNEL_SRC:-$HOME/wsl-kernel-src/src}"
 # enforced-regime RDTSC patch is currently applied to it.
 build_cli_fingerprint() {
     {
-        sha256sum crates/baud-multiverse/tests/fixtures/linux-guest/minimal.config \
-                  crates/baud-multiverse/tests/fixtures/linux-guest/init.c \
+        sha256sum examples/linux-guest/minimal.config \
+                  examples/linux-guest/init.c \
                   drive/pkg/pkg-build-cli.sh 2>/dev/null
         find crates/baud-packages/src -name '*.rs' -exec sha256sum {} + 2>/dev/null | sort
         sha256sum crates/baud-server/src/routes/image.rs \

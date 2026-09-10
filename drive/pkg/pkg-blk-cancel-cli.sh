@@ -57,7 +57,7 @@
 # 8 ioctls took 5 s at 100% CPU). So until the run loop can be interrupted inside the boundary
 # walk, a cancelled run keeps burning a full core and step 5 fails — with the real numbers printed.
 #
-# WORKLOAD. Every `tests/fixtures/linux-guest` /init ends in `reboot(RB_POWER_OFF)`, which with
+# WORKLOAD. Every `examples/linux-guest` /init ends in `reboot(RB_POWER_OFF)`, which with
 # `acpi=off` lands the guest in `System halted` — a terminal `Hlt` about 1.2s after the request
 # starts, far too short to kill a client "mid-run" against, and a run that ends on its own proves
 # nothing about cancellation. So this script deliberately boots the same checked-in bzImage +
@@ -91,7 +91,7 @@ echo ""
 REPO_ROOT="$(pwd)"
 BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
 BAUD="$REPO_ROOT/target/debug/baud"
-FIXTURE_DIR="$REPO_ROOT/crates/baud-multiverse/tests/fixtures/linux-guest"
+FIXTURE_DIR="$REPO_ROOT/examples/linux-guest"
 KERNEL="$FIXTURE_DIR/bzImage"
 INITRAMFS="$FIXTURE_DIR/virtio_blk_initramfs.cpio.gz"
 DB_FILE="$(mktemp -u -t baud-pkg-blk-cancel-cli-XXXXXX.sqlite)"
@@ -201,7 +201,7 @@ server_rss_kib() {
 
 mib() { python3 -c "import sys; print(round(int(sys.argv[1]) / 1024))" "$1"; }
 
-# Same fixed formula tests/fixtures/linux-guest/virtio_blk_init.c's own /init expects at sector 0
+# Same fixed formula examples/linux-guest/virtio_blk_init.c's own /init expects at sector 0
 # (crates/baud-multiverse/src/linux/mod.rs's virtio_blk_test_base_image): byte i is i % 256,
 # repeating every 256 bytes -- 4 sectors, exactly as drive/pkg/pkg-boot-virtio-blk-cli.sh writes
 # it. The remaining 512 MiB is sparse zeroes.

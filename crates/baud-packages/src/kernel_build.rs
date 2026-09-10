@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Proprietary
 //
 // Automates the by-hand guest-kernel build recipe documented in
-// `crates/baud-multiverse/tests/fixtures/linux-guest/BUILD.md`'s "Regenerating the kernel"
+// `examples/linux-guest/BUILD.md`'s "Regenerating the kernel"
 // section (todo.md §4.5 / §14 next-actions item 1's "next concrete step": "a plain from-source
 // `make bzImage` could reuse the kernel source tree already checked out at
 // `~/wsl-kernel-src/src`"): `mrproper -> allnoconfig -> merge_config.sh -> olddefconfig ->
@@ -21,7 +21,7 @@ pub struct KernelBuildConfig<'a> {
     /// artifacts and applied enforcement patches unrelated to a guest kernel. Copy it first.
     pub kernel_src: &'a Path,
     /// A Kconfig fragment merged on top of `allnoconfig` (spec §4.1's required/disabled list --
-    /// e.g. `tests/fixtures/linux-guest/minimal.config`).
+    /// e.g. `../../examples/linux-guest/minimal.config`).
     pub config_fragment: &'a Path,
     /// The compiler to build with. CLAUDE.md: must match this dev host's kernel-build gcc major
     /// version (`gcc-13`) or struct-ABI details silently diverge.
@@ -178,7 +178,7 @@ mod tests {
         }
 
         let config_fragment = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../baud-multiverse/tests/fixtures/linux-guest/minimal.config");
+            .join("../baud-multiverse/../../examples/linux-guest/minimal.config");
 
         let scratch_a = tempfile::tempdir().unwrap();
         let scratch_b = tempfile::tempdir().unwrap();

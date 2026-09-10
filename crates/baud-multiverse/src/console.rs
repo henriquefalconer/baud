@@ -735,6 +735,10 @@ impl Bus for DeviceBus {
     }
 
     fn mmio_read(&mut self, addr: u64, data: &mut [u8]) {
+        if crate::tape_bus::TapeBus::in_mmio_range(addr).is_some() {
+            self.tape.mmio_read(addr, data);
+            return;
+        }
         if let Some(virtio_rng) = self.virtio_rng.as_mut() {
             if virtio_rng.in_range(addr).is_some() {
                 virtio_rng.mmio_read(addr, data);
@@ -749,6 +753,10 @@ impl Bus for DeviceBus {
     }
 
     fn mmio_write(&mut self, addr: u64, data: &[u8]) {
+        if crate::tape_bus::TapeBus::in_mmio_range(addr).is_some() {
+            self.tape.mmio_write(addr, data);
+            return;
+        }
         if let Some(virtio_rng) = self.virtio_rng.as_mut() {
             if virtio_rng.in_range(addr).is_some() {
                 virtio_rng.mmio_write(addr, data);

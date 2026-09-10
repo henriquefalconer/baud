@@ -452,8 +452,15 @@ static int load_rom(NES *nes, const char *path) {
         fprintf(stderr, "nes_bridge: only mapper 0 (NROM) supported, got %d\n", mapper);
         fclose(f); return -1;
     }
-    /* Skip trainer if present */
-    if (hdr[6] & 0x04) fseek(f, 512, SEEK_CUR);
+    if (prg_banks < 1 || prg_banks > 2 || chr_banks > 1) {
+        fprintf(stderr, "nes_bridge: unsupported NROM geometry (PRG=%d, CHR=%d)\n", prg_banks, chr_banks);
+        fclose(f); return -1;
+    }
+    /* Skip trainer if present, but fail closed if the advertised bytes are absent. */
+    if ((hdr[6] & 0x04) && fseek(f, 512, SEEK_CUR) != 0) {
+        fprintf(stderr, "nes_bridge: truncated iNES trainer\n");
+        fclose(f); return -1;
+    }
 
     /* Load PRG-ROM (16 KiB banks) */
     int prg_size = prg_banks * 0x4000;
@@ -464,17 +471,26 @@ static int load_rom(NES *nes, const char *path) {
     /* Mirror single-bank ROM to fill 32 KiB */
     if (prg_banks == 1) {
         unsigned char bank[0x4000];
-        fread(bank, 1, 0x4000, f);
+        if (fread(bank, 1, 0x4000, f) != 0x4000) {
+            fprintf(stderr, "nes_bridge: truncated PRG-ROM\n");
+            fclose(f); return -1;
+        }
         memcpy(nes->prg_rom,          bank, 0x4000);
         memcpy(nes->prg_rom + 0x4000, bank, 0x4000);
     } else {
-        fread(nes->prg_rom, 1, prg_size < (int)sizeof(nes->prg_rom) ? prg_size : (int)sizeof(nes->prg_rom), f);
+        if (fread(nes->prg_rom, 1, prg_size, f) != (size_t)prg_size) {
+            fprintf(stderr, "nes_bridge: truncated PRG-ROM\n");
+            fclose(f); return -1;
+        }
     }
 
     /* Load CHR-ROM (8 KiB banks) */
     if (chr_banks > 0) {
         int chr_size = chr_banks * 0x2000;
-        fread(nes->chr_rom, 1, chr_size < (int)sizeof(nes->chr_rom) ? chr_size : (int)sizeof(nes->chr_rom), f);
+        if (fread(nes->chr_rom, 1, chr_size, f) != (size_t)chr_size) {
+            fprintf(stderr, "nes_bridge: truncated CHR-ROM\n");
+            fclose(f); return -1;
+        }
     }
 
     /* Read reset vector from PRG-ROM (at 0xFFFC-0xFFFD relative to 0x8000) */

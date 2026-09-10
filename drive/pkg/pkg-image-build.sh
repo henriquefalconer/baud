@@ -4,10 +4,10 @@
 # next-actions item 1)
 #
 # Exercises crates/baud-packages::kernel_build's #[ignore]d image_build_is_reproducible test for
-# real: builds the linux-guest fixture's kernel (tests/fixtures/linux-guest/minimal.config) twice,
+# real: builds the linux-guest fixture's kernel (examples/linux-guest/minimal.config) twice,
 # from two independent scratch copies of the kernel source tree, and asserts the resulting
 # bzImage bytes are byte-for-byte identical. This is the automated Rust equivalent of the by-hand
-# recipe in tests/fixtures/linux-guest/BUILD.md's "Regenerating the kernel" section.
+# recipe in examples/linux-guest/BUILD.md's "Regenerating the kernel" section.
 #
 # Needs a real kernel source tree (CLAUDE.md: ~/wsl-kernel-src/src, or set BAUD_KERNEL_SRC) and
 # gcc-13, and takes several minutes (two full kernel builds + two full-tree copies) — not part of

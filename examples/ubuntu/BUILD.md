@@ -44,7 +44,7 @@ iteration-by-iteration narrative.
 ## Real-hardware finding: `--periodic-timer-vector` must be `238` (`0xee`), not the `236` default
 
 The default `--periodic-timer-vector` (`0xec`) is `LOCAL_TIMER_VECTOR` for the newer ~6.18 kernel
-this project's other fixtures (`tests/fixtures/linux-guest/`) use — **not** for the real Ubuntu
+this project's other fixtures (`../linux-guest/`) use — **not** for the real Ubuntu
 18.04.1 image's stock 4.15 kernel. Direct source lookup (`arch/x86/include/asm/irq_vectors.h` at
 `github.com/torvalds/linux` tag `v4.15`) confirms 4.15's `LOCAL_TIMER_VECTOR` is `0xee` (238); `0xec`
 is an ordinary unclaimed device-IRQ vector in that layout. Booting with the `236` default produces an

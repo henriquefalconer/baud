@@ -199,7 +199,9 @@ impl CowRegion {
         }
         if n < 0 {
             let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::Interrupted {
+            if error.kind() == io::ErrorKind::WouldBlock
+                || error.kind() == io::ErrorKind::Interrupted
+            {
                 return Ok(None);
             }
             return Err(error.into());
@@ -285,13 +287,25 @@ mod tests {
         };
         assert_eq!(
             message.fault().unwrap(),
-            Fault { address: 0x4000, write: true, write_protect: true, minor: true }
+            Fault {
+                address: 0x4000,
+                write: true,
+                write_protect: true,
+                minor: true
+            }
         );
     }
 
     #[test]
     fn unsupported_pagefault_event_fails_closed() {
-        assert!(matches!(Message { event: 1, ..Message::default() }.fault(), Err(Error::UnexpectedEvent(1))));
+        assert!(matches!(
+            Message {
+                event: 1,
+                ..Message::default()
+            }
+            .fault(),
+            Err(Error::UnexpectedEvent(1))
+        ));
     }
 
     #[test]
