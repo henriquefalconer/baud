@@ -924,3 +924,19 @@ Full gate is green: all recorded units passed, including M10 after the 60-second
   - Shell-into end-to-end verification remains byte-exact under gate load.
 
 ---
+
+Repeating the workspace test command in the foreground as requested, with no background worker.
+
+Foreground cargo test --workspace completed green with no failures; recording that verification before the clean-up commit.
+
+## 2026-09-10T01:21:44 UTC - Changes committed.
+
+- Repeated cargo test --workspace in the foreground as requested.
+
+- Files changed: ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - The workspace test suite passed with no failures.
+
+---
