@@ -384,6 +384,13 @@ impl Driver {
     pub fn draw_choice(&mut self, weights: &[u32]) -> usize {
         assert!(!weights.is_empty(), "draw_choice: weights must be non-empty");
         let total: u64 = weights.iter().map(|&w| w as u64).sum();
+        // A malformed tactic set must not trigger an arithmetic panic. Consume the draw so
+        // replay alignment stays stable, then use the first choice as the documented neutral
+        // fallback for an all-zero distribution.
+        if total == 0 {
+            let _ = self.draw_u64();
+            return 0;
+        }
         let raw = self.draw_u64() % total;
         let mut acc = 0u64;
         for (i, &w) in weights.iter().enumerate() {
@@ -684,6 +691,19 @@ mod tests {
             let idx = d.draw_choice(&weights);
             assert!(idx < weights.len(), "draw_choice index {idx} out of range");
         }
+    }
+
+    #[test]
+    fn draw_choice_all_zero_weights_is_deterministic_and_replay_aligned() {
+        let mut d = make_driver(100);
+        d.begin_run();
+        assert_eq!(d.draw_choice(&[0, 0, 0]), 0);
+        let after_invalid = d.draw_bits(8);
+
+        let mut replay = make_driver(100);
+        replay.begin_run();
+        assert_eq!(replay.draw_choice(&[0, 0, 0]), 0);
+        assert_eq!(replay.draw_bits(8), after_invalid);
     }
 
     /// Spec §5 API: run_driver(seed, script) helper for testing.

@@ -155,14 +155,20 @@ pub fn lint_spec(toml_str: &str) -> Result<WorkloadSpec> {
 
 /// Build a workload spec, returning the closure hash.
 ///
-/// If `nix` is not installed or `dry_run` is true, returns a stub result
-/// with a deterministic hash of the spec contents.
+/// A dry run returns a deterministic planning result. Production builds never substitute a
+/// fixture when Nix is unavailable: they return a diagnostic error instead.
 ///
-/// On a real build, this calls `nix build` inside a temp directory with the
-/// generated flake, then computes the closure hash via `nix path-info`.
+/// On a real build, this calls `nix build` inside a temp directory with the generated flake, then
+/// computes the closure hash via `nix path-info`.
 pub fn build(spec: &WorkloadSpec, dry_run: bool) -> Result<BuildResult> {
-    if dry_run || !nix_available() {
+    if dry_run {
         return Ok(stub_result(spec));
+    }
+    if !nix_available() {
+        bail!(
+            "real guest build requires Nix on PATH; refusing to substitute a fixture for workload '{}'",
+            spec.workload.name
+        );
     }
     build_real(spec)
 }
@@ -318,6 +324,25 @@ build = "cp ${hello}/bin/hello $out"
         let r = build(&spec, true).unwrap();
         // Stub: contract check is a no-op
         assert!(r.verify_guest_contract().is_ok());
+    }
+
+    #[test]
+    fn real_build_never_silently_falls_back_when_nix_is_missing() {
+        if nix_available() {
+            return;
+        }
+        let spec = lint_spec(
+            r#"
+[workload]
+name = "requires-nix"
+packages = ["stdenv"]
+build = "false"
+"#,
+        )
+        .unwrap();
+        let error = build(&spec, false).unwrap_err().to_string();
+        assert!(error.contains("requires Nix on PATH"), "unexpected error: {error}");
+        assert!(error.contains("refusing to substitute a fixture"), "unexpected error: {error}");
     }
 
     #[test]

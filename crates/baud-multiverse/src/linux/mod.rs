@@ -298,11 +298,10 @@ pub fn restore_guest(
     Ok((guest, dirty_ring))
 }
 
-/// Register [`layout::GUEST_RAM_START`]..`+ram_size` as one zeroed, anonymous-mmap-backed memory
-/// slot (specs/baud-multiverse.md §3's "Memory init: Zeroed RAM at fixed guest-physical
-/// addresses" — `GuestMemoryMmap::from_ranges` anonymous-mmaps zeroed pages, and nothing in this
-/// boot flow ever writes host data into guest RAM except the specific structures this module
-/// builds).
+/// Register [`layout::GUEST_RAM_START`]..`+ram_size` as one zeroed, memfd-backed memory slot
+/// (specs/baud-multiverse.md §3's "Memory init: Zeroed RAM at fixed guest-physical addresses").
+/// The shared file backing keeps the mapping eligible for the userfaultfd branch design while the
+/// current restore path remains the explicit full-restore fallback.
 fn allocate_and_register_guest_ram(
     vm: &VmFd,
     ram_size: usize,
@@ -1038,11 +1037,9 @@ impl Multiverse {
 
     /// Fork a new, independent continuation from a captured [`Universe`] on its own tape suffix
     /// (specs/baud-snapshot.md §4's `Snapshot::branch(parent: &Universe, suffix: TapeSuffix) ->
-    /// Branch`) — todo.md §14's real architecture gap: the spec's `UFFDIO_CONTINUE` memory-sharing
-    /// mechanism needs guest RAM backed by a shared (memfd/hugetlbfs) mapping to fault minor faults
-    /// against, but this crate's guest RAM (`allocate_and_register_guest_ram`) is a private
-    /// anonymous mapping — switching that is an architecture change this crate cannot absorb alone
-    /// (specs/baud-snapshot.md §10). This realizes the spec's own documented escape hatch instead
+    /// Branch`). Guest RAM is already memfd-backed, which is the prerequisite for the eventual
+    /// userfaultfd minor-fault branch path. Until that handler owns the KVM registration and page
+    /// lifetime, this method deliberately uses the spec's documented full-restore fallback instead
     /// ("`fork()` copy-on-write is the small-N fallback") — via [`restore`](Self::restore) rather
     /// than a literal `fork(2)`, because a raw OS `fork()` cannot safely reuse this `Multiverse`'s
     /// already-open KVM `vm`/`vcpu` fds either: a `VmFd` is tied to its *creating* process's `mm` at

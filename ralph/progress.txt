@@ -940,3 +940,91 @@ Foreground cargo test --workspace completed green with no failures; recording th
   - The workspace test suite passed with no failures.
 
 ---
+
+## 2026-09-10T01:22:04 UTC (47min) - Session usage — ralph-1 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6349 (summed from 10 session transcripts: main $0.4177 · subagents $0.2173)
+- tokens input 1,347,625 · cache-read 15,834,624 · cache-write 0 · output 40,610 · reasoning 9,586
+- context 192,115 tok peak of 272K (71%) across 111 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.6349 (in 1,347,625 / out 50,196 / cache-read 15,834,624)
+- subagents (9) pi process x9
+  - delegate-f49833ccfc605ea5e592d29fec516470: gpt-5.6-luna $0.0295, 4 inference calls
+  - delegate-65352b7fe9b0009551668a1c7bf87079: gpt-5.6-luna $0.0226, 4 inference calls
+  - delegate-49b0fa8c40ba9a9201b7eed339a91add: gpt-5.6-luna $0.0211, 4 inference calls
+  - delegate-c288bc7034cd51314c2733d08eb02e82: gpt-5.6-luna $0.0318, 6 inference calls
+  - delegate-1b022e56ed34dbaa69749a9fefd1a821: gpt-5.6-luna $0.0258, 5 inference calls
+  - delegate-58c70c92c1695942251cb86052a8ed6f: gpt-5.6-luna $0.0252, 4 inference calls
+  - delegate-7361ae87a1b476dbf1b9b321621f223b: gpt-5.6-luna $0.0283, 5 inference calls
+  - delegate-ec7da7ab917267105c9a0eac7b414ec8: gpt-5.6-luna $0.0267, 6 inference calls
+  - 01a088c3-6bc6-7051-8f38-30277f57831e: gpt-5.6-luna $0.0064, 3 inference calls
+- transcript: ralph/.run/20260910T003437Z/001-ralph-1.json
+- transcript: ralph/.run/20260910T003437Z/002-ralph-1.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important pending build items, studying the specifications, and then implementing and validating that batch end to end.
+
+Chose these 7 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all pending entries in the current implementation queue.
+
+Starting G1 stock-KVM run integration and locating the real execution gaps.
+
+The repository already contains substantial primitive tests but production routes and package builds still expose explicit simulation/stub paths; establishing the baseline before wiring them.
+
+Baseline workspace tests are green, including real KVM route and snapshot tests. Running the maintained acceptance drives now to identify the remaining production gaps.
+
+H1 and H2 passed on real KVM. The requested H4/H5/H7 files are present but not executable, so invoking them explicitly with bash to preserve the acceptance path.
+
+The real H1, H2, H4, H5, and H7 fixture acceptance drives are green, including 1000 independent branches and persisted shell cancellation. Remaining work is the explicit production-path gaps, beginning with rejecting unsafe package fallbacks and documenting the real image contract.
+
+The image pipeline already composes real kernel and initramfs builders, but its acceptance scripts distinguish a checked-in fixture from a true Buildroot/Nix artifact. Running package acceptance to expose exact failures.
+
+The full from-source image reproducibility drive passed after a real kernel build. Next I am running the CLI/server image path and tape endpoint checks before touching queue status.
+
+The real image-build CLI/server drive also passed, emitting hashes and bootable artifacts. I am now checking the tape round-trip and proof/frame drives to close the evidence loop.
+
+Closed a concrete G2 safety gap: production workload builds now fail clearly when Nix is absent instead of returning a fake store path; dry-run fixtures remain explicit test-only behavior, with a regression test.
+
+Package image, replay, branch/resume, and frame re-render drives are green. Probing the remaining G6 Ubuntu acceptance path now, with failures treated as root-cause work.
+
+Tightened G4 frame ingress validation: the tape device now rejects dimension/format byte-count mismatches before emitting a frame, with a regression replacing the former synthetic empty-frame acceptance.
+
+Hardened G4 tactic handling: an all-zero weighted choice now consumes a deterministic draw and selects index zero instead of dividing by zero, preserving replay alignment with a regression test.
+
+All targeted unit tests are green after the package, frame-ingress, and driver fixes. Starting the repository-defined full gate now; any failure will drive root-cause repair rather than being waived.
+
+The full gate reached its 600-second tool limit after most units passed. Two units reported failures before timeout, H0 and M10; inspecting their logs for root causes before rerunning isolated.
+
+M10 exposed a real CLI error-path bug: a failed shell WebSocket was returned as a transport error before JSON could be emitted. The scripted JSON mode now preserves an in-band shell-into diagnostic for handshake and stream errors.
+
+M10 now passes its full real WebSocket drive, including unknown-resource diagnostics. H0 also passes in isolation; rerunning the complete gate to verify the repaired batch under the project protocol.
+
+The second gate run passed every concurrent phase, including H0, H5, M10, M13, clippy, and workspace tests, then hit the tool timeout during the required real pkg-build-cli phase. Running that phase directly to completion before the final gate rerun.
+
+The timed gate left one baud-server orphan, which I removed after confirming it was the only server process. The package CLI retry is clean and will use the disposable kernel scratch as required.
+
+The standalone pkg-build-cli phase passed with a fresh disposable build and identical hashes. Final gate rerun follows now that all previous failures are repaired and the long package phase is warm.
+
+The final gate reached one known RDTSC high-bit timing flake in H3 under concurrent load, while all other phase-3 units passed. Per AGENTS.md, rerunning that unit alone now is the required flake evidence; the gate then timed out at the already-known long pkg phase.
+
+The direct pkg-build-cli acceptance run passed; I recorded its gate fingerprint so the repository gate can use the defined cache rather than rebuilding the same kernel after every timeout. Running the final gate with that proven input stamp.
+
+The gate’s H3 RDTSC failure again passes in isolation, confirming the documented load flake. The default gate cannot reach phase 4 within the 600-second tool ceiling because H5 plus the fan-out exceeds it, so I am using the gate’s documented --no-h5-first scheduling mode to complete the same checks.
+
+The documented --no-h5-first gate completed green: 25 passed, 1 cached skip, 0 failed. The isolated H3 RDTSC rerun also passed, satisfying the repository’s documented flake protocol.
+
+## 2026-09-10T03:06:03 UTC - Changes committed.
+- Hardened real-build, frame-ingress, driver-choice, and shell WebSocket error paths.
+- Files changed: crates/baud-packages/src/lib.rs, crates/baud-tape-device/src/lib.rs, crates/baud-tape-device/src/tests.rs, crates/baud-driver/src/lib.rs, crates/baud-cli/src/cmds/shell_into.rs, crates/baud-multiverse/src/linux/mod.rs, drive/pkg/pkg-build-cli.stamp, ralph/progress.txt.
+- **Brief description of changes:**
+  - Production Nix builds now fail diagnostically instead of silently returning fixture store paths.
+  - Tape frames validate declared geometry and pixel byte counts before emission.
+  - Zero-weight driver choices preserve deterministic replay alignment.
+  - JSON shell clients retain in-band diagnostics for WebSocket failures.
+  - Real KVM memory comments now describe the existing memfd backing and explicit full-restore fallback.
+  - The repository gate passed with all runnable units green.
+---

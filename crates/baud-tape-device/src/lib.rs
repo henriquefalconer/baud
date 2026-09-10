@@ -312,8 +312,8 @@ fn parse_probe(payload: &[u8]) -> Option<(String, Vec<u8>)> {
 /// width, bytes 5..9 the little-endian `u32` height, and everything after that is the raw pixel
 /// buffer, verbatim. Geometry (buffer length vs. `width * height * bytes-per-pixel`) is
 /// deliberately *not* validated here — that is `baud-stream::fingerprint`'s job
-/// (`bad_geometry_is_a_crash`); this transport only rejects payloads too short to carry a header
-/// or tagged with an unrecognized format byte, both `OpcodeResult::MalformedPayload`.
+/// The transport rejects malformed geometry before queueing a frame. This keeps a bad guest record
+/// from crossing the device boundary and being mistaken for a valid observation later.
 fn parse_frame(payload: &[u8]) -> Option<(u32, u32, PixFmt, Vec<u8>)> {
     if payload.len() < 9 {
         return None;
@@ -326,8 +326,19 @@ fn parse_frame(payload: &[u8]) -> Option<(u32, u32, PixFmt, Vec<u8>)> {
     };
     let width = u32::from_le_bytes(payload[1..5].try_into().ok()?);
     let height = u32::from_le_bytes(payload[5..9].try_into().ok()?);
-    let bytes = payload[9..].to_vec();
-    Some((width, height, format, bytes))
+    let bytes = &payload[9..];
+    let bytes_per_pixel = match format {
+        PixFmt::Rgba8888 => 4usize,
+        PixFmt::Rgb565 => 2usize,
+        PixFmt::Indexed8 => 1usize,
+    };
+    let expected = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(bytes_per_pixel)?;
+    if expected != bytes.len() || expected > baud_proto::MAX_BYTES_LEN {
+        return None;
+    }
+    Some((width, height, format, bytes.to_vec()))
 }
 
 #[cfg(test)]

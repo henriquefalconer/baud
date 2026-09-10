@@ -252,20 +252,16 @@ fn frame_opcode_with_header_shorter_than_nine_bytes_is_malformed() {
 }
 
 #[test]
-fn frame_opcode_with_zero_pixel_bytes_is_still_well_formed() {
-    // Geometry validation is baud-stream's job (bad_geometry_is_a_crash), not this transport's —
-    // a header with no trailing pixel bytes still finalizes as a well-formed (if empty) Frame.
+fn frame_opcode_with_zero_pixel_bytes_is_malformed_for_nonzero_geometry() {
+    // A nonzero frame geometry must carry exactly its declared pixel buffer at the device boundary.
     let mut dev = TapeDevice::new(vec![]);
     let payload: Vec<u8> = [1u8].into_iter().chain(3u32.to_le_bytes()).chain(3u32.to_le_bytes()).collect();
     for b in payload {
         dev.pio_write(reg::DATA, b);
     }
     dev.pio_write(reg::CONTROL, ControlOp::Frame as u8);
-    assert_eq!(dev.last_opcode_result(), OpcodeResult::Ok);
-    match &dev.drain_records()[0] {
-        Msg::Frame(rec) => assert!(rec.bytes.as_ref().unwrap().is_empty()),
-        other => panic!("expected Frame, got {other:?}"),
-    }
+    assert_eq!(dev.last_opcode_result(), OpcodeResult::MalformedPayload);
+    assert!(dev.drain_records().is_empty());
 }
 
 #[test]

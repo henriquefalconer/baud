@@ -44,9 +44,19 @@ pub struct ShellIntoArgs {
 
 pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
     let url = c.ws_url(&format!("/shell-into/{}/{}", args.run_id, args.node_id));
-    let (ws, _resp) = tokio_tungstenite::connect_async(&url)
-        .await
-        .with_context(|| format!("connect {url}: could not reach baud-server"))?;
+    let (ws, _resp) = match tokio_tungstenite::connect_async(&url).await {
+        Ok(connection) => connection,
+        Err(error) if json && args.input_hex.is_some() => {
+            let message = format!("shell-into websocket error: {error}");
+            fmt::print(&json!({
+                "ok": false,
+                "output_hex": hex_encode(message.as_bytes()),
+                "error": message,
+            }), true);
+            return Ok(());
+        }
+        Err(error) => return Err(error).context(format!("connect {url}: could not reach baud-server")),
+    };
     let (mut tx, mut rx) = ws.split();
 
     match args.input_hex {
@@ -75,7 +85,12 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
                     Ok(Some(Ok(Message::Text(text)))) => output.extend_from_slice(text.as_bytes()),
                     Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
                     Ok(Some(Ok(_))) => {}
-                    Ok(Some(Err(e))) => return Err(e).context("shell-into websocket error"),
+                    Ok(Some(Err(error))) if json => {
+                        let message = format!("shell-into websocket error: {error}");
+                        output.extend_from_slice(message.as_bytes());
+                        break;
+                    }
+                    Ok(Some(Err(error))) => return Err(error).context("shell-into websocket error"),
                     Err(_) => break, // idle/first-byte timeout: no more output expected
                 }
             }
