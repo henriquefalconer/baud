@@ -69,6 +69,12 @@ pub fn place(topology: &Topology, n: usize) -> Result<Placement, PlacementError>
             capacity,
         });
     }
-    let assigned_cores = topology.cores.iter().take(n).cloned().collect();
+    let assigned_cores = topology
+        .cores
+        .iter()
+        .skip(topology.housekeeping_reserved)
+        .take(n)
+        .cloned()
+        .collect();
     Ok(Placement { assigned_cores })
 }

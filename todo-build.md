@@ -28,7 +28,7 @@ guarantee and the test that proves it.
 
 ## Current implementation queue
 
-- **G1 exact-boundary interrupt proof and enforced capability.** Complete `crates/baud-vcpu/src/boundary.rs` target identity validation and overshoot rejection, wire real PMU/single-step evidence through `crates/baud-vcpu/src/linux/pmu.rs`, and replace the hardcoded `enforced_module_present()` result in `crates/baud-host/src/linux.rs` with a measured host contract. Run the baud-vcpu/multiverse tests plus `drive/h/h0.sh`, `drive/h/h1.sh`, `drive/h/h2.sh`, and `drive/h/h4.sh`; missing PMU, KVM, or module capability must produce a named rejection, never a pass or overstated regime.
+- **G1 exact-boundary interrupt proof and enforced capability.** DONE. Boundary identity and overshoot rejection use real PMU/single-step evidence, and host probing measures the loaded enforced module with named cooperative fallback; H0, H1, H2, and H4 pass on real KVM.
 
 - **G2 reproducible image pipeline.** Finish the Buildroot bring-up and pinned Nix kernel/initramfs/userspace path in `crates/baud-packages`, including deterministic newc archives, image hashes, store warming, and double-build verification, then wire `baud image build` and lint without fixture fallback. Acceptance is `drive/pkg/pkg-build-cli.sh`, the maintained real-image build drive, `image_build_is_reproducible`, and real-image entropy/lint checks; any non-reproducible stage or missing prerequisite must fail with its stage and diagnostic.
 

@@ -100,6 +100,9 @@ pub fn compute_probe(checks: &dyn CapabilityChecks) -> Probe {
         Vendor::Amd => base(Some(
             "AMD host: enforced regime unverified (phase-2, specs/baud-host.md §8); cooperative available".into(),
         )),
+        Vendor::Intel if !enforced_module_present => base(Some(
+            "enforced KVM module unavailable: load the patched kvm_intel module for the enforced regime; cooperative mode remains available".into(),
+        )),
         _ => base(None),
     }
 }

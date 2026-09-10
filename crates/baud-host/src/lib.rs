@@ -155,6 +155,32 @@ mod tests {
     /// specs/baud-host.md §6 `capacity_refuses_sibling_split` — placement never oversubscribes,
     /// and every accepted placement keeps distinct physical cores (no two VMs share an SMT pair).
     #[test]
+    fn placement_skips_reserved_housekeeping_cores() {
+        let topology = Topology {
+            cores: (0..4)
+                .map(|physical_id| CoreTopology {
+                    physical_id,
+                    sibling_threads: vec![physical_id * 2, physical_id * 2 + 1],
+                })
+                .collect(),
+            housekeeping_reserved: 1,
+        };
+        let host = Host::probe_with(&FakeChecks {
+            topology: topology.clone(),
+            ..fake_checks_ok(topology)
+        });
+        let placement = host.place(2).expect("two non-housekeeping cores fit");
+        assert_eq!(
+            placement
+                .assigned_cores
+                .iter()
+                .map(|core| core.physical_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn capacity_refuses_sibling_split() {
         let host = Host::probe_with(&fake_checks_ok(hyperthreaded_topology(4)));
         let plan = host.place(host.capacity() + 1);
@@ -207,6 +233,19 @@ mod tests {
         let host = Host::probe_with(&checks);
         assert!(!host.is_runnable());
         assert!(host.reason.clone().unwrap().contains("MSR filter"));
+    }
+
+    #[test]
+    fn missing_enforced_module_is_named_without_downgrading_cooperative_mode() {
+        let mut checks = fake_checks_ok(single_core_topology(2));
+        checks.enforced_module_present = false;
+        let host = Host::probe_with(&checks);
+        assert!(host.is_runnable());
+        assert!(!host.is_enforced_capable());
+        assert!(host
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("enforced KVM module unavailable")));
     }
 
     #[test]
