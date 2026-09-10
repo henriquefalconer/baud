@@ -87,23 +87,35 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
             .take(12)
             .collect::<String>()
     );
-    let tape_id = format!(
-        "tape-{}",
-        uuid::Uuid::new_v4()
-            .to_string()
-            .replace('-', "")
-            .chars()
-            .take(12)
-            .collect::<String>()
-    );
+    // Allocate the real backend sandbox before acknowledging the run. The backend's ID is the
+    // durable tape identity, so a successful response always names a sandbox the server owns.
+    if body.backend != "local" {
+        return Json(json!({
+            "error": format!("backend '{}' is unavailable; only the configured local backend is enabled", body.backend)
+        }));
+    }
+    let tape_id = match state
+        .tape_backend
+        .create(&baud_tape::types::SandboxSpec {
+            image: Some(spec_doc.nix.clone()),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => return Json(json!({ "error": format!("backend sandbox creation failed: {e}") })),
+    };
     let now = crate::state::unix_now() as i64;
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(e) => return Json(json!({ "error": format!("db transaction error: {e}") })),
+        Err(e) => {
+            let _ = state.tape_backend.delete(&tape_id).await;
+            return Json(json!({ "error": format!("db transaction error: {e}") }));
+        }
     };
     let tape_result = sqlx::query(
-        "INSERT INTO tapes (id, backend, state, vcpus, memory_mib, disk_mib, image, created_at, updated_at)
-         VALUES (?, ?, 'creating', 1, 0, 0, ?, ?, ?)"
+        "INSERT INTO tapes (id, backend, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, created_at, updated_at)
+         VALUES (?, ?, 'running', 1, 1024, 1024, 60, 300, ?, ?, ?)"
     )
     .bind(&tape_id)
     .bind(&body.backend)
@@ -113,6 +125,8 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
     .execute(&mut *tx)
     .await;
     if let Err(e) = tape_result {
+        let _ = tx.rollback().await;
+        let _ = state.tape_backend.delete(&tape_id).await;
         return Json(json!({ "error": format!("tape journal error: {e}") }));
     }
     let result = sqlx::query(
@@ -173,7 +187,10 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
                 "created_at": now,
             }))
         }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Err(e) => {
+            let _ = state.tape_backend.delete(&tape_id).await;
+            Json(json!({ "error": format!("db error: {e}") }))
+        }
     }
 }
 
@@ -203,6 +220,35 @@ mod identity_tests {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn exit_code_for_status(status: &str) -> u8 {
+    match status {
+        "done" | "completed" => 0,
+        "crashed" | "goal" | "violation_found" => 2,
+        "aborted" | "failed" | "error" | "divergent" | "pending" | "provisioning" | "running"
+        | "paused" => 1,
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::exit_code_for_status;
+
+    #[test]
+    fn active_runs_are_not_successful() {
+        for status in ["pending", "provisioning", "running", "paused"] {
+            assert_eq!(exit_code_for_status(status), 1, "{status}");
+        }
+    }
+
+    #[test]
+    fn terminal_statuses_follow_the_cli_contract() {
+        assert_eq!(exit_code_for_status("done"), 0);
+        assert_eq!(exit_code_for_status("error"), 1);
+        assert_eq!(exit_code_for_status("goal"), 2);
+    }
 }
 
 /// Background task: transition the durably journaled tape and run to active ownership.
@@ -301,12 +347,10 @@ pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> Js
             ca,
             ua,
         ))) => {
-            // exit_code: 0=completed, 1=error/aborted, 2=goal/violation (spec baud-cli.md §4)
-            let exit_code: u8 = match status.as_str() {
-                "crashed" | "goal" | "violation_found" => 2,
-                "aborted" | "failed" => 1,
-                _ => 0,
-            };
+            // exit_code: 0=completed, 1=active/error/aborted, 2=goal/violation (spec
+            // baud-cli.md §4). An active run is not a successful completion: returning zero here
+            // made polling scripts treat pending/provisioning/running as finished.
+            let exit_code = exit_code_for_status(&status);
             Json(json!({
                 "id": id,
                 "spec_hash": spec_hash,

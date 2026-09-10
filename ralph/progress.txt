@@ -2495,3 +2495,85 @@ Repeating the full repository gate in the foreground as requested, then verifyin
   - Remote main remains the verified commit tip.
 
 ---
+
+## 2026-09-10T19:35:46 UTC (2h02min) - Session usage — ralph-15 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.7104 (summed from 7 session transcripts: main $0.5642 · subagents $0.1461)
+- tokens input 1,036,878 · cache-read 22,532,096 · cache-write 0 · output 43,612 · reasoning 14,585
+- context 206,776 tok peak of 272K (76%) across 157 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.7104 (in 1,036,878 / out 58,197 / cache-read 22,532,096)
+- subagents (6) pi process x6
+  - delegate-c490c784371894ef68f5c9f6d86ed5d6: gpt-5.6-luna $0.0271, 7 inference calls
+  - delegate-e8de4cdea2df0e5123f0c3fb3f39ec93: gpt-5.6-luna $0.0243, 5 inference calls
+  - delegate-09da723dcbba238c0ec13bfdd7acb93f: gpt-5.6-luna $0.0284, 8 inference calls
+  - delegate-b94c6284d0b264438fca615ddc27761f: gpt-5.6-luna $0.0290, 11 inference calls
+  - 01a08c63-f3a4-710d-9ff8-f319ce43b5cd: gpt-5.6-luna $0.0086, 3 inference calls
+  - delegate-530865e254ac3bfc44bbfbe37c17a7ba: gpt-5.6-luna $0.0287, 6 inference calls
+- transcript: ralph/.run/20260910T073659Z/021-ralph-15.json
+- transcript: ralph/.run/20260910T073659Z/022-ralph-15.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 16 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the real implementation before making changes.
+
+Starting the required environment check and inventory.
+
+The queue has nine pending implementation entries, so this iteration binds all nine and will not defer any.
+
+Chose these 9 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract — they are all pending items in the current queue.
+
+Tracing the nine locked items through source, tests, and drives before changing code.
+
+The source audit found several prior slices are still only partially integrated: image dry-run/stub paths, guest tape transport documentation and real guest driver, UFFD wrapper without branch orchestration, and lifecycle status/error paths that still return HTTP 200. Continuing with the highest-risk root causes rather than relabeling them.
+
+Closed one concrete image-pipeline gap by linting the generated post-olddefconfig kernel configuration, and corrected run status exit mapping so active runs cannot report success. Adding focused tests now, then tracing the remaining end-to-end blockers.
+
+The package unit test passed; the server crate has no library target, so the attempted --lib selector was invalid. Running its binary test target next, then I will repair any compile or contract failures instead of treating the selector error as a product failure.
+
+Run creation now allocates the configured local backend first, journals the backend identity and full sandbox metadata transactionally, and cleans the sandbox on journal failure. This removes the acknowledged-run-with-no-sandbox path; compiling and testing before the next change.
+
+The focused server suite is green after real backend allocation and active-run exit-code fixes. Handing the focused build/test protocol to the single test subagent while I inspect remaining acceptance plumbing.
+
+The single build/test subagent found all focused tests green but cargo fmt --check failed at the new exit-code match. Applying rustfmt, then I will run the exact required gate before committing.
+
+Rustfmt is now clean after the test subagent finding. The remaining queue entries still require real guest/runtime work, so I am preserving them as open and moving to the mandated full gate rather than manufacturing DONE markers.
+
+The full gate passed warm-up, clippy, workspace tests, H0-H5, H7-H9, M9-M13, and package drives, but H6 failed and the command hit the 600-second limit during the real package build. Inspecting the H6 log and isolating that failure first, as required.
+
+H6 failed after the real host probe passed, while the fleet phase was running. Re-running drive/h/h6.sh in isolation to capture the root error and repair it, not classify the failure as a flake.
+
+The isolated H6 run passed all checks in 3.47 seconds, proving the gate failure was host contention rather than a reproducible regression. The package-build phase exceeded the gate call limit, so I am running it alone to finish its real-image validation and reuse its stamp.
+
+The isolated package drive did not reach image validation because the timed-out gate left a stale baud-server holding port 7734. Cleaning only that stale project server, then rerunning the drive with the same real inputs.
+
+The real image drive exposed that CONFIG_BAUD_TAPE_DEVICE is an out-of-tree symbol and disappears from stock Kconfig output; rejecting that expected absence broke the acceptance path. Kept fragment-level tape-driver validation and narrowed the post-olddefconfig check to effective real-timer violations, preserving the useful root-cause guard without a false failure.
+
+The effective-config check still failed the real image drive because the stock kernel resolves a forbidden timer symbol through dependencies; the drive only reported a transport failure, so I am removing this unverified guard rather than hiding an unexplained failure. The complete post-Kconfig lint remains an open part of G2 and is not being marked DONE.
+
+The real image build CLI drive is green after restoring the valid stock-kernel behavior. It produced a fresh bzImage and initramfs with a content hash through the live server and CLI. G2 remains open because spec-to-image and the guest-side endpoint are still missing; continuing with the full gate for the integrated changes.
+
+The second full gate is green: 25 passed, 0 failed, 1 skipped in 9m40s. H6 passed on the uncontended rerun, and the real host probe, placement, doctor, and fleet checks satisfy the selected G8 contract, which is now collapsed to DONE. The other locked entries still have concrete missing implementation paths, so I am continuing rather than closing the step early.
+
+Added the missing advertised tape probe-caps route alias and synchronized the CLI to use it. The alias now reaches the existing backend capability endpoint, while the deeper identity/journal and real-agent contracts remain open and are not being relabeled.
+
+The synchronized probe-caps route and CLI compile and pass the server/CLI suites. Running the exact full gate once more after this route change; no post-push checks will be substituted for it.
+
+The final full gate is green: 25 passed, 0 failed, 1 skipped in 7m48s. Re-reading the locked queue now: G8 is DONE; G2 image/tape, G3 branching, all three G5 contracts, G6, and G7 remain pending because their real end-to-end paths are not implemented. I will commit the verified concrete fixes and preserve those open queue entries for the next step rather than falsifying completion.
+
+## 2026-09-10T20:33:13 UTC - Changes committed.
+- Implemented real backend allocation and cleanup for run-start ownership.
+- Corrected active-run exit-code reporting and synchronized the advertised tape probe-caps route.
+- Files changed: `crates/baud-server/src/routes/runs.rs`, `crates/baud-server/src/main.rs`, `crates/baud-cli/src/cmds/tape.rs`, `todo-build.md`, `ralph/progress.txt`.
+- **Brief description of changes:**
+  - Run creation now allocates a real local sandbox before acknowledging and journals its backend identity and resource metadata.
+  - Backend resources are deleted on transaction or journal failure.
+  - Pending and active run states return CLI exit code 1 instead of false success.
+  - The CLI probe-caps command uses its advertised server route.
+  - G8 host safety is collapsed to DONE after green real H0/H6 and full-gate evidence.
+  - Full gate passed: 25 passed, 0 failed, 1 skipped in 7m48s.
+---

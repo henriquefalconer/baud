@@ -164,7 +164,7 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
             }
         }
         TapeAction::ProbeCaps { id } => {
-            let v = c.get(&format!("/tapes/{id}/endpoint")).await?;
+            let v = c.get(&format!("/tapes/{id}/probe-caps")).await?;
             print_value(&v, json);
         }
     }
