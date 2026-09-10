@@ -1401,3 +1401,25 @@ Final prune: no additional task items were marked DONE after reconciliation. Rec
   - The real Buildroot/Nix image and guest tape endpoint remain incomplete, while Ubuntu H9 and Mario are blocked by their measured boot and runtime dependency failures.
 ---
 
+
+## 2026-09-10T07:36:50 UTC (4min) - Session usage — ralph-1 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2624 (summed from 9 session transcripts: main $0.0614 · subagents $0.2010)
+- tokens input 981,569 · cache-read 1,796,096 · cache-write 0 · output 25,110 · reasoning 5,011
+- context 64,594 tok peak of 272K (24%) across 27 inference calls, monotonic
+- models gpt-5.6-luna $0.2624 (in 981,569 / out 30,121 / cache-read 1,796,096)
+- subagents (8) pi process x8
+  - delegate-ca60e47421031d6ccd722275b4b49607: gpt-5.6-luna $0.0306, 7 inference calls
+  - delegate-aa05ef5cc7e304d45937bd7ef120de20: gpt-5.6-luna $0.0242, 6 inference calls
+  - delegate-24e9046b45a91e672c86d6140a13cdbe: gpt-5.6-luna $0.0246, 5 inference calls
+  - delegate-cfef4bd1162b2d55cad90ad64dd2466c: gpt-5.6-luna $0.0244, 6 inference calls
+  - delegate-41dc20e3aadd23595180ead5d0b91c55: gpt-5.6-luna $0.0290, 5 inference calls
+  - delegate-d4bb4ed31e9296a6eb2f51ddf961e203: gpt-5.6-luna $0.0212, 6 inference calls
+  - delegate-9cf252c73cd61c12baf2d6528c2f2995: gpt-5.6-luna $0.0245, 5 inference calls
+  - delegate-1006df4860d0f98d9bacf257d6d11a39: gpt-5.6-luna $0.0224, 5 inference calls
+- transcript: ralph/.run/20260910T073253Z/001-ralph-1.json
+
+## 2026-09-10T07:36:56 UTC - RUN TOTALS (ralph shell loop)
+- sessions: 1; ralph iterations: 1
+- ralph ended COMPLETE
+- total cost $0.2624 (summed from session usage)
+---
