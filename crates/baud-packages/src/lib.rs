@@ -242,13 +242,27 @@ fn build_real(spec: &WorkloadSpec) -> Result<BuildResult> {
     }
 
     let store_path = String::from_utf8(path_info.stdout)?.trim().to_string();
+    if store_path.is_empty() {
+        bail!("nix path-info returned an empty store path for the built guest");
+    }
 
-    // Compute closure hash: hash of sorted closure paths
+    // Compute closure hash: hash of sorted closure paths. Do not hash an empty stdout if the
+    // recursive query failed, because that would turn a missing closure into a successful but
+    // meaningless image result.
     let closure_out = std::process::Command::new("nix")
         .args(["path-info", "--recursive", &store_path])
         .output()?;
+    if !closure_out.status.success() {
+        bail!(
+            "nix path-info --recursive failed for {store_path}:\n{}",
+            String::from_utf8_lossy(&closure_out.stderr)
+        );
+    }
     let closure_text = String::from_utf8(closure_out.stdout)?;
-    let mut paths: Vec<&str> = closure_text.lines().collect();
+    let mut paths: Vec<&str> = closure_text.lines().filter(|line| !line.is_empty()).collect();
+    if paths.is_empty() {
+        bail!("nix path-info --recursive returned no closure paths for {store_path}");
+    }
     paths.sort();
     let closure_hash = blake3::hash(paths.join("\n").as_bytes());
 

@@ -11,6 +11,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 const UFFD_API: u64 = 0xAA;
+const UFFD_FEATURE_PAGEFAULT_FLAG_WP: u64 = 1 << 0;
 const UFFD_FEATURE_MINOR: u64 = 1 << 16;
 const UFFDIO_REGISTER_MODE_MISSING: u64 = 1 << 0;
 const UFFDIO_REGISTER_MODE_WP: u64 = 1 << 1;
@@ -107,9 +108,13 @@ impl CowRegion {
             return Err(io::Error::last_os_error().into());
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) };
+        // Write-protect mode has its own feature bit. Negotiating only MINOR makes the
+        // subsequent registration look valid on some kernels but leaves WP page faults
+        // unsupported, which turns a claimed CoW region into an unhandled fault path.
+        let requested_features = UFFD_FEATURE_MINOR | UFFD_FEATURE_PAGEFAULT_FLAG_WP;
         let mut api = Api {
             api: UFFD_API,
-            features: UFFD_FEATURE_MINOR,
+            features: requested_features,
             ..Api::default()
         };
         if unsafe { libc::ioctl(fd.as_raw_fd(), UFFDIO_API, &mut api) } < 0 {
@@ -118,8 +123,8 @@ impl CowRegion {
         if api.api != UFFD_API {
             return Err(Error::Api(api.api, UFFD_API));
         }
-        if api.features & UFFD_FEATURE_MINOR == 0 {
-            return Err(Error::MissingFeature(UFFD_FEATURE_MINOR));
+        if api.features & requested_features != requested_features {
+            return Err(Error::MissingFeature(requested_features & !api.features));
         }
         let required_ioctls = UFFDIO_REGISTER_IOC | UFFDIO_WRITEPROTECT_IOC | UFFDIO_CONTINUE_IOC;
         if api.ioctls & required_ioctls != required_ioctls {
@@ -187,6 +192,13 @@ impl CowRegion {
 mod tests {
     use super::*;
     #[test]
+    fn requested_features_include_minor_faults_and_write_protection() {
+        let requested = UFFD_FEATURE_MINOR | UFFD_FEATURE_PAGEFAULT_FLAG_WP;
+        assert_ne!(requested & UFFD_FEATURE_MINOR, 0);
+        assert_ne!(requested & UFFD_FEATURE_PAGEFAULT_FLAG_WP, 0);
+    }
+
+    #[test]
     fn ioctl_numbers_match_linux_abi() {
         assert_eq!(UFFDIO_API, 0xC018AA3F);
         assert_eq!(UFFDIO_REGISTER, 0xC020AA00);
@@ -196,7 +208,10 @@ mod tests {
 
     #[test]
     fn unaligned_regions_fail_before_touching_userfaultfd() {
-        assert!(matches!(CowRegion::open(1, 4096), Err(Error::UnalignedRange)));
+        assert!(matches!(
+            CowRegion::open(1, 4096),
+            Err(Error::UnalignedRange)
+        ));
         assert!(matches!(CowRegion::open(0, 0), Err(Error::UnalignedRange)));
     }
 }

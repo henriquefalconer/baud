@@ -1619,3 +1619,68 @@ The image drive has now run beyond the gate’s nominal estimate but is still co
   - The CLI forwards SSE bytes until disconnect.
 
 ---
+
+Push completed; confirming only the remote tip and working-tree cleanliness, with no post-push rebuild or test rerun.
+
+## 2026-09-10T10:07:43 UTC (1h24min) - Session usage — ralph-3 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1353202, receipt ralph/.run/20260910T073659Z/003-ralph-3.json.processes/receipt.json)
+- cost $0.4261 (summed from 5 session transcripts: main $0.3289 · subagents $0.0972)
+- tokens input 752,257 · cache-read 12,101,120 · cache-write 0 · output 28,018 · reasoning 6,463
+- context 183,387 tok peak of 272K (67%) across 105 inference calls, monotonic
+- models gpt-5.6-luna $0.4261 (in 752,257 / out 34,481 / cache-read 12,101,120)
+- subagents (4) pi process x4
+  - delegate-5ea87d798191c7206b9aeb78e7f18f98: gpt-5.6-luna $0.0226, 4 inference calls
+  - delegate-7f2bcb0651423bed7f7effde8fdc254a: gpt-5.6-luna $0.0249, 9 inference calls
+  - delegate-8af3af466771b37651cd3156ca1d2d7f: gpt-5.6-luna $0.0264, 6 inference calls
+  - delegate-9ff6c5472cde4bb2d4a9017a205f2a88: gpt-5.6-luna $0.0233, 4 inference calls
+- transcript: ralph/.run/20260910T073659Z/003-ralph-3.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in @todo-build.md, then studying the specifications and code paths before implementing and verifying the selected batch.
+
+Starting the required KVM host setup before inspection.
+
+Chose these 8 items: G1 exact-boundary interrupt proof and enforced capability; G2 reproducible image pipeline; G2 guest tape endpoint and harness; G3 write-set-scaled branching; G3 serial wake for shell continuation; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof; G7 real Mario guest proof; G8 production host safety contract; G8 relocate distributed validation images — all 8 pending queue entries are binding for this iteration.
+
+Selection correction: the queue has 12 pending entries, not 8. The binding ten are G1 exact-boundary interrupt proof and enforced capability; G2 reproducible image pipeline; G2 guest tape endpoint and harness; G3 write-set-scaled branching; G3 serial wake for shell continuation; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof; G7 real Mario guest proof. G8 host safety and G8 image relocation remain for a later step.
+
+Auditing selected paths: existing shell continuation is real but explicitly lacks IRQ4 wake; userfaultfd is only a wrapper and is not integrated into Multiverse; Mario remains a simulation bridge; Ubuntu drive still uses a fixture.
+
+Fixed the UFFD negotiation bug: CoW setup now requests and verifies the write-protect feature as well as minor faults, so unsupported WP cannot be reported as a usable region. Waiting on the required build/test audit while continuing source review.
+
+Re-reading the queue before any status decision: the ten selected entries remain open and none can be honestly collapsed without their real acceptance paths. No fallback or fixture-only result will be marked DONE.
+
+Checking formatting after the UFFD feature-negotiation change; the required build worker is still running independently.
+
+Hardened the real Nix build path: empty or failed recursive closure metadata now fails with a stage-specific diagnostic instead of returning a false successful hash. The build worker is still running the full verification protocol.
+
+Formatting check found pre-existing repository-wide rustfmt drift in tracing and vcpu files; the two edited files are now individually formatted. I am not reformatting unrelated code while the gate worker completes.
+
+The fresh gate run has passed warm-up and the expensive real H5 checks, including 1000 independent KVM branches and restored shell continuation; it is now completing remaining cancellation/package phases.
+
+The single verification worker ran the exact gate through all reported H/M/package units, with every completed unit PASS, but its 600-second gate call timed out before the protocol reached a terminal green result. I am now validating the two edited crates directly before recording the timeout honestly.
+
+Focused verification is green: baud-packages (45 passed, 2 prerequisite-gated ignored) and baud-snapshot (39 passed) pass with the new checks. The authoritative gate reached all listed completed units with PASS, but timed out at 600 seconds before terminal completion; the selected real image/tape/UFFD/IRQ/auth/Ubuntu/Mario integrations remain open and are not being mislabeled DONE.
+
+## 2026-09-10T10:25:21 UTC - Changes committed.
+
+- Hardened UFFD feature negotiation and real Nix closure metadata validation.
+
+- Files changed: crates/baud-snapshot/src/userfaultfd.rs, crates/baud-packages/src/lib.rs, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - UFFD CoW setup now requires both minor-fault and write-protect feature support.
+
+  - Recursive Nix closure failures and empty metadata fail closed with diagnostics.
+
+  - Focused tests passed; full gate timed out after passing all completed units, so the ten locked queue entries remain open.
+
+---
