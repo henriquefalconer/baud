@@ -2577,3 +2577,75 @@ The final full gate is green: 25 passed, 0 failed, 1 skipped in 7m48s. Re-readin
   - G8 host safety is collapsed to DONE after green real H0/H6 and full-gate evidence.
   - Full gate passed: 25 passed, 0 failed, 1 skipped in 7m48s.
 ---
+
+## 2026-09-10T20:33:58 UTC (58min) - Session usage — ralph-16 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3361 (summed from 6 session transcripts: main $0.2322 · subagents $0.1039)
+- tokens input 617,362 · cache-read 9,005,568 · cache-write 0 · output 27,096 · reasoning 7,916
+- context 173,962 tok peak of 272K (64%) across 72 inference calls, monotonic
+- models gpt-5.6-luna $0.3361 (in 617,362 / out 35,012 / cache-read 9,005,568)
+- subagents (5) pi process x5
+  - delegate-bfce9a36a2417bf464dfc8ccb5110b52: gpt-5.6-luna $0.0224, 5 inference calls
+  - delegate-47da3d0cd0b7b8f6cb008b3b42760e90: gpt-5.6-luna $0.0272, 6 inference calls
+  - delegate-7dc665d523d78ab42a590b971cde25ae: gpt-5.6-luna $0.0234, 6 inference calls
+  - delegate-cf875c8262d7d989e46ff37af2e1663b: gpt-5.6-luna $0.0213, 5 inference calls
+  - 01a08cd8-ad8a-7782-9d24-e39eb1021ae5: gpt-5.6-luna $0.0095, 8 inference calls
+- transcript: ralph/.run/20260910T073659Z/023-ralph-16.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 17 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in @todo-build.md, studying the specs, then implementing and validating the full batch.
+
+Resetting the required perf_event setting before inspection.
+
+Locked the eight pending queue entries after reading todo-build.md; inspecting their code paths and acceptance tests now.
+
+The queue contains eight pending outcomes, not ten; all eight are locked for this step. Reading the server, snapshot, image, Ubuntu, and Mario paths before edits.
+
+Initial code search shows substantial prior plumbing but the queue still lacks real integration in several paths; awaiting repository audits before choosing concrete fixes.
+
+Specification study confirms the locked batch must preserve workload-agnostic core paths, fail closed on missing guest artifacts, and validate real CLI/server execution. Collecting implementation audit results next.
+
+Fixed the run-start API to return 4xx/5xx transport errors instead of HTTP 200 JSON failures, preserving journal cleanup on rejected backend and database paths. Updating tests and continuing the selected G5 lifecycle work.
+
+Checking the remaining audit deliverables and repository state while the validation subagent runs independently.
+
+Audits confirm the eight locked entries remain genuinely open, with explicit partial paths in G2/G3/G5/G6/G7. The first code fix is complete; now running static checks and preparing the next integrated change.
+
+Validation subagent returned only its targeted result and did not provide the nested gate completion; checking the gate process and logs before continuing.
+
+The full gate log reports every unit PASS with no FAIL rows, including build, clippy, workspace tests, H-series, M-series, and package cancellation coverage.
+
+Unified persistent KVM ownership with the server cancellation registry: persisted run IDs now reuse the existing abort token, disconnect guards attach to it, and only the creator removes it. Formatting and re-running targeted validation next.
+
+The owner requested a foreground verification rerun. Running the exact mandated bash drive/gate.sh now without backgrounding, then I will close the iteration.
+
+The foreground gate exposed a real regression: h9 now correctly refuses the absent Ubuntu image, so the gate fails before any VM run. Checking the documented external artifact path before deciding the smallest honest repair.
+
+The h9 hardening cannot pass the repository gate without the external Ubuntu artifact and full disk boot wiring, so I reverted that gate-breaking drive-only change rather than hiding the missing input behind a skip. Keeping the verified server ownership/API fixes and rerunning the exact foreground gate.
+
+Foreground validation rerun after removing the unavailable-artifact regression.
+
+The previous foreground gate call hit the tool timeout after all visible phase-3 units passed; rerunning the exact command for its final summary.
+
+The repeated exact foreground gate is green: 25 passed, 0 failed, 1 skipped. Re-reading the locked queue before committing; the selected broad G2/G3/G5/G6/G7 entries remain pending, while this iteration’s concrete ownership and API fixes are verified.
+
+## 2026-09-10T21:10:57 UTC - Changes committed.
+- Hardened persistent KVM run ownership and API failure signaling.
+- Files changed: crates/baud-server/src/state.rs, crates/baud-server/src/routes/run_kvm.rs, crates/baud-server/src/routes/runs.rs, crates/baud-server/src/routes/shell_into.rs, ralph/progress.txt.
+- **Brief description of changes:**
+  - Shared persisted run IDs now reuse the existing cancellation token instead of replacing an active worker token.
+  - KVM disconnect guards attach to the shared ownership token and only remove registry entries they created.
+  - Invalid run starts now return structured HTTP 4xx/5xx responses instead of HTTP 200 JSON errors.
+  - Corrected the shell route documentation to reflect router-level bearer authentication.
+  - Foreground pre-push gate: 25 passed, 0 failed, 1 skipped.
+---
+
+Appending the verified progress block before committing all changes and pushing the main tip.
+
+Commit is created with the foreground gate result recorded; pushing main and checking the remote tip and clean worktree now.

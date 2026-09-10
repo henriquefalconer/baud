@@ -360,9 +360,15 @@ pub(crate) struct CancelGuard {
 
 impl CancelGuard {
     pub(crate) fn new() -> Self {
-        CancelGuard {
-            flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+        Self::from_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
+    }
+
+    /// Attach a route-local guard to the server's shared run ownership token. This lets an
+    /// explicit abort and a dropped HTTP/WebSocket handler stop the same blocking worker.
+    pub(crate) fn from_flag(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        CancelGuard { flag }
     }
 
     /// A handle on the flag to hand to the blocking side (`Multiverse::set_cancel_flag`).
@@ -472,7 +478,16 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     // this future because the client's socket went away, the guard drops, the flag flips, and the
     // boot below returns `RunLoopError::Cancelled` at its next loop-head check instead of driving
     // a whole KVM guest to completion for nobody. See `CancelGuard`'s doc.
-    let cancel = CancelGuard::new();
+    // Persistent runs use the same ownership token as `/runs/:id/abort`; stateless calls still
+    // get a handler-local token so disconnect cancellation remains immediate.
+    let registered_run_id = body.run_id.clone();
+    let (cancel, owns_registry_entry) = match registered_run_id.as_deref() {
+        Some(run_id) => {
+            let (flag, inserted) = state.register_or_get_run(run_id);
+            (CancelGuard::from_flag(flag), inserted)
+        }
+        None => (CancelGuard::new(), false),
+    };
     let cancel_flag = cancel.flag();
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
@@ -503,6 +518,11 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     // is only to make it explicit that it had to stay alive across the `.await` above — that is
     // the entire mechanism, and a future "unused binding" tidy-up would silently remove it.
     drop(cancel);
+    if owns_registry_entry {
+        if let Some(run_id) = registered_run_id.as_deref() {
+            state.remove_run(run_id);
+        }
+    }
 
     match result {
         Ok(((console_output, ram_hash, _mark_branch_step, _node_id), records)) => {

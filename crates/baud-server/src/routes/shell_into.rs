@@ -31,8 +31,9 @@
 // ever sends the real `Close` (`send_task`, once `output_rx` drains dry) — the first and only
 // close frame on the connection, so there is no race to lose.
 //
-// No auth (matches every other route in this crate — `AppState`'s own doc, and this process binds
-// `127.0.0.1` only): todo.md's own "and auth" note for this feature remains open, tracked there.
+// Authentication is applied by the router middleware in `main.rs`; the WebSocket upgrade carries
+// the same `Authorization: Bearer` requirement as the REST and SSE routes. The handler itself
+// stays focused on restoring the universe and bridging the live console.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};

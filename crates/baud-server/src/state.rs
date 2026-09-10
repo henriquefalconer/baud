@@ -48,6 +48,21 @@ impl AppState {
         token
     }
 
+    /// Return the existing ownership token when a persisted run is already live, otherwise
+    /// register one. Replacing a token here would make `/runs/:id/abort` cancel the wrong worker.
+    pub fn register_or_get_run(&self, run_id: &str) -> (Arc<AtomicBool>, bool) {
+        let mut registry = self
+            .run_cancellations
+            .write()
+            .expect("run cancellation registry poisoned");
+        if let Some(token) = registry.get(run_id) {
+            return (Arc::clone(token), false);
+        }
+        let token = Arc::new(AtomicBool::new(false));
+        registry.insert(run_id.to_owned(), Arc::clone(&token));
+        (token, true)
+    }
+
     /// Cancel a live run. Missing IDs are reported to the caller instead of creating a token
     /// that no worker will ever observe.
     pub fn cancel_run(&self, run_id: &str) -> bool {

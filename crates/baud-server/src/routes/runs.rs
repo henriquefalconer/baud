@@ -14,6 +14,7 @@
 use crate::AppState;
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Json,
 };
 use serde::Deserialize;
@@ -55,11 +56,32 @@ fn default_backend() -> String {
 // POST /runs — start a run
 // ---------------------------------------------------------------------------
 
-pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>) -> Json<Value> {
-    // 1. Lint the spec via baud-init
+type ApiError = (StatusCode, Json<Value>);
+
+fn bad_request(message: impl Into<String>) -> ApiError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": message.into() })),
+    )
+}
+
+fn internal_error(message: impl Into<String>) -> ApiError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message.into() })),
+    )
+}
+
+pub async fn start(
+    State(state): State<AppState>,
+    Json(body): Json<RunStartBody>,
+) -> Result<Json<Value>, ApiError> {
+    // 1. Lint the spec via baud-init. Invalid input must not be reported as an HTTP 200
+    // success, because the CLI and automation use the transport status to distinguish a
+    // rejected request from an accepted run.
     let spec_doc = match baud_init::lint(&body.spec) {
         Ok(doc) => doc,
-        Err(e) => return Json(json!({ "error": format!("spec lint error: {e}") })),
+        Err(e) => return Err(bad_request(format!("spec lint error: {e}"))),
     };
 
     // 2. Compute spec hash
@@ -74,9 +96,10 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
     // 4. Journal ownership before acknowledging the run. A run without a durable tape
     // reservation cannot be replayed or cancelled safely, so create both rows in one transaction.
     if body.backend != "local" && body.backend != "daytona" {
-        return Json(
-            json!({ "error": format!("unsupported backend '{}'; expected local or daytona", body.backend) }),
-        );
+        return Err(bad_request(format!(
+            "unsupported backend '{}'; expected local or daytona",
+            body.backend
+        )));
     }
     let run_id = format!(
         "run-{}",
@@ -90,9 +113,10 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
     // Allocate the real backend sandbox before acknowledging the run. The backend's ID is the
     // durable tape identity, so a successful response always names a sandbox the server owns.
     if body.backend != "local" {
-        return Json(json!({
-            "error": format!("backend '{}' is unavailable; only the configured local backend is enabled", body.backend)
-        }));
+        return Err(bad_request(format!(
+            "backend '{}' is unavailable; only the configured local backend is enabled",
+            body.backend
+        )));
     }
     let tape_id = match state
         .tape_backend
@@ -103,14 +127,18 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
         .await
     {
         Ok(id) => id,
-        Err(e) => return Json(json!({ "error": format!("backend sandbox creation failed: {e}") })),
+        Err(e) => {
+            return Err(internal_error(format!(
+                "backend sandbox creation failed: {e}"
+            )))
+        }
     };
     let now = crate::state::unix_now() as i64;
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(e) => {
             let _ = state.tape_backend.delete(&tape_id).await;
-            return Json(json!({ "error": format!("db transaction error: {e}") }));
+            return Err(internal_error(format!("db transaction error: {e}")));
         }
     };
     let tape_result = sqlx::query(
@@ -127,7 +155,7 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
     if let Err(e) = tape_result {
         let _ = tx.rollback().await;
         let _ = state.tape_backend.delete(&tape_id).await;
-        return Json(json!({ "error": format!("tape journal error: {e}") }));
+        return Err(internal_error(format!("tape journal error: {e}")));
     }
     let result = sqlx::query(
         "INSERT INTO runs (id, spec_content, spec_hash, nix_ref, closure_hash, strategy, tactics, seed, budget_minutes, tape_id, status, created_at, updated_at)
@@ -150,7 +178,7 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
     match result {
         Ok(_) => {
             if let Err(e) = tx.commit().await {
-                return Json(json!({ "error": format!("db commit error: {e}") }));
+                return Err(internal_error(format!("db commit error: {e}")));
             }
             state.register_run(&run_id);
             let db = state.db.clone();
@@ -174,7 +202,7 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
                     .expect("run cancellation registry poisoned")
                     .remove(&run_id_clone);
             });
-            Json(json!({
+            Ok(Json(json!({
                 "id": run_id,
                 "tape_id": tape_id,
                 "spec_hash": spec_hash,
@@ -185,11 +213,11 @@ pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>
                 "status": "pending",
                 "nodes": spec_doc.nodes.len(),
                 "created_at": now,
-            }))
+            })))
         }
         Err(e) => {
             let _ = state.tape_backend.delete(&tape_id).await;
-            Json(json!({ "error": format!("db error: {e}") }))
+            Err(internal_error(format!("db error: {e}")))
         }
     }
 }
