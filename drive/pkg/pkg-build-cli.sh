@@ -118,18 +118,19 @@ pass "bzImage written to $OUTPUT_DIR/bzImage ($(stat -c%s "$OUTPUT_DIR/bzImage")
 [[ -s "$OUTPUT_DIR/initramfs.cpio.gz" ]] || fail "output initramfs.cpio.gz missing or empty"
 pass "initramfs.cpio.gz written to $OUTPUT_DIR/initramfs.cpio.gz ($(stat -c%s "$OUTPUT_DIR/initramfs.cpio.gz") bytes)"
 
+log "Booting the freshly emitted image through the real KVM CLI path..."
+BOOT_JSON="$($BAUD run kvm --kernel "$OUTPUT_DIR/bzImage" --initramfs "$OUTPUT_DIR/initramfs.cpio.gz" --json)" \
+    || fail "freshly built image failed real KVM boot"
+BOOT_OK="$(echo "$BOOT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok", False))')"
+[[ "$BOOT_OK" == "True" ]] || fail "freshly built image returned ok=false: $BOOT_JSON"
+pass "freshly built bzImage + initramfs booted through real KVM"
+
 IMAGE_HASH="$(echo "$BUILD_JSON" | grep -oE '"image_hash":[[:space:]]*"[0-9a-f]+"' | grep -oE '[0-9a-f]{64}')"
 [[ -n "$IMAGE_HASH" ]] || fail "response missing a 64-hex-char image_hash"
 pass "image_hash present: $IMAGE_HASH"
 
-# Boot verification of this exact kernel+initramfs recipe is already covered on real /dev/kvm by
-# guest_kernel_boots_to_userspace (drive/h/h7.sh) against the hand-built fixture bzImage/initramfs —
-# same kernel_src/config_fragment/init.c recipe this script drives through the CLI/server, so a
-# byte-identical bzImage (already proven reproducible by drive/pkg/pkg-image-build.sh) is expected
-# here too. `baud run kvm --initramfs ... --periodic-timer-period-rcb ...` now exists
-# (drive/pkg/pkg-boot-cli.sh boots the checked-in fixture pair through it end-to-end) — booting this
-# script's own freshly-built OUTPUT_DIR/{bzImage,initramfs.cpio.gz} through it directly, instead
-# of only the checked-in fixture copy, is still open future work.
+# The image above is now booted directly, not substituted with a checked-in fixture. A failed
+# KVM boot is a failed image build even when the two output files and hashes exist.
 
 echo ""
 echo "=== baud image build CLI/server wiring: PASSED ==="

@@ -2705,3 +2705,59 @@ Running the workspace clippy pass after the authentication hardening; this is th
   - Workspace tests and clippy pass.
 
 ---
+
+## 2026-09-10T21:17:41 UTC (6min) - Session usage — ralph-18 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.1959 (summed from 5 session transcripts: main $0.0945 · subagents $0.1015)
+- tokens input 571,438 · cache-read 3,149,824 · cache-write 0 · output 15,535 · reasoning 3,282
+- context 139,173 tok peak of 272K (51%) across 31 inference calls, monotonic
+- models gpt-5.6-luna $0.1959 (in 571,438 / out 18,817 / cache-read 3,149,824)
+- subagents (4) pi process x4
+  - delegate-20c22bc36bfe4c9ed76e34d8aa5972d8: gpt-5.6-luna $0.0223, 4 inference calls
+  - delegate-dc2d3c32adbeba768dae11eb1b3cbc3f: gpt-5.6-luna $0.0274, 8 inference calls
+  - delegate-ac354aaeaa7c16b304d5ed6a5082e078: gpt-5.6-luna $0.0267, 5 inference calls
+  - delegate-337d8865948857da07ab3f863df979da: gpt-5.6-luna $0.0251, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/026-ralph-18.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 19 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the full batch.
+
+Chose these 8 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof — they are all 8 pending items in the implementation queue.
+
+Selected batch recorded. Inspecting repository implementation paths before edits.
+
+Study complete: audits confirmed the selected queue is genuinely open. I tightened public route aliases and made the Mario drive fail closed instead of injecting synthetic frames or skipping reconstruction. Running focused validation next.
+
+Formatter found only the new syscall alias layout; applying rustfmt, then running focused server tests and the Mario shell syntax check.
+
+The first focused command used a nonexistent library target; rerunning the package test target exactly as the workspace defines it.
+
+Focused server tests pass: 56/56, and the tightened Mario/H9 scripts parse. The real G2/G3/G6/G7 gaps remain explicit, so I am auditing the verification result before deciding the next implementation slice.
+
+The false-positive acceptance paths are now removed: Mario requires real frame output and reconstruction, and H9 requires explicit Ubuntu artifacts instead of timer-guest stand-ins. Preserving these failures is part of the selected work while the real guest/runtime plumbing is completed.
+
+The package acceptance drive now boots its own emitted bzImage/initramfs through `baud run kvm`; no checked-in fixture can make image build pass. Checking formatting and shell syntax before the gate result arrives.
+
+The real-image and real-Ubuntu drives are now fail-closed and the package drive exercises a fresh boot. I am checking whether the pinned Ubuntu artifact fetch can supply the remaining H9 inputs before the final validation.
+
+Route aliases compile and shell checks are green. The verification child is still running the required workspace gate; no selected item is being marked DONE until its real acceptance path is green.
+
+The current diff is clean and limited to real acceptance-path hardening. The gate child is still running; I am not claiming completion or collapsing any queue item.
+
+The verification subagent timed out at 600s before producing a gate result. Re-running the exact gate in the foreground now so timeout is diagnosed rather than treated as green.
+
+The gate exposed the tightened H9 drive failing immediately because the pinned external Ubuntu artifacts were absent. Fetching the documented verified artifacts into the configured external cache before rerunning H9.
+
+The H9 path now passes the verified raw Ubuntu image through the fingerprint API, using the existing read-only mapped virtio-blk overlay instead of merely checking that a rootfs exists. Compiling the route and CLI integration.
+
+The first compile caught an API mismatch: Multiverse accepts the mapped BlockBase, not a prebuilt backing store. Corrected that call and rerunning the focused server/CLI tests.
+
+Focused server/CLI tests are green: 56 server tests and the CLI target pass. Running the real Ubuntu H9 drive against the fetched, checksum-verified kernel and raw rootfs to expose the next boot-path failure.
+
+Focused validation after the H9 API wiring is green: server/CLI tests pass, rustfmt and all changed shell scripts parse. The real Ubuntu capture is deterministic with the pinned command line but still does not reach the login banner, so G6 remains open and the full gate is not yet green.

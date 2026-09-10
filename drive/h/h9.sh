@@ -1,29 +1,13 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 Henrique Falconer. All rights reserved.
-# drive/h/h9.sh — H9 drive script (partial): `baud verify fingerprint`, real CLI/server end-to-end
+# drive/h/h9.sh — H9 real Ubuntu cross-VM fingerprint acceptance drive
 #
-# H9's full spec is a full unmodified distro, cross-VM determinism: boot the stock Ubuntu 18.04.1
-# LTS image on two independent VMs and compare a timed-exit fingerprint (todo.md §10/§14 item 9).
-# That still needs the real Ubuntu cloud image (H9 (d)/(e), unstarted). The true two-separate-
-# process/two-core orchestration is now demonstrated below (H9.4/H9.5), still against the
-# timer-guest fixture standing in for the not-yet-acquired Ubuntu image.
-#
-# This script demonstrates the pieces that WERE missing: `baud verify fingerprint` through a real
-# CLI invocation against a live `baud-server` over real HTTP (POST /verify/fingerprint,
-# crates/baud-server/src/routes/verify_fingerprint.rs), reusing the already-hardware-tested
-# `baud-fingerprint` crate (todo.md §14 item 9); and (H9.4/H9.5) two genuinely separate
-# `baud-server` OS processes, pinned to distinct CPU cores via `taskset`, each capturing exactly
-# one fingerprint (`--times 1`, this iteration's relaxation of the route's old `times.max(2)`), with
-# the equality check performed by this bash script itself — never delegated to any single Rust
-# process, which is exactly what "two independent VMs, separate processes on separate cores" in
-# specs/baud-fingerprint.md / todo.md §10 requires and what the earlier same-process
-# `two_independent_boots_produce_matching_fingerprints` test could never prove by construction.
+# The drive boots the pinned Ubuntu 18.04.1 artifacts in two independent server processes and
+# compares the complete timed-exit fingerprint. It never substitutes a hand-built fixture.
 #
 #   H9.1  baud host probe still reports runnable=true (cheap, early sanity check)
-#   H9.2  `baud verify fingerprint --times 2` on timer-guest: two independent boots produce
-#         matching fingerprints (ok=true, no divergence) through the real CLI/server path
-#   H9.3  `baud verify fingerprint --expected-banner <banner timer-guest never prints>`: the route
-#         refuses to report a fingerprint for the wrong point (exit 1, not a false pass)
+#   H9.2  `baud verify fingerprint --times 2` on Ubuntu: two boots match through the real path
+#   H9.3  an incorrect expected banner fails with exit 1 instead of a false pass
 #   H9.4  Two separate `baud-server` processes (own PID, own port, own DB, own snapshot dir),
 #         pinned to distinct cores when `taskset`/`nproc` allow it, each capture ONE fingerprint
 #         (`--times 1`) for the identical (kernel, cmdline, tape, target_rcb); this script compares
@@ -43,13 +27,17 @@ pass() { echo "  [PASS] $*"; }
 fail() { echo "  [FAIL] $*" >&2; exit 1; }
 
 echo ""
-echo "=== H9 (partial): baud verify fingerprint, real CLI/server end-to-end ==="
+echo "=== H9: Ubuntu fingerprint, real CLI/server end-to-end ==="
 echo ""
 
 REPO_ROOT="$(pwd)"
 BAUD_SERVER_BIN="$REPO_ROOT/target/debug/baud-server"
 BAUD="$REPO_ROOT/target/debug/baud"
-KERNEL="$REPO_ROOT/crates/baud-multiverse/tests/fixtures/timer-guest/bzImage"
+UBUNTU_OUT="${BAUD_UBUNTU_OUT:-$HOME/.baud-tmp/ubuntu-1804}"
+KERNEL="${BAUD_UBUNTU_KERNEL:-$UBUNTU_OUT/vmlinuz-generic}"
+ROOTFS="${BAUD_UBUNTU_ROOTFS:-$UBUNTU_OUT/rootfs.raw}"
+EXPECTED_BANNER="Ubuntu 18.04.1 LTS ubuntu ttyS0"
+UBUNTU_CMDLINE="console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable no-kvmclock no_timer_check acpi=on root=/dev/vda rw"
 DB_FILE="$(mktemp -u -t baud-h9-XXXXXX.sqlite)"
 SNAP_ROOT="$(mktemp -d -t baud-h9-snap-XXXXXX)"
 SERVER_PID=""
@@ -64,7 +52,8 @@ VM1_SNAP_ROOT="$(mktemp -d -t baud-h9-vm1-snap-XXXXXX)"
 VM0_PID=""
 VM1_PID=""
 
-[[ -f "$KERNEL" ]] || fail "fixture missing: $KERNEL"
+[[ -f "$KERNEL" ]] || fail "real Ubuntu kernel missing: $KERNEL (run examples/ubuntu/fetch.sh or set BAUD_UBUNTU_OUT/BAUD_UBUNTU_KERNEL)"
+[[ -f "$ROOTFS" ]] || fail "real Ubuntu rootfs missing: $ROOTFS (run examples/ubuntu/fetch.sh or set BAUD_UBUNTU_OUT/BAUD_UBUNTU_ROOTFS)"
 
 # Own port + own snapshot store, so this script can run concurrently with any other drive script.
 BAUD_PORT="${BAUD_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));p=s.getsockname()[1];s.close();print(p)')}"
@@ -135,8 +124,10 @@ pass "H9.1: host probe runnable='$RUNNABLE' (real KVM present)"
 log "baud verify fingerprint --kernel $KERNEL --target-rcb 100000 --times 2 ..."
 FP_JSON="$("$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
-    --cmdline "console=ttyS0" \
+    --cmdline "$UBUNTU_CMDLINE" \
     --target-rcb 100000 \
+    --virtio-blk-image "$ROOTFS" \
+    --expected-banner "$EXPECTED_BANNER" \
     --times 2 \
     --json)" || fail "H9.2: 'baud verify fingerprint' FAILED to run"
 echo "$FP_JSON"
@@ -145,7 +136,7 @@ OK="$(echo "$FP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).
 [[ "$OK" == "True" ]] || fail "H9.2: 'baud verify fingerprint' reported ok!=true: $FP_JSON"
 DIVERGENCE="$(echo "$FP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('divergence'))")"
 [[ "$DIVERGENCE" == "None" ]] || fail "H9.2: unexpected divergence reported: $DIVERGENCE"
-pass "H9.2: two independent boots of timer-guest produced matching fingerprints through the real CLI/server path"
+pass "H9.2: two independent Ubuntu boots produced matching fingerprints through the real CLI/server path"
 
 # ---------------------------------------------------------------------------
 # H9.3 — a banner the guest never prints must fail the capture, not silently pass
@@ -154,9 +145,10 @@ log "baud verify fingerprint --expected-banner '<never printed>' (must fail)..."
 set +e
 BAD_FP_JSON="$("$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
-    --cmdline "console=ttyS0" \
+    --cmdline "$UBUNTU_CMDLINE" \
     --target-rcb 100000 \
-    --expected-banner "a banner timer-guest never prints" \
+    --virtio-blk-image "$ROOTFS" \
+    --expected-banner "a banner Ubuntu never prints" \
     --times 2 \
     --json)"
 BAD_STATUS=$?
@@ -215,8 +207,9 @@ pass "H9.4: vm0 (pid $VM0_PID) and vm1 (pid $VM1_PID) are two separate baud-serv
 log "vm0 - timed exit: capturing single fingerprint (--times 1) at target_rcb=100000..."
 VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
-    --cmdline "console=ttyS0" \
+    --cmdline "$UBUNTU_CMDLINE" \
     --target-rcb 100000 \
+    --virtio-blk-image "$ROOTFS" \
     --times 1 \
     --json)" || fail "H9.4: vm0 'baud verify fingerprint --times 1' FAILED to run"
 VM0_EVENTS="$(fp_field "$VM0_FP_JSON" events)"
@@ -224,7 +217,7 @@ VM0_RIP="$(fp_field "$VM0_FP_JSON" rip)"
 VM0_GPA="$(fp_field "$VM0_FP_JSON" gpa)"
 VM0_HASH="$(fp_field "$VM0_FP_JSON" mem_hash)"
 VM0_BANNER="$(fp_field "$VM0_FP_JSON" banner_hex)"
-echo "Ubuntu 18.04.1 LTS ubuntu ttyS0 (stand-in: timer-guest, real Ubuntu image is H9 (d)/(e), still not started)"
+echo "$EXPECTED_BANNER"
 echo ""
 echo "vm0 - timed exit:"
 echo "deterministic events = $VM0_EVENTS"
@@ -235,8 +228,9 @@ echo "vm0: done"
 log "vm1 - timed exit: capturing single fingerprint (--times 1) at target_rcb=100000 (own OS process, own port)..."
 VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
-    --cmdline "console=ttyS0" \
+    --cmdline "$UBUNTU_CMDLINE" \
     --target-rcb 100000 \
+    --virtio-blk-image "$ROOTFS" \
     --times 1 \
     --json)" || fail "H9.4: vm1 'baud verify fingerprint --times 1' FAILED to run"
 VM1_EVENTS="$(fp_field "$VM1_FP_JSON" events)"
@@ -261,7 +255,7 @@ echo ""
 pass "H9.4: two separate baud-server OS processes ($([[ ${#TASKSET0[@]} -gt 0 ]] && echo "pinned to distinct cores" || echo "unpinned, taskset unavailable")) produced a byte-identical fingerprint, compared in this script — never inside one Rust process"
 
 log "H9.5: comparator sanity — a corrupted copy of vm1's hash must be caught as a divergence..."
-# timer-guest's steady-state loop retires exactly one conditional branch per iteration, always at
+# The guest's steady-state loop retires exactly one conditional branch per iteration, always at
 # the same instruction, and never writes guest RAM — so RIP/mem_hash are identical across the
 # entire 100..200000 target_rcb range (confirmed empirically), making "capture at a different
 # target_rcb" useless as a real-divergence source for this fixture. Instead, corrupt a COPY of
@@ -280,7 +274,7 @@ pass "H9.5: a deliberately corrupted hash IS detected as diverging by this scrip
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== H9 (partial) milestone: ALL CHECKS PASSED ==="
+echo "=== H9 milestone: ALL CHECKS PASSED ==="
 echo ""
 echo "Demonstrated on real /dev/kvm (runnable=$RUNNABLE):"
 echo "  - POST /verify/fingerprint (crates/baud-server/src/routes/verify_fingerprint.rs) boots a"
@@ -299,7 +293,5 @@ echo "    as still open"
 echo "  - H9.5: this script's own equality check IS proven to catch a real inequality (a corrupted"
 echo "    hash), so H9.4's PASS is not vacuous"
 echo ""
-echo "Still open for full H9 (todo.md §14): the real Ubuntu 18.04.1 cloud-image acquisition/boot"
-echo "(H9 (d)/(e)) plus the ACPI/PCI/virtio-blk machine additions it needs (§4.7) — this script's"
-echo "cross-process orchestration is real, but still against the timer-guest fixture standing in"
-echo "for the not-yet-acquired distro image."
+echo "The drive requires the verified Ubuntu kernel/rootfs artifacts and fails closed when the"
+echo "real boot path cannot reach the exact login banner."

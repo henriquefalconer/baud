@@ -73,6 +73,9 @@ pub enum VerifyAction {
         /// no separate initramfs.
         #[arg(long)]
         initramfs: Option<String>,
+        /// Path to a raw read-only virtio-blk image on the server host; writes use a memory overlay.
+        #[arg(long)]
+        virtio_blk_image: Option<String>,
     },
 }
 
@@ -140,6 +143,7 @@ pub async fn run(cmd: VerifyCmd, c: &Client, json: bool) -> Result<()> {
             expected_banner,
             times,
             initramfs,
+            virtio_blk_image,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -156,6 +160,9 @@ pub async fn run(cmd: VerifyCmd, c: &Client, json: bool) -> Result<()> {
             }
             if let Some(initramfs) = initramfs {
                 body["initramfs_path"] = json!(initramfs);
+            }
+            if let Some(path) = virtio_blk_image {
+                body["virtio_blk_image_path"] = json!(path);
             }
 
             let v = c.post("/verify/fingerprint", &body).await?;

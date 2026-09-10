@@ -138,6 +138,10 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/{id}/obs", get(routes::obs::list))
         .route("/runs/{id}/obs", post(routes::obs::append))
         .route("/runs/{id}/obs/tail", get(routes::obs::tail))
+        // Keep the public command names and route names aligned. `run watch` is the live
+        // observation stream, while `obs get` is the same durable list with an explicit alias.
+        .route("/runs/{id}/watch", get(routes::obs::tail))
+        .route("/runs/{id}/observations", get(routes::obs::list))
         // Verify (M3)
         .route("/verify/determinism", post(routes::verify::determinism))
         .route(
@@ -172,6 +176,10 @@ fn build_router(state: AppState) -> Router {
         .route("/runs/{id}/ebpf", get(routes::tracing::list_ebpf))
         // Syscall log — plane 1 (M7)
         .route("/runs/{id}/syscalls", get(routes::tracing::list_syscalls))
+        .route(
+            "/runs/{id}/syscalls/get",
+            get(routes::tracing::list_syscalls),
+        )
         .route(
             "/runs/{id}/syscalls/tail",
             get(routes::tracing::tail_syscalls),

@@ -59,6 +59,9 @@ pub struct VerifyFingerprintBody {
     /// initramfs_path`. `None` for a guest with no separate initramfs.
     #[serde(default)]
     pub initramfs_path: Option<String>,
+    /// Read-only raw disk image for a real distro boot; guest writes use the in-memory overlay.
+    #[serde(default)]
+    pub virtio_blk_image_path: Option<String>,
 }
 
 fn default_cmdline() -> String {
@@ -104,6 +107,17 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
         None => None,
     };
 
+    let disk_path = match &body.virtio_blk_image_path {
+        Some(path) => {
+            if !std::path::Path::new(path).is_file() {
+                return Json(
+                    json!({ "ok": false, "error": format!("virtio_blk_image_path is not a readable file: {path}") }),
+                );
+            }
+            Some(PathBuf::from(path))
+        }
+        None => None,
+    };
     let times = body.times.max(1);
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
@@ -118,6 +132,7 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
             &cmdline,
             tape,
             initramfs.as_deref(),
+            disk_path.as_deref(),
             target_rcb,
             banner_tail_len,
             expected_banner.as_deref(),
@@ -179,6 +194,7 @@ fn boot_and_compare_fingerprints(
     cmdline: &str,
     tape: Vec<u8>,
     initramfs: Option<&[u8]>,
+    disk_path: Option<&Path>,
     target_rcb: u64,
     banner_tail_len: usize,
     expected_banner: Option<&[u8]>,
@@ -198,6 +214,13 @@ fn boot_and_compare_fingerprints(
             rdseed_sites.iter().map(|(addr, site)| (*addr, *site)),
         )
         .map_err(|e| format!("vm{i} boot failed: {e}"))?;
+        if let Some(path) = disk_path {
+            let disk = baud_multiverse::virtio_blk::BlockBase::mapped(path)
+                .map_err(|e| format!("vm{i} disk setup failed: {e}"))?;
+            vm.enable_virtio_pci_blk(disk);
+            vm.write_acpi_tables()
+                .map_err(|e| format!("vm{i} ACPI setup failed: {e}"))?;
+        }
         let f = baud_fingerprint::capture(
             &mut vm,
             &format!("vm{i}"),
@@ -257,6 +280,7 @@ mod tests {
             "console=ttyS0",
             vec![],
             None,
+            None,
             100_000,
             64,
             None,
@@ -283,6 +307,7 @@ mod tests {
             "console=ttyS0",
             vec![],
             None,
+            None,
             100_000,
             64,
             None,
@@ -304,6 +329,7 @@ mod tests {
             &kernel,
             "console=ttyS0",
             vec![],
+            None,
             None,
             100_000,
             64,
