@@ -218,12 +218,13 @@ pub async fn replay(
         let v = replay_stream_hash == expected_hash && !replayed.is_empty();
         (expected_hash, v)
     } else {
-        // Legacy rows without a stream hash have no cryptographic replay authority. Count equality
-        // is retained only for rows that supplied an explicit tape above, and an empty stream never
-        // becomes a successful verification.
-        let hash_placeholder = format!("<no-stored-hash-for-{}>", id);
-        let v = replayed.len() == orig_obs_count && !replayed.is_empty();
-        (hash_placeholder, v)
+        // Older rows predate the persisted stream_hash column, but their observation rows still
+        // contain the exact protocol values. Hash those rows instead of returning a placeholder or
+        // treating equal counts as proof. A legacy replay is verified only when its encoded stream
+        // matches that reconstructed hash and is non-empty.
+        let expected_hash = hash_observation_prefix(&original_obs, to_step);
+        let v = replay_stream_hash == expected_hash && !replayed.is_empty();
+        (expected_hash, v)
     };
 
     Json(json!({

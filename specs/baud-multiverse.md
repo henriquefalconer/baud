@@ -117,6 +117,9 @@ data.
 
 ## 7. Regimes
 
+The wire and manifest value of `regime` is lowercase: `cooperative`, `enforced`, or `rejected`.
+`enforced_capable` in the host probe is a separate boolean and is not a regime value.
+
 - **Cooperative (stock KVM)** — first target. Full CPUID control, fixed-frequency virtual TSC + controllable
   offset, MSR trapping, single vCPU, zeroed memory, tape device. Reproducible for guests that take
   entropy/clock/input from the tape device. The raw *random* instruction is closed here outright, not just
@@ -142,7 +145,7 @@ data.
     `RFLAGS.CF = 1` and `OF/SF/ZF/AF/PF` cleared: baud's `rdrand` always reports success, unlike real
     hardware entropy, which occasionally fails.
   - `rdseed` is **not** trapped: `SECONDARY_EXEC_RDSEED_EXITING` is not settable on this host's VMX
-    microcode (proved by `baud host probe`'s enforced-capability check), so `rdseed` stays CPUID-masked and
+    microcode (proved by `baud host probe`'s `enforced_capable` check), so `rdseed` stays CPUID-masked and
     `#UD`s under both regimes — a hardware limitation of this host, to be revisited on silicon that exposes
     the control.
 - The manifest records the regime; `run` and `verify` report guarantees only for the regime in force.

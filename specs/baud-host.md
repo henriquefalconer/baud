@@ -88,16 +88,19 @@ Probes and records each capability; a failure downgrades the regime and is writt
 baud host probe --json
 # → { kvm:true, vmx:true, cpuid:true, tsc_stable:true, msr_filter:true,
 #     singlestep:true, rcb_deterministic:true, nested:true, vendor:"intel",
-#     regime:"enforced-capable" }
+#     regime:"enforced" }
 ```
 
 ---
 
-## 4. Regime Decision
+## 4. Regime decision
 
-- **enforced-capable**: Intel + custom KVM module present + all checks pass.
+The wire value of `regime` is lowercase: `enforced`, `cooperative`, or `rejected`.
+`enforced_capable` is a separate boolean capability field, not a regime value.
+
+- **enforced**: Intel + custom KVM module present + all checks pass.
 - **cooperative**: all stock-KVM checks pass; no module.
-- **rejected**: a required capability (kvm/vmx/tsc_stable/rcb_deterministic) failed — the host cannot run
+- **rejected**: a required capability (kvm/vmx/tsc_stable/rcb_deterministic) failed. The host cannot run
   baud; the report names the failing check and its remediation.
 
 ---

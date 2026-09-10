@@ -2215,3 +2215,71 @@ The final gate is green: 25 units passed and 1 cached package-build unit skipped
 Repeating the focused validation directly in the foreground, without a background task, before closing this iteration.
 
 Foreground package validation completed: 45 passed and 2 ignored, with no failures. The pushed tip remains the validated iteration result.
+
+## 2026-09-10T16:18:06 UTC (24min) - Session usage — ralph-11 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2884 (summed from 6 session transcripts: main $0.1901 · subagents $0.0984)
+- tokens input 655,178 · cache-read 6,521,856 · cache-write 0 · output 22,480 · reasoning 5,955
+- context 117,903 tok peak of 272K (43%) across 72 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2884 (in 655,178 / out 28,435 / cache-read 6,521,856)
+- subagents (5) pi process x5
+  - delegate-8e3539580d5f287d7599be513bab24c6: gpt-5.6-luna $0.0260, 5 inference calls
+  - delegate-59a7c0dba21f48e1507deec21d328d54: gpt-5.6-luna $0.0254, 6 inference calls
+  - delegate-ace561783951fcf286281e7c3c65e6d1: gpt-5.6-luna $0.0248, 4 inference calls
+  - delegate-b6e33d253c328afc41b462848aceca50: gpt-5.6-luna $0.0177, 4 inference calls
+  - 01a08c07-af25-7461-8eb1-a42c8e6e345a: gpt-5.6-luna $0.0044, 3 inference calls
+- transcript: ralph/.run/20260910T073659Z/014-ralph-11.json
+- transcript: ralph/.run/20260910T073659Z/015-ralph-11.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 12 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the ten most important build items, studying the specifications, and then implementing and validating the complete batch.
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract — they are the 10 highest-priority pending items; G8 relocate distributed validation images remains outside this batch.
+
+Specification audit found unresolved contract conflicts in journal versus snapshot-store authority, package image versus static ELF scope, regime naming, tape EOF, frame ownership, and outcome semantics. Keeping these as implementation constraints while tracing the real paths; no item is marked DONE on audit evidence alone.
+
+Fixed legacy replay verification to reconstruct the protocol observation hash from durable rows instead of returning a placeholder or accepting equal counts. Now checking route tests and gate findings.
+
+The replay route now has a real legacy verification path: it hashes stored observations with the same baud-proto encoding used by live replay, so count equality cannot claim success. Focused baud-server replay tests and diff checks are green.
+
+Running the focused package contract suite while the single gate worker continues; this checks deterministic archive/hash plumbing before any queue status changes.
+
+Focused baud-packages validation is green: 45 passed, 2 ignored. The ignored real image reproducibility proof remains open and is not being relabeled from its documented stub-oriented coverage.
+
+The implementation audit confirms the remaining gaps are real: UFFD is unwired from guest RAM, serial eventfd is not injected as IRQ4, lifecycle registries do not span replay/render, Ubuntu still lacks login proof, Mario is a simulation, and host placement lacks live NUMA/affinity acceptance. I am keeping all ten queue entries open until those paths exist.
+
+The spec subagent reconciled host regime vocabulary to lowercase cooperative/enforced/rejected with enforced_capable as a separate boolean, updating baud-host, baud-multiverse, and baud-cli. Focused tests are green; starting the required foreground gate now.
+
+═══════════════════════════════════════════════════════
+
+Ralph iteration 12 gate: running bash drive/gate.sh
+
+═══════════════════════════════════════════════════════
+
+Required pre-push validation is green on the current tip: 25 passed, 0 failed, 1 skipped in 7m31s; focused server, snapshot, snapshot-store, tape-agent, and packages suites also passed. The ten contracts are still open because their real end-to-end acceptance paths remain incomplete, so no DONE lines were fabricated.
+
+## 2026-09-10T16:31:35 UTC - Changes committed.
+
+- Reconstructed legacy replay verification hashes from durable observation rows instead of accepting count equality or returning a placeholder.
+
+- Clarified the canonical host regime wire values in the host, multiverse, and CLI specifications.
+
+- Files changed: crates/baud-server/src/routes/replay.rs, specs/baud-host.md, specs/baud-multiverse.md, specs/baud-cli.md, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Legacy replay now verifies the exact baud-proto observation stream hash.
+
+  - Host regime naming is consistent across the public specifications.
+
+  - Focused tests and the full gate are green.
+
+  - The locked ten contracts remain open because their required real end-to-end paths are not complete.
+
+---

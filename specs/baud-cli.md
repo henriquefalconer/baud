@@ -84,6 +84,7 @@ baud budget
 | Exit codes       | `0` completed · `1` error · `2` goal/violation |
 | Server address   | From `BAUD_SERVER` env or default localhost port |
 | Auth             | Local token; never printed |
+| Host probe regime | JSON uses lowercase `cooperative`, `enforced`, or `rejected`; `enforced_capable` is a separate boolean |
 
 ---
 
