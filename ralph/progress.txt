@@ -2945,3 +2945,57 @@ H9 now reaches 17 KB of real Ubuntu console output and enters the combined timer
 Repeating the repository gate in the foreground as requested, with no background task, then recording the verification result against the selected batch.
 
 The foreground gate again passed warm-up, clippy, workspace tests, H5, and all completed drive units before the 600-second command limit; it did not reach a green final tally. The selected queue entries remain open, so no DONE markers or completion block are being fabricated.
+
+## 2026-09-10T23:18:07 UTC (51min) - Session usage — ralph-22 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3871 (summed from 5 session transcripts: main $0.2866 · subagents $0.1005)
+- tokens input 755,156 · cache-read 10,265,600 · cache-write 0 · output 25,650 · reasoning 7,073
+- context 152,321 tok peak of 272K (56%) across 91 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.3871 (in 755,156 / out 32,723 / cache-read 10,265,600)
+- subagents (4) pi process x4
+  - delegate-b9aef15f767c2dc0bb9272e2b711a971: gpt-5.6-luna $0.0267, 6 inference calls
+  - delegate-817e70f59834569289624b14b4e72dd6: gpt-5.6-luna $0.0253, 5 inference calls
+  - delegate-92a451a4c288670360413e38f2a3d274: gpt-5.6-luna $0.0250, 5 inference calls
+  - delegate-94b6b1d6f9b2cb6e72e18a00a265b53a: gpt-5.6-luna $0.0235, 6 inference calls
+- transcript: ralph/.run/20260910T073659Z/031-ralph-22.json
+- transcript: ralph/.run/20260910T073659Z/032-ralph-22.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 23 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the complete batch.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 pending items in todo-build.md.
+
+G2/G3/G5/G6 inspection is in progress; checking the existing acceptance scripts and route tests while delegates review specs.
+
+The image builder now validates the generated final kernel .config, and live frame SSE tails use monotonic row IDs so same-step frames are not dropped. Running focused checks next.
+
+Focused tests are running in the single verification worker; examining the real Ubuntu boot failure evidence and final-config test coverage in parallel.
+
+Reviewing the changed SSE cursor and final-config validation for compile issues while the verification worker finishes.
+
+Focused tests found the new stage context hid the underlying kernel-tree diagnostic; preserving the cause in the error and rerunning baud-packages tests.
+
+Focused baud-packages and baud-server tests are green, and clippy completes with existing warnings only. Running the required full gate now before deciding queue state.
+
+Full gate reached every scheduled unit before its 600-second wall; inspecting remaining H9 diagnostics and recording the green units without claiming the overall gate green.
+
+The focused package/server verification is green and the required gate passed every completed unit, but the gate still fails at H9 because the real Ubuntu fingerprint path closes the server during the 600-second wall after only a handful of expensive timer ticks. The selected queue items remain open, so no DONE markers or completion block are being written.
+
+Repeating the focused verification in the foreground as requested, then I will recheck the selected queue and repository state.
+
+Focused foreground verification is green: baud-packages 45 passed, baud-server 57 passed, with two ignored package tests. Preparing the repository commit and push with the verified changes.
+
+## 2026-09-10T23:43:14 UTC - Changes committed.
+- Hardened final kernel configuration validation and fixed frame SSE cursoring.
+- Files changed: `crates/baud-packages/src/guest_build.rs`, `crates/baud-server/src/routes/stream.rs`, and `ralph/progress.txt`.
+- **Brief description of changes:**
+  - Validate the generated kernel `.config` after the real kernel build, with stage-specific diagnostics.
+  - Cursor live frame SSE tails by durable frame row ID so frames sharing a step are not skipped.
+  - Recorded focused foreground verification and the full-gate H9 limitation.
+---

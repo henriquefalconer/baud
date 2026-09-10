@@ -637,21 +637,21 @@ pub async fn tail(
     let node = q.node;
     let stream = futures_util::stream::unfold(
         (state, run_id, node, 0_i64, false),
-        move |(state, run_id, node, last_step, terminal)| async move {
+        move |(state, run_id, node, last_id, terminal)| async move {
             if terminal {
                 return None;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let rows = match sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
-                "SELECT node, step, width, height, format, hash
+            let rows = match sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>, i64)>(
+                "SELECT node, step, width, height, format, hash, id
              FROM frame_records
-             WHERE run_id = ? AND (? IS NULL OR node = ?) AND step > ?
-             ORDER BY step ASC",
+             WHERE run_id = ? AND (? IS NULL OR node = ?) AND id > ?
+             ORDER BY id ASC",
             )
             .bind(&run_id)
             .bind(node)
             .bind(node)
-            .bind(last_step)
+            .bind(last_id)
             .fetch_all(&state.db)
             .await
             {
@@ -663,14 +663,14 @@ pub async fn tail(
                         .unwrap_or_else(|_| {
                             Event::default().data("{\"error\":\"frame stream query failed\"}")
                         });
-                    return Some((Ok(event), (state, run_id, node, last_step, true)));
+                    return Some((Ok(event), (state, run_id, node, last_id, true)));
                 }
             };
-            let next_step = rows
+            let next_id = rows
                 .iter()
-                .map(|(_, step, _, _, _, _)| *step)
+                .map(|(_, _, _, _, _, _, id)| *id)
                 .max()
-                .unwrap_or(last_step);
+                .unwrap_or(last_id);
             if rows.is_empty() {
                 // A tail must not leave clients polling forever after a run has reached a
                 // terminal state. Heartbeats keep a live run observable, while `done` closes
@@ -689,7 +689,7 @@ pub async fn tail(
                                 "status": status,
                             }))
                             .unwrap_or_else(|_| Event::default().data("{}"));
-                        Some((Ok(event), (state, run_id, node, last_step, true)))
+                        Some((Ok(event), (state, run_id, node, last_id, true)))
                     }
                     Ok(None) => {
                         let event = Event::default()
@@ -698,15 +698,15 @@ pub async fn tail(
                                 "error": format!("run {} not found", run_id),
                             }))
                             .unwrap_or_else(|_| Event::default().data("{}"));
-                        Some((Ok(event), (state, run_id, node, last_step, true)))
+                        Some((Ok(event), (state, run_id, node, last_id, true)))
                     }
                     Ok(Some(_)) | Err(_) => {
                         let event = Event::default().event("heartbeat").data("{}");
-                        Some((Ok(event), (state, run_id, node, last_step, false)))
+                        Some((Ok(event), (state, run_id, node, last_id, false)))
                     }
                 }
             } else {
-                let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash)| {
+                let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash, _id)| {
                 if hashes_only {
                     json!({ "run_id": run_id, "node": n, "step": step, "hash": hex_encode(&hash) })
                 } else {
@@ -718,7 +718,7 @@ pub async fn tail(
                         .event("frame")
                         .json_data(data)
                         .unwrap_or_else(|_| Event::default().data("{}"))),
-                    (state, run_id, node, next_step, false),
+                    (state, run_id, node, next_id, false),
                 ))
             }
         },
