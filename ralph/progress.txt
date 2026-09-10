@@ -2761,3 +2761,23 @@ The first compile caught an API mismatch: Multiverse accepts the mapped BlockBas
 Focused server/CLI tests are green: 56 server tests and the CLI target pass. Running the real Ubuntu H9 drive against the fetched, checksum-verified kernel and raw rootfs to expose the next boot-path failure.
 
 Focused validation after the H9 API wiring is green: server/CLI tests pass, rustfmt and all changed shell scripts parse. The real Ubuntu capture is deterministic with the pinned command line but still does not reach the login banner, so G6 remains open and the full gate is not yet green.
+
+## 2026-09-10T21:49:20 UTC - Changes committed.
+
+- Hardened route aliases and raw-image fingerprint plumbing.
+
+- Removed synthetic Mario frame injection and fixture/skip fallbacks from acceptance drives.
+
+- Files changed: crates/baud-cli/src/cmds/verify.rs, crates/baud-server/src/main.rs, crates/baud-server/src/routes/verify_fingerprint.rs, drive/h/h9.sh, drive/m/m8.sh, drive/pkg/pkg-build-cli.sh, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Added live watch, observations, and syscall route aliases.
+
+  - Added mapped virtio-blk image support to fingerprint verification.
+
+  - Made real-image drives fail closed and boot freshly emitted images.
+
+  - Focused tests passed; the full gate remains blocked by the real Ubuntu login-banner path.
+
+---
