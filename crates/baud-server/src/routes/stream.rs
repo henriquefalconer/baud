@@ -636,10 +636,13 @@ pub async fn tail(
     let hashes_only = q.hashes_only.unwrap_or(false);
     let node = q.node;
     let stream = futures_util::stream::unfold(
-        (state, run_id, node, 0_i64),
-        move |(state, run_id, node, last_step)| async move {
+        (state, run_id, node, 0_i64, false),
+        move |(state, run_id, node, last_step, terminal)| async move {
+            if terminal {
+                return None;
+            }
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
+            let rows = match sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
                 "SELECT node, step, width, height, format, hash
              FROM frame_records
              WHERE run_id = ? AND (? IS NULL OR node = ?) AND step > ?
@@ -650,8 +653,16 @@ pub async fn tail(
             .bind(node)
             .bind(last_step)
             .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+            .await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let event = Event::default()
+                        .event("error")
+                        .json_data(json!({"error": format!("frame stream query failed: {error}")}))
+                        .unwrap_or_else(|_| Event::default().data("{\"error\":\"frame stream query failed\"}"));
+                    return Some((Ok(event), (state, run_id, node, last_step, true)));
+                }
+            };
             let next_step = rows
                 .iter()
                 .map(|(_, step, _, _, _, _)| *step)
@@ -659,7 +670,7 @@ pub async fn tail(
                 .unwrap_or(last_step);
             if rows.is_empty() {
                 let event = Event::default().event("heartbeat").data("{}");
-                Some((Ok(event), (state, run_id, node, last_step)))
+                Some((Ok(event), (state, run_id, node, last_step, false)))
             } else {
                 let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash)| {
                 if hashes_only {
@@ -673,7 +684,7 @@ pub async fn tail(
                         .event("frame")
                         .json_data(data)
                         .unwrap_or_else(|_| Event::default().data("{}"))),
-                    (state, run_id, node, next_step),
+                    (state, run_id, node, next_step, false),
                 ))
             }
         },

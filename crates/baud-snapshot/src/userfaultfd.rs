@@ -21,6 +21,10 @@ const UFFDIO_WRITEPROTECT_MODE_WP: u64 = 1 << 0;
 const UFFDIO_REGISTER_IOC: u64 = 1 << 0;
 const UFFDIO_WRITEPROTECT_IOC: u64 = 1 << 6;
 const UFFDIO_CONTINUE_IOC: u64 = 1 << 7;
+const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
+const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1 << 0;
+const UFFD_PAGEFAULT_FLAG_WP: u64 = 1 << 1;
+const UFFD_PAGEFAULT_FLAG_MINOR: u64 = 1 << 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -50,6 +54,40 @@ struct Register {
 struct WriteProtect {
     range: Range,
     mode: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Message {
+    event: u8,
+    reserved1: u8,
+    reserved2: u16,
+    reserved3: u32,
+    flags: u64,
+    address: u64,
+    reserved4: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fault {
+    pub address: u64,
+    pub write: bool,
+    pub write_protect: bool,
+    pub minor: bool,
+}
+
+impl Message {
+    fn fault(self) -> Result<Fault, Error> {
+        if self.event != UFFD_EVENT_PAGEFAULT {
+            return Err(Error::UnexpectedEvent(self.event));
+        }
+        Ok(Fault {
+            address: self.address,
+            write: self.flags & UFFD_PAGEFAULT_FLAG_WRITE != 0,
+            write_protect: self.flags & UFFD_PAGEFAULT_FLAG_WP != 0,
+            minor: self.flags & UFFD_PAGEFAULT_FLAG_MINOR != 0,
+        })
+    }
 }
 
 #[repr(C)]
@@ -85,6 +123,10 @@ pub enum Error {
     MissingIoctl(u64),
     #[error("userfaultfd range is not page aligned")]
     UnalignedRange,
+    #[error("userfaultfd returned unsupported event {0:#x}")]
+    UnexpectedEvent(u8),
+    #[error("userfaultfd returned a truncated event")]
+    ShortRead,
 }
 
 /// A registered range that can be write-protected and populated from a shared memfd.
@@ -139,6 +181,33 @@ impl CowRegion {
             return Err(io::Error::last_os_error().into());
         }
         Ok(Self { fd, start, len })
+    }
+
+    /// Read one page-fault event from the nonblocking descriptor. `Ok(None)` means there is no
+    /// event yet, so a branch worker can drain faults without blocking the vCPU thread.
+    pub fn read_fault(&self) -> Result<Option<Fault>, Error> {
+        let mut message = Message::default();
+        let n = unsafe {
+            libc::read(
+                self.fd.as_raw_fd(),
+                (&mut message as *mut Message).cast(),
+                std::mem::size_of::<Message>(),
+            )
+        };
+        if n == 0 {
+            return Ok(None);
+        }
+        if n < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        if n as usize != std::mem::size_of::<Message>() {
+            return Err(Error::ShortRead);
+        }
+        message.fault().map(Some)
     }
 
     pub fn write_protect(&self, enabled: bool) -> Result<(), Error> {
@@ -204,6 +273,25 @@ mod tests {
         assert_eq!(UFFDIO_REGISTER, 0xC020AA00);
         assert_eq!(UFFDIO_WRITEPROTECT, 0xC018AA06);
         assert_eq!(UFFDIO_CONTINUE, 0xC028AA07);
+    }
+
+    #[test]
+    fn pagefault_message_decodes_minor_and_write_protect_flags() {
+        let message = Message {
+            event: UFFD_EVENT_PAGEFAULT,
+            flags: UFFD_PAGEFAULT_FLAG_WRITE | UFFD_PAGEFAULT_FLAG_WP | UFFD_PAGEFAULT_FLAG_MINOR,
+            address: 0x4000,
+            ..Message::default()
+        };
+        assert_eq!(
+            message.fault().unwrap(),
+            Fault { address: 0x4000, write: true, write_protect: true, minor: true }
+        );
+    }
+
+    #[test]
+    fn unsupported_pagefault_event_fails_closed() {
+        assert!(matches!(Message { event: 1, ..Message::default() }.fault(), Err(Error::UnexpectedEvent(1))));
     }
 
     #[test]

@@ -29,7 +29,11 @@ impl CapabilityChecks for LinuxChecks {
     }
 
     fn vmx_present(&self) -> bool {
-        cpuinfo_flag("vmx") || cpuinfo_flag("svm")
+        match self.vendor() {
+            Vendor::Intel => cpuinfo_flag("vmx"),
+            Vendor::Amd => cpuinfo_flag("svm"),
+            Vendor::Other => false,
+        }
     }
 
     fn vendor(&self) -> Vendor {

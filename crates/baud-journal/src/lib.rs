@@ -134,7 +134,7 @@ impl Journal {
 
         // Load existing index if present
         let index_path = run_dir.join("index.cbor");
-        let index = if index_path.exists() {
+        let index: Vec<IndexEntry> = if index_path.exists() {
             let bytes =
                 fs::read(&index_path).map_err(|e| JournalError::Io(format!("read index: {e}")))?;
             ciborium::from_reader(bytes.as_slice())
@@ -143,11 +143,25 @@ impl Journal {
             Vec::new()
         };
 
+        let mut stream_hasher = blake3::Hasher::new();
+        // Reconstruct the hash from durable plaintext chunks when reopening an unencrypted
+        // journal. Encrypted journals need a decryption identity, which this writer-only API does
+        // not possess, so they deliberately start a fresh hash rather than claiming verification.
+        if age_recipient.is_none() {
+            for entry in &index {
+                let path = run_dir.join("chunks").join(&entry.chunk_addr);
+                let bytes = fs::read(&path).map_err(|e| {
+                    JournalError::Io(format!("read chunk {} while reopening: {e}", entry.chunk_addr))
+                })?;
+                stream_hasher.update(&bytes);
+            }
+        }
+
         Ok(Journal {
             base: base.to_path_buf(),
             run_id: run_id.to_owned(),
             index,
-            stream_hasher: blake3::Hasher::new(),
+            stream_hasher,
             age_recipient,
         })
     }
@@ -399,6 +413,18 @@ mod tests {
         let h1 = j1.stream_hash();
         let h2 = j2.stream_hash();
         assert_ne!(h1.0, h2.0, "different content → different stream hash");
+    }
+
+    #[test]
+    fn reopening_unencrypted_journal_preserves_stream_hash() {
+        let dir = TempDir::new().unwrap();
+        let mut first = Journal::open(dir.path(), "run-reopen").unwrap();
+        first.append_observation(obs("probe", 1)).unwrap();
+        let expected = first.stream_hash();
+        drop(first);
+
+        let reopened = Journal::open(dir.path(), "run-reopen").unwrap();
+        assert_eq!(reopened.stream_hash(), expected);
     }
 
     #[test]
