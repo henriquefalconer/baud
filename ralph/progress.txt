@@ -2211,3 +2211,7 @@ The final gate is green: 25 units passed and 1 cached package-build unit skipped
 - Files changed: crates/baud-journal/src/lib.rs, crates/baud-snapshot/src/userfaultfd.rs, crates/baud-host/src/linux.rs, crates/baud-server/src/routes/stream.rs, ralph/progress.txt.
 
 ---
+
+Repeating the focused validation directly in the foreground, without a background task, before closing this iteration.
+
+Foreground package validation completed: 45 passed and 2 ignored, with no failures. The pushed tip remains the validated iteration result.
