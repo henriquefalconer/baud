@@ -2131,3 +2131,21 @@ Isolated H6 exposed the host safety root cause: the daemon selected two SMT sibl
 The sibling-safe affinity unit tests pass; rerunning H6 isolation to verify real fleet capacity and KVM execution on separate physical-core groups.
 
 H6 now passes with two physical-core sibling groups and the focused route/server tests remain green. The selected contracts are still open because real image, guest driver, UFFD, lifecycle, Ubuntu, and Mario acceptance paths are not complete.
+
+Repeating the repository gate in the foreground as requested, then checking the pushed main tip and working tree.
+
+The foreground gate completed: 24 passed, 0 regressions, 1 documented load flake; rdtsc_guest_reproduces_high_bits_across_boots passed in isolation, and H6 passed with sibling-safe affinity.
+
+Re-reading todo-build.md confirms the ten selected contracts still have open real image, guest endpoint, UFFD, lifecycle, Ubuntu, Mario, and host NUMA acceptance work; preserving them as open rather than relabeling partial fixes.
+
+## 2026-09-10T15:53:34 UTC - Changes committed.
+
+- Fixed COM1 input wake delivery by staging IRQ4 only after the guest unmasks the line.
+
+- Changed server CPU selection to rank physical-core sibling groups, preventing SMT oversubscription.
+
+- Added a shared per-run cancellation registry and abort signaling.
+
+- Focused tests, H6, and the foreground gate completed; the gate reported one documented load flake that passed in isolation.
+
+---
