@@ -76,13 +76,17 @@ fn default_times() -> u32 {
 pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value> {
     let tape = match hex_decode(&body.tape_hex) {
         Some(t) => t,
-        None => return Json(json!({ "ok": false, "error": "tape_hex must be a valid hex string" })),
+        None => {
+            return Json(json!({ "ok": false, "error": "tape_hex must be a valid hex string" }))
+        }
     };
     let expected_banner = match &body.expected_banner_hex {
         Some(hex) => match hex_decode(hex) {
             Some(bytes) => Some(bytes),
             None => {
-                return Json(json!({ "ok": false, "error": "expected_banner_hex must be a valid hex string" }))
+                return Json(
+                    json!({ "ok": false, "error": "expected_banner_hex must be a valid hex string" }),
+                )
             }
         },
         None => None,
@@ -194,8 +198,14 @@ fn boot_and_compare_fingerprints(
             rdseed_sites.iter().map(|(addr, site)| (*addr, *site)),
         )
         .map_err(|e| format!("vm{i} boot failed: {e}"))?;
-        let f = baud_fingerprint::capture(&mut vm, &format!("vm{i}"), target_rcb, banner_tail_len, expected_banner)
-            .map_err(|e| format!("vm{i} capture failed: {e}"))?;
+        let f = baud_fingerprint::capture(
+            &mut vm,
+            &format!("vm{i}"),
+            target_rcb,
+            banner_tail_len,
+            expected_banner,
+        )
+        .map_err(|e| format!("vm{i} capture failed: {e}"))?;
         fingerprints.push(f);
     }
 
@@ -256,7 +266,10 @@ mod tests {
 
         assert_eq!(fingerprints.len(), 2);
         assert_ne!(fingerprints[0].label, fingerprints[1].label);
-        assert!(divergence.is_none(), "two independent boots must not diverge: {divergence:?}");
+        assert!(
+            divergence.is_none(),
+            "two independent boots must not diverge: {divergence:?}"
+        );
     }
 
     /// `times: 1` must return exactly one fingerprint and no divergence, without silently

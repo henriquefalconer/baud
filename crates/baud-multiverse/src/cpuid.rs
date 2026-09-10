@@ -233,7 +233,14 @@ mod tests {
     /// A leaf reporting every masked feature as *supported* — the worst case
     /// `KVM_GET_SUPPORTED_CPUID` can hand back — must still come out fully masked.
     fn all_bits_set_leaf(function: u32, index: u32) -> CpuidLeaf {
-        CpuidLeaf { function, index, eax: u32::MAX, ebx: u32::MAX, ecx: u32::MAX, edx: u32::MAX }
+        CpuidLeaf {
+            function,
+            index,
+            eax: u32::MAX,
+            ebx: u32::MAX,
+            ecx: u32::MAX,
+            edx: u32::MAX,
+        }
     }
 
     #[test]
@@ -241,9 +248,18 @@ mod tests {
         let mut entries = [all_bits_set_leaf(LEAF_FEATURES, 0)];
         apply_determinism_mask(&mut entries);
         let ecx = entries[0].ecx;
-        assert!(!bit_is_set(ecx, ECX_RDRAND_BIT), "RDRAND (01H:ECX[30]) must be cleared");
-        assert!(!bit_is_set(ecx, ECX_X2APIC_BIT), "x2APIC (01H:ECX[21]) must be cleared");
-        assert!(bit_is_set(ecx, ECX_HYPERVISOR_PRESENT_BIT), "hypervisor-present must be fixed on");
+        assert!(
+            !bit_is_set(ecx, ECX_RDRAND_BIT),
+            "RDRAND (01H:ECX[30]) must be cleared"
+        );
+        assert!(
+            !bit_is_set(ecx, ECX_X2APIC_BIT),
+            "x2APIC (01H:ECX[21]) must be cleared"
+        );
+        assert!(
+            bit_is_set(ecx, ECX_HYPERVISOR_PRESENT_BIT),
+            "hypervisor-present must be fixed on"
+        );
     }
 
     /// Real-hardware finding (todo.md §14, test-matrix row 20): `KVM_GET_SUPPORTED_CPUID` fills
@@ -266,9 +282,18 @@ mod tests {
         let mut entries = [all_bits_set_leaf(LEAF_EXTENDED_FEATURES, 0)];
         apply_determinism_mask(&mut entries);
         let ebx = entries[0].ebx;
-        assert!(!bit_is_set(ebx, EBX_RDSEED_BIT), "RDSEED (07H:EBX[18]) must be cleared");
-        assert!(!bit_is_set(ebx, EBX_TSX_HLE_BIT), "TSX HLE (07H:EBX[4]) must be cleared");
-        assert!(!bit_is_set(ebx, EBX_TSX_RTM_BIT), "TSX RTM (07H:EBX[11]) must be cleared");
+        assert!(
+            !bit_is_set(ebx, EBX_RDSEED_BIT),
+            "RDSEED (07H:EBX[18]) must be cleared"
+        );
+        assert!(
+            !bit_is_set(ebx, EBX_TSX_HLE_BIT),
+            "TSX HLE (07H:EBX[4]) must be cleared"
+        );
+        assert!(
+            !bit_is_set(ebx, EBX_TSX_RTM_BIT),
+            "TSX RTM (07H:EBX[11]) must be cleared"
+        );
     }
 
     #[test]
@@ -276,7 +301,10 @@ mod tests {
         // A leaf starting fully zeroed (as if the host reported no invariant TSC at all) must
         // still come out with the bit set — baud always claims/serves an invariant virtual TSC,
         // it does not merely pass through host support (specs/baud-multiverse.md §4).
-        let mut entries = [CpuidLeaf { function: LEAF_EXTENDED_POWER_MGMT, ..Default::default() }];
+        let mut entries = [CpuidLeaf {
+            function: LEAF_EXTENDED_POWER_MGMT,
+            ..Default::default()
+        }];
         apply_determinism_mask(&mut entries);
         assert!(bit_is_set(entries[0].edx, EDX_INVARIANT_TSC_BIT));
     }
@@ -306,10 +334,20 @@ mod tests {
 
     #[test]
     fn unrecognized_leaves_pass_through_unmodified() {
-        let original = CpuidLeaf { function: 0x2, index: 0, eax: 1, ebx: 2, ecx: 3, edx: 4 };
+        let original = CpuidLeaf {
+            function: 0x2,
+            index: 0,
+            eax: 1,
+            ebx: 2,
+            ecx: 3,
+            edx: 4,
+        };
         let mut entries = [original];
         apply_determinism_mask(&mut entries);
-        assert_eq!(entries[0], original, "masking must not touch leaves outside the mask table");
+        assert_eq!(
+            entries[0], original,
+            "masking must not touch leaves outside the mask table"
+        );
     }
 
     #[test]

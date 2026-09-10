@@ -85,7 +85,10 @@ impl TimeSource for RecordingTime {
 
 #[test]
 fn io_in_reads_from_bus_and_continues() {
-    let mut bus = RecordingBus { fill_byte: 0xAB, ..Default::default() };
+    let mut bus = RecordingBus {
+        fill_byte: 0xAB,
+        ..Default::default()
+    };
     let mut time = RecordingTime::default();
     let mut data = [0u8; 4];
     let outcome = dispatch_exit(Exit::IoIn(0x3F8, &mut data), &mut bus, &mut time).unwrap();
@@ -106,7 +109,10 @@ fn io_out_writes_to_bus_and_continues() {
 
 #[test]
 fn mmio_read_and_write_route_to_bus() {
-    let mut bus = RecordingBus { fill_byte: 0x11, ..Default::default() };
+    let mut bus = RecordingBus {
+        fill_byte: 0x11,
+        ..Default::default()
+    };
     let mut time = RecordingTime::default();
     let mut data = [0u8; 2];
     dispatch_exit(Exit::MmioRead(0x1000, &mut data), &mut bus, &mut time).unwrap();
@@ -120,7 +126,10 @@ fn mmio_read_and_write_route_to_bus() {
 #[test]
 fn rdmsr_is_served_from_time_source() {
     let mut bus = RecordingBus::default();
-    let mut time = RecordingTime { serve_value: 0xDEAD_BEEF, ..Default::default() };
+    let mut time = RecordingTime {
+        serve_value: 0xDEAD_BEEF,
+        ..Default::default()
+    };
     let mut out = 0u64;
     let outcome = dispatch_exit(Exit::Rdmsr(0x10, &mut out), &mut bus, &mut time).unwrap();
     assert_eq!(outcome, DispatchOutcome::Continue);
@@ -140,8 +149,14 @@ fn wrmsr_is_absorbed_by_time_source() {
 fn hlt_and_shutdown_report_halted() {
     let mut bus = RecordingBus::default();
     let mut time = RecordingTime::default();
-    assert_eq!(dispatch_exit(Exit::Hlt, &mut bus, &mut time).unwrap(), DispatchOutcome::Halted);
-    assert_eq!(dispatch_exit(Exit::Shutdown, &mut bus, &mut time).unwrap(), DispatchOutcome::Halted);
+    assert_eq!(
+        dispatch_exit(Exit::Hlt, &mut bus, &mut time).unwrap(),
+        DispatchOutcome::Halted
+    );
+    assert_eq!(
+        dispatch_exit(Exit::Shutdown, &mut bus, &mut time).unwrap(),
+        DispatchOutcome::Halted
+    );
 }
 
 /// Regression for a real bug (todo.md §14): `IrqWindowOpen` used to fall into `Exit::Unmodeled`,
@@ -175,9 +190,15 @@ fn debug_reports_single_step_boundary() {
 #[test]
 fn rdtsc_enforced_is_served_from_time_source() {
     let mut bus = RecordingBus::default();
-    let mut time = RecordingTime { serve_value: 0x1234_5678_9ABC, ..Default::default() };
+    let mut time = RecordingTime {
+        serve_value: 0x1234_5678_9ABC,
+        ..Default::default()
+    };
     let outcome = dispatch_exit(Exit::RdtscEnforced, &mut bus, &mut time).unwrap();
-    assert_eq!(outcome, DispatchOutcome::ServeEnforcedRdtsc(0x1234_5678_9ABC));
+    assert_eq!(
+        outcome,
+        DispatchOutcome::ServeEnforcedRdtsc(0x1234_5678_9ABC)
+    );
     assert_eq!(time.enforced_rdtsc_calls, 1);
 }
 
@@ -187,11 +208,17 @@ fn rdtsc_enforced_is_served_from_time_source() {
 #[test]
 fn rdtscp_enforced_is_served_from_time_source() {
     let mut bus = RecordingBus::default();
-    let mut time = RecordingTime { serve_value: 0x1234_5678_9ABC, ..Default::default() };
+    let mut time = RecordingTime {
+        serve_value: 0x1234_5678_9ABC,
+        ..Default::default()
+    };
     let outcome = dispatch_exit(Exit::RdtscpEnforced, &mut bus, &mut time).unwrap();
     assert_eq!(
         outcome,
-        DispatchOutcome::ServeEnforcedRdtscp { value: 0x1234_5678_9ABC, tsc_aux: 0x5678_9ABC }
+        DispatchOutcome::ServeEnforcedRdtscp {
+            value: 0x1234_5678_9ABC,
+            tsc_aux: 0x5678_9ABC
+        }
     );
     assert_eq!(time.enforced_rdtsc_calls, 1);
     assert_eq!(time.enforced_tsc_aux_calls, 1);
@@ -203,9 +230,19 @@ fn rdtscp_enforced_is_served_from_time_source() {
 #[test]
 fn rdrand_enforced_is_served_from_time_source_with_its_gpr_index() {
     let mut bus = RecordingBus::default();
-    let mut time = RecordingTime { serve_value: 0xFEED_FACE_0102_0304, ..Default::default() };
-    let outcome = dispatch_exit(Exit::RdrandEnforced { gpr_index: 6 }, &mut bus, &mut time).unwrap();
-    assert_eq!(outcome, DispatchOutcome::ServeEnforcedRdrand { gpr_index: 6, value: 0xFEED_FACE_0102_0304 });
+    let mut time = RecordingTime {
+        serve_value: 0xFEED_FACE_0102_0304,
+        ..Default::default()
+    };
+    let outcome =
+        dispatch_exit(Exit::RdrandEnforced { gpr_index: 6 }, &mut bus, &mut time).unwrap();
+    assert_eq!(
+        outcome,
+        DispatchOutcome::ServeEnforcedRdrand {
+            gpr_index: 6,
+            value: 0xFEED_FACE_0102_0304
+        }
+    );
     assert_eq!(time.enforced_rdrand_calls, 1);
 }
 
@@ -215,7 +252,10 @@ fn rdrand_enforced_is_served_from_time_source_with_its_gpr_index() {
 #[test]
 fn rdseed_enforced_at_a_known_site_is_served_from_time_source() {
     let mut bus = RecordingBus::default();
-    let site = EnforcedRdseedSite { gpr_index: 3, length: 4 };
+    let site = EnforcedRdseedSite {
+        gpr_index: 3,
+        length: 4,
+    };
     let mut time = RecordingTime {
         serve_value: 0x0BAD_F00D_CAFE_BABE,
         known_rdseed_site: Some((0x1000, site)),
@@ -224,7 +264,11 @@ fn rdseed_enforced_at_a_known_site_is_served_from_time_source() {
     let outcome = dispatch_exit(Exit::RdseedEnforced { rip: 0x1000 }, &mut bus, &mut time).unwrap();
     assert_eq!(
         outcome,
-        DispatchOutcome::ServeEnforcedRdseed { rip: 0x1000, site, value: 0x0BAD_F00D_CAFE_BABE }
+        DispatchOutcome::ServeEnforcedRdseed {
+            rip: 0x1000,
+            site,
+            value: 0x0BAD_F00D_CAFE_BABE
+        }
     );
     assert_eq!(time.enforced_rdseed_calls, 1);
 }
@@ -236,12 +280,21 @@ fn rdseed_enforced_at_a_known_site_is_served_from_time_source() {
 fn rdseed_enforced_at_an_unknown_site_is_reinjected_not_served() {
     let mut bus = RecordingBus::default();
     let mut time = RecordingTime {
-        known_rdseed_site: Some((0x1000, EnforcedRdseedSite { gpr_index: 3, length: 4 })),
+        known_rdseed_site: Some((
+            0x1000,
+            EnforcedRdseedSite {
+                gpr_index: 3,
+                length: 4,
+            },
+        )),
         ..Default::default()
     };
     let outcome = dispatch_exit(Exit::RdseedEnforced { rip: 0x2000 }, &mut bus, &mut time).unwrap();
     assert_eq!(outcome, DispatchOutcome::ReinjectUd);
-    assert_eq!(time.enforced_rdseed_calls, 0, "an unknown site must never draw from the entropy stream");
+    assert_eq!(
+        time.enforced_rdseed_calls, 0,
+        "an unknown site must never draw from the entropy stream"
+    );
 }
 
 // specs/baud-vcpu.md §6 `no_unmodeled_exit_is_silent`: the run loop never leaves the dispatch
@@ -314,7 +367,12 @@ fn open_bus_reads_are_fixed_never_host_memory() {
 
     // Writes to open bus are absorbed, never observably stored or reflected.
     dispatch_exit(Exit::IoOut(0x9999, &[1, 2, 3]), &mut bus, &mut time).unwrap();
-    dispatch_exit(Exit::MmioWrite(0xDEAD_0000, &[1, 2, 3]), &mut bus, &mut time).unwrap();
+    dispatch_exit(
+        Exit::MmioWrite(0xDEAD_0000, &[1, 2, 3]),
+        &mut bus,
+        &mut time,
+    )
+    .unwrap();
 }
 
 #[test]

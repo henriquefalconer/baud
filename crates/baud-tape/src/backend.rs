@@ -4,10 +4,10 @@
 // Backend trait — the abstraction over Daytona and local backends.
 // Nothing above this trait may import baud-tape or baud-tape-local directly.
 
-use std::path::Path;
+use crate::types::{ExecResult, SandboxSpec, SandboxStatus};
 use anyhow::Result;
 use async_trait::async_trait;
-use crate::types::{ExecResult, SandboxSpec, SandboxStatus};
+use std::path::Path;
 
 /// The Backend trait: create/destroy/exec/put/get/status/endpoint.
 ///
@@ -77,8 +77,8 @@ pub trait Backend: Send + Sync + 'static {
 /// can invoke the shared suite from their own test modules.
 pub mod conformance {
     use super::*;
-    pub use crate::types::TapeState;
     use crate::types::SandboxSpec;
+    pub use crate::types::TapeState;
 
     /// Run the conformance suite against a backend.
     /// Backends must have a 1-minute auto-stop timer so we can test that.
@@ -96,7 +96,10 @@ pub mod conformance {
         assert!(status.memory_mib >= 1024, "memory must be >= 1 GiB");
         assert!(status.disk_mib >= 1024, "disk must be >= 1 GiB");
         assert_eq!(status.auto_stop_secs, 60, "auto-stop must be 1 minute");
-        assert_eq!(status.auto_archive_secs, 300, "auto-archive must be 5 minutes");
+        assert_eq!(
+            status.auto_archive_secs, 300,
+            "auto-archive must be 5 minutes"
+        );
 
         // 3. Exec echo
         let result = backend.exec(&id, &["echo", "hello"]).await?;
@@ -127,15 +130,27 @@ pub mod conformance {
         // Create
         let id = backend.create(&spec).await?;
         let s = backend.status(&id).await?;
-        assert_eq!(s.state, TapeState::Running, "lifecycle: created sandbox must be Running");
+        assert_eq!(
+            s.state,
+            TapeState::Running,
+            "lifecycle: created sandbox must be Running"
+        );
         println!("lifecycle: created {id}");
 
         // Stop → ensure → Running
         backend.stop(&id).await?;
         let s = backend.status(&id).await?;
-        assert_eq!(s.state, TapeState::Stopped, "lifecycle: sandbox must be Stopped after stop");
+        assert_eq!(
+            s.state,
+            TapeState::Stopped,
+            "lifecycle: sandbox must be Stopped after stop"
+        );
         let s = backend.ensure(&id).await?;
-        assert_eq!(s.state, TapeState::Running, "lifecycle: ensure must revive from Stopped");
+        assert_eq!(
+            s.state,
+            TapeState::Running,
+            "lifecycle: ensure must revive from Stopped"
+        );
         println!("lifecycle: stop → ensure → Running ok");
 
         // Stop again, then simulate archive by calling restore directly after stop
@@ -143,13 +158,20 @@ pub mod conformance {
         backend.stop(&id).await?;
         backend.restore(&id).await?;
         let s = backend.status(&id).await?;
-        assert_eq!(s.state, TapeState::Running, "lifecycle: restore from Stopped must yield Running");
+        assert_eq!(
+            s.state,
+            TapeState::Running,
+            "lifecycle: restore from Stopped must yield Running"
+        );
         println!("lifecycle: restore from Stopped ok");
 
         // Delete → gone: any subsequent call must fail
         backend.delete(&id).await?;
         let result = backend.status(&id).await;
-        assert!(result.is_err(), "lifecycle: status after delete must fail (sandbox gone)");
+        assert!(
+            result.is_err(),
+            "lifecycle: status after delete must fail (sandbox gone)"
+        );
         println!("lifecycle: delete → gone ok");
 
         println!("lifecycle conformance: PASSED");

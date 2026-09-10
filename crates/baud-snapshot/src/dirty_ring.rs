@@ -84,11 +84,19 @@ mod tests {
     use super::*;
 
     fn dirty(slot: u32, offset: u64) -> RawDirtyGfn {
-        RawDirtyGfn { flags: DIRTY_BIT, slot, offset }
+        RawDirtyGfn {
+            flags: DIRTY_BIT,
+            slot,
+            offset,
+        }
     }
 
     fn clean() -> RawDirtyGfn {
-        RawDirtyGfn { flags: 0, slot: 0, offset: 0 }
+        RawDirtyGfn {
+            flags: 0,
+            slot: 0,
+            offset: 0,
+        }
     }
 
     /// specs/baud-snapshot.md §5's `reset_cost_scales_with_write_set` in miniature: harvesting a
@@ -101,7 +109,10 @@ mod tests {
         let mut cursor = 0;
         let harvested = harvest(&mut ring, &mut cursor);
         assert_eq!(harvested, vec![(0, 0x1000), (0, 0x2000), (1, 0x3000)]);
-        assert_eq!(cursor, 3, "cursor advances exactly past the harvested entries, not the whole ring");
+        assert_eq!(
+            cursor, 3,
+            "cursor advances exactly past the harvested entries, not the whole ring"
+        );
     }
 
     #[test]
@@ -111,7 +122,10 @@ mod tests {
         harvest(&mut ring, &mut cursor);
         assert_eq!(ring[0].flags, DIRTY_BIT | RESET_BIT);
         assert_eq!(ring[1].flags, DIRTY_BIT | RESET_BIT);
-        assert_eq!(ring[2].flags, 0, "an entry never dirtied must never gain RESET");
+        assert_eq!(
+            ring[2].flags, 0,
+            "an entry never dirtied must never gain RESET"
+        );
         assert_eq!(ring[3].flags, 0);
     }
 
@@ -122,7 +136,10 @@ mod tests {
         let first = harvest(&mut ring, &mut cursor);
         assert_eq!(first.len(), 2);
         let second = harvest(&mut ring, &mut cursor);
-        assert!(second.is_empty(), "no new DIRTY entries since the last harvest -> nothing new to report");
+        assert!(
+            second.is_empty(),
+            "no new DIRTY entries since the last harvest -> nothing new to report"
+        );
     }
 
     #[test]
@@ -131,8 +148,15 @@ mod tests {
         let mut ring = vec![dirty(9, 0), clean(), clean(), dirty(8, 0)];
         let mut cursor = 3;
         let harvested = harvest(&mut ring, &mut cursor);
-        assert_eq!(harvested, vec![(8, 0), (9, 0)], "must wrap past the ring end back to index 0");
-        assert_eq!(cursor, 1, "wrapped past the two dirty entries (3 -> 0 -> 1), stopping at the clean slot");
+        assert_eq!(
+            harvested,
+            vec![(8, 0), (9, 0)],
+            "must wrap past the ring end back to index 0"
+        );
+        assert_eq!(
+            cursor, 1,
+            "wrapped past the two dirty entries (3 -> 0 -> 1), stopping at the clean slot"
+        );
     }
 
     #[test]
@@ -147,7 +171,10 @@ mod tests {
         let mut ring = vec![clean(), dirty(0, 0)];
         let mut cursor = 0;
         assert!(harvest(&mut ring, &mut cursor).is_empty());
-        assert_eq!(cursor, 0, "cursor must not advance past an entry it did not harvest");
+        assert_eq!(
+            cursor, 0,
+            "cursor must not advance past an entry it did not harvest"
+        );
     }
 
     #[test]

@@ -150,12 +150,15 @@ impl Node {
         // Broadcast RequestVote to all other nodes
         for peer in 0u8..3 {
             if peer != self.id {
-                outbox.push((peer, Message::RequestVote {
-                    term: self.current_term,
-                    candidate_id: self.id,
-                    last_log_index,
-                    last_log_term,
-                }));
+                outbox.push((
+                    peer,
+                    Message::RequestVote {
+                        term: self.current_term,
+                        candidate_id: self.id,
+                        last_log_index,
+                        last_log_term,
+                    },
+                ));
             }
         }
     }
@@ -175,27 +178,35 @@ impl Node {
     /// Leader: send AppendEntries (or heartbeats) to all followers.
     pub fn send_append_entries(&mut self, outbox: &mut Vec<(u8, Message)>) {
         for peer in 0u8..3 {
-            if peer == self.id { continue; }
+            if peer == self.id {
+                continue;
+            }
             let next_idx = self.next_index[peer as usize];
             let prev_log_index = next_idx.saturating_sub(1);
             let prev_log_term = if prev_log_index == 0 {
                 0
             } else {
-                self.log.get(prev_log_index as usize - 1).map(|e| e.term).unwrap_or(0)
+                self.log
+                    .get(prev_log_index as usize - 1)
+                    .map(|e| e.term)
+                    .unwrap_or(0)
             };
             let entries = if next_idx as usize <= self.log.len() {
                 self.log[next_idx as usize - 1..].to_vec()
             } else {
                 vec![]
             };
-            outbox.push((peer, Message::AppendEntries {
-                term: self.current_term,
-                leader_id: self.id,
-                prev_log_index,
-                prev_log_term,
-                entries,
-                leader_commit: self.commit_index,
-            }));
+            outbox.push((
+                peer,
+                Message::AppendEntries {
+                    term: self.current_term,
+                    leader_id: self.id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    leader_commit: self.commit_index,
+                },
+            ));
         }
     }
 
@@ -207,7 +218,12 @@ impl Node {
         planted_bug_active: bool,
     ) {
         match msg {
-            Message::RequestVote { term, candidate_id, last_log_index, last_log_term } => {
+            Message::RequestVote {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            } => {
                 // Update term
                 if term > self.current_term {
                     self.current_term = term;
@@ -221,14 +237,21 @@ impl Node {
                 if grant {
                     self.voted_for = Some(candidate_id);
                 }
-                outbox.push((candidate_id, Message::RequestVoteReply {
-                    term: self.current_term,
-                    vote_granted: grant,
-                    from: self.id,
-                }));
+                outbox.push((
+                    candidate_id,
+                    Message::RequestVoteReply {
+                        term: self.current_term,
+                        vote_granted: grant,
+                        from: self.id,
+                    },
+                ));
             }
 
-            Message::RequestVoteReply { term, vote_granted, from: _ } => {
+            Message::RequestVoteReply {
+                term,
+                vote_granted,
+                from: _,
+            } => {
                 if term > self.current_term {
                     self.current_term = term;
                     self.role = Role::Follower;
@@ -248,17 +271,25 @@ impl Node {
             }
 
             Message::AppendEntries {
-                term, leader_id, prev_log_index, prev_log_term, entries, leader_commit
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
             } => {
                 // Standard Raft: accept messages from the current or newer term.
                 // Reject stale messages (term < current_term).
                 if term < self.current_term {
-                    outbox.push((leader_id, Message::AppendEntriesReply {
-                        term: self.current_term,
-                        success: false,
-                        from: self.id,
-                        match_index: 0,
-                    }));
+                    outbox.push((
+                        leader_id,
+                        Message::AppendEntriesReply {
+                            term: self.current_term,
+                            success: false,
+                            from: self.id,
+                            match_index: 0,
+                        },
+                    ));
                     return;
                 }
 
@@ -275,21 +306,27 @@ impl Node {
                     let entry = self.log.get(prev_log_index as usize - 1);
                     match entry {
                         None => {
-                            outbox.push((leader_id, Message::AppendEntriesReply {
-                                term: self.current_term,
-                                success: false,
-                                from: self.id,
-                                match_index: 0,
-                            }));
+                            outbox.push((
+                                leader_id,
+                                Message::AppendEntriesReply {
+                                    term: self.current_term,
+                                    success: false,
+                                    from: self.id,
+                                    match_index: 0,
+                                },
+                            ));
                             return;
                         }
                         Some(e) if e.term != prev_log_term => {
-                            outbox.push((leader_id, Message::AppendEntriesReply {
-                                term: self.current_term,
-                                success: false,
-                                from: self.id,
-                                match_index: 0,
-                            }));
+                            outbox.push((
+                                leader_id,
+                                Message::AppendEntriesReply {
+                                    term: self.current_term,
+                                    success: false,
+                                    from: self.id,
+                                    match_index: 0,
+                                },
+                            ));
                             return;
                         }
                         _ => {}
@@ -328,15 +365,23 @@ impl Node {
                     self.commit_index = leader_commit.min(self.log.len() as u64);
                 }
 
-                outbox.push((leader_id, Message::AppendEntriesReply {
-                    term: self.current_term,
-                    success: true,
-                    from: self.id,
-                    match_index: self.log.len() as u64,
-                }));
+                outbox.push((
+                    leader_id,
+                    Message::AppendEntriesReply {
+                        term: self.current_term,
+                        success: true,
+                        from: self.id,
+                        match_index: self.log.len() as u64,
+                    },
+                ));
             }
 
-            Message::AppendEntriesReply { term, success, from, match_index } => {
+            Message::AppendEntriesReply {
+                term,
+                success,
+                from,
+                match_index,
+            } => {
                 if term > self.current_term {
                     self.current_term = term;
                     self.role = Role::Follower;
@@ -414,11 +459,7 @@ pub struct Cluster {
 impl Cluster {
     pub fn new(planted_bug: bool) -> Self {
         Cluster {
-            nodes: [
-                Node::new(0, 10),
-                Node::new(1, 13),
-                Node::new(2, 16),
-            ],
+            nodes: [Node::new(0, 10), Node::new(1, 13), Node::new(2, 16)],
             pending: Vec::new(),
             partitioned: std::collections::HashSet::new(),
             step: 0,
@@ -432,7 +473,8 @@ impl Cluster {
     /// Returns (from, to) if a message was delivered.
     pub fn deliver_one(&mut self, which: usize) -> Option<(u8, u8)> {
         // Find deliverable messages
-        let deliverable: Vec<usize> = self.pending
+        let deliverable: Vec<usize> = self
+            .pending
             .iter()
             .enumerate()
             .filter(|(_, (from, to, _))| !self.partitioned.contains(&(*from, *to)))
@@ -517,7 +559,10 @@ impl Cluster {
         let mut leaders_per_term: HashMap<u64, Vec<u8>> = HashMap::new();
         for node in &self.nodes {
             if node.role == Role::Leader {
-                leaders_per_term.entry(node.current_term).or_default().push(node.id);
+                leaders_per_term
+                    .entry(node.current_term)
+                    .or_default()
+                    .push(node.id);
             }
         }
         for (term, leaders) in &leaders_per_term {
@@ -582,7 +627,10 @@ impl Cluster {
                 // Propose a value
                 let value = self.next_value;
                 let proposed = self.propose(value);
-                Ok(StepResult::Proposed { value, accepted: proposed })
+                Ok(StepResult::Proposed {
+                    value,
+                    accepted: proposed,
+                })
             }
             4 => {
                 // Partition
@@ -631,7 +679,11 @@ impl Cluster {
         probes.insert("max_term".to_string(), max_term as f64);
 
         // partition_state: 0.0 = no partition, 1.0 = at least one partition active
-        let partition_state = if self.partitioned.is_empty() { 0.0 } else { 1.0 };
+        let partition_state = if self.partitioned.is_empty() {
+            0.0
+        } else {
+            1.0
+        };
         probes.insert("partition_state".to_string(), partition_state);
         // Legacy alias
         probes.insert("partition_active".to_string(), partition_state);
@@ -713,8 +765,15 @@ mod tests {
                 cluster.deliver_one(i);
             }
         }
-        let leaders: Vec<_> = cluster.nodes.iter().filter(|n| n.role == Role::Leader).collect();
-        assert!(!leaders.is_empty(), "expected at least one leader after 30 ticks");
+        let leaders: Vec<_> = cluster
+            .nodes
+            .iter()
+            .filter(|n| n.role == Role::Leader)
+            .collect();
+        assert!(
+            !leaders.is_empty(),
+            "expected at least one leader after 30 ticks"
+        );
     }
 
     #[test]
@@ -726,7 +785,9 @@ mod tests {
             for i in 0..count {
                 cluster.deliver_one(i);
             }
-            cluster.check_invariants().expect("invariants should hold without bug");
+            cluster
+                .check_invariants()
+                .expect("invariants should hold without bug");
         }
     }
 
@@ -751,7 +812,12 @@ mod tests {
                 cluster.deliver_one(i);
             }
         }
-        let max_commit = cluster.nodes.iter().map(|n| n.commit_index).max().unwrap_or(0);
+        let max_commit = cluster
+            .nodes
+            .iter()
+            .map(|n| n.commit_index)
+            .max()
+            .unwrap_or(0);
         assert!(max_commit > 0, "expected at least one committed entry");
     }
 
@@ -761,9 +827,15 @@ mod tests {
         let probes = cluster.probes();
         // Spec-mandated probe names (specs/baud-raftlet.md §5)
         assert!(probes.contains_key("op_depth"), "missing probe:op_depth");
-        assert!(probes.contains_key("leader_count"), "missing probe:leader_count");
+        assert!(
+            probes.contains_key("leader_count"),
+            "missing probe:leader_count"
+        );
         assert!(probes.contains_key("term_band"), "missing probe:term_band");
-        assert!(probes.contains_key("partition_state"), "missing probe:partition_state");
+        assert!(
+            probes.contains_key("partition_state"),
+            "missing probe:partition_state"
+        );
         // Legacy aliases (backward compat with existing fuzz loop code)
         assert!(probes.contains_key("max_commit"));
         assert!(probes.contains_key("has_leader"));
@@ -777,8 +849,15 @@ mod tests {
         // 300 steps of purely random-ish tape
         let tape: Vec<u8> = (0u8..255).cycle().take(300 * 3).collect();
         let (probes, violation) = simulate(&tape, 300, false);
-        assert!(violation.is_none(), "should not violate invariants without bug: {:?}", violation);
-        assert!(probes.contains_key("op_depth"), "simulate result must contain op_depth probe");
+        assert!(
+            violation.is_none(),
+            "should not violate invariants without bug: {:?}",
+            violation
+        );
+        assert!(
+            probes.contains_key("op_depth"),
+            "simulate result must contain op_depth probe"
+        );
     }
 
     #[test]
@@ -849,27 +928,41 @@ mod tests {
             let guided_tape: Vec<u8> = {
                 let mut t = Vec::new();
                 // Phase 1: tick until node 0 becomes leader (many ticks)
-                for _ in 0..30 { t.extend_from_slice(&[0, 0, 0]); }
+                for _ in 0..30 {
+                    t.extend_from_slice(&[0, 0, 0]);
+                }
                 // Phase 2: propose value 1 via node 0
                 t.extend_from_slice(&[3, 1, 0]);
                 // Phase 3: deliver messages (replicate to majority)
-                for _ in 0..10 { t.extend_from_slice(&[2, 5, 0]); }
+                for _ in 0..10 {
+                    t.extend_from_slice(&[2, 5, 0]);
+                }
                 // Phase 4: partition node 2 from node 0
                 t.extend_from_slice(&[4, 0, 2]);
                 // Phase 5: propose value 2 (leader → node1 only)
                 t.extend_from_slice(&[3, 2, 0]);
                 // Phase 6: tick until node 2 starts new election
-                for _ in 0..40 { t.extend_from_slice(&[0, 0, 0]); }
+                for _ in 0..40 {
+                    t.extend_from_slice(&[0, 0, 0]);
+                }
                 // Phase 7: deliver node 2 election messages
-                for _ in 0..5 { t.extend_from_slice(&[2, 5, 2]); }
+                for _ in 0..5 {
+                    t.extend_from_slice(&[2, 5, 2]);
+                }
                 // Phase 8: heal partition — old leader (node 0) sends stale AppendEntries
                 t.extend_from_slice(&[5, 0, 2]);
                 // Phase 9: deliver stale append — bug: node 1 accepts it, overwriting committed entry
-                for _ in 0..10 { t.extend_from_slice(&[2, 5, 0]); }
+                for _ in 0..10 {
+                    t.extend_from_slice(&[2, 5, 0]);
+                }
                 // Phase 10: new leader commits different value at same index
-                for _ in 0..20 { t.extend_from_slice(&[2, 5, 2]); }
+                for _ in 0..20 {
+                    t.extend_from_slice(&[2, 5, 2]);
+                }
                 // Pad to budget
-                while t.len() < budget_steps * 3 { t.extend_from_slice(&[2, 5, 0]); }
+                while t.len() < budget_steps * 3 {
+                    t.extend_from_slice(&[2, 5, 0]);
+                }
                 t
             };
             let (_, violation) = simulate(&guided_tape, budget_steps, /* planted_bug= */ true);

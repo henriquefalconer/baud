@@ -27,11 +27,14 @@
 
 use crate::dirty_ring::{self, RawDirtyGfn};
 use crate::page_store::{PageRef, PageStore, PAGE_SIZE};
-use crate::universe::{order_msrs_tsc_first, restore_plan, model_matches, ClockState, DeviceState, MsrWrite, RestoreStep, Universe, VcpuState};
+use crate::universe::{
+    model_matches, order_msrs_tsc_first, restore_plan, ClockState, DeviceState, MsrWrite,
+    RestoreStep, Universe, VcpuState,
+};
 use kvm_bindings::{
-    kvm_clock_data, kvm_dirty_gfn, kvm_enable_cap, kvm_mp_state, kvm_msr_entry,
-    kvm_regs, kvm_sregs, kvm_vcpu_events, kvm_xcrs, Msrs, KVM_CAP_DIRTY_LOG_RING,
-    KVM_DIRTY_LOG_PAGE_OFFSET, KVM_MAX_CPUID_ENTRIES,
+    kvm_clock_data, kvm_dirty_gfn, kvm_enable_cap, kvm_mp_state, kvm_msr_entry, kvm_regs,
+    kvm_sregs, kvm_vcpu_events, kvm_xcrs, Msrs, KVM_CAP_DIRTY_LOG_RING, KVM_DIRTY_LOG_PAGE_OFFSET,
+    KVM_MAX_CPUID_ENTRIES,
 };
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
 use std::os::fd::AsRawFd;
@@ -48,8 +51,14 @@ pub enum CaptureError {
     #[error(transparent)]
     Xsave(#[from] crate::xsave::XsaveError),
     #[error("incomplete MSR capture: read {completed}/{expected}, first unread {first_unread:?}")]
-    IncompleteMsrRead { expected: usize, completed: usize, first_unread: Option<u32> },
-    #[error("async page-fault interrupt MSR is nonzero ({0:#x}) on a VM without an in-kernel LAPIC")]
+    IncompleteMsrRead {
+        expected: usize,
+        completed: usize,
+        first_unread: Option<u32>,
+    },
+    #[error(
+        "async page-fault interrupt MSR is nonzero ({0:#x}) on a VM without an in-kernel LAPIC"
+    )]
     AsyncPfInterruptWithoutLapic(u64),
     #[error("KVM ioctl failed while capturing state: {0}")]
     Kvm(#[from] kvm_ioctls::Error),
@@ -63,8 +72,14 @@ pub enum CaptureError {
 pub enum RestoreError {
     #[error(transparent)]
     Xsave(#[from] crate::xsave::XsaveError),
-    #[error("incomplete MSR restore: wrote {completed}/{expected}, first unwritten {first_unwritten:?}")]
-    IncompleteMsrWrite { expected: usize, completed: usize, first_unwritten: Option<u32> },
+    #[error(
+        "incomplete MSR restore: wrote {completed}/{expected}, first unwritten {first_unwritten:?}"
+    )]
+    IncompleteMsrWrite {
+        expected: usize,
+        completed: usize,
+        first_unwritten: Option<u32>,
+    },
     #[error("KVM ioctl failed while restoring state: {0}")]
     Kvm(#[from] kvm_ioctls::Error),
     #[error("failed to write guest RAM at offset {0:#x}: {1}")]
@@ -77,7 +92,11 @@ pub enum RestoreError {
     )]
     CpuMismatch { captured: u32, current: u32 },
     #[error("universe field {field} has length {actual}, expected {expected}")]
-    InvalidStateLength { field: &'static str, actual: usize, expected: usize },
+    InvalidStateLength {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
 }
 
 /// Copy `size_of::<T>()` bytes out of `v` verbatim. Every `T` this is called with below
@@ -90,7 +109,8 @@ pub enum RestoreError {
 /// `v` is a live `&T` for the duration of the read, so `size_of::<T>()` bytes starting at its
 /// address are valid to read.
 unsafe fn struct_to_bytes<T>(v: &T) -> Vec<u8> {
-    unsafe { std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>()) }.to_vec()
+    unsafe { std::slice::from_raw_parts(v as *const T as *const u8, std::mem::size_of::<T>()) }
+        .to_vec()
 }
 
 /// The inverse of [`struct_to_bytes`]: reconstruct a `T` from bytes previously produced by it.
@@ -126,7 +146,9 @@ fn validate_state_lengths(universe: &Universe, xsave_size: usize) -> Result<(), 
     exact!(universe.vcpu.sregs, "sregs", kvm_sregs);
     if universe.vcpu.xsave.len() != xsave_size {
         return Err(RestoreError::InvalidStateLength {
-            field: "xsave", actual: universe.vcpu.xsave.len(), expected: xsave_size,
+            field: "xsave",
+            actual: universe.vcpu.xsave.len(),
+            expected: xsave_size,
         });
     }
     exact!(universe.vcpu.xcrs, "xcrs", kvm_xcrs);
@@ -145,7 +167,12 @@ fn validate_state_lengths(universe: &Universe, xsave_size: usize) -> Result<(), 
 /// leaf 1 EAX).
 fn cpuid_leaf1_eax(kvm: &Kvm) -> Result<u32, kvm_ioctls::Error> {
     let cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
-    Ok(cpuid.as_slice().iter().find(|e| e.function == 1 && e.index == 0).map(|e| e.eax).unwrap_or(0))
+    Ok(cpuid
+        .as_slice()
+        .iter()
+        .find(|e| e.function == 1 && e.index == 0)
+        .map(|e| e.eax)
+        .unwrap_or(0))
 }
 
 fn capture_ram(
@@ -159,7 +186,8 @@ fn capture_ram(
     let mut buf = [0u8; PAGE_SIZE];
     for i in 0..page_count {
         let offset = ram_start + (i * PAGE_SIZE) as u64;
-        mem.read_slice(&mut buf, GuestAddress(offset)).map_err(|e| CaptureError::GuestMemory(offset, e))?;
+        mem.read_slice(&mut buf, GuestAddress(offset))
+            .map_err(|e| CaptureError::GuestMemory(offset, e))?;
         ram.push(page_store.intern(&buf));
     }
     Ok(ram)
@@ -168,7 +196,8 @@ fn capture_ram(
 fn restore_ram(mem: &GuestMemory, ram_start: u64, ram: &[PageRef]) -> Result<(), RestoreError> {
     for (i, page) in ram.iter().enumerate() {
         let offset = ram_start + (i * PAGE_SIZE) as u64;
-        mem.write_slice(page.bytes(), GuestAddress(offset)).map_err(|e| RestoreError::GuestMemory(offset, e))?;
+        mem.write_slice(page.bytes(), GuestAddress(offset))
+            .map_err(|e| RestoreError::GuestMemory(offset, e))?;
     }
     Ok(())
 }
@@ -209,17 +238,30 @@ pub fn capture(
     let mp_state = vcpu.get_mp_state()?;
 
     let msr_index_list = kvm.get_msr_index_list()?;
-    let entries: Vec<kvm_msr_entry> =
-        msr_index_list.as_slice().iter().map(|&index| kvm_msr_entry { index, ..Default::default() }).collect();
+    let entries: Vec<kvm_msr_entry> = msr_index_list
+        .as_slice()
+        .iter()
+        .map(|&index| kvm_msr_entry {
+            index,
+            ..Default::default()
+        })
+        .collect();
     let mut msrs = Msrs::from_entries(&entries).map_err(CaptureError::MsrAlloc)?;
     let read = vcpu.get_msrs(&mut msrs)?;
     if read != entries.len() {
         return Err(CaptureError::IncompleteMsrRead {
-            expected: entries.len(), completed: read, first_unread: entries.get(read).map(|e| e.index),
+            expected: entries.len(),
+            completed: read,
+            first_unread: entries.get(read).map(|e| e.index),
         });
     }
-    let mut msr_writes: Vec<MsrWrite> =
-        msrs.as_slice()[..read].iter().map(|e| MsrWrite { index: e.index, data: e.data }).collect();
+    let mut msr_writes: Vec<MsrWrite> = msrs.as_slice()[..read]
+        .iter()
+        .map(|e| MsrWrite {
+            index: e.index,
+            data: e.data,
+        })
+        .collect();
     // kvm_pv_enable_async_pf_int rejects SET even for zero without lapic_in_kernel.
     // This VMM never creates an in-kernel irqchip, so the reset value has no restorable
     // state. Reject a nonzero value rather than silently discarding active state.
@@ -261,9 +303,18 @@ pub fn capture(
         entropy_state,
     };
 
-    let device = DeviceState { tape_cursor, console };
+    let device = DeviceState {
+        tape_cursor,
+        console,
+    };
 
-    Ok(Universe { ram, vcpu: vcpu_state, clock, device, cpu_signature })
+    Ok(Universe {
+        ram,
+        vcpu: vcpu_state,
+        clock,
+        device,
+        cpu_signature,
+    })
 }
 
 /// Restore a [`Universe`] onto an already-created (but not yet run) vCPU, walking
@@ -292,7 +343,10 @@ pub fn restore(
     let xsave = crate::xsave::decode(&universe.vcpu.xsave)?;
     let current_signature = cpuid_leaf1_eax(kvm)?;
     if !model_matches(universe.cpu_signature, current_signature, template_active) {
-        return Err(RestoreError::CpuMismatch { captured: universe.cpu_signature, current: current_signature });
+        return Err(RestoreError::CpuMismatch {
+            captured: universe.cpu_signature,
+            current: current_signature,
+        });
     }
 
     for step in restore_plan() {
@@ -303,20 +357,29 @@ pub fn restore(
             // exact type each `set_*` ioctl expects, then overwrites it with bytes this same
             // module's `capture` produced from that exact type via `struct_to_bytes` — see both
             // functions' docs.
-            RestoreStep::SetVcpuRegs => vcpu.set_regs(&unsafe { bytes_to_struct(&universe.vcpu.regs) })?,
-            RestoreStep::SetVcpuSregs => vcpu.set_sregs(&unsafe { bytes_to_struct(&universe.vcpu.sregs) })?,
+            RestoreStep::SetVcpuRegs => {
+                vcpu.set_regs(&unsafe { bytes_to_struct(&universe.vcpu.regs) })?
+            }
+            RestoreStep::SetVcpuSregs => {
+                vcpu.set_sregs(&unsafe { bytes_to_struct(&universe.vcpu.sregs) })?
+            }
             RestoreStep::SetVcpuMsrs => {
                 let entries: Vec<kvm_msr_entry> = universe
                     .vcpu
                     .msrs
                     .iter()
-                    .map(|m| kvm_msr_entry { index: m.index, data: m.data, ..Default::default() })
+                    .map(|m| kvm_msr_entry {
+                        index: m.index,
+                        data: m.data,
+                        ..Default::default()
+                    })
                     .collect();
                 let msrs = Msrs::from_entries(&entries).map_err(RestoreError::MsrAlloc)?;
                 let completed = vcpu.set_msrs(&msrs)?;
                 if completed != entries.len() {
                     return Err(RestoreError::IncompleteMsrWrite {
-                        expected: entries.len(), completed,
+                        expected: entries.len(),
+                        completed,
                         first_unwritten: entries.get(completed).map(|e| e.index),
                     });
                 }
@@ -324,10 +387,18 @@ pub fn restore(
             // SAFETY: the buffer covers the destination VM's XSAVE2 size, validated before
             // any state mutation. No dynamic XSTATE features are enabled during restore.
             RestoreStep::SetVcpuXsave => unsafe { vcpu.set_xsave2(&xsave)? },
-            RestoreStep::SetVcpuXcrs => vcpu.set_xcrs(&unsafe { bytes_to_struct(&universe.vcpu.xcrs) })?,
-            RestoreStep::SetVcpuEvents => vcpu.set_vcpu_events(&unsafe { bytes_to_struct(&universe.vcpu.events) })?,
-            RestoreStep::SetVcpuMpState => vcpu.set_mp_state(unsafe { bytes_to_struct(&universe.vcpu.mp_state) })?,
-            RestoreStep::SetVmClock => vm.set_clock(&unsafe { bytes_to_struct(&universe.clock.kvm_clock) })?,
+            RestoreStep::SetVcpuXcrs => {
+                vcpu.set_xcrs(&unsafe { bytes_to_struct(&universe.vcpu.xcrs) })?
+            }
+            RestoreStep::SetVcpuEvents => {
+                vcpu.set_vcpu_events(&unsafe { bytes_to_struct(&universe.vcpu.events) })?
+            }
+            RestoreStep::SetVcpuMpState => {
+                vcpu.set_mp_state(unsafe { bytes_to_struct(&universe.vcpu.mp_state) })?
+            }
+            RestoreStep::SetVmClock => {
+                vm.set_clock(&unsafe { bytes_to_struct(&universe.clock.kvm_clock) })?
+            }
             // Device/console restoration is the caller's job (see this function's doc): the
             // caller reads `universe.device` after `restore` returns `Ok` and feeds it back into
             // its own tape-device/console model, same reason `DeviceState` stores opaque bytes
@@ -420,7 +491,10 @@ impl DirtyRing {
             return Err(DirtyRingError::NotPowerOfTwo(entries));
         }
         let bytes = dirty_ring::ring_bytes(entries);
-        let mut cap = kvm_enable_cap { cap: KVM_CAP_DIRTY_LOG_RING, ..Default::default() };
+        let mut cap = kvm_enable_cap {
+            cap: KVM_CAP_DIRTY_LOG_RING,
+            ..Default::default()
+        };
         cap.args[0] = bytes as u64;
         vm.enable_cap(&cap)?;
         Ok(())
@@ -462,7 +536,11 @@ impl DirtyRing {
         if addr == libc::MAP_FAILED {
             return Err(DirtyRingError::Mmap(std::io::Error::last_os_error()));
         }
-        Ok(DirtyRing { ptr: addr as *mut kvm_dirty_gfn, entries: entries as usize, cursor: 0 })
+        Ok(DirtyRing {
+            ptr: addr as *mut kvm_dirty_gfn,
+            entries: entries as usize,
+            cursor: 0,
+        })
     }
 
     /// Copy every ring slot's current bytes into a portable [`RawDirtyGfn`] buffer, run
@@ -486,7 +564,11 @@ impl DirtyRing {
                 // in this same mapping (only `g.flags` needs the volatile guarantee — see the
                 // write-back loop below for why `slot`/`offset` do not).
                 let flags = unsafe { std::ptr::read_volatile(&g.flags) };
-                RawDirtyGfn { flags, slot: g.slot, offset: g.offset }
+                RawDirtyGfn {
+                    flags,
+                    slot: g.slot,
+                    offset: g.offset,
+                }
             })
             .collect();
         let harvested = dirty_ring::harvest(&mut mirrored, &mut self.cursor);
@@ -525,7 +607,10 @@ impl Drop for DirtyRing {
         // returned and reserved; nothing else in this process holds a reference to this mapping
         // (it is private to this `DirtyRing`, never exposed by any public API here).
         unsafe {
-            libc::munmap(self.ptr as *mut libc::c_void, self.entries * std::mem::size_of::<kvm_dirty_gfn>());
+            libc::munmap(
+                self.ptr as *mut libc::c_void,
+                self.entries * std::mem::size_of::<kvm_dirty_gfn>(),
+            );
         }
     }
 }
@@ -556,7 +641,10 @@ mod state_validation_tests {
                 tsc_aux: 0,
                 entropy_state: 0,
             },
-            device: DeviceState { tape_cursor: 0, console: Vec::new() },
+            device: DeviceState {
+                tape_cursor: 0,
+                console: Vec::new(),
+            },
             cpu_signature: 0,
         }
     }
@@ -565,7 +653,10 @@ mod state_validation_tests {
     fn truncated_register_state_is_rejected_before_kvm_restore() {
         let mut universe = valid_universe();
         universe.vcpu.regs.pop();
-        assert!(matches!(validate_state_lengths(&universe, 4096), Err(RestoreError::InvalidStateLength { field: "regs", .. })));
+        assert!(matches!(
+            validate_state_lengths(&universe, 4096),
+            Err(RestoreError::InvalidStateLength { field: "regs", .. })
+        ));
     }
 
     #[test]
@@ -573,7 +664,10 @@ mod state_validation_tests {
         let mut universe = valid_universe();
         assert!(validate_state_lengths(&universe, 4096).is_ok());
         for size in [4095, 4097, 8192] {
-            assert!(matches!(validate_state_lengths(&universe, size), Err(RestoreError::InvalidStateLength { field: "xsave", .. })));
+            assert!(matches!(
+                validate_state_lengths(&universe, size),
+                Err(RestoreError::InvalidStateLength { field: "xsave", .. })
+            ));
         }
         universe.vcpu.xsave.resize(8192, 0x5a);
         assert!(validate_state_lengths(&universe, 8192).is_ok());

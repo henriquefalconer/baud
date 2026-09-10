@@ -19,14 +19,14 @@
 // - auto-stop: after 60s idle, transition to Stopped (tracked via timer)
 // - auto-archive: after 300s in Stopped, transition to Archived
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use baud_tape::types::{ExecResult, SandboxSpec, SandboxStatus, TapeState};
 use baud_tape::Backend;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -69,7 +69,11 @@ impl SandboxEntry {
             TapeState::Running => {
                 let idle = now.duration_since(self.last_active);
                 if idle > Duration::from_secs(self.spec.auto_stop_secs as u64) {
-                    info!("local: sandbox {} auto-stopped after {}s idle", self.id, idle.as_secs());
+                    info!(
+                        "local: sandbox {} auto-stopped after {}s idle",
+                        self.id,
+                        idle.as_secs()
+                    );
                     self.state = TapeState::Stopped;
                     self.stopped_at = Some(now);
                 }
@@ -78,7 +82,11 @@ impl SandboxEntry {
                 if let Some(stopped_at) = self.stopped_at {
                     let stopped_for = now.duration_since(stopped_at);
                     if stopped_for > Duration::from_secs(self.spec.auto_archive_secs as u64) {
-                        info!("local: sandbox {} auto-archived after {}s stopped", self.id, stopped_for.as_secs());
+                        info!(
+                            "local: sandbox {} auto-archived after {}s stopped",
+                            self.id,
+                            stopped_for.as_secs()
+                        );
                         self.state = TapeState::Archived;
                         self.stopped_at = None;
                     }
@@ -137,7 +145,8 @@ impl LocalBackend {
 
     async fn get_sandbox(&self, id: &str) -> Result<SandboxEntry> {
         let mut map = self.sandboxes.lock().await;
-        let entry = map.get_mut(id)
+        let entry = map
+            .get_mut(id)
             .with_context(|| format!("sandbox {id} not found"))?;
         entry.tick();
         Ok(entry.clone())
@@ -148,7 +157,8 @@ impl LocalBackend {
         F: FnOnce(&mut SandboxEntry) -> Result<()>,
     {
         let mut map = self.sandboxes.lock().await;
-        let entry = map.get_mut(id)
+        let entry = map
+            .get_mut(id)
             .with_context(|| format!("sandbox {id} not found"))?;
         entry.tick();
         f(entry)?;
@@ -252,9 +262,13 @@ fn unix_now() -> u64 {
 #[async_trait]
 impl Backend for LocalBackend {
     async fn create(&self, spec: &SandboxSpec) -> Result<String> {
-        let id = format!("local-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+        let id = format!(
+            "local-{}",
+            uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
+        );
         let root = self.sandbox_root(&id);
-        tokio::fs::create_dir_all(&root).await
+        tokio::fs::create_dir_all(&root)
+            .await
             .with_context(|| format!("create sandbox dir {root:?}"))?;
         // Create standard directories
         tokio::fs::create_dir_all(root.join("tmp")).await?;
@@ -277,48 +291,45 @@ impl Backend for LocalBackend {
     }
 
     async fn start(&self, id: &str) -> Result<()> {
-        self.mutate_sandbox(id, |e| {
-            match e.state {
-                TapeState::Stopped => {
-                    e.state = TapeState::Running;
-                    e.last_active = Instant::now();
-                    e.stopped_at = None;
-                    Ok(())
-                }
-                ref s => bail!("cannot start sandbox in state {s}"),
+        self.mutate_sandbox(id, |e| match e.state {
+            TapeState::Stopped => {
+                e.state = TapeState::Running;
+                e.last_active = Instant::now();
+                e.stopped_at = None;
+                Ok(())
             }
-        }).await?;
+            ref s => bail!("cannot start sandbox in state {s}"),
+        })
+        .await?;
         info!("local: started sandbox {id}");
         Ok(())
     }
 
     async fn stop(&self, id: &str) -> Result<()> {
-        self.mutate_sandbox(id, |e| {
-            match e.state {
-                TapeState::Running => {
-                    e.state = TapeState::Stopped;
-                    e.stopped_at = Some(Instant::now());
-                    Ok(())
-                }
-                ref s => bail!("cannot stop sandbox in state {s}"),
+        self.mutate_sandbox(id, |e| match e.state {
+            TapeState::Running => {
+                e.state = TapeState::Stopped;
+                e.stopped_at = Some(Instant::now());
+                Ok(())
             }
-        }).await?;
+            ref s => bail!("cannot stop sandbox in state {s}"),
+        })
+        .await?;
         info!("local: stopped sandbox {id}");
         Ok(())
     }
 
     async fn restore(&self, id: &str) -> Result<()> {
-        self.mutate_sandbox(id, |e| {
-            match e.state {
-                TapeState::Archived | TapeState::Stopped => {
-                    e.state = TapeState::Running;
-                    e.last_active = Instant::now();
-                    e.stopped_at = None;
-                    Ok(())
-                }
-                ref s => bail!("cannot restore sandbox in state {s}"),
+        self.mutate_sandbox(id, |e| match e.state {
+            TapeState::Archived | TapeState::Stopped => {
+                e.state = TapeState::Running;
+                e.last_active = Instant::now();
+                e.stopped_at = None;
+                Ok(())
             }
-        }).await?;
+            ref s => bail!("cannot restore sandbox in state {s}"),
+        })
+        .await?;
         info!("local: restored sandbox {id}");
         Ok(())
     }
@@ -326,12 +337,14 @@ impl Backend for LocalBackend {
     async fn delete(&self, id: &str) -> Result<()> {
         let root = {
             let mut map = self.sandboxes.lock().await;
-            let entry = map.remove(id)
+            let entry = map
+                .remove(id)
                 .with_context(|| format!("sandbox {id} not found"))?;
             entry.root
         };
         if root.exists() {
-            tokio::fs::remove_dir_all(&root).await
+            tokio::fs::remove_dir_all(&root)
+                .await
                 .with_context(|| format!("remove sandbox dir {root:?}"))?;
         }
         info!("local: deleted sandbox {id}");
@@ -355,7 +368,8 @@ impl Backend for LocalBackend {
         self.mutate_sandbox(id, |e| {
             e.last_active = Instant::now();
             Ok(())
-        }).await?;
+        })
+        .await?;
 
         let result = self.run_cmd(id, cmd).await?;
         debug!("local exec [{id}] {:?} → exit {}", cmd, result.exit_code);
@@ -369,7 +383,8 @@ impl Backend for LocalBackend {
         if let Some(parent) = local_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(&local_path, data).await
+        tokio::fs::write(&local_path, data)
+            .await
             .with_context(|| format!("write {local_path:?}"))?;
         debug!("local put [{id}] {remote_path:?} ({} bytes)", data.len());
         Ok(())
@@ -378,7 +393,8 @@ impl Backend for LocalBackend {
     async fn get(&self, id: &str, remote_path: &Path) -> Result<Vec<u8>> {
         let entry = self.get_sandbox(id).await?;
         let local_path = map_path(&entry.root, remote_path);
-        let data = tokio::fs::read(&local_path).await
+        let data = tokio::fs::read(&local_path)
+            .await
             .with_context(|| format!("read {local_path:?}"))?;
         debug!("local get [{id}] {remote_path:?} ({} bytes)", data.len());
         Ok(data)
@@ -437,7 +453,10 @@ mod tests {
         drop(first);
 
         let second = LocalBackend::with_base_dir(base);
-        second.adopt_existing(&id, spec, TapeState::Running, 123).await.expect("adopt");
+        second
+            .adopt_existing(&id, spec, TapeState::Running, 123)
+            .await
+            .expect("adopt");
         let status = second.status(&id).await.expect("status after adopt");
         assert_eq!(status.id, id);
         assert_eq!(status.created_at, 123);
@@ -460,7 +479,9 @@ mod tests {
         let spec = SandboxSpec::default();
         let id = b.create(&spec).await.expect("create");
         let content = b"baud test content";
-        b.put(&id, Path::new("/tmp/test.txt"), content).await.expect("put");
+        b.put(&id, Path::new("/tmp/test.txt"), content)
+            .await
+            .expect("put");
         let got = b.get(&id, Path::new("/tmp/test.txt")).await.expect("get");
         assert_eq!(&got, content);
     }

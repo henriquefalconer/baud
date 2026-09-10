@@ -137,7 +137,10 @@ impl BlockBackingStore {
     /// length need not be a multiple of [`SECTOR_SIZE`]; [`Self::capacity_sectors`] simply floors
     /// it, matching how a real disk's last partial sector (if any) would be unreachable.
     pub fn new(base: impl Into<BlockBase>) -> Self {
-        BlockBackingStore { base: base.into(), overlay: std::collections::HashMap::new() }
+        BlockBackingStore {
+            base: base.into(),
+            overlay: std::collections::HashMap::new(),
+        }
     }
 
     /// [`Self::new`] over a read-only memory map of the image file at `path`
@@ -202,7 +205,8 @@ pub fn service_request<M: GuestMemoryBackend>(
     let data_descriptors = &chain[1..chain.len() - 1];
 
     let mut header = [0u8; REQ_HEADER_LEN];
-    mem.read_slice(&mut header, GuestAddress(header_desc.addr)).map_err(VirtqueueError::GuestMemory)?;
+    mem.read_slice(&mut header, GuestAddress(header_desc.addr))
+        .map_err(VirtqueueError::GuestMemory)?;
     let request_type = u32::from_le_bytes(header[0..4].try_into().unwrap());
     let sector = u64::from_le_bytes(header[8..16].try_into().unwrap());
 
@@ -220,9 +224,11 @@ pub fn service_request<M: GuestMemoryBackend>(
                         let mut buf = [0u8; SECTOR_SIZE as usize];
                         if request_type == VIRTIO_BLK_T_IN {
                             store.read_sector(current_sector, &mut buf);
-                            mem.write_slice(&buf, GuestAddress(addr)).map_err(VirtqueueError::GuestMemory)?;
+                            mem.write_slice(&buf, GuestAddress(addr))
+                                .map_err(VirtqueueError::GuestMemory)?;
                         } else {
-                            mem.read_slice(&mut buf, GuestAddress(addr)).map_err(VirtqueueError::GuestMemory)?;
+                            mem.read_slice(&mut buf, GuestAddress(addr))
+                                .map_err(VirtqueueError::GuestMemory)?;
                             store.write_sector(current_sector, &buf);
                         }
                         current_sector += 1;
@@ -243,7 +249,8 @@ pub fn service_request<M: GuestMemoryBackend>(
     }
 
     let status_written = if status_desc.len >= 1 {
-        mem.write_slice(&[status], GuestAddress(status_desc.addr)).map_err(VirtqueueError::GuestMemory)?;
+        mem.write_slice(&[status], GuestAddress(status_desc.addr))
+            .map_err(VirtqueueError::GuestMemory)?;
         1
     } else {
         0
@@ -278,15 +285,28 @@ mod tests {
 
     fn chain(data_len: u32, data_write: bool) -> Vec<Descriptor> {
         vec![
-            Descriptor { addr: HEADER_BASE, len: REQ_HEADER_LEN as u32, write: false },
-            Descriptor { addr: DATA_BASE, len: data_len, write: data_write },
-            Descriptor { addr: STATUS_BASE, len: 1, write: true },
+            Descriptor {
+                addr: HEADER_BASE,
+                len: REQ_HEADER_LEN as u32,
+                write: false,
+            },
+            Descriptor {
+                addr: DATA_BASE,
+                len: data_len,
+                write: data_write,
+            },
+            Descriptor {
+                addr: STATUS_BASE,
+                len: 1,
+                write: true,
+            },
         ]
     }
 
     fn read_status(mem: &GuestMemory) -> u8 {
         let mut byte = [0u8; 1];
-        mem.read_slice(&mut byte, GuestAddress(STATUS_BASE)).unwrap();
+        mem.read_slice(&mut byte, GuestAddress(STATUS_BASE))
+            .unwrap();
         byte[0]
     }
 
@@ -307,11 +327,17 @@ mod tests {
 
         let written = service_request(&mem, &chain, &mut store).unwrap();
 
-        assert_eq!(written, SECTOR_SIZE as u32 + 1, "one sector of data plus the status byte");
+        assert_eq!(
+            written,
+            SECTOR_SIZE as u32 + 1,
+            "one sector of data plus the status byte"
+        );
         assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
         let mut data = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut data, GuestAddress(DATA_BASE)).unwrap();
-        let expected: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
+        let expected: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE)
+            .map(|i| (i % 256) as u8)
+            .collect();
         assert_eq!(data, expected, "sector 1's own bytes from the base image");
     }
 
@@ -319,15 +345,23 @@ mod tests {
     fn write_request_updates_the_overlay_not_the_base_image() {
         let mem = test_guest_mem();
         let mut store = BlockBackingStore::new(base_image(4));
-        mem.write_slice(&[0xAB; SECTOR_SIZE as usize], GuestAddress(DATA_BASE)).unwrap();
+        mem.write_slice(&[0xAB; SECTOR_SIZE as usize], GuestAddress(DATA_BASE))
+            .unwrap();
         write_header(&mem, VIRTIO_BLK_T_OUT, 2);
         let chain = chain(SECTOR_SIZE as u32, false);
 
         let written = service_request(&mem, &chain, &mut store).unwrap();
 
-        assert_eq!(written, 1, "a write request only reports the status byte, no data bytes");
+        assert_eq!(
+            written, 1,
+            "a write request only reports the status byte, no data bytes"
+        );
         assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
-        assert_eq!(store.base[(2 * SECTOR_SIZE) as usize], 0, "the base image itself must stay pristine");
+        assert_eq!(
+            store.base[(2 * SECTOR_SIZE) as usize],
+            0,
+            "the base image itself must stay pristine"
+        );
     }
 
     #[test]
@@ -335,7 +369,8 @@ mod tests {
         let mem = test_guest_mem();
         let mut store = BlockBackingStore::new(base_image(4));
 
-        mem.write_slice(&[0xCD; SECTOR_SIZE as usize], GuestAddress(DATA_BASE)).unwrap();
+        mem.write_slice(&[0xCD; SECTOR_SIZE as usize], GuestAddress(DATA_BASE))
+            .unwrap();
         write_header(&mem, VIRTIO_BLK_T_OUT, 0);
         service_request(&mem, &chain(SECTOR_SIZE as u32, false), &mut store).unwrap();
 
@@ -343,24 +378,37 @@ mod tests {
         service_request(&mem, &chain(SECTOR_SIZE as u32, true), &mut store).unwrap();
         let mut data = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut data, GuestAddress(DATA_BASE)).unwrap();
-        assert_eq!(data, vec![0xCD; SECTOR_SIZE as usize], "the read must see the just-written overlay, not the base");
+        assert_eq!(
+            data,
+            vec![0xCD; SECTOR_SIZE as usize],
+            "the read must see the just-written overlay, not the base"
+        );
     }
 
     #[test]
     fn an_out_of_range_sector_reports_ioerr_without_touching_memory() {
         let mem = test_guest_mem();
         let mut store = BlockBackingStore::new(base_image(2)); // only sectors 0..2 exist
-        mem.write_slice(&[0x11; SECTOR_SIZE as usize], GuestAddress(DATA_BASE)).unwrap();
+        mem.write_slice(&[0x11; SECTOR_SIZE as usize], GuestAddress(DATA_BASE))
+            .unwrap();
         write_header(&mem, VIRTIO_BLK_T_IN, 5); // out of range
         let chain = chain(SECTOR_SIZE as u32, true);
 
         let written = service_request(&mem, &chain, &mut store).unwrap();
 
-        assert_eq!(written, 1, "an error report is only the status byte, no data written");
+        assert_eq!(
+            written, 1,
+            "an error report is only the status byte, no data written"
+        );
         assert_eq!(read_status(&mem), VIRTIO_BLK_S_IOERR);
         let mut untouched = vec![0u8; SECTOR_SIZE as usize];
-        mem.read_slice(&mut untouched, GuestAddress(DATA_BASE)).unwrap();
-        assert_eq!(untouched, vec![0x11; SECTOR_SIZE as usize], "the data buffer must be left exactly as posted");
+        mem.read_slice(&mut untouched, GuestAddress(DATA_BASE))
+            .unwrap();
+        assert_eq!(
+            untouched,
+            vec![0x11; SECTOR_SIZE as usize],
+            "the data buffer must be left exactly as posted"
+        );
     }
 
     #[test]
@@ -382,8 +430,16 @@ mod tests {
         // A flush request carries no data descriptor at all under the legacy interface: just
         // header + status.
         let chain = vec![
-            Descriptor { addr: HEADER_BASE, len: REQ_HEADER_LEN as u32, write: false },
-            Descriptor { addr: STATUS_BASE, len: 1, write: true },
+            Descriptor {
+                addr: HEADER_BASE,
+                len: REQ_HEADER_LEN as u32,
+                write: false,
+            },
+            Descriptor {
+                addr: STATUS_BASE,
+                len: 1,
+                write: true,
+            },
         ];
 
         let written = service_request(&mem, &chain, &mut store).unwrap();
@@ -398,10 +454,26 @@ mod tests {
         const DATA_BASE_2: u64 = DATA_BASE + 0x10_000;
         write_header(&mem, VIRTIO_BLK_T_IN, 0);
         let chain = vec![
-            Descriptor { addr: HEADER_BASE, len: REQ_HEADER_LEN as u32, write: false },
-            Descriptor { addr: DATA_BASE, len: SECTOR_SIZE as u32, write: true },
-            Descriptor { addr: DATA_BASE_2, len: SECTOR_SIZE as u32, write: true },
-            Descriptor { addr: STATUS_BASE, len: 1, write: true },
+            Descriptor {
+                addr: HEADER_BASE,
+                len: REQ_HEADER_LEN as u32,
+                write: false,
+            },
+            Descriptor {
+                addr: DATA_BASE,
+                len: SECTOR_SIZE as u32,
+                write: true,
+            },
+            Descriptor {
+                addr: DATA_BASE_2,
+                len: SECTOR_SIZE as u32,
+                write: true,
+            },
+            Descriptor {
+                addr: STATUS_BASE,
+                len: 1,
+                write: true,
+            },
         ];
 
         let written = service_request(&mem, &chain, &mut store).unwrap();
@@ -410,11 +482,17 @@ mod tests {
         let mut first = vec![0u8; SECTOR_SIZE as usize];
         let mut second = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut first, GuestAddress(DATA_BASE)).unwrap();
-        mem.read_slice(&mut second, GuestAddress(DATA_BASE_2)).unwrap();
+        mem.read_slice(&mut second, GuestAddress(DATA_BASE_2))
+            .unwrap();
         let expected_first: Vec<u8> = (0..SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
-        let expected_second: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
+        let expected_second: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE)
+            .map(|i| (i % 256) as u8)
+            .collect();
         assert_eq!(first, expected_first, "sector 0 in the first descriptor");
-        assert_eq!(second, expected_second, "sector 1 (the request's sector spans on) in the second descriptor");
+        assert_eq!(
+            second, expected_second,
+            "sector 1 (the request's sector spans on) in the second descriptor"
+        );
     }
 
     #[test]
@@ -427,7 +505,11 @@ mod tests {
     fn a_chain_shorter_than_header_plus_status_is_a_harmless_no_op() {
         let mem = test_guest_mem();
         let mut store = BlockBackingStore::new(base_image(2));
-        let chain = vec![Descriptor { addr: HEADER_BASE, len: REQ_HEADER_LEN as u32, write: false }];
+        let chain = vec![Descriptor {
+            addr: HEADER_BASE,
+            len: REQ_HEADER_LEN as u32,
+            write: false,
+        }];
         assert_eq!(service_request(&mem, &chain, &mut store).unwrap(), 0);
     }
 
@@ -444,28 +526,45 @@ mod tests {
         std::fs::write(&path, &image).expect("write the base image out");
 
         let mem = test_guest_mem();
-        let mut mapped = BlockBackingStore::mapped(&path).expect("mapping a readable file must succeed");
-        assert_eq!(mapped.capacity_sectors(), 4, "capacity comes from the mapping's length");
+        let mut mapped =
+            BlockBackingStore::mapped(&path).expect("mapping a readable file must succeed");
+        assert_eq!(
+            mapped.capacity_sectors(),
+            4,
+            "capacity comes from the mapping's length"
+        );
 
         // Read sector 1 -- byte-identical to the owned-Vec store's own test above.
         write_header(&mem, VIRTIO_BLK_T_IN, 1);
         let read_chain = chain(SECTOR_SIZE as u32, true);
-        assert_eq!(service_request(&mem, &read_chain, &mut mapped).unwrap(), SECTOR_SIZE as u32 + 1);
+        assert_eq!(
+            service_request(&mem, &read_chain, &mut mapped).unwrap(),
+            SECTOR_SIZE as u32 + 1
+        );
         assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
         let mut data = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut data, GuestAddress(DATA_BASE)).unwrap();
-        let expected: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
-        assert_eq!(data, expected, "sector 1's own bytes, read straight out of the mapping");
+        let expected: Vec<u8> = (SECTOR_SIZE..2 * SECTOR_SIZE)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        assert_eq!(
+            data, expected,
+            "sector 1's own bytes, read straight out of the mapping"
+        );
 
         // Write sector 1, then read it back: the overlay answers, and the file is untouched.
-        mem.write_slice(&[0xABu8; SECTOR_SIZE as usize], GuestAddress(DATA_BASE)).unwrap();
+        mem.write_slice(&[0xABu8; SECTOR_SIZE as usize], GuestAddress(DATA_BASE))
+            .unwrap();
         write_header(&mem, VIRTIO_BLK_T_OUT, 1);
         let write_chain = chain(SECTOR_SIZE as u32, false);
         assert_eq!(service_request(&mem, &write_chain, &mut mapped).unwrap(), 1);
         assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
         let mut overlaid = [0u8; SECTOR_SIZE as usize];
         mapped.read_sector(1, &mut overlaid);
-        assert_eq!(overlaid, [0xABu8; SECTOR_SIZE as usize], "the overlay, not the mapping, answers");
+        assert_eq!(
+            overlaid, [0xABu8; SECTOR_SIZE as usize],
+            "the overlay, not the mapping, answers"
+        );
         assert_eq!(
             std::fs::read(&path).expect("re-read the base image"),
             image,
@@ -480,7 +579,13 @@ mod tests {
         let Err(err) = BlockBackingStore::mapped(&missing) else {
             panic!("a missing file cannot be mapped");
         };
-        assert!(err.contains("does-not-exist.img"), "error must name the path, got: {err}");
-        assert!(err.contains("open failed"), "error must name the failing step, got: {err}");
+        assert!(
+            err.contains("does-not-exist.img"),
+            "error must name the path, got: {err}"
+        );
+        assert!(
+            err.contains("open failed"),
+            "error must name the failing step, got: {err}"
+        );
     }
 }

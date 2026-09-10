@@ -8,11 +8,11 @@
 //   - SQLite metadata storage + content-addressed journal files
 //   - Run orchestration and sandbox-minute budget
 
-mod routes;
 #[cfg(target_os = "linux")]
 mod cpu_affinity;
 #[cfg(target_os = "linux")]
 mod rdseed_sites;
+mod routes;
 mod state;
 
 use anyhow::Result;
@@ -47,7 +47,10 @@ fn main() -> Result<()> {
         .init();
 
     #[cfg(target_os = "linux")]
-    info!(?pinned_cpus, "baud-server pinned to dynamically selected CPUs");
+    info!(
+        ?pinned_cpus,
+        "baud-server pinned to dynamically selected CPUs"
+    );
 
     // Apply affinity before creating any runtime threads so workers, blocking tasks,
     // and their children inherit the same two-CPU mask.
@@ -70,7 +73,9 @@ async fn serve() -> Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:7734".to_owned())
         .parse()?;
     if !addr.ip().is_loopback() {
-        anyhow::bail!("BAUD_ADDR must use a loopback address; refusing to expose the daemon on {addr}");
+        anyhow::bail!(
+            "BAUD_ADDR must use a loopback address; refusing to expose the daemon on {addr}"
+        );
     }
     info!("baud-server listening on {addr}");
 
@@ -119,13 +124,18 @@ fn build_router(state: AppState) -> Router {
         .route("/runs", get(routes::runs::list))
         .route("/runs/{id}", get(routes::runs::status))
         .route("/runs/{id}/abort", post(routes::runs::abort))
+        .route("/runs/{id}/pause", post(routes::runs::pause))
+        .route("/runs/{id}/resume", post(routes::runs::resume))
         // Observations (M3: full SQLite-backed)
         .route("/runs/{id}/obs", get(routes::obs::list))
         .route("/runs/{id}/obs", post(routes::obs::append))
         .route("/runs/{id}/obs/tail", get(routes::obs::tail))
         // Verify (M3)
         .route("/verify/determinism", post(routes::verify::determinism))
-        .route("/verify/determinism/poisoned", post(routes::verify::determinism_poisoned))
+        .route(
+            "/verify/determinism/poisoned",
+            post(routes::verify::determinism_poisoned),
+        )
         .route("/verify/observation/{id}", get(routes::verify::observation))
         // Replay (M3)
         .route("/replay/{id}", post(routes::replay::replay))
@@ -140,15 +150,24 @@ fn build_router(state: AppState) -> Router {
         // Net weather (M5)
         .route("/runs/{id}/net/weather", get(routes::net::weather))
         .route("/runs/{id}/net/weather", post(routes::net::append_event))
-        .route("/runs/{id}/net/simulate", post(routes::net::simulate_weather))
+        .route(
+            "/runs/{id}/net/simulate",
+            post(routes::net::simulate_weather),
+        )
         // Tracing — plane 2 (M7)
         .route("/tracing/tail", get(routes::tracing::tail))
         .route("/tracing/summary", get(routes::tracing::summary))
-        .route("/runs/{id}/tracing/seed", post(routes::tracing::seed_from_syscalls))
+        .route(
+            "/runs/{id}/tracing/seed",
+            post(routes::tracing::seed_from_syscalls),
+        )
         .route("/runs/{id}/ebpf", get(routes::tracing::list_ebpf))
         // Syscall log — plane 1 (M7)
         .route("/runs/{id}/syscalls", get(routes::tracing::list_syscalls))
-        .route("/runs/{id}/syscalls/tail", get(routes::tracing::tail_syscalls))
+        .route(
+            "/runs/{id}/syscalls/tail",
+            get(routes::tracing::tail_syscalls),
+        )
         // Budget (M9)
         .route("/budget", get(routes::budget::budget))
         .route("/budget/record", post(routes::budget::record))
@@ -165,12 +184,24 @@ fn build_router(state: AppState) -> Router {
 fn add_run_kvm_route(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/run/kvm", axum::routing::post(routes::run_kvm::run))
-        .route("/run/kvm/branch", axum::routing::post(routes::run_kvm::branch))
-        .route("/run/kvm/resume", axum::routing::post(routes::run_kvm::resume))
-        .route("/shell-into/{run_id}/{node_id}", axum::routing::get(routes::shell_into::shell_into))
+        .route(
+            "/run/kvm/branch",
+            axum::routing::post(routes::run_kvm::branch),
+        )
+        .route(
+            "/run/kvm/resume",
+            axum::routing::post(routes::run_kvm::resume),
+        )
+        .route(
+            "/shell-into/{run_id}/{node_id}",
+            axum::routing::get(routes::shell_into::shell_into),
+        )
         // Verify — fingerprint (H9, todo.md §14 item 9): needs the real KVM Multiverse, like
         // every other route in this Linux-only group.
-        .route("/verify/fingerprint", axum::routing::post(routes::verify_fingerprint::fingerprint))
+        .route(
+            "/verify/fingerprint",
+            axum::routing::post(routes::verify_fingerprint::fingerprint),
+        )
 }
 
 #[cfg(not(target_os = "linux"))]

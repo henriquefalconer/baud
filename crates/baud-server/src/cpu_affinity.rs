@@ -35,13 +35,8 @@ fn stats() -> io::Result<Vec<(usize, u64, u64)>> {
 /// now. Failure is returned instead of silently running without the advertised cap.
 pub fn pin_to_quiet_cpus() -> io::Result<Vec<usize>> {
     let mut allowed = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
-    let rc = unsafe {
-        libc::sched_getaffinity(
-            0,
-            std::mem::size_of::<libc::cpu_set_t>(),
-            &mut allowed,
-        )
-    };
+    let rc =
+        unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut allowed) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -49,7 +44,10 @@ pub fn pin_to_quiet_cpus() -> io::Result<Vec<usize>> {
         .filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &allowed) })
         .collect();
     if allowed.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "current affinity mask is empty"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "current affinity mask is empty",
+        ));
     }
 
     let first = stats()?;
@@ -78,16 +76,17 @@ pub fn pin_to_quiet_cpus() -> io::Result<Vec<usize>> {
         .map(|(cpu, _)| cpu)
         .collect();
     if selected.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::Other, "no measurable CPU available"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "no measurable CPU available",
+        ));
     }
 
     let mut mask = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
     for &cpu in &selected {
         unsafe { libc::CPU_SET(cpu, &mut mask) };
     }
-    let rc = unsafe {
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mask)
-    };
+    let rc = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mask) };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }

@@ -6,9 +6,9 @@
 // baud tracing tail --tape <id> [--event sched|syscall|exec|fault] [--node <n>]
 // baud tracing summary --run <id>
 
+use crate::client::Client;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crate::client::Client;
 
 #[derive(Parser)]
 pub struct TracingCmd {
@@ -38,14 +38,19 @@ pub async fn run(cmd: TracingCmd, c: &Client, json: bool) -> Result<()> {
     match cmd.action {
         TracingAction::Tail { tape, event, node } => {
             let mut url = format!("/tracing/tail?tape={tape}");
-            if let Some(ev) = &event { url.push_str(&format!("&event={ev}")); }
-            if let Some(n) = node { url.push_str(&format!("&node={n}")); }
+            if let Some(ev) = &event {
+                url.push_str(&format!("&event={ev}"));
+            }
+            if let Some(n) = node {
+                url.push_str(&format!("&node={n}"));
+            }
             let resp = c.get(&url).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp)?);
             } else {
                 let count = resp["count"].as_u64().unwrap_or(0);
-                let source = resp["records"].as_array()
+                let source = resp["records"]
+                    .as_array()
                     .and_then(|a| a.first())
                     .and_then(|r| r["source"].as_str())
                     .unwrap_or("fallback");
@@ -74,10 +79,18 @@ pub async fn run(cmd: TracingCmd, c: &Client, json: bool) -> Result<()> {
                 let p1 = &resp["plane1"];
                 let p2 = &resp["plane2"];
                 println!("Tracing summary for run {run}");
-                println!("  Plane 1 (supervisor syscall log): {} records",
-                    p1["syscall_records"].as_u64().unwrap_or(0));
-                println!("  Plane 2 ({}):", p2["source"].as_str().unwrap_or("fallback"));
-                println!("    total events: {}", p2["total_events"].as_u64().unwrap_or(0));
+                println!(
+                    "  Plane 1 (supervisor syscall log): {} records",
+                    p1["syscall_records"].as_u64().unwrap_or(0)
+                );
+                println!(
+                    "  Plane 2 ({}):",
+                    p2["source"].as_str().unwrap_or("fallback")
+                );
+                println!(
+                    "    total events: {}",
+                    p2["total_events"].as_u64().unwrap_or(0)
+                );
                 if let Some(ec) = p2["event_counts"].as_object() {
                     for (k, v) in ec {
                         println!("      {k}: {}", v.as_u64().unwrap_or(0));

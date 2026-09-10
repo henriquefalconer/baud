@@ -32,7 +32,10 @@ pub fn write_identity_page_tables<M: GuestMemoryBackend>(
     let tables: IdentityPageTables = layout::build_identity_page_tables(ram_size);
 
     guest_mem.write_slice(page_as_bytes(&tables.pml4), GuestAddress(layout::PML4_ADDR))?;
-    guest_mem.write_slice(page_as_bytes(&tables.pdpte), GuestAddress(layout::PDPTE_ADDR))?;
+    guest_mem.write_slice(
+        page_as_bytes(&tables.pdpte),
+        GuestAddress(layout::PDPTE_ADDR),
+    )?;
     for (i, pde_page) in tables.pde_pages.iter().enumerate() {
         let addr = GuestAddress(layout::PDE_ADDR + (i as u64) * 0x1000);
         guest_mem.write_slice(page_as_bytes(pde_page), addr)?;
@@ -45,7 +48,9 @@ pub fn write_identity_page_tables<M: GuestMemoryBackend>(
 /// specs/baud-vcpu.md §5): the IDT gate's far transfer reloads `CS` via a genuine GDT
 /// descriptor-table lookup regardless of `kvm_sregs`'s directly-loaded segment cache (see
 /// [`layout::GDT_ADDR`]'s doc for why this is not optional once `inject_at` is wired in).
-pub fn write_gdt<M: GuestMemoryBackend>(guest_mem: &M) -> Result<(), vm_memory::guest_memory::Error> {
+pub fn write_gdt<M: GuestMemoryBackend>(
+    guest_mem: &M,
+) -> Result<(), vm_memory::guest_memory::Error> {
     let gdt = layout::build_flat_gdt();
     let bytes: Vec<u8> = gdt.iter().flat_map(|entry| entry.to_le_bytes()).collect();
     guest_mem.write_slice(&bytes, GuestAddress(layout::GDT_ADDR))
@@ -86,10 +91,10 @@ pub fn long_mode_sregs() -> kvm_sregs {
         type_: 0xB, // execute, read, accessed
         present: 1,
         dpl: 0,
-        db: 0,  // 64-bit code segments must have D=0
-        s: 1,   // code/data segment (not a system segment)
-        l: 1,   // 64-bit long mode segment
-        g: 1,   // limit is in 4 KiB pages
+        db: 0, // 64-bit code segments must have D=0
+        s: 1,  // code/data segment (not a system segment)
+        l: 1,  // 64-bit long mode segment
+        g: 1,  // limit is in 4 KiB pages
         avl: 0,
         unusable: 0,
         padding: 0,
@@ -109,8 +114,16 @@ pub fn long_mode_sregs() -> kvm_sregs {
         fs: data_segment,
         gs: data_segment,
         ss: data_segment,
-        gdt: kvm_dtable { base: layout::GDT_ADDR, limit: FLAT_GDT_LIMIT, padding: [0; 3] },
-        idt: kvm_dtable { base: 0, limit: 0, padding: [0; 3] },
+        gdt: kvm_dtable {
+            base: layout::GDT_ADDR,
+            limit: FLAT_GDT_LIMIT,
+            padding: [0; 3],
+        },
+        idt: kvm_dtable {
+            base: 0,
+            limit: 0,
+            padding: [0; 3],
+        },
         cr0: CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_WP | CR0_AM | CR0_PG,
         cr3: layout::PML4_ADDR,
         cr4: CR4_PAE,
@@ -185,13 +198,34 @@ mod tests {
         let sregs = long_mode_sregs();
         assert_eq!(sregs.cr0 & CR0_PG, CR0_PG, "paging must be on");
         assert_eq!(sregs.cr0 & CR0_PE, CR0_PE, "protected mode must be on");
-        assert_eq!(sregs.cr4 & CR4_PAE, CR4_PAE, "PAE is required for long mode");
+        assert_eq!(
+            sregs.cr4 & CR4_PAE,
+            CR4_PAE,
+            "PAE is required for long mode"
+        );
         assert_eq!(sregs.efer & EFER_LME, EFER_LME);
         assert_eq!(sregs.efer & EFER_LMA, EFER_LMA);
-        assert_eq!(sregs.cr3, layout::PML4_ADDR, "CR3 must point at the identity map's PML4");
-        assert_eq!(sregs.cs.l, 1, "code segment must be a 64-bit long-mode segment");
-        assert_eq!(sregs.ds.l, 0, "data segments carry l=0 (Intel SDM 3A table 3-5)");
-        assert_eq!(sregs.gdt.base, layout::GDT_ADDR, "GDT must point at the real in-memory table");
-        assert_eq!(sregs.gdt.limit, FLAT_GDT_LIMIT, "GDT limit must cover exactly its 3 entries");
+        assert_eq!(
+            sregs.cr3,
+            layout::PML4_ADDR,
+            "CR3 must point at the identity map's PML4"
+        );
+        assert_eq!(
+            sregs.cs.l, 1,
+            "code segment must be a 64-bit long-mode segment"
+        );
+        assert_eq!(
+            sregs.ds.l, 0,
+            "data segments carry l=0 (Intel SDM 3A table 3-5)"
+        );
+        assert_eq!(
+            sregs.gdt.base,
+            layout::GDT_ADDR,
+            "GDT must point at the real in-memory table"
+        );
+        assert_eq!(
+            sregs.gdt.limit, FLAT_GDT_LIMIT,
+            "GDT limit must cover exactly its 3 entries"
+        );
     }
 }

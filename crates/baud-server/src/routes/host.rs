@@ -8,10 +8,10 @@
 // independently-observed check; `runnable`/`enforced_capable` are derived from those checks
 // (`Probe::is_runnable`/`is_enforced_capable`), not a separate summary tier.
 
+use crate::AppState;
 use axum::{extract::State, Json};
 use baud_host::Host;
 use serde_json::{json, Value};
-use crate::AppState;
 
 pub async fn probe(_state: State<AppState>) -> Json<Value> {
     // Capability probing does real ioctls/syscalls; run it off the async executor.

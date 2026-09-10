@@ -50,8 +50,17 @@ pub fn compute_probe(checks: &dyn CapabilityChecks) -> Probe {
     let enforced_module_present = checks.enforced_module_present();
 
     let base = |reason: Option<String>| Probe {
-        kvm, vmx, cpuid, tsc_stable, msr_filter, singlestep, rcb_deterministic, nested, vendor,
-        enforced_module_present, reason,
+        kvm,
+        vmx,
+        cpuid,
+        tsc_stable,
+        msr_filter,
+        singlestep,
+        rcb_deterministic,
+        nested,
+        vendor,
+        enforced_module_present,
+        reason,
     };
 
     // Capabilities without which this host cannot run baud at all.
@@ -67,9 +76,21 @@ pub fn compute_probe(checks: &dyn CapabilityChecks) -> Probe {
 
     // Capabilities the tape-device-cooperative determinism model itself needs to serve.
     let cooperative_gate: [(&str, bool, &str); 3] = [
-        ("CPUID control", cpuid, "KVM_SET_CPUID2 did not round-trip a masked leaf"),
-        ("MSR filter", msr_filter, "KVM_X86_SET_MSR_FILTER was not accepted"),
-        ("single-step", singlestep, "KVM_SET_GUEST_DEBUG single-step was not accepted"),
+        (
+            "CPUID control",
+            cpuid,
+            "KVM_SET_CPUID2 did not round-trip a masked leaf",
+        ),
+        (
+            "MSR filter",
+            msr_filter,
+            "KVM_X86_SET_MSR_FILTER was not accepted",
+        ),
+        (
+            "single-step",
+            singlestep,
+            "KVM_SET_GUEST_DEBUG single-step was not accepted",
+        ),
     ];
     if let Some((name, _, remediation)) = cooperative_gate.iter().find(|(_, ok, _)| !ok) {
         return base(Some(format!("{name} unavailable: {remediation}")));
@@ -107,25 +128,55 @@ pub mod test_support {
     }
 
     impl CapabilityChecks for FakeChecks {
-        fn kvm_present(&self) -> bool { self.kvm }
-        fn vmx_present(&self) -> bool { self.vmx }
-        fn vendor(&self) -> Vendor { self.vendor }
-        fn cpuid_control_ok(&self) -> bool { self.cpuid }
-        fn tsc_stable(&self) -> bool { self.tsc_stable }
-        fn msr_filter_ok(&self) -> bool { self.msr_filter_ok }
-        fn singlestep_ok(&self) -> bool { self.singlestep_ok }
-        fn rcb_deterministic(&self) -> bool { self.rcb_deterministic }
-        fn nested_virt(&self) -> bool { self.nested }
-        fn enforced_module_present(&self) -> bool { self.enforced_module_present }
-        fn topology(&self) -> Topology { self.topology.clone() }
+        fn kvm_present(&self) -> bool {
+            self.kvm
+        }
+        fn vmx_present(&self) -> bool {
+            self.vmx
+        }
+        fn vendor(&self) -> Vendor {
+            self.vendor
+        }
+        fn cpuid_control_ok(&self) -> bool {
+            self.cpuid
+        }
+        fn tsc_stable(&self) -> bool {
+            self.tsc_stable
+        }
+        fn msr_filter_ok(&self) -> bool {
+            self.msr_filter_ok
+        }
+        fn singlestep_ok(&self) -> bool {
+            self.singlestep_ok
+        }
+        fn rcb_deterministic(&self) -> bool {
+            self.rcb_deterministic
+        }
+        fn nested_virt(&self) -> bool {
+            self.nested
+        }
+        fn enforced_module_present(&self) -> bool {
+            self.enforced_module_present
+        }
+        fn topology(&self) -> Topology {
+            self.topology.clone()
+        }
     }
 
     /// A fully-capable Intel host with the enforced module present.
     pub fn fake_checks_ok(topology: Topology) -> FakeChecks {
         FakeChecks {
-            kvm: true, vmx: true, vendor: Vendor::Intel, cpuid: true, tsc_stable: true,
-            msr_filter_ok: true, singlestep_ok: true, rcb_deterministic: true, nested: true,
-            enforced_module_present: true, topology,
+            kvm: true,
+            vmx: true,
+            vendor: Vendor::Intel,
+            cpuid: true,
+            tsc_stable: true,
+            msr_filter_ok: true,
+            singlestep_ok: true,
+            rcb_deterministic: true,
+            nested: true,
+            enforced_module_present: true,
+            topology,
         }
     }
 
@@ -139,16 +190,28 @@ pub mod test_support {
     /// `n` physical cores, each with two SMT sibling logical CPUs (hyperthreaded).
     pub fn hyperthreaded_topology(n: usize) -> Topology {
         let cores = (0..n)
-            .map(|i| CoreTopology { physical_id: i, sibling_threads: vec![2 * i, 2 * i + 1] })
+            .map(|i| CoreTopology {
+                physical_id: i,
+                sibling_threads: vec![2 * i, 2 * i + 1],
+            })
             .collect();
-        Topology { cores, housekeeping_reserved: 0 }
+        Topology {
+            cores,
+            housekeeping_reserved: 0,
+        }
     }
 
     /// `n` physical cores, one logical CPU each (SMT disabled).
     pub fn single_core_topology(n: usize) -> Topology {
         let cores = (0..n)
-            .map(|i| CoreTopology { physical_id: i, sibling_threads: vec![i] })
+            .map(|i| CoreTopology {
+                physical_id: i,
+                sibling_threads: vec![i],
+            })
             .collect();
-        Topology { cores, housekeeping_reserved: 0 }
+        Topology {
+            cores,
+            housekeeping_reserved: 0,
+        }
     }
 }

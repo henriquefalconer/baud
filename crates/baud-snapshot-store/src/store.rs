@@ -64,7 +64,11 @@ impl SnapshotStore {
         recipient: String,
         identity_path: Option<PathBuf>,
     ) -> Self {
-        SnapshotStore { root: root.into(), recipient, identity_path }
+        SnapshotStore {
+            root: root.into(),
+            recipient,
+            identity_path,
+        }
     }
 
     // -- paths ---------------------------------------------------------------------------------
@@ -79,16 +83,24 @@ impl SnapshotStore {
         self.run_dir(run).join("tape.age")
     }
     fn node_path(&self, run: &RunId, node: NodeId) -> PathBuf {
-        self.run_dir(run).join("nodes").join(format!("{}.json", node.to_hex()))
+        self.run_dir(run)
+            .join("nodes")
+            .join(format!("{}.json", node.to_hex()))
     }
     fn universe_body_path(&self, run: &RunId, hash: Sha) -> PathBuf {
-        self.run_dir(run).join("universes").join(format!("{}.age", hash.to_hex()))
+        self.run_dir(run)
+            .join("universes")
+            .join(format!("{}.age", hash.to_hex()))
     }
     fn page_body_path(&self, run: &RunId, hash: Sha) -> PathBuf {
-        self.run_dir(run).join("pages").join(format!("{}.age", hash.to_hex()))
+        self.run_dir(run)
+            .join("pages")
+            .join(format!("{}.age", hash.to_hex()))
     }
     fn records_path(&self, run: &RunId, node: NodeId) -> PathBuf {
-        self.run_dir(run).join("records").join(format!("{}.age", node.to_hex()))
+        self.run_dir(run)
+            .join("records")
+            .join(format!("{}.age", node.to_hex()))
     }
     fn driver_state_path(&self, run: &RunId) -> PathBuf {
         self.run_dir(run).join("driver_state.age")
@@ -118,7 +130,12 @@ impl SnapshotStore {
         Ok(baud_keys::age_decrypt(identity_path, &ciphertext)?)
     }
 
-    fn read_and_verify(&self, path: &Path, expected: Sha, kind: &'static str) -> Result<Vec<u8>, StoreError> {
+    fn read_and_verify(
+        &self,
+        path: &Path,
+        expected: Sha,
+        kind: &'static str,
+    ) -> Result<Vec<u8>, StoreError> {
         let plaintext = self.read_and_decrypt(path)?;
         let actual = Sha::of(&plaintext);
         if actual != expected {
@@ -144,8 +161,7 @@ impl SnapshotStore {
 
     pub fn get_manifest(&self, run: &RunId) -> Result<RunManifest, StoreError> {
         let path = self.manifest_path(run);
-        let bytes = fs::read(&path)
-            .map_err(|_| StoreError::ManifestNotFound(run.0.clone()))?;
+        let bytes = fs::read(&path).map_err(|_| StoreError::ManifestNotFound(run.0.clone()))?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
@@ -178,7 +194,11 @@ impl SnapshotStore {
     pub fn put_page(&self, run: &RunId, page: &[u8]) -> Result<PageRef, StoreError> {
         const PAGE_SIZE: usize = 4096;
         if page.len() != PAGE_SIZE {
-            return Err(StoreError::InvalidLength { kind: "page", expected: PAGE_SIZE, actual: page.len() });
+            return Err(StoreError::InvalidLength {
+                kind: "page",
+                expected: PAGE_SIZE,
+                actual: page.len(),
+            });
         }
         let hash = Sha::of(page);
         self.write_body_if_absent(&self.page_body_path(run, hash), page)?;
@@ -186,9 +206,17 @@ impl SnapshotStore {
     }
 
     pub fn get_page(&self, run: &RunId, page: PageRef) -> Result<Vec<u8>, StoreError> {
-        let bytes = self.read_and_verify(&self.page_body_path(run, page.address), page.address, "page")?;
+        let bytes = self.read_and_verify(
+            &self.page_body_path(run, page.address),
+            page.address,
+            "page",
+        )?;
         if bytes.len() != 4096 {
-            return Err(StoreError::InvalidLength { kind: "page", expected: 4096, actual: bytes.len() });
+            return Err(StoreError::InvalidLength {
+                kind: "page",
+                expected: 4096,
+                actual: bytes.len(),
+            });
         }
         Ok(bytes)
     }
@@ -293,7 +321,9 @@ impl SnapshotStore {
 
     pub fn get_universe(&self, run: &RunId, node: NodeId) -> Result<Vec<u8>, StoreError> {
         let n = self.read_node(run, node)?;
-        let hash_hex = n.universe.ok_or_else(|| StoreError::NoUniverseAtNode(node.to_hex()))?;
+        let hash_hex = n
+            .universe
+            .ok_or_else(|| StoreError::NoUniverseAtNode(node.to_hex()))?;
         let hash = Sha::from_hex(&hash_hex)?;
         self.read_and_verify(&self.universe_body_path(run, hash), hash, "universe")
     }
@@ -386,7 +416,11 @@ impl SnapshotStore {
         self.read_and_decrypt(&self.driver_state_path(run))
     }
 
-    pub fn get_records(&self, run: &RunId, node: NodeId) -> Result<Vec<baud_proto::Msg>, StoreError> {
+    pub fn get_records(
+        &self,
+        run: &RunId,
+        node: NodeId,
+    ) -> Result<Vec<baud_proto::Msg>, StoreError> {
         const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
         const MAX_RECORD_COUNT: usize = 1_000_000;
         const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
@@ -400,9 +434,9 @@ impl SnapshotStore {
         let mut records = Vec::new();
         let mut offset = 0usize;
         while offset < plaintext.len() {
-            let end_of_prefix = offset.checked_add(4).ok_or_else(|| {
-                StoreError::BadHash("records length prefix overflow".into())
-            })?;
+            let end_of_prefix = offset
+                .checked_add(4)
+                .ok_or_else(|| StoreError::BadHash("records length prefix overflow".into()))?;
             let len_bytes: [u8; 4] = plaintext
                 .get(offset..end_of_prefix)
                 .ok_or_else(|| StoreError::BadHash("truncated records length prefix".into()))?
@@ -422,9 +456,9 @@ impl SnapshotStore {
                 )));
             }
             offset = end_of_prefix;
-            let end_of_record = offset.checked_add(len).ok_or_else(|| {
-                StoreError::BadHash("records length overflow".into())
-            })?;
+            let end_of_record = offset
+                .checked_add(len)
+                .ok_or_else(|| StoreError::BadHash("records length overflow".into()))?;
             let encoded = plaintext
                 .get(offset..end_of_record)
                 .ok_or_else(|| StoreError::BadHash("truncated record body".into()))?;
@@ -439,6 +473,12 @@ impl SnapshotStore {
 /// every non-alphanumeric byte except `-`/`_`/`.` becomes `_`.
 pub(crate) fn sanitize_component(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

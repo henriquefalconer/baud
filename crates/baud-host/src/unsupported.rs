@@ -20,8 +20,12 @@ impl UnsupportedChecks {
         // even though `is_runnable() == false` means no VM will ever actually be placed here. We
         // cannot tell physical cores from logical ones without OS-specific topology APIs this
         // module deliberately does not implement (real placement is only meaningful on Linux).
-        let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        Self { physical_cores: logical.max(1) }
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Self {
+            physical_cores: logical.max(1),
+        }
     }
 }
 
@@ -71,9 +75,15 @@ impl CapabilityChecks for UnsupportedChecks {
         // placed (`is_runnable()` is always false), so no accuracy claim is made about SMT
         // siblings.
         let cores = (0..self.physical_cores)
-            .map(|i| CoreTopology { physical_id: i, sibling_threads: vec![i] })
+            .map(|i| CoreTopology {
+                physical_id: i,
+                sibling_threads: vec![i],
+            })
             .collect();
-        Topology { cores, housekeeping_reserved: 0 }
+        Topology {
+            cores,
+            housekeeping_reserved: 0,
+        }
     }
 }
 

@@ -17,7 +17,7 @@ pub mod daytona;
 pub mod types;
 
 pub use backend::Backend;
-pub use types::{SandboxStatus, SandboxSpec, ExecResult, TapeState};
+pub use types::{ExecResult, SandboxSpec, SandboxStatus, TapeState};
 
 // ---------------------------------------------------------------------------
 // Tests — conformance suite run against a stub backend (no cloud required)
@@ -25,15 +25,15 @@ pub use types::{SandboxStatus, SandboxSpec, ExecResult, TapeState};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::backend::conformance;
+    use super::*;
+    use anyhow::{bail, Context, Result};
+    use async_trait::async_trait;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use anyhow::{bail, Context, Result};
-    use async_trait::async_trait;
     use tokio::sync::Mutex;
-    use types::{SandboxSpec, SandboxStatus, TapeState, ExecResult};
+    use types::{ExecResult, SandboxSpec, SandboxStatus, TapeState};
 
     /// A minimal in-process stub backend for conformance testing.
     /// Models the same lifecycle as LocalBackend without I/O.
@@ -118,7 +118,11 @@ mod tests {
             } else {
                 String::new()
             };
-            Ok(ExecResult { exit_code: 0, stdout, stderr: String::new() })
+            Ok(ExecResult {
+                exit_code: 0,
+                stdout,
+                stderr: String::new(),
+            })
         }
 
         async fn put(&self, id: &str, remote_path: &Path, data: &[u8]) -> Result<()> {

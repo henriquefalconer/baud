@@ -10,9 +10,9 @@
 // - load_secret_env / require_secret_env: {VAR}_FILE → {VAR} lookup
 // - soft budget <= 400 LOC
 
+use serde::{de::Deserializer, ser::Serializer, Deserialize, Serialize};
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use serde::{de::Deserializer, ser::Serializer, Deserialize, Serialize};
 
 pub const REDACTED: &str = "[REDACTED]";
 
@@ -45,7 +45,10 @@ impl<T: Zeroize + Clone> Secret<T> {
 
     /// Consume the Secret and return the inner value.
     /// The value is NOT zeroized when returned — caller is responsible.
-    pub fn into_inner(mut self) -> T where T: Clone {
+    pub fn into_inner(mut self) -> T
+    where
+        T: Clone,
+    {
         let val = self.inner.clone();
         self.inner.zeroize();
         std::mem::forget(self); // avoid double-zeroize in ZeroizeOnDrop
@@ -131,8 +134,11 @@ pub struct MissingSecret {
 pub fn load_secret_env(var: &str) -> Result<Option<SecretString>, SecretEnvError> {
     let file_var = format!("{}_FILE", var);
     if let Ok(path) = std::env::var(&file_var) {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| SecretEnvError::FileReadError { path: path.clone(), source: e })?;
+        let contents =
+            std::fs::read_to_string(&path).map_err(|e| SecretEnvError::FileReadError {
+                path: path.clone(),
+                source: e,
+            })?;
         let trimmed = contents.strip_suffix('\n').unwrap_or(&contents).to_owned();
         return Ok(Some(Secret::new(trimmed)));
     }
@@ -144,8 +150,9 @@ pub fn load_secret_env(var: &str) -> Result<Option<SecretString>, SecretEnvError
 
 /// Like `load_secret_env` but returns an error if neither is set.
 pub fn require_secret_env(var: &str) -> Result<SecretString, SecretEnvError> {
-    load_secret_env(var)?
-        .ok_or_else(|| SecretEnvError::Missing { var: var.to_owned() })
+    load_secret_env(var)?.ok_or_else(|| SecretEnvError::Missing {
+        var: var.to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------

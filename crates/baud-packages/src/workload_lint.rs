@@ -52,8 +52,8 @@ pub fn scan_crates_for_workload_leaks(crates_dir: &Path) -> Result<Vec<WorkloadL
     let mut leaks = Vec::new();
     let mut stack = vec![crates_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir)
-            .with_context(|| format!("reading directory {}", dir.display()))?;
+        let entries =
+            fs::read_dir(&dir).with_context(|| format!("reading directory {}", dir.display()))?;
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
@@ -71,8 +71,8 @@ pub fn scan_crates_for_workload_leaks(crates_dir: &Path) -> Result<Vec<WorkloadL
             if path.file_name().and_then(|n| n.to_str()) == Some(SELF_FILE_NAME) {
                 continue;
             }
-            let contents = fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
+            let contents =
+                fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             for (idx, line) in contents.lines().enumerate() {
                 let lower = line.to_lowercase();
                 for term in FORBIDDEN_WORKLOAD_TERMS {

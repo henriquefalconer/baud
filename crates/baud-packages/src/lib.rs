@@ -24,24 +24,22 @@
 // `GuestImageManifest`) is the new top-level contract: it lints a guest kernel's `.config`
 // for the tape-device driver and the absence of real hardware timers baud does not model.
 
-use serde::{Deserialize, Serialize};
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-mod spec;
 mod flake;
 mod guest_build;
 mod image;
 mod initramfs;
 mod kernel_build;
 mod rdseed;
+mod spec;
 mod workload_lint;
 
-pub use spec::{WorkloadSpec, WorkloadPackage};
 pub use flake::FlakeTemplate;
 pub use guest_build::{
-    build_guest_image, hash_image, GuestImageBuildConfig, GuestImageBuildResult,
-    InitramfsFileEntry,
+    build_guest_image, hash_image, GuestImageBuildConfig, GuestImageBuildResult, InitramfsFileEntry,
 };
 pub use image::{
     image_lint, lint_kernel_config, ConfigState, GuestImageManifest, LintReport, LintViolation,
@@ -50,9 +48,8 @@ pub use image::{
 pub use initramfs::{build_reproducible_initramfs, InitramfsEntry};
 pub use kernel_build::{build_bzimage, KernelBuildConfig};
 pub use rdseed::{rewrite_rdseed, scan_rdseed_opcodes, RdseedRewriteReport, RdseedSite};
-pub use workload_lint::{
-    scan_crates_for_workload_leaks, WorkloadLeak, FORBIDDEN_WORKLOAD_TERMS,
-};
+pub use spec::{WorkloadPackage, WorkloadSpec};
+pub use workload_lint::{scan_crates_for_workload_leaks, WorkloadLeak, FORBIDDEN_WORKLOAD_TERMS};
 
 // ---------------------------------------------------------------------------
 // Pinned nixpkgs revision (the single source of truth)
@@ -259,7 +256,10 @@ fn build_real(spec: &WorkloadSpec) -> Result<BuildResult> {
         );
     }
     let closure_text = String::from_utf8(closure_out.stdout)?;
-    let mut paths: Vec<&str> = closure_text.lines().filter(|line| !line.is_empty()).collect();
+    let mut paths: Vec<&str> = closure_text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
     if paths.is_empty() {
         bail!("nix path-info --recursive returned no closure paths for {store_path}");
     }
@@ -323,7 +323,10 @@ build = "cc -static -no-pie -o guest parser.c"
         let spec = lint_spec(toml).unwrap();
         let r1 = build(&spec, true).unwrap();
         let r2 = build(&spec, true).unwrap();
-        assert_eq!(r1.closure_hash, r2.closure_hash, "stub build must be reproducible");
+        assert_eq!(
+            r1.closure_hash, r2.closure_hash,
+            "stub build must be reproducible"
+        );
     }
 
     #[test]
@@ -355,8 +358,14 @@ build = "false"
         )
         .unwrap();
         let error = build(&spec, false).unwrap_err().to_string();
-        assert!(error.contains("requires Nix on PATH"), "unexpected error: {error}");
-        assert!(error.contains("refusing to substitute a fixture"), "unexpected error: {error}");
+        assert!(
+            error.contains("requires Nix on PATH"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("refusing to substitute a fixture"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

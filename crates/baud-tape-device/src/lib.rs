@@ -215,7 +215,9 @@ impl TapeDevice {
         let remaining_bits = remaining.min(0x7f) as u8;
         let error_bit = match self.last_result {
             OpcodeResult::Ok => 0u8,
-            OpcodeResult::UnknownOpcode | OpcodeResult::MalformedPayload | OpcodeResult::OversizedPayload => 0x80,
+            OpcodeResult::UnknownOpcode
+            | OpcodeResult::MalformedPayload
+            | OpcodeResult::OversizedPayload => 0x80,
         };
         remaining_bits | error_bit
     }
@@ -247,7 +249,8 @@ impl TapeDevice {
             }
             Some(ControlOp::Goal) => match String::from_utf8(payload) {
                 Ok(metric) => {
-                    self.records.push(Msg::Outcome(Outcome::GoalReached { metric }));
+                    self.records
+                        .push(Msg::Outcome(Outcome::GoalReached { metric }));
                     self.last_result = OpcodeResult::Ok;
                 }
                 Err(_) => self.last_result = OpcodeResult::MalformedPayload,
@@ -265,7 +268,10 @@ impl TapeDevice {
                 Err(_) => self.last_result = OpcodeResult::MalformedPayload,
             },
             Some(ControlOp::Log) => {
-                self.records.push(Msg::Log { bytes: payload, step });
+                self.records.push(Msg::Log {
+                    bytes: payload,
+                    step,
+                });
                 self.last_result = OpcodeResult::Ok;
             }
             Some(ControlOp::Frame) => match parse_frame(&payload) {
@@ -301,7 +307,9 @@ fn parse_probe(payload: &[u8]) -> Option<(String, Vec<u8>)> {
     if payload.len() < 1 + key_len {
         return None;
     }
-    let key = std::str::from_utf8(&payload[1..1 + key_len]).ok()?.to_string();
+    let key = std::str::from_utf8(&payload[1..1 + key_len])
+        .ok()?
+        .to_string();
     let value = payload[1 + key_len..].to_vec();
     Some((key, value))
 }

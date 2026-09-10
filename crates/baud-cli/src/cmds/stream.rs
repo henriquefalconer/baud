@@ -3,9 +3,9 @@
 //
 // baud stream — frame streaming commands (M5)
 
+use crate::client::Client;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crate::client::Client;
 
 #[derive(Parser)]
 pub struct StreamCmd {
@@ -54,12 +54,23 @@ pub enum StreamAction {
 
 pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
     match cmd.action {
-        StreamAction::Frames { run, node, from_step, to_step } => {
+        StreamAction::Frames {
+            run,
+            node,
+            from_step,
+            to_step,
+        } => {
             let mut url = format!("/runs/{run}/frames");
             let mut params = Vec::new();
-            if let Some(n) = node { params.push(format!("node={n}")); }
-            if let Some(s) = from_step { params.push(format!("from_step={s}")); }
-            if let Some(s) = to_step { params.push(format!("to_step={s}")); }
+            if let Some(n) = node {
+                params.push(format!("node={n}"));
+            }
+            if let Some(s) = from_step {
+                params.push(format!("from_step={s}"));
+            }
+            if let Some(s) = to_step {
+                params.push(format!("to_step={s}"));
+            }
             if !params.is_empty() {
                 url = format!("{url}?{}", params.join("&"));
             }
@@ -84,11 +95,20 @@ pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
             }
         }
 
-        StreamAction::Tail { run, node, out, hashes_only } => {
+        StreamAction::Tail {
+            run,
+            node,
+            out,
+            hashes_only,
+        } => {
             let mut url = format!("/runs/{run}/stream/tail");
             let mut params = Vec::new();
-            if let Some(n) = node { params.push(format!("node={n}")); }
-            if hashes_only { params.push("hashes_only=true".to_string()); }
+            if let Some(n) = node {
+                params.push(format!("node={n}"));
+            }
+            if hashes_only {
+                params.push("hashes_only=true".to_string());
+            }
             if !params.is_empty() {
                 url = format!("{url}?{}", params.join("&"));
             }
@@ -110,20 +130,30 @@ pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
                         let w = f["width"].as_i64().unwrap_or(0);
                         let h = f["height"].as_i64().unwrap_or(0);
                         let fmt = f["format"].as_str().unwrap_or("?");
-                        println!("  step={step} {w}x{h} {fmt} hash={}", &hash[..16.min(hash.len())]);
+                        println!(
+                            "  step={step} {w}x{h} {fmt} hash={}",
+                            &hash[..16.min(hash.len())]
+                        );
                     }
                 }
             }
         }
 
-        StreamAction::Render { run, from_step, to_step, format, out } => {
+        StreamAction::Render {
+            run,
+            from_step,
+            to_step,
+            format,
+            out,
+        } => {
             let body = serde_json::json!({
                 "from_step": from_step,
                 "to_step": to_step,
                 "format": format,
                 "out": out,
             });
-            let resp: serde_json::Value = c.post(&format!("/runs/{run}/stream/render"), &body).await?;
+            let resp: serde_json::Value =
+                c.post(&format!("/runs/{run}/stream/render"), &body).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resp)?);
             } else {

@@ -8,7 +8,10 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
 use crate::routes::server::LogEntry;
-use baud_tape::{Backend, types::{SandboxSpec, TapeState}};
+use baud_tape::{
+    types::{SandboxSpec, TapeState},
+    Backend,
+};
 
 /// Shared application state, cloned into every request handler.
 #[derive(Clone)]
@@ -32,8 +35,8 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new() -> Result<Self> {
-        let db_url = std::env::var("BAUD_DB")
-            .unwrap_or_else(|_| "sqlite://baud.sqlite?mode=rwc".to_owned());
+        let db_url =
+            std::env::var("BAUD_DB").unwrap_or_else(|_| "sqlite://baud.sqlite?mode=rwc".to_owned());
 
         let pool = SqlitePool::connect(&db_url).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
@@ -44,7 +47,18 @@ impl AppState {
         )
         .fetch_all(&pool)
         .await?;
-        for (id, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, created_at) in persisted_tapes {
+        for (
+            id,
+            state,
+            vcpus,
+            memory_mib,
+            disk_mib,
+            auto_stop_secs,
+            auto_archive_secs,
+            image,
+            created_at,
+        ) in persisted_tapes
+        {
             let tape_state = match state.as_str() {
                 "creating" => TapeState::Creating,
                 "running" => TapeState::Running,
@@ -61,7 +75,10 @@ impl AppState {
                 image,
                 ..Default::default()
             };
-            if let Err(error) = local_backend.adopt_existing(&id, spec, tape_state, created_at as u64).await {
+            if let Err(error) = local_backend
+                .adopt_existing(&id, spec, tape_state, created_at as u64)
+                .await
+            {
                 tracing::warn!(%id, %error, "could not reattach persisted local tape");
             }
         }
@@ -105,7 +122,11 @@ fn open_snapshot_store() -> Result<SnapshotStore> {
         format!("identity file at {identity_path:?} has no '# public key:' line")
     })?;
 
-    Ok(SnapshotStore::open_with_keys(root, recipient, Some(identity_path)))
+    Ok(SnapshotStore::open_with_keys(
+        root,
+        recipient,
+        Some(identity_path),
+    ))
 }
 
 pub fn unix_now() -> u64 {

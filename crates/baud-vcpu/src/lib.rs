@@ -58,7 +58,9 @@ pub enum Exit<'a> {
     /// chosen and instruction-encoded, so it is carried here (0-15, x86-64 ModRM register
     /// numbering: 0=RAX..7=RDI, 8=R8..15=R15) for `linux::run_and_convert`'s caller to write the
     /// served value into; RFLAGS.CF is also set (success) as part of that write.
-    RdrandEnforced { gpr_index: u8 },
+    RdrandEnforced {
+        gpr_index: u8,
+    },
     /// `RDTSCP` trapped by the enforced-regime KVM module (same `KVM_EXIT_BAUD_DETERMINISM`
     /// mechanism as `RdtscEnforced`, distinguished by a payload byte — `linux::convert_exit`'s
     /// doc). Real `RDTSCP` (Intel SDM Vol. 2B) loads the identical work-clock value into EDX:EAX
@@ -76,7 +78,9 @@ pub enum Exit<'a> {
     /// (the original `rdseed`'s destination-register ModRM byte was overwritten with `NOP` and is
     /// gone). `dispatch_exit` must ask `TimeSource::resolve_rdseed_site` whether `rip` is a known
     /// rewrite site before serving anything.
-    RdseedEnforced { rip: u64 },
+    RdseedEnforced {
+        rip: u64,
+    },
     /// `KVM_EXIT_IRQ_WINDOW_OPEN` — the signal `boundary::PmuStepper::run_until_irq_window` is
     /// waiting for after `request_interrupt_window` was set (specs/baud-vcpu.md §5 step 4's
     /// fallback): the vCPU is now injectable. Not a device access with a value to serve, just a
@@ -120,7 +124,8 @@ pub struct DeterminismHole(pub String);
 fn format_guest_rip(guest_rip: &Option<u64>) -> String {
     match guest_rip {
         Some(rip) => format!("; guest RIP at kill: {rip:#x}"),
-        None => "; guest RIP at kill: unavailable (register read after the kill also failed)".to_string(),
+        None => "; guest RIP at kill: unavailable (register read after the kill also failed)"
+            .to_string(),
     }
 }
 
@@ -179,7 +184,11 @@ pub enum RunLoopError {
         format_guest_rip(.guest_rip),
         format_console_tail(.console_tail)
     )]
-    WatchdogKilled { budget_ms: u64, guest_rip: Option<u64>, console_tail: Option<String> },
+    WatchdogKilled {
+        budget_ms: u64,
+        guest_rip: Option<u64>,
+        console_tail: Option<String>,
+    },
     /// The supervisor's cancellation flag was observed set
     /// (`baud_multiverse::linux::Multiverse::set_cancel_flag`) — the caller abandoned the run
     /// (e.g. `baud-server`'s HTTP client disconnected) and does not want its result, so the loop
@@ -231,7 +240,11 @@ pub enum DispatchOutcome {
     /// by `site.gpr_index` (same RDRAND flag semantics as `ServeEnforcedRdrand`) and RIP advances
     /// to `rip + site.length` — past the whole `UD2`+`NOP` sequence, not just the 2-byte `UD2`.
     /// `linux::run_one_exit` performs both writes in one `KVM_SET_REGS` round trip.
-    ServeEnforcedRdseed { rip: u64, site: EnforcedRdseedSite, value: u64 },
+    ServeEnforcedRdseed {
+        rip: u64,
+        site: EnforcedRdseedSite,
+        value: u64,
+    },
     /// `Exit::RdseedEnforced` at a `rip` with no known site: a genuine invalid-opcode fault (or a
     /// kernel `BUG()`/`WARN_ON()`), which must be re-injected into the guest exactly as if baud
     /// had never intercepted `#UD` at all (todo.md §12 row 15) — `linux::run_one_exit` does this
@@ -344,18 +357,23 @@ pub fn dispatch_exit(
         Exit::Hlt | Exit::Shutdown => Ok(DispatchOutcome::Halted),
         Exit::IrqWindowOpen => Ok(DispatchOutcome::Continue),
         Exit::Debug => Ok(DispatchOutcome::SingleStepBoundary),
-        Exit::RdtscEnforced => Ok(DispatchOutcome::ServeEnforcedRdtsc(time.serve_enforced_rdtsc())),
+        Exit::RdtscEnforced => Ok(DispatchOutcome::ServeEnforcedRdtsc(
+            time.serve_enforced_rdtsc(),
+        )),
         Exit::RdtscpEnforced => Ok(DispatchOutcome::ServeEnforcedRdtscp {
             value: time.serve_enforced_rdtsc(),
             tsc_aux: time.serve_enforced_tsc_aux(),
         }),
-        Exit::RdrandEnforced { gpr_index } => {
-            Ok(DispatchOutcome::ServeEnforcedRdrand { gpr_index, value: time.serve_enforced_rdrand() })
-        }
+        Exit::RdrandEnforced { gpr_index } => Ok(DispatchOutcome::ServeEnforcedRdrand {
+            gpr_index,
+            value: time.serve_enforced_rdrand(),
+        }),
         Exit::RdseedEnforced { rip } => match time.resolve_rdseed_site(rip) {
-            Some(site) => {
-                Ok(DispatchOutcome::ServeEnforcedRdseed { rip, site, value: time.serve_enforced_rdseed() })
-            }
+            Some(site) => Ok(DispatchOutcome::ServeEnforcedRdseed {
+                rip,
+                site,
+                value: time.serve_enforced_rdseed(),
+            }),
             None => Ok(DispatchOutcome::ReinjectUd),
         },
         Exit::Unmodeled(name) => Err(DeterminismHole(name.to_string())),

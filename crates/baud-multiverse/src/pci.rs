@@ -323,12 +323,16 @@ impl PciHostBridge {
     /// reads this after every configuration-space write to keep `VirtioPciTransport::set_io_base`
     /// synchronized with whatever BAR0 the guest's PCI core has settled on.
     pub fn virtio_io_base(&self) -> Option<u16> {
-        self.virtio_rng.as_ref().and_then(PciVirtioFunction::io_base)
+        self.virtio_rng
+            .as_ref()
+            .and_then(PciVirtioFunction::io_base)
     }
 
     /// [`Self::virtio_io_base`]'s counterpart for the virtio-blk function at 00:02.0.
     pub fn virtio_blk_io_base(&self) -> Option<u16> {
-        self.virtio_blk.as_ref().and_then(PciVirtioFunction::io_base)
+        self.virtio_blk
+            .as_ref()
+            .and_then(PciVirtioFunction::io_base)
     }
 
     /// The dword this bridge presents at `addr`, or `0xFFFF_FFFF` for any unmodeled
@@ -340,7 +344,9 @@ impl PciHostBridge {
         }
         if addr.device == 0 && addr.function == 0 {
             return match addr.register {
-                REG_VENDOR_DEVICE => (HOST_BRIDGE_VENDOR_ID as u32) | ((HOST_BRIDGE_DEVICE_ID as u32) << 16),
+                REG_VENDOR_DEVICE => {
+                    (HOST_BRIDGE_VENDOR_ID as u32) | ((HOST_BRIDGE_DEVICE_ID as u32) << 16)
+                }
                 REG_CLASS_REVISION => HOST_BRIDGE_CLASS_CODE, // revision ID 0 in the low byte
                 _ => 0,
             };
@@ -472,17 +478,37 @@ mod tests {
     #[test]
     fn host_bridge_vendor_and_device_id_are_present() {
         let mut bus = PciHostBridge::default();
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_host_bridge(REG_VENDOR_DEVICE),
+        );
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
-        assert_eq!(dword & 0xFFFF, HOST_BRIDGE_VENDOR_ID as u32, "vendor ID in the low half-word");
-        assert_eq!(dword >> 16, HOST_BRIDGE_DEVICE_ID as u32, "device ID in the high half-word");
-        assert_ne!(dword & 0xFFFF, 0xFFFF, "a present device must never report vendor ID 0xFFFF");
+        assert_eq!(
+            dword & 0xFFFF,
+            HOST_BRIDGE_VENDOR_ID as u32,
+            "vendor ID in the low half-word"
+        );
+        assert_eq!(
+            dword >> 16,
+            HOST_BRIDGE_DEVICE_ID as u32,
+            "device ID in the high half-word"
+        );
+        assert_ne!(
+            dword & 0xFFFF,
+            0xFFFF,
+            "a present device must never report vendor ID 0xFFFF"
+        );
     }
 
     #[test]
     fn host_bridge_class_code_is_bridge_host() {
         let mut bus = PciHostBridge::default();
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_CLASS_REVISION));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_host_bridge(REG_CLASS_REVISION),
+        );
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
         assert_eq!(dword & 0xFF, 0, "revision ID 0 in the low byte");
         assert_eq!((dword >> 8) & 0xFF, 0x00, "prog IF 00h");
@@ -494,7 +520,10 @@ mod tests {
             "the 16-bit PCI_CLASS_DEVICE word (offset 0x0A, what a real kernel's \
              pci_sanity_check() reads) must equal PCI_CLASS_BRIDGE_HOST exactly"
         );
-        assert_eq!(dword, HOST_BRIDGE_CLASS_CODE, "revision 0 plus the class code, bits 31:8");
+        assert_eq!(
+            dword, HOST_BRIDGE_CLASS_CODE,
+            "revision 0 plus the class code, bits 31:8"
+        );
     }
 
     #[test]
@@ -528,7 +557,11 @@ mod tests {
         // A guest reading only the 16-bit device-ID half-word at CONFIG_DATA+2 (real kernels do
         // this via `inw`), not the full dword.
         let mut bus = PciHostBridge::default();
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_host_bridge(REG_VENDOR_DEVICE),
+        );
         let mut half = [0u8; 2];
         bus.pio_read(PCI_CONFIG_DATA + 2, &mut half);
         assert_eq!(u16::from_le_bytes(half), HOST_BRIDGE_DEVICE_ID);
@@ -537,7 +570,11 @@ mod tests {
     #[test]
     fn config_data_write_is_absorbed_without_changing_subsequent_reads() {
         let mut bus = PciHostBridge::default();
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_host_bridge(REG_VENDOR_DEVICE),
+        );
         write_u32(&mut bus, PCI_CONFIG_DATA, 0xDEAD_BEEF); // must not corrupt the read-only register
         assert_eq!(
             read_u32(&mut bus, PCI_CONFIG_DATA) & 0xFFFF,
@@ -567,34 +604,62 @@ mod tests {
     #[test]
     fn device_1_reads_absent_until_attached() {
         let mut bus = PciHostBridge::default();
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_VENDOR_DEVICE));
-        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xFFFF_FFFF, "no virtio function attached yet");
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio(REG_VENDOR_DEVICE),
+        );
+        assert_eq!(
+            read_u32(&mut bus, PCI_CONFIG_DATA),
+            0xFFFF_FFFF,
+            "no virtio function attached yet"
+        );
     }
 
     #[test]
     fn attached_virtio_function_reports_virtio_vendor_and_legacy_rng_device_id() {
         let mut bus = PciHostBridge::default();
         bus.attach_virtio_rng(0x20);
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio(REG_VENDOR_DEVICE),
+        );
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
-        assert_eq!(dword & 0xFFFF, VIRTIO_VENDOR_ID as u32, "virtio's real PCI-SIG vendor ID, not 0x1B36");
+        assert_eq!(
+            dword & 0xFFFF,
+            VIRTIO_VENDOR_ID as u32,
+            "virtio's real PCI-SIG vendor ID, not 0x1B36"
+        );
         assert_eq!(
             dword >> 16,
             VIRTIO_LEGACY_DEVICE_ID_BASE as u32 + crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG,
             "legacy device ID = 0x1000 + virtio device type"
         );
-        assert_ne!(dword & 0xFFFF, 0xFFFF, "a present device must never report vendor ID 0xFFFF");
+        assert_ne!(
+            dword & 0xFFFF,
+            0xFFFF,
+            "a present device must never report vendor ID 0xFFFF"
+        );
     }
 
     #[test]
     fn attached_virtio_rng_class_code_is_unclassified_base_class() {
         let mut bus = PciHostBridge::default();
         bus.attach_virtio_rng(0x20);
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_CLASS_REVISION));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio(REG_CLASS_REVISION),
+        );
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
         assert_eq!((dword >> 8) & 0xFF, 0x00, "prog IF 00h");
         assert_eq!((dword >> 16) & 0xFF, 0x00, "subclass 00h");
-        assert_eq!((dword >> 24) & 0xFF, 0xFF, "base class FFh (does not fit any defined class)");
+        assert_eq!(
+            (dword >> 24) & 0xFF,
+            0xFF,
+            "base class FFh (does not fit any defined class)"
+        );
         assert_eq!(
             (dword >> 16) as u16,
             0xFF00,
@@ -609,15 +674,29 @@ mod tests {
         let mut bus = PciHostBridge::default();
         bus.attach_virtio_rng(0x20);
         write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_BAR0));
-        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), BAR_IO_SPACE_BIT, "unassigned BAR0 starts at 0, I/O bit set");
+        assert_eq!(
+            read_u32(&mut bus, PCI_CONFIG_DATA),
+            BAR_IO_SPACE_BIT,
+            "unassigned BAR0 starts at 0, I/O bit set"
+        );
 
         write_u32(&mut bus, PCI_CONFIG_DATA, 0xFFFF_FFFF); // enter the sizing protocol
         let size_mask = read_u32(&mut bus, PCI_CONFIG_DATA);
-        assert_eq!(size_mask, !(0x20u32 - 1) | BAR_IO_SPACE_BIT, "size mask for a 0x20-byte I/O BAR");
-        assert!(bus.virtio_io_base().is_none(), "still sizing: no valid base yet");
+        assert_eq!(
+            size_mask,
+            !(0x20u32 - 1) | BAR_IO_SPACE_BIT,
+            "size mask for a 0x20-byte I/O BAR"
+        );
+        assert!(
+            bus.virtio_io_base().is_none(),
+            "still sizing: no valid base yet"
+        );
 
         write_u32(&mut bus, PCI_CONFIG_DATA, 0xC000); // guest assigns a real base
-        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xC000 | BAR_IO_SPACE_BIT);
+        assert_eq!(
+            read_u32(&mut bus, PCI_CONFIG_DATA),
+            0xC000 | BAR_IO_SPACE_BIT
+        );
         assert_eq!(bus.virtio_io_base(), Some(0xC000));
     }
 
@@ -638,17 +717,33 @@ mod tests {
         bus.attach_virtio_rng(0x20);
         write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio(REG_SUBSYSTEM));
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
-        assert_eq!(dword & 0xFFFF, VIRTIO_VENDOR_ID as u32, "subsystem vendor ID");
-        assert_eq!(dword >> 16, crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG, "subsystem ID = virtio device type");
+        assert_eq!(
+            dword & 0xFFFF,
+            VIRTIO_VENDOR_ID as u32,
+            "subsystem vendor ID"
+        );
+        assert_eq!(
+            dword >> 16,
+            crate::virtio_mmio::VIRTIO_DEVICE_ID_RNG,
+            "subsystem ID = virtio device type"
+        );
     }
 
     #[test]
     fn host_bridge_at_00_0_is_unaffected_by_an_attached_virtio_function() {
         let mut bus = PciHostBridge::default();
         bus.attach_virtio_rng(0x20);
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_host_bridge(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_host_bridge(REG_VENDOR_DEVICE),
+        );
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
-        assert_eq!(dword & 0xFFFF, HOST_BRIDGE_VENDOR_ID as u32, "00:00.0 is still the host bridge");
+        assert_eq!(
+            dword & 0xFFFF,
+            HOST_BRIDGE_VENDOR_ID as u32,
+            "00:00.0 is still the host bridge"
+        );
     }
 
     /// `CONFIG_ADDRESS` selecting bus 0 / device 2 / function 0 — where
@@ -660,15 +755,27 @@ mod tests {
     #[test]
     fn device_2_reads_absent_until_blk_is_attached() {
         let mut bus = PciHostBridge::default();
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_VENDOR_DEVICE));
-        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xFFFF_FFFF, "no virtio-blk function attached yet");
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_VENDOR_DEVICE),
+        );
+        assert_eq!(
+            read_u32(&mut bus, PCI_CONFIG_DATA),
+            0xFFFF_FFFF,
+            "no virtio-blk function attached yet"
+        );
     }
 
     #[test]
     fn attached_virtio_blk_reports_virtio_vendor_legacy_device_id_and_mass_storage_class() {
         let mut bus = PciHostBridge::default();
         bus.attach_virtio_blk(0x20);
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_VENDOR_DEVICE),
+        );
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
         assert_eq!(dword & 0xFFFF, VIRTIO_VENDOR_ID as u32);
         assert_eq!(
@@ -677,8 +784,16 @@ mod tests {
             "legacy device ID = 0x1000 + virtio device type"
         );
 
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_CLASS_REVISION));
-        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), VIRTIO_BLK_CLASS_CODE, "mass storage, not the catch-all class");
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_CLASS_REVISION),
+        );
+        assert_eq!(
+            read_u32(&mut bus, PCI_CONFIG_DATA),
+            VIRTIO_BLK_CLASS_CODE,
+            "mass storage, not the catch-all class"
+        );
     }
 
     #[test]
@@ -686,7 +801,11 @@ mod tests {
         let mut bus = PciHostBridge::default();
         bus.attach_virtio_rng(0x20);
         // virtio-blk is untouched: still absent even with rng attached.
-        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_VENDOR_DEVICE));
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_VENDOR_DEVICE),
+        );
         assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xFFFF_FFFF);
         assert_eq!(bus.virtio_blk_io_base(), None);
 
@@ -694,6 +813,10 @@ mod tests {
         write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_BAR0));
         write_u32(&mut bus, PCI_CONFIG_DATA, 0xD000);
         assert_eq!(bus.virtio_blk_io_base(), Some(0xD000));
-        assert_eq!(bus.virtio_io_base(), None, "rng's BAR0 must be unaffected by blk's own assignment");
+        assert_eq!(
+            bus.virtio_io_base(),
+            None,
+            "rng's BAR0 must be unaffected by blk's own assignment"
+        );
     }
 }

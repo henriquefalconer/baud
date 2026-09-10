@@ -11,9 +11,9 @@ pub mod keys;
 pub mod net;
 pub mod obs;
 pub mod replay;
-pub mod runs;
 #[cfg(target_os = "linux")]
 pub mod run_kvm;
+pub mod runs;
 pub mod server;
 #[cfg(target_os = "linux")]
 pub mod shell_into;

@@ -40,7 +40,11 @@ pub const RAM_SLOT: u32 = 0;
 /// guest-physical `[i * PAGE_SIZE, (i+1) * PAGE_SIZE)`") — no further scaling needed, and a
 /// harvested page index can be used directly as an index into a captured `Universe`'s `ram` slice.
 pub fn ram_page_indices(harvested: &[(u32, u64)], ram_slot: u32) -> Vec<usize> {
-    harvested.iter().filter(|(slot, _)| *slot == ram_slot).map(|(_, offset)| *offset as usize).collect()
+    harvested
+        .iter()
+        .filter(|(slot, _)| *slot == ram_slot)
+        .map(|(_, offset)| *offset as usize)
+        .collect()
 }
 
 #[cfg(test)]
@@ -69,7 +73,11 @@ mod tests {
     #[test]
     fn preserves_harvest_order_within_the_kept_slot() {
         let harvested = vec![(0, 9), (0, 3), (0, 1)];
-        assert_eq!(ram_page_indices(&harvested, 0), vec![9, 3, 1], "order must match the ring's harvest order, not be re-sorted");
+        assert_eq!(
+            ram_page_indices(&harvested, 0),
+            vec![9, 3, 1],
+            "order must match the ring's harvest order, not be re-sorted"
+        );
     }
 
     proptest::proptest! {

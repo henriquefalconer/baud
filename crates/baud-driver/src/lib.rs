@@ -17,8 +17,8 @@
 //   - deps = {rand_chacha, serde, baud-proto}
 
 use rand::RngCore;
-use rand_chacha::ChaCha20Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,10 @@ pub struct Tape {
 
 impl Tape {
     pub fn new(seed: u64) -> Self {
-        Tape { seed, choices: Vec::new() }
+        Tape {
+            seed,
+            choices: Vec::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -50,7 +53,10 @@ impl Tape {
     /// Concatenate all choice bytes into a single flat byte vector.
     /// Used for tape identity comparison in `same_seed_same_replies_same_tape`.
     pub fn tape_bytes(&self) -> Vec<u8> {
-        self.choices.iter().flat_map(|c| c.iter().copied()).collect()
+        self.choices
+            .iter()
+            .flat_map(|c| c.iter().copied())
+            .collect()
     }
 }
 
@@ -260,7 +266,9 @@ impl Driver {
         if use_replay {
             // Alternate: generation % 3 == 0 → splice, else extend/mutate
             let g = self.generation;
-            if grid_bucket.is_some_and(|bucket| bucket.is_multiple_of(3)) && !self.reservoir.is_empty() {
+            if grid_bucket.is_some_and(|bucket| bucket.is_multiple_of(3))
+                && !self.reservoir.is_empty()
+            {
                 // Splice from reservoir
                 let idx = (self.draw_raw_u64() as usize) % self.reservoir.len();
                 self.replay_tape = self.reservoir[idx].clone();
@@ -300,7 +308,8 @@ impl Driver {
     pub fn end_run(&mut self, observations: &[(String, f64)]) {
         let score = self.compute_score(observations);
         if !self.strategy.buckets.is_empty() {
-            let bucket = ((self.generation.saturating_sub(1)) as usize) % self.strategy.buckets.len();
+            let bucket =
+                ((self.generation.saturating_sub(1)) as usize) % self.strategy.buckets.len();
             self.grid_bucket_counts[bucket] = self.grid_bucket_counts[bucket].saturating_add(1);
         }
         if score > self.best_score || self.best.choices.is_empty() {
@@ -319,7 +328,9 @@ impl Driver {
 
     /// Check if goal is reached based on observations.
     pub fn is_goal_reached(&self, observations: &[(String, f64)]) -> bool {
-        if let (Some(probe), Some(goal_val)) = (self.strategy.goal_probe(), self.strategy.goal_value_f64()) {
+        if let (Some(probe), Some(goal_val)) =
+            (self.strategy.goal_probe(), self.strategy.goal_value_f64())
+        {
             for (name, val) in observations {
                 if name == probe && (*val - goal_val).abs() < 1e-9 {
                     return true;
@@ -395,7 +406,13 @@ impl Driver {
             return Vec::new();
         }
         let raw = self.next_raw_u64();
-        let mask = if n == 64 { u64::MAX } else if n == 0 { 0 } else { (1u64 << n) - 1 };
+        let mask = if n == 64 {
+            u64::MAX
+        } else if n == 0 {
+            0
+        } else {
+            (1u64 << n) - 1
+        };
         let value = raw & mask;
         let byte_count = n.div_ceil(8) as usize;
         let mut bytes = value.to_le_bytes()[..byte_count].to_vec();
@@ -458,11 +475,14 @@ impl Driver {
     /// Draw a geometric "hold" value with given mean.
     pub fn draw_hold(&mut self, mean: u32) -> u32 {
         let mean = match self.tactics.input.first() {
-            Some(InputTactic::Hold { geom_mean }) if geom_mean.is_finite() && *geom_mean >= 1.0 =>
-                (*geom_mean).round().min(u32::MAX as f64) as u32,
+            Some(InputTactic::Hold { geom_mean }) if geom_mean.is_finite() && *geom_mean >= 1.0 => {
+                (*geom_mean).round().min(u32::MAX as f64) as u32
+            }
             _ => mean,
         };
-        if mean == 0 { return 0; }
+        if mean == 0 {
+            return 0;
+        }
         // Geometric distribution: P(X = k) = (1 - p)^k * p where p = 1/mean
         let p = 1.0 / (mean as f64);
         if p >= 1.0 {
@@ -515,7 +535,9 @@ impl Driver {
     fn draw_markov_weather(&mut self, p_start: f64, p_stop: f64) -> u8 {
         let u = self.draw_f64();
         if self.partition_state {
-            if u < p_stop.clamp(0.0, 1.0) { self.partition_state = false; }
+            if u < p_stop.clamp(0.0, 1.0) {
+                self.partition_state = false;
+            }
         } else if u < p_start.clamp(0.0, 1.0) {
             self.partition_state = true;
         }
@@ -543,13 +565,18 @@ impl Driver {
         // Chunk-delete pass: try removing consecutive chunks
         'outer: loop {
             let n = current.choices.len();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             let chunk = (n / 8).max(1);
             let mut i = 0;
             while i + chunk <= n {
                 let mut candidate = current.choices.clone();
                 candidate.drain(i..i + chunk);
-                let t = Tape { seed: current.seed, choices: candidate };
+                let t = Tape {
+                    seed: current.seed,
+                    choices: candidate,
+                };
                 if let Some(s) = oracle(&t) {
                     if s >= self.best_score {
                         current = t;
@@ -565,7 +592,10 @@ impl Driver {
         for i in 0..current.choices.len() {
             let mut candidate = current.choices.clone();
             candidate[i] = vec![0u8; candidate[i].len()];
-            let t = Tape { seed: current.seed, choices: candidate };
+            let t = Tape {
+                seed: current.seed,
+                choices: candidate,
+            };
             if let Some(s) = oracle(&t) {
                 if s >= self.best_score {
                     current = t;
@@ -580,7 +610,10 @@ impl Driver {
             for new_len in (0..original_len).rev() {
                 let mut candidate = current.choices.clone();
                 candidate[i].truncate(new_len);
-                let t = Tape { seed: current.seed, choices: candidate };
+                let t = Tape {
+                    seed: current.seed,
+                    choices: candidate,
+                };
                 if let Some(s) = oracle(&t) {
                     if s >= self.best_score {
                         current = t;
@@ -601,7 +634,10 @@ impl Driver {
                 }
                 prev = Some(c);
             }
-            let t = Tape { seed: current.seed, choices: deduped };
+            let t = Tape {
+                seed: current.seed,
+                choices: deduped,
+            };
             if let Some(s) = oracle(&t) {
                 if s >= self.best_score {
                     current = t;
@@ -663,7 +699,8 @@ impl Driver {
     fn compute_score(&self, observations: &[(String, f64)]) -> Score {
         let mut scores = Vec::new();
         for probe_name in &self.strategy.maximize {
-            let val = observations.iter()
+            let val = observations
+                .iter()
                 .filter(|(name, _)| name == probe_name)
                 .map(|(_, v)| *v)
                 .next_back()
@@ -755,7 +792,11 @@ mod tests {
         d.begin_run();
         for n in [1u32, 8, 16, 32, 64] {
             let v = d.draw_bits(n);
-            assert_eq!(v.len(), n.div_ceil(8) as usize, "draw_bits({n}) should return ceil({n}/8) bytes");
+            assert_eq!(
+                v.len(),
+                n.div_ceil(8) as usize,
+                "draw_bits({n}) should return ceil({n}/8) bytes"
+            );
         }
     }
 
@@ -857,9 +898,14 @@ mod tests {
 
         // Replay with driver B using the recorded tape
         let mut engine = ReplayEngine::from_tape(tape_a.clone());
-        let draws_b: Vec<Vec<u8>> = (0..20).map(|_| engine.draw_u64().to_le_bytes().to_vec()).collect();
+        let draws_b: Vec<Vec<u8>> = (0..20)
+            .map(|_| engine.draw_u64().to_le_bytes().to_vec())
+            .collect();
 
-        assert_eq!(draws_a, draws_b, "determinism: same seed + same tape → same draws");
+        assert_eq!(
+            draws_a, draws_b,
+            "determinism: same seed + same tape → same draws"
+        );
     }
 
     #[test]
@@ -872,9 +918,14 @@ mod tests {
 
         // Replay the tape
         let mut engine = ReplayEngine::from_tape(tape);
-        let draws2: Vec<Vec<u8>> = (0..10).map(|_| engine.draw_u64().to_le_bytes().to_vec()).collect();
+        let draws2: Vec<Vec<u8>> = (0..10)
+            .map(|_| engine.draw_u64().to_le_bytes().to_vec())
+            .collect();
 
-        assert_eq!(draws1, draws2, "replay tape: should produce identical draw sequence");
+        assert_eq!(
+            draws1, draws2,
+            "replay tape: should produce identical draw sequence"
+        );
     }
 
     #[test]
@@ -891,11 +942,23 @@ mod tests {
         let v16 = d.draw_bits(16);
         let v32 = d.draw_bits(32);
         assert_eq!(d.live_tape().choices[0], v8);
-        assert_eq!(d.live_tape().choices[0].len(), 1, "draw_bits(8) must record exactly 1 byte");
+        assert_eq!(
+            d.live_tape().choices[0].len(),
+            1,
+            "draw_bits(8) must record exactly 1 byte"
+        );
         assert_eq!(d.live_tape().choices[1], v16);
-        assert_eq!(d.live_tape().choices[1].len(), 2, "draw_bits(16) must record exactly 2 bytes");
+        assert_eq!(
+            d.live_tape().choices[1].len(),
+            2,
+            "draw_bits(16) must record exactly 2 bytes"
+        );
         assert_eq!(d.live_tape().choices[2], v32);
-        assert_eq!(d.live_tape().choices[2].len(), 4, "draw_bits(32) must record exactly 4 bytes");
+        assert_eq!(
+            d.live_tape().choices[2].len(),
+            4,
+            "draw_bits(32) must record exactly 4 bytes"
+        );
     }
 
     #[test]
@@ -917,22 +980,32 @@ mod tests {
         replay.replay_tape = mutated;
         let replayed = replay.draw_bits(8);
 
-        assert_ne!(replayed, original, "flipping the only recorded byte must change draw_bits(8)'s replayed output");
+        assert_ne!(
+            replayed, original,
+            "flipping the only recorded byte must change draw_bits(8)'s replayed output"
+        );
         assert_eq!(replayed[0], original[0] ^ 0x01);
     }
 
     #[test]
     fn end_run_updates_best() {
-        let mut d = Driver::new(1, StrategySpec {
-            maximize: vec!["depth".into()],
-            ..Default::default()
-        }, TacticsSpec::default());
+        let mut d = Driver::new(
+            1,
+            StrategySpec {
+                maximize: vec!["depth".into()],
+                ..Default::default()
+            },
+            TacticsSpec::default(),
+        );
         d.begin_run();
         let _ = d.draw_bits(8);
         let _ = d.draw_bits(8);
         // Report a high score
         d.end_run(&[("depth".into(), 100.0)]);
-        assert!(!d.best.choices.is_empty(), "best tape should be non-empty after end_run");
+        assert!(
+            !d.best.choices.is_empty(),
+            "best tape should be non-empty after end_run"
+        );
     }
 
     #[test]
@@ -940,7 +1013,9 @@ mod tests {
         let mut d = make_driver(42);
         d.begin_run();
         // Record 20 draws
-        for _ in 0..20 { d.draw_bits(8); }
+        for _ in 0..20 {
+            d.draw_bits(8);
+        }
         d.end_run(&[]);
         let before = d.best.len();
         assert_eq!(before, 20, "20 recorded draws");
@@ -954,23 +1029,34 @@ mod tests {
             shrunk.len()
         );
         assert_eq!(
-            shrunk.len(), 0,
+            shrunk.len(),
+            0,
             "an oracle that accepts every tape must shrink all the way to the empty tape"
         );
-        assert_eq!(shrunk.seed, d.best.seed, "shrinking must not change the tape's seed");
+        assert_eq!(
+            shrunk.seed, d.best.seed,
+            "shrinking must not change the tape's seed"
+        );
 
         // And it must stop at the smallest tape the oracle still accepts, rather than
         // deleting blindly: an oracle that only reproduces with >= 5 choices must be
         // shrunk to exactly 5.
         let mut d2 = make_driver(42);
         d2.begin_run();
-        for _ in 0..20 { d2.draw_bits(8); }
+        for _ in 0..20 {
+            d2.draw_bits(8);
+        }
         d2.end_run(&[]);
         let shrunk2 = d2.shrink(|tape| {
-            if tape.choices.len() >= 5 { Some(Score(Vec::new())) } else { None }
+            if tape.choices.len() >= 5 {
+                Some(Score(Vec::new()))
+            } else {
+                None
+            }
         });
         assert_eq!(
-            shrunk2.len(), 5,
+            shrunk2.len(),
+            5,
             "shrink must reduce to the smallest tape the oracle still accepts"
         );
     }
@@ -1018,7 +1104,11 @@ mod tests {
         d.reset_weather();
         assert_eq!(d.draw_weather(0.0, 0.0), 0, "p_start=0.0 must stay OFF");
         for _ in 0..10 {
-            assert_eq!(d.draw_weather(0.0, 0.0), 0, "p_start=0.0: partition must remain OFF");
+            assert_eq!(
+                d.draw_weather(0.0, 0.0),
+                0,
+                "p_start=0.0: partition must remain OFF"
+            );
         }
     }
 
@@ -1030,7 +1120,10 @@ mod tests {
     #[test]
     fn exported_state_resumes_scheduling_identically_to_continuing_in_process() {
         let seed = 4242u64;
-        let strategy = StrategySpec { maximize: vec!["depth".into()], ..Default::default() };
+        let strategy = StrategySpec {
+            maximize: vec!["depth".into()],
+            ..Default::default()
+        };
 
         // Baseline: one driver runs 4 generations uninterrupted.
         let mut baseline = Driver::new(seed, strategy.clone(), TacticsSpec::default());
@@ -1074,7 +1167,10 @@ mod tests {
     fn driver_new_accepts_tactics() {
         let tactics = TacticsSpec {
             input: vec![InputTactic::StatefulMask { p_flip: 0.05 }],
-            weather: vec![WeatherTactic::MarkovPartition { p_start: 0.1, p_stop: 0.3 }],
+            weather: vec![WeatherTactic::MarkovPartition {
+                p_start: 0.1,
+                p_stop: 0.3,
+            }],
         };
         let d = Driver::new(42, StrategySpec::default(), tactics);
         assert_eq!(d.seed(), 42);
@@ -1084,7 +1180,10 @@ mod tests {
     fn configured_tactics_are_reproducible_and_persisted() {
         let tactics = TacticsSpec {
             input: vec![InputTactic::StatefulMask { p_flip: 1.0 }],
-            weather: vec![WeatherTactic::MarkovPartition { p_start: 1.0, p_stop: 0.0 }],
+            weather: vec![WeatherTactic::MarkovPartition {
+                p_start: 1.0,
+                p_stop: 0.0,
+            }],
         };
         let mut a = Driver::new(7, StrategySpec::default(), tactics.clone());
         a.begin_run();
@@ -1105,8 +1204,19 @@ mod tests {
 
     #[test]
     fn configured_weather_tactics_have_deterministic_neutral_paths() {
-        let burst = TacticsSpec { weather: vec![WeatherTactic::BurstDelay { regimes: vec![(2, 1)] }], ..Default::default() };
-        let crash = TacticsSpec { weather: vec![WeatherTactic::CrashRestart { p: 1.0, min_up_ticks: 2 }], ..Default::default() };
+        let burst = TacticsSpec {
+            weather: vec![WeatherTactic::BurstDelay {
+                regimes: vec![(2, 1)],
+            }],
+            ..Default::default()
+        };
+        let crash = TacticsSpec {
+            weather: vec![WeatherTactic::CrashRestart {
+                p: 1.0,
+                min_up_ticks: 2,
+            }],
+            ..Default::default()
+        };
         let mut a = Driver::new(99, StrategySpec::default(), burst);
         let mut b = Driver::new(99, StrategySpec::default(), crash);
         a.begin_run();
@@ -1132,7 +1242,10 @@ mod tests {
         assert_eq!(state.grid_bucket_counts, vec![2, 2, 2]);
         let mut resumed = Driver::new_simple(
             11,
-            StrategySpec { buckets: vec!["input".into(), "weather".into(), "restarts".into()], ..StrategySpec::default() },
+            StrategySpec {
+                buckets: vec!["input".into(), "weather".into(), "restarts".into()],
+                ..StrategySpec::default()
+            },
         );
         resumed.apply_state(state);
         for _ in 0..3 {

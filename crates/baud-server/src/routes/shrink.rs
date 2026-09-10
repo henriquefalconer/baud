@@ -6,13 +6,13 @@
 // POST /runs/:id/shrink   — shrink a run's tape to minimum steps reproducing violation
 // GET  /runs/:id/shrink   — get previous shrink result
 
+use crate::AppState;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
 
 /// POST /runs/:id/shrink
 #[derive(Debug, Deserialize)]
@@ -35,23 +35,24 @@ pub async fn shrink(
     let passes: Vec<&str> = passes_str.split(',').map(|s| s.trim()).collect();
 
     // Look up the run
-    let run: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT id, status FROM runs WHERE id = ?"
-    )
-    .bind(&run_id)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let run: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, status FROM runs WHERE id = ?")
+            .bind(&run_id)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let (_id, status_opt) = match run {
         Some(r) => r,
-        None => {
-            return Json(json!({ "ok": false, "error": format!("run {run_id} not found") }))
-        }
+        None => return Json(json!({ "ok": false, "error": format!("run {run_id} not found") })),
     };
 
     let status = status_opt.as_deref().unwrap_or("unknown");
-    if status != "crashed" && status != "completed" && status != "violation_found" && status != "done" {
+    if status != "crashed"
+        && status != "completed"
+        && status != "violation_found"
+        && status != "done"
+    {
         return Json(json!({
             "ok": false,
             "error": format!("run {run_id} has status '{status}'; shrink requires crashed/completed/done/violation_found")
@@ -59,16 +60,15 @@ pub async fn shrink(
     }
 
     // Count observations as proxy for tape steps
-    let obs_count: i64 = sqlx::query_as::<_, (i64,)>(
-        "SELECT COUNT(*) FROM observations WHERE run_id = ?"
-    )
-    .bind(&run_id)
-    .fetch_one(&state.db)
-    .await
-    .map(|(c,)| c)
-    .unwrap_or(0);
+    let obs_count: i64 =
+        sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM observations WHERE run_id = ?")
+            .bind(&run_id)
+            .fetch_one(&state.db)
+            .await
+            .map(|(c,)| c)
+            .unwrap_or(0);
 
-    let original_steps = obs_count.max(10) as u64;  // at least 10 steps for meaningful output
+    let original_steps = obs_count.max(10) as u64; // at least 10 steps for meaningful output
 
     // Apply passes in order, simulating reduction
     let mut current_steps = original_steps;
@@ -155,10 +155,7 @@ pub async fn shrink(
 }
 
 /// GET /runs/:id/shrink — get previous shrink result
-pub async fn get_shrink(
-    Path(run_id): Path<String>,
-    State(state): State<AppState>,
-) -> Json<Value> {
+pub async fn get_shrink(Path(run_id): Path<String>, State(state): State<AppState>) -> Json<Value> {
     let row: Option<(i64, i64, String, Option<String>, i64)> = sqlx::query_as(
         "SELECT original_steps, shrunk_steps, passes_applied, fault_schedule, created_at FROM shrink_results WHERE run_id = ?"
     )

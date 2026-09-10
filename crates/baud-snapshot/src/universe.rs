@@ -204,7 +204,11 @@ pub fn restore_plan() -> [RestoreStep; 11] {
 /// a restore may proceed only if the CPU signatures match, or if a CPUID template is normalizing
 /// leaves across models (`template_active`). Pure comparison — the actual CPUID-leaf reads on
 /// both sides are `linux::capture`'s and the restoring host's job.
-pub fn model_matches(captured_signature: u32, current_signature: u32, template_active: bool) -> bool {
+pub fn model_matches(
+    captured_signature: u32,
+    current_signature: u32,
+    template_active: bool,
+) -> bool {
     template_active || captured_signature == current_signature
 }
 
@@ -233,35 +237,74 @@ mod tests {
     #[test]
     fn order_msrs_tsc_first_places_tsc_before_tsc_deadline_regardless_of_input_order() {
         let mut msrs = vec![
-            MsrWrite { index: 0x1234, data: 1 },
-            MsrWrite { index: MSR_IA32_TSC_DEADLINE, data: 2 },
-            MsrWrite { index: 0x5678, data: 3 },
-            MsrWrite { index: MSR_IA32_TSC, data: 4 },
+            MsrWrite {
+                index: 0x1234,
+                data: 1,
+            },
+            MsrWrite {
+                index: MSR_IA32_TSC_DEADLINE,
+                data: 2,
+            },
+            MsrWrite {
+                index: 0x5678,
+                data: 3,
+            },
+            MsrWrite {
+                index: MSR_IA32_TSC,
+                data: 4,
+            },
         ];
         order_msrs_tsc_first(&mut msrs);
         let tsc_pos = msrs.iter().position(|m| m.index == MSR_IA32_TSC).unwrap();
-        let deadline_pos = msrs.iter().position(|m| m.index == MSR_IA32_TSC_DEADLINE).unwrap();
-        assert!(tsc_pos < deadline_pos, "IA32_TSC must precede IA32_TSC_DEADLINE after ordering");
+        let deadline_pos = msrs
+            .iter()
+            .position(|m| m.index == MSR_IA32_TSC_DEADLINE)
+            .unwrap();
+        assert!(
+            tsc_pos < deadline_pos,
+            "IA32_TSC must precede IA32_TSC_DEADLINE after ordering"
+        );
     }
 
     #[test]
     fn order_msrs_tsc_first_preserves_relative_order_of_unrelated_msrs() {
         let mut msrs = vec![
-            MsrWrite { index: 0xAAAA, data: 1 },
-            MsrWrite { index: 0xBBBB, data: 2 },
-            MsrWrite { index: 0xCCCC, data: 3 },
+            MsrWrite {
+                index: 0xAAAA,
+                data: 1,
+            },
+            MsrWrite {
+                index: 0xBBBB,
+                data: 2,
+            },
+            MsrWrite {
+                index: 0xCCCC,
+                data: 3,
+            },
         ];
         let before = msrs.clone();
         order_msrs_tsc_first(&mut msrs);
-        assert_eq!(msrs, before, "no TSC/TSC_DEADLINE entries present -> stable sort must not reorder");
+        assert_eq!(
+            msrs, before,
+            "no TSC/TSC_DEADLINE entries present -> stable sort must not reorder"
+        );
     }
 
     #[test]
     fn order_msrs_tsc_first_is_already_ordered_input_stays_ordered() {
         let mut msrs = vec![
-            MsrWrite { index: MSR_IA32_TSC, data: 1 },
-            MsrWrite { index: 0x9999, data: 2 },
-            MsrWrite { index: MSR_IA32_TSC_DEADLINE, data: 3 },
+            MsrWrite {
+                index: MSR_IA32_TSC,
+                data: 1,
+            },
+            MsrWrite {
+                index: 0x9999,
+                data: 2,
+            },
+            MsrWrite {
+                index: MSR_IA32_TSC_DEADLINE,
+                data: 3,
+            },
         ];
         order_msrs_tsc_first(&mut msrs);
         assert_eq!(msrs[0].index, MSR_IA32_TSC);
@@ -274,15 +317,28 @@ mod tests {
     #[test]
     fn restore_order_matches_the_spec() {
         let plan = restore_plan();
-        assert_eq!(plan[0], RestoreStep::SetTscKhz, "TSC frequency must be set before anything else");
-        let ram_pos = plan.iter().position(|s| *s == RestoreStep::RegisterRam).unwrap();
+        assert_eq!(
+            plan[0],
+            RestoreStep::SetTscKhz,
+            "TSC frequency must be set before anything else"
+        );
+        let ram_pos = plan
+            .iter()
+            .position(|s| *s == RestoreStep::RegisterRam)
+            .unwrap();
         let first_vcpu_state_pos = plan
             .iter()
             .position(|s| matches!(s, RestoreStep::SetVcpuRegs))
             .unwrap();
-        assert!(ram_pos < first_vcpu_state_pos, "RAM must be registered before vCPU registers");
+        assert!(
+            ram_pos < first_vcpu_state_pos,
+            "RAM must be registered before vCPU registers"
+        );
 
-        let clock_pos = plan.iter().position(|s| *s == RestoreStep::SetVmClock).unwrap();
+        let clock_pos = plan
+            .iter()
+            .position(|s| *s == RestoreStep::SetVmClock)
+            .unwrap();
         let last_vcpu_state_pos = plan
             .iter()
             .rposition(|s| {
@@ -298,16 +354,29 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(clock_pos > last_vcpu_state_pos, "VM clock restores after every vCPU-state field");
+        assert!(
+            clock_pos > last_vcpu_state_pos,
+            "VM clock restores after every vCPU-state field"
+        );
 
-        assert_eq!(plan.last(), Some(&RestoreStep::RestoreDevice), "device state restores last");
+        assert_eq!(
+            plan.last(),
+            Some(&RestoreStep::RestoreDevice),
+            "device state restores last"
+        );
     }
 
     #[test]
     fn model_matches_requires_equal_signature_unless_template_active() {
         assert!(model_matches(0x1234, 0x1234, false));
-        assert!(!model_matches(0x1234, 0x5678, false), "mismatched signature without a template must refuse");
-        assert!(model_matches(0x1234, 0x5678, true), "an active CPUID template normalizes the mismatch");
+        assert!(
+            !model_matches(0x1234, 0x5678, false),
+            "mismatched signature without a template must refuse"
+        );
+        assert!(
+            model_matches(0x1234, 0x5678, true),
+            "an active CPUID template normalizes the mismatch"
+        );
     }
 
     fn page(fill: u8) -> [u8; crate::page_store::PAGE_SIZE] {
@@ -330,7 +399,11 @@ mod tests {
         }
 
         let dirty = dirty_pages(&base, &current);
-        assert_eq!(dirty.len(), CHANGED, "dirty count must equal the actual write set, not TOTAL={TOTAL}");
+        assert_eq!(
+            dirty.len(),
+            CHANGED,
+            "dirty count must equal the actual write set, not TOTAL={TOTAL}"
+        );
         assert_eq!(dirty, (0..CHANGED).collect::<Vec<_>>());
     }
 

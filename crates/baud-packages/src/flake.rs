@@ -6,8 +6,8 @@
 // One flake template + substitution; the pinned nixpkgs rev lives in one place.
 // No Nix-language AST manipulation.
 
-use anyhow::Result;
 use crate::spec::WorkloadSpec;
+use anyhow::Result;
 
 pub struct FlakeTemplate;
 
@@ -66,7 +66,7 @@ impl FlakeTemplate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{WorkloadSpec, WorkloadPackage};
+    use crate::spec::{WorkloadPackage, WorkloadSpec};
 
     fn make_spec(name: &str) -> WorkloadSpec {
         WorkloadSpec {

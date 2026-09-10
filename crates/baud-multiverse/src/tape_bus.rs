@@ -30,7 +30,9 @@ pub struct TapeBus {
 
 impl TapeBus {
     pub fn new(tape: Vec<u8>) -> Self {
-        TapeBus { device: TapeDevice::new(tape) }
+        TapeBus {
+            device: TapeDevice::new(tape),
+        }
     }
 
     /// Read-only access to the underlying device (e.g. to call
@@ -98,8 +100,8 @@ impl Bus for TapeBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use baud_tape_device::{reg, ControlOp};
     use baud_proto::Msg;
+    use baud_tape_device::{reg, ControlOp};
 
     #[test]
     fn a_byte_read_at_the_data_offset_returns_the_next_tape_byte() {
@@ -114,7 +116,10 @@ mod tests {
     #[test]
     fn a_write_at_the_control_offset_finalizes_a_record_visible_via_drain() {
         let mut bus = TapeBus::new(vec![]);
-        bus.pio_write(TAPE_DEVICE_BASE + reg::CONTROL, &[ControlOp::MarkBranch as u8]);
+        bus.pio_write(
+            TAPE_DEVICE_BASE + reg::CONTROL,
+            &[ControlOp::MarkBranch as u8],
+        );
         let records = bus.device_mut().drain_records();
         assert_eq!(records.len(), 1);
         assert!(matches!(records[0], Msg::MarkBranch { step: 0 }));

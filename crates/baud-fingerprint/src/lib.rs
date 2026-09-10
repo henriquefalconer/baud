@@ -46,7 +46,10 @@ impl Fingerprint {
     /// Render the exact console report block (specs/baud-fingerprint.md §3). Only `<label>`
     /// differs between two matching VMs by design — see [`compare`].
     pub fn render(&self) -> String {
-        let gpa = self.gpa.map(|g| format!("0x{g:016x}")).unwrap_or_else(|| "unmapped".into());
+        let gpa = self
+            .gpa
+            .map(|g| format!("0x{g:016x}"))
+            .unwrap_or_else(|| "unmapped".into());
         format!(
             "{banner}\n{l} - timed exit:\n\
              deterministic events = {n}\n\
@@ -78,7 +81,11 @@ pub enum FpError {
         "did not reach the expected banner by event {events}: expected the console tail to end \
          with {expected:?}, found {found:?}"
     )]
-    NoBanner { events: u64, expected: Vec<u8>, found: Vec<u8> },
+    NoBanner {
+        events: u64,
+        expected: Vec<u8>,
+        found: Vec<u8>,
+    },
 }
 
 /// The first field two fingerprints disagree on (specs/baud-fingerprint.md §6). `label` is
@@ -92,13 +99,21 @@ pub struct Divergence {
 
 impl Divergence {
     fn new(field: &'static str, a: impl std::fmt::Display, b: impl std::fmt::Display) -> Self {
-        Self { field, a: a.to_string(), b: b.to_string() }
+        Self {
+            field,
+            a: a.to_string(),
+            b: b.to_string(),
+        }
     }
 }
 
 impl std::fmt::Display for Divergence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "determinism VIOLATED at {}: {} != {}", self.field, self.a, self.b)
+        write!(
+            f,
+            "determinism VIOLATED at {}: {} != {}",
+            self.field, self.a, self.b
+        )
     }
 }
 
@@ -118,20 +133,32 @@ pub fn compare(a: &Fingerprint, b: &Fingerprint) -> Result<(), Divergence> {
         return Err(Divergence::new("deterministic events", a.events, b.events));
     }
     if a.rip != b.rip {
-        return Err(Divergence::new("guest RIP", format!("{:#018x}", a.rip), format!("{:#018x}", b.rip)));
+        return Err(Divergence::new(
+            "guest RIP",
+            format!("{:#018x}", a.rip),
+            format!("{:#018x}", b.rip),
+        ));
     }
     if a.gpa != b.gpa {
-        return Err(Divergence::new("guest physical", format!("{:?}", a.gpa), format!("{:?}", b.gpa)));
+        return Err(Divergence::new(
+            "guest physical",
+            format!("{:?}", a.gpa),
+            format!("{:?}", b.gpa),
+        ));
     }
     if a.mem_hash != b.mem_hash {
-        return Err(Divergence::new("guest memory hash", &a.mem_hash, &b.mem_hash));
+        return Err(Divergence::new(
+            "guest memory hash",
+            &a.mem_hash,
+            &b.mem_hash,
+        ));
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{FpError, Fingerprint};
+    use super::{Fingerprint, FpError};
     use baud_multiverse::linux::Multiverse;
 
     /// Stop `vm` at exactly `target_rcb` deterministic events and capture the four-field
@@ -195,10 +222,12 @@ mod linux {
             let cmdline = "console=ttyS0";
             const TARGET_RCB: u64 = 100_000;
 
-            let mut vm0 = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("vm0 boot failed");
+            let mut vm0 =
+                Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("vm0 boot failed");
             let f0 = capture(&mut vm0, "vm0", TARGET_RCB, 64, None).expect("vm0 capture failed");
 
-            let mut vm1 = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("vm1 boot failed");
+            let mut vm1 =
+                Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("vm1 boot failed");
             let f1 = capture(&mut vm1, "vm1", TARGET_RCB, 64, None).expect("vm1 capture failed");
 
             assert_ne!(f0.label, f1.label);
@@ -212,10 +241,16 @@ mod linux {
         #[test]
         fn wrong_expected_banner_is_rejected() {
             let kernel = timer_guest_kernel_path();
-            let mut vm =
-                Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
-            let err = capture(&mut vm, "vm0", 100_000, 64, Some(b"a banner timer-guest never prints"))
-                .expect_err("timer-guest's console never contains this banner");
+            let mut vm = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None)
+                .expect("boot failed");
+            let err = capture(
+                &mut vm,
+                "vm0",
+                100_000,
+                64,
+                Some(b"a banner timer-guest never prints"),
+            )
+            .expect_err("timer-guest's console never contains this banner");
             assert!(matches!(err, FpError::NoBanner { .. }));
         }
     }
@@ -267,8 +302,8 @@ mod tests {
     fn compare_reports_first_divergence() {
         let a = fp("vm0");
         let mut b = fp("vm1");
-        b.mem_hash = "blake3:2222222222222222222222222222222222222222222222222222222222222222"
-            .to_string();
+        b.mem_hash =
+            "blake3:2222222222222222222222222222222222222222222222222222222222222222".to_string();
         let d = compare(&a, &b).unwrap_err();
         assert_eq!(d.field, "guest memory hash");
     }
@@ -279,8 +314,8 @@ mod tests {
         let a = fp("vm0");
         let mut b = fp("vm1");
         b.rip += 1;
-        b.mem_hash = "blake3:3333333333333333333333333333333333333333333333333333333333333333"
-            .to_string();
+        b.mem_hash =
+            "blake3:3333333333333333333333333333333333333333333333333333333333333333".to_string();
         let d = compare(&a, &b).unwrap_err();
         assert_eq!(d.field, "guest RIP");
     }

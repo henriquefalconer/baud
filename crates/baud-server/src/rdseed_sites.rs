@@ -36,15 +36,31 @@ pub fn load_rdseed_sites(
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("failed to read rdseed-sites sidecar '{}': {e}", path.display())),
+        Err(e) => {
+            return Err(format!(
+                "failed to read rdseed-sites sidecar '{}': {e}",
+                path.display()
+            ))
+        }
     };
-    let report: baud_packages::RdseedRewriteReport = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("rdseed-sites sidecar '{}' is not valid JSON: {e}", path.display()))?;
+    let report: baud_packages::RdseedRewriteReport =
+        serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "rdseed-sites sidecar '{}' is not valid JSON: {e}",
+                path.display()
+            )
+        })?;
     Ok(report
         .sites
         .into_iter()
         .map(|site| {
-            (site.address, baud_vcpu::EnforcedRdseedSite { gpr_index: site.gpr_index, length: site.length })
+            (
+                site.address,
+                baud_vcpu::EnforcedRdseedSite {
+                    gpr_index: site.gpr_index,
+                    length: site.length,
+                },
+            )
         })
         .collect())
 }
@@ -80,8 +96,20 @@ mod tests {
         assert_eq!(
             sites,
             vec![
-                (2097159, baud_vcpu::EnforcedRdseedSite { gpr_index: 0, length: 3 }),
-                (2097175, baud_vcpu::EnforcedRdseedSite { gpr_index: 8, length: 4 }),
+                (
+                    2097159,
+                    baud_vcpu::EnforcedRdseedSite {
+                        gpr_index: 0,
+                        length: 3
+                    }
+                ),
+                (
+                    2097175,
+                    baud_vcpu::EnforcedRdseedSite {
+                        gpr_index: 8,
+                        length: 4
+                    }
+                ),
             ]
         );
     }
@@ -94,6 +122,9 @@ mod tests {
         std::fs::write(sidecar_path(&kernel_path), b"not json").unwrap();
 
         let err = load_rdseed_sites(&kernel_path).unwrap_err();
-        assert!(err.contains("not valid JSON"), "error should name the real cause: {err}");
+        assert!(
+            err.contains("not valid JSON"),
+            "error should name the real cause: {err}"
+        );
     }
 }

@@ -6,11 +6,11 @@
 // GET  /budget              — total sandbox-minutes used this session + per-run breakdown
 // POST /budget/record       — record sandbox minutes for a run
 
+use crate::state::unix_now;
+use crate::AppState;
 use axum::{extract::State, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
-use crate::state::unix_now;
 
 /// GET /budget
 pub async fn budget(State(s): State<AppState>) -> Json<Value> {
@@ -28,10 +28,12 @@ pub async fn budget(State(s): State<AppState>) -> Json<Value> {
 
     let per_run: Vec<Value> = rows
         .iter()
-        .map(|(run_id, minutes)| json!({
-            "run_id": run_id,
-            "sandbox_minutes": minutes
-        }))
+        .map(|(run_id, minutes)| {
+            json!({
+                "run_id": run_id,
+                "sandbox_minutes": minutes
+            })
+        })
         .collect();
 
     Json(json!({
@@ -49,10 +51,7 @@ pub struct BudgetRecordBody {
     pub sandbox_minutes: f64,
 }
 
-pub async fn record(
-    State(s): State<AppState>,
-    Json(body): Json<BudgetRecordBody>,
-) -> Json<Value> {
+pub async fn record(State(s): State<AppState>, Json(body): Json<BudgetRecordBody>) -> Json<Value> {
     // Update in-memory total
     {
         let mut used = s.budget_minutes_used.lock().await;
@@ -60,16 +59,16 @@ pub async fn record(
     }
 
     // Persist per-run
-    let res = sqlx::query(
-        "INSERT INTO run_budget (run_id, sandbox_minutes) VALUES (?, ?)"
-    )
-    .bind(&body.run_id)
-    .bind(body.sandbox_minutes)
-    .execute(&s.db)
-    .await;
+    let res = sqlx::query("INSERT INTO run_budget (run_id, sandbox_minutes) VALUES (?, ?)")
+        .bind(&body.run_id)
+        .bind(body.sandbox_minutes)
+        .execute(&s.db)
+        .await;
 
     match res {
-        Ok(_) => Json(json!({ "ok": true, "run_id": body.run_id, "sandbox_minutes": body.sandbox_minutes })),
+        Ok(_) => Json(
+            json!({ "ok": true, "run_id": body.run_id, "sandbox_minutes": body.sandbox_minutes }),
+        ),
         Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),
     }
 }

@@ -11,15 +11,19 @@ use crate::{Node, RunId, RunManifest, Sha, SnapshotStore, StoreError};
 
 /// Same throwaway age-x25519 test keypair as `baud-keys`' own tests (see that crate's doc
 /// comment on `TEST_IDENTITY` for why it is hardcoded rather than generated at test time).
-const TEST_IDENTITY: &str = "AGE-SECRET-KEY-1VPR7E992FFDWZU0JAACA83A3VDG6JLF9HVHEWWWYLN5YLXNJFYGSNXYJ9R";
+const TEST_IDENTITY: &str =
+    "AGE-SECRET-KEY-1VPR7E992FFDWZU0JAACA83A3VDG6JLF9HVHEWWWYLN5YLXNJFYGSNXYJ9R";
 const TEST_RECIPIENT: &str = "age1u3p0u0p7w4tmwaplpw3vafrj0xmturnml200636wdgamemh69ytql87pg4";
 
 fn open_test_store() -> (tempfile::TempDir, tempfile::TempDir, SnapshotStore) {
     let store_root = tempfile::tempdir().expect("store root tmpdir");
     let identity_dir = tempfile::tempdir().expect("identity tmpdir");
     let identity_path = identity_dir.path().join("keys.txt");
-    std::fs::write(&identity_path, format!("# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"))
-        .expect("write identity file");
+    std::fs::write(
+        &identity_path,
+        format!("# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"),
+    )
+    .expect("write identity file");
     let store = SnapshotStore::open_with_keys(
         store_root.path(),
         TEST_RECIPIENT.to_owned(),
@@ -43,7 +47,9 @@ fn snapshot_store_bodies_are_ciphertext() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-a");
     let secret_body = b"universe RAM contains sk-secret-token somewhere in it";
-    let node = store.put_universe(&run, None, 0, (0, 0), secret_body).expect("put_universe");
+    let node = store
+        .put_universe(&run, None, 0, (0, 0), secret_body)
+        .expect("put_universe");
 
     let n = store.read_node(&run, node).expect("read_node");
     let universe_hash = Sha::from_hex(n.universe.as_deref().unwrap()).unwrap();
@@ -55,7 +61,8 @@ fn snapshot_store_bodies_are_ciphertext() {
         .join(format!("{}.age", universe_hash.to_hex()));
     let raw = std::fs::read(&body_path).expect("read raw universe body file");
     assert!(
-        !raw.windows(b"sk-secret-token".len()).any(|w| w == b"sk-secret-token"),
+        !raw.windows(b"sk-secret-token".len())
+            .any(|w| w == b"sk-secret-token"),
         "the plaintext secret must never appear in the on-disk ciphertext body"
     );
 
@@ -69,14 +76,25 @@ fn read_node_rejects_a_tampered_clear_index() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-node-integrity");
     let node = store.put_universe(&run, None, 4, (0, 4), b"state").unwrap();
-    let path = root.path().join("runs").join("run-node-integrity").join("nodes")
+    let path = root
+        .path()
+        .join("runs")
+        .join("run-node-integrity")
+        .join("nodes")
         .join(format!("{}.json", node.to_hex()));
-    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     value["at_step"] = serde_json::json!(5);
     std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
     let err = store.read_node(&run, node).unwrap_err();
-    assert!(matches!(err, StoreError::IntegrityMismatch { kind: "node identity", .. }));
+    assert!(matches!(
+        err,
+        StoreError::IntegrityMismatch {
+            kind: "node identity",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -87,13 +105,20 @@ fn pages_dedup_by_plaintext_hash() {
 
     let a = store.put_page(&run, &page_bytes).expect("put_page a");
     let b = store.put_page(&run, &page_bytes).expect("put_page b");
-    assert_eq!(a.address, b.address, "identical plaintext must produce the same address");
+    assert_eq!(
+        a.address, b.address,
+        "identical plaintext must produce the same address"
+    );
 
     // Only one encrypted body was ever written for this content, even though age's own
     // ciphertext is non-deterministic per call (specs/baud-snapshot-store.md §4).
     let pages_dir = _root.path().join("runs").join("run-b").join("pages");
     let entries: Vec<_> = std::fs::read_dir(&pages_dir).unwrap().collect();
-    assert_eq!(entries.len(), 1, "one distinct plaintext -> one stored ciphertext body");
+    assert_eq!(
+        entries.len(),
+        1,
+        "one distinct plaintext -> one stored ciphertext body"
+    );
 
     let round_tripped = store.get_page(&run, a).expect("get_page");
     assert_eq!(round_tripped, page_bytes);
@@ -104,13 +129,20 @@ fn get_page_rejects_decrypted_plaintext_with_wrong_address() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-b-integrity");
     let page = store.put_page(&run, &[0x11u8; 4096]).unwrap();
-    let path = root.path().join("runs").join("run-b-integrity").join("pages")
+    let path = root
+        .path()
+        .join("runs")
+        .join("run-b-integrity")
+        .join("pages")
         .join(format!("{}.age", page.address.to_hex()));
     let replacement = baud_keys::age_encrypt(TEST_RECIPIENT, &[0x22u8; 4096]).unwrap();
     std::fs::write(path, replacement).unwrap();
 
     let err = store.get_page(&run, page).unwrap_err();
-    assert!(matches!(err, StoreError::IntegrityMismatch { kind: "page", .. }));
+    assert!(matches!(
+        err,
+        StoreError::IntegrityMismatch { kind: "page", .. }
+    ));
 }
 
 #[test]
@@ -124,7 +156,9 @@ fn reconstruct_forks_from_nearest_node() {
     // captured universe. `reconstruct` must report ~LOCAL_RANGE steps replayed, not the full
     // chain depth from the root.
     let total_depth: u64 = 500;
-    let root_node = store.put_universe(&run, None, 0, (0, 0), b"root universe").expect("root");
+    let root_node = store
+        .put_universe(&run, None, 0, (0, 0), b"root universe")
+        .expect("root");
 
     let mut parent = root_node;
     let mut last_captured_at = 0u64;
@@ -145,10 +179,16 @@ fn reconstruct_forks_from_nearest_node() {
             deep_target = parent;
         }
     }
-    assert!(last_captured_at > 0, "test setup must actually capture a mid-chain universe");
+    assert!(
+        last_captured_at > 0,
+        "test setup must actually capture a mid-chain universe"
+    );
 
     let steps_replayed = store.reconstruct(&run, deep_target).expect("reconstruct");
-    assert_eq!(steps_replayed, LOCAL_RANGE, "must replay from the nearest captured ancestor");
+    assert_eq!(
+        steps_replayed, LOCAL_RANGE,
+        "must replay from the nearest captured ancestor"
+    );
     assert!(
         steps_replayed < total_depth,
         "must not replay the whole prefix from root ({total_depth} steps)"
@@ -167,7 +207,9 @@ fn reconstruct_forks_from_nearest_node() {
 fn nearest_returns_the_node_itself_when_it_has_a_universe() {
     let (_root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-d");
-    let node = store.put_universe(&run, None, 0, (0, 0), b"body").expect("put_universe");
+    let node = store
+        .put_universe(&run, None, 0, (0, 0), b"body")
+        .expect("put_universe");
     assert_eq!(store.nearest(&run, node).unwrap(), node);
     assert_eq!(store.reconstruct(&run, node).unwrap(), 0);
 }
@@ -176,10 +218,14 @@ fn nearest_returns_the_node_itself_when_it_has_a_universe() {
 fn mark_branch_does_not_clobber_an_existing_capture() {
     let (_root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-e");
-    let node = store.put_universe(&run, None, 5, (0, 5), b"captured").expect("put_universe");
+    let node = store
+        .put_universe(&run, None, 5, (0, 5), b"captured")
+        .expect("put_universe");
     // Re-recording the same branch point (idempotent — same content-addressed id) must not erase
     // the universe that was already captured there.
-    let same_node = store.mark_branch(&run, None, 5, (0, 5)).expect("mark_branch");
+    let same_node = store
+        .mark_branch(&run, None, 5, (0, 5))
+        .expect("mark_branch");
     assert_eq!(node, same_node);
     let n = store.read_node(&run, node).unwrap();
     assert!(n.universe.is_some());
@@ -241,7 +287,11 @@ fn node_index_is_readable_without_decryption() {
     let run = RunId::new("run-j");
     let node = store.put_universe(&run, None, 7, (0, 7), b"body").unwrap();
     let raw = std::fs::read_to_string(
-        root.path().join("runs").join("run-j").join("nodes").join(format!("{}.json", node.to_hex())),
+        root.path()
+            .join("runs")
+            .join("run-j")
+            .join("nodes")
+            .join(format!("{}.json", node.to_hex())),
     )
     .unwrap();
     let parsed: Node = serde_json::from_str(&raw).unwrap();
@@ -253,7 +303,9 @@ fn get_fails_loudly_when_no_identity_is_configured() {
     let root = tempfile::tempdir().unwrap();
     let store = write_only_store(root.path());
     let run = RunId::new("run-k");
-    let node = store.put_universe(&run, None, 0, (0, 0), b"body").expect("put still works");
+    let node = store
+        .put_universe(&run, None, 0, (0, 0), b"body")
+        .expect("put still works");
     let err = store.get_universe(&run, node).unwrap_err();
     assert!(matches!(err, StoreError::MissingKey));
 }
@@ -277,12 +329,20 @@ fn records_roundtrip_through_baud_proto_encoding() {
     let node = store.put_universe(&run, None, 0, (0, 0), b"body").unwrap();
     let records = vec![
         baud_proto::Msg::MarkBranch { step: 3 },
-        baud_proto::Msg::Log { bytes: b"hello from the guest".to_vec(), step: 4 },
+        baud_proto::Msg::Log {
+            bytes: b"hello from the guest".to_vec(),
+            step: 4,
+        },
     ];
-    store.put_records(&run, node, &records).expect("put_records");
+    store
+        .put_records(&run, node, &records)
+        .expect("put_records");
     let round_tripped = store.get_records(&run, node).expect("get_records");
     assert_eq!(round_tripped.len(), 2);
-    assert!(matches!(round_tripped[0], baud_proto::Msg::MarkBranch { step: 3 }));
+    assert!(matches!(
+        round_tripped[0],
+        baud_proto::Msg::MarkBranch { step: 3 }
+    ));
     match &round_tripped[1] {
         baud_proto::Msg::Log { bytes, step } => {
             assert_eq!(bytes, b"hello from the guest");
@@ -323,10 +383,18 @@ fn driver_state_roundtrips_and_is_ciphertext_on_disk() {
     assert!(!store.has_driver_state(&run), "no state persisted yet");
 
     let state = br#"{"generation":3,"best":{"seed":1,"choices":[]}}"#;
-    store.put_driver_state(&run, state).expect("put_driver_state");
+    store
+        .put_driver_state(&run, state)
+        .expect("put_driver_state");
     assert!(store.has_driver_state(&run));
 
-    let raw = std::fs::read(root.path().join("runs").join("run-n").join("driver_state.age")).unwrap();
+    let raw = std::fs::read(
+        root.path()
+            .join("runs")
+            .join("run-n")
+            .join("driver_state.age"),
+    )
+    .unwrap();
     assert_ne!(raw, state, "driver state body must be encrypted on disk");
 
     let read_back = store.get_driver_state(&run).expect("get_driver_state");
@@ -334,24 +402,37 @@ fn driver_state_roundtrips_and_is_ciphertext_on_disk() {
 
     // A second put overwrites — only the latest state is kept, like put_tape.
     let newer = br#"{"generation":4,"best":{"seed":1,"choices":[]}}"#;
-    store.put_driver_state(&run, newer).expect("put_driver_state overwrite");
-    assert_eq!(store.get_driver_state(&run).expect("get_driver_state"), newer);
+    store
+        .put_driver_state(&run, newer)
+        .expect("put_driver_state overwrite");
+    assert_eq!(
+        store.get_driver_state(&run).expect("get_driver_state"),
+        newer
+    );
 }
 
 #[test]
 fn run_id_sanitization_prevents_path_escape() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("../../evil");
-    store.put_universe(&run, None, 0, (0, 0), b"body").expect("put_universe with hostile run id");
+    store
+        .put_universe(&run, None, 0, (0, 0), b"body")
+        .expect("put_universe with hostile run id");
     // The run directory must land inside the store root, not have escaped it via `..`.
     let runs_dir = root.path().join("runs");
     let mut saw_expected_dir = false;
     for entry in std::fs::read_dir(&runs_dir).unwrap() {
         let entry = entry.unwrap();
-        assert!(entry.path().starts_with(&runs_dir), "no entry may escape the runs directory");
+        assert!(
+            entry.path().starts_with(&runs_dir),
+            "no entry may escape the runs directory"
+        );
         saw_expected_dir = true;
     }
-    assert!(saw_expected_dir, "the sanitized run directory must exist under runs/");
+    assert!(
+        saw_expected_dir,
+        "the sanitized run directory must exist under runs/"
+    );
     assert!(!root.path().parent().unwrap().join("evil").exists());
 }
 

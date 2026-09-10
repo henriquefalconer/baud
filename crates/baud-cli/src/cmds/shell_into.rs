@@ -48,21 +48,28 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
         Ok(connection) => connection,
         Err(error) if json && args.input_hex.is_some() => {
             let message = format!("shell-into websocket error: {error}");
-            fmt::print(&json!({
-                "ok": false,
-                "output_hex": hex_encode(message.as_bytes()),
-                "error": message,
-            }), true);
+            fmt::print(
+                &json!({
+                    "ok": false,
+                    "output_hex": hex_encode(message.as_bytes()),
+                    "error": message,
+                }),
+                true,
+            );
             return Ok(());
         }
-        Err(error) => return Err(error).context(format!("connect {url}: could not reach baud-server")),
+        Err(error) => {
+            return Err(error).context(format!("connect {url}: could not reach baud-server"))
+        }
     };
     let (mut tx, mut rx) = ws.split();
 
     match args.input_hex {
         Some(hex) => {
             let bytes = hex_decode(&hex).context("--input-hex must be a valid hex string")?;
-            tx.send(Message::Binary(bytes.into())).await.context("send input")?;
+            tx.send(Message::Binary(bytes.into()))
+                .await
+                .context("send input")?;
 
             let mut output = Vec::new();
             loop {
@@ -75,11 +82,9 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
                 } else {
                     args.idle_timeout_ms
                 };
-                let next = tokio::time::timeout(
-                    std::time::Duration::from_millis(timeout_ms),
-                    rx.next(),
-                )
-                .await;
+                let next =
+                    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx.next())
+                        .await;
                 match next {
                     Ok(Some(Ok(Message::Binary(bytes)))) => output.extend_from_slice(&bytes),
                     Ok(Some(Ok(Message::Text(text)))) => output.extend_from_slice(text.as_bytes()),
@@ -90,7 +95,9 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
                         output.extend_from_slice(message.as_bytes());
                         break;
                     }
-                    Ok(Some(Err(error))) => return Err(error).context("shell-into websocket error"),
+                    Ok(Some(Err(error))) => {
+                        return Err(error).context("shell-into websocket error")
+                    }
                     Err(_) => break, // idle/first-byte timeout: no more output expected
                 }
             }
@@ -105,7 +112,10 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
             .await
             {}
 
-            fmt::print(&json!({ "ok": true, "output_hex": hex_encode(&output) }), json);
+            fmt::print(
+                &json!({ "ok": true, "output_hex": hex_encode(&output) }),
+                json,
+            );
             Ok(())
         }
         None => interactive(tx, rx).await,
@@ -116,11 +126,15 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
 /// as it arrives, until stdin closes (Ctrl-D) or the server closes the connection.
 async fn interactive(
     mut tx: futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         Message,
     >,
     mut rx: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
 ) -> Result<()> {
     let mut stdin_lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -175,7 +189,9 @@ async fn interactive(
 /// left to send, only output still owed.
 async fn drain_remaining_output(
     rx: &mut futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
     >,
     stdout: &mut tokio::io::Stdout,
 ) -> Result<()> {
@@ -204,7 +220,10 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

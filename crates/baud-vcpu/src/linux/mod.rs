@@ -15,9 +15,12 @@ pub mod pmu;
 pub mod watchdog;
 
 use crate::{
-    dispatch_exit, Bus, DeterminismHole, DispatchOutcome, EnforcedRdseedSite, Exit, RunLoopError, TimeSource,
+    dispatch_exit, Bus, DeterminismHole, DispatchOutcome, EnforcedRdseedSite, Exit, RunLoopError,
+    TimeSource,
 };
-use kvm_bindings::{kvm_guest_debug, KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP};
+use kvm_bindings::{
+    kvm_guest_debug, KVM_GUESTDBG_BLOCKIRQ, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP,
+};
 use kvm_ioctls::{VcpuExit, VcpuFd};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,7 +72,9 @@ const KVM_EXIT_BAUD_DETERMINISM: u32 = 41;
 fn decode_baud_determinism_exit(payload: u64) -> Exit<'static> {
     match payload & 0xFF {
         0 => Exit::RdtscEnforced,
-        1 => Exit::RdrandEnforced { gpr_index: ((payload >> 8) & 0xF) as u8 },
+        1 => Exit::RdrandEnforced {
+            gpr_index: ((payload >> 8) & 0xF) as u8,
+        },
         3 => Exit::RdtscpEnforced,
         _ => Exit::Unmodeled("BaudDeterminismUnknownKind"),
     }
@@ -153,7 +158,10 @@ pub fn set_singlestep(vcpu: &VcpuFd, enabled: bool, block_irq: bool) -> io::Resu
             control |= KVM_GUESTDBG_BLOCKIRQ;
         }
     }
-    let debug = kvm_guest_debug { control, ..Default::default() };
+    let debug = kvm_guest_debug {
+        control,
+        ..Default::default()
+    };
     vcpu.set_guest_debug(&debug).map_err(io::Error::from)
 }
 
@@ -213,7 +221,9 @@ pub fn run_until_halted(
         // below: whichever host-side supervisory decision actually stopped the run is the honest
         // thing to report, and a cancelled run's caller is by construction no longer listening.
         RunLoopError::Cancelled => RunLoopError::Cancelled,
-        RunLoopError::DeterminismHole(hole) if !watchdog_fired => RunLoopError::DeterminismHole(hole),
+        RunLoopError::DeterminismHole(hole) if !watchdog_fired => {
+            RunLoopError::DeterminismHole(hole)
+        }
         // `vcpu`'s own `KVM_RUN` (`run_and_convert`) already returned — this `get_regs()` is not
         // competing with any live borrow of it, same reasoning as the `RdseedTrapNeedsRip` fetch
         // in `run_one_exit_impl`. Best-effort: `.ok()` so a register-read failure never turns a
@@ -377,7 +387,8 @@ fn run_one_exit_impl(
                 // match, so this fresh `vcpu.get_regs()` is not competing with any live borrow —
                 // see `ConvertedExit`'s doc for why the same fetch cannot happen one level down,
                 // inside `run_and_convert` itself.
-                vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
+                vcpu.get_regs()
+                    .map(|regs| Exit::RdseedEnforced { rip: regs.rip })
             }
             Err(e) => Err(e),
         };
@@ -385,28 +396,33 @@ fn run_one_exit_impl(
             Ok(exit) => {
                 return match dispatch_exit(exit, bus, time)? {
                     DispatchOutcome::ServeEnforcedRdtsc(value) => {
-                        write_enforced_rdtsc_result(vcpu, value)
-                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDTSC result: {e}")))?;
+                        write_enforced_rdtsc_result(vcpu, value).map_err(|e| {
+                            DeterminismHole(format!("failed to write enforced-RDTSC result: {e}"))
+                        })?;
                         Ok(DispatchOutcome::Continue)
                     }
                     DispatchOutcome::ServeEnforcedRdtscp { value, tsc_aux } => {
-                        write_enforced_rdtscp_result(vcpu, value, tsc_aux)
-                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDTSCP result: {e}")))?;
+                        write_enforced_rdtscp_result(vcpu, value, tsc_aux).map_err(|e| {
+                            DeterminismHole(format!("failed to write enforced-RDTSCP result: {e}"))
+                        })?;
                         Ok(DispatchOutcome::Continue)
                     }
                     DispatchOutcome::ServeEnforcedRdrand { gpr_index, value } => {
-                        write_enforced_rdrand_result(vcpu, gpr_index, value)
-                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDRAND result: {e}")))?;
+                        write_enforced_rdrand_result(vcpu, gpr_index, value).map_err(|e| {
+                            DeterminismHole(format!("failed to write enforced-RDRAND result: {e}"))
+                        })?;
                         Ok(DispatchOutcome::Continue)
                     }
                     DispatchOutcome::ServeEnforcedRdseed { rip, site, value } => {
-                        write_enforced_rdseed_result(vcpu, rip, site, value)
-                            .map_err(|e| DeterminismHole(format!("failed to write enforced-RDSEED result: {e}")))?;
+                        write_enforced_rdseed_result(vcpu, rip, site, value).map_err(|e| {
+                            DeterminismHole(format!("failed to write enforced-RDSEED result: {e}"))
+                        })?;
                         Ok(DispatchOutcome::Continue)
                     }
                     DispatchOutcome::ReinjectUd => {
-                        reinject_ud(vcpu)
-                            .map_err(|e| DeterminismHole(format!("failed to re-inject #UD: {e}")))?;
+                        reinject_ud(vcpu).map_err(|e| {
+                            DeterminismHole(format!("failed to re-inject #UD: {e}"))
+                        })?;
                         Ok(DispatchOutcome::Continue)
                     }
                     other => Ok(other),
@@ -479,7 +495,8 @@ const X86_EFLAGS_CF: u64 = 1 << 0;
 /// success, baud's enforced regime never reports failure), and `PF`/`AF`/`ZF`/`SF`/`OF` (always
 /// cleared). Used to replace exactly these bits in RFLAGS, leaving every other bit (interrupt
 /// flag, direction flag, etc.) untouched.
-const RDRAND_DEFINED_FLAGS_MASK: u64 = X86_EFLAGS_CF | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+const RDRAND_DEFINED_FLAGS_MASK: u64 =
+    X86_EFLAGS_CF | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
 
 /// Map an x86-64 ModRM general-register index (0=RAX..7=RDI, 8=R8..15=R15 — the same numbering
 /// `vmx_get_instr_info_reg` decodes from `VMX_INSTRUCTION_INFO`, `rdrand-enforce.patch`'s doc) to
@@ -503,7 +520,11 @@ fn gpr_for_index(regs: &mut kvm_bindings::kvm_regs, index: u8) -> io::Result<&mu
         13 => &mut regs.r13,
         14 => &mut regs.r14,
         15 => &mut regs.r15,
-        _ => return Err(io::Error::other(format!("invalid RDRAND destination GPR index {index}"))),
+        _ => {
+            return Err(io::Error::other(format!(
+                "invalid RDRAND destination GPR index {index}"
+            )))
+        }
     })
 }
 
@@ -575,10 +596,22 @@ mod tests {
     #[test]
     fn modeled_exits_convert_without_becoming_unmodeled() {
         let mut buf = [0u8; 4];
-        assert!(matches!(convert_exit(VcpuExit::IoIn(0x3f8, &mut buf)), Exit::IoIn(0x3f8, _)));
-        assert!(matches!(convert_exit(VcpuExit::IoOut(0x3f8, &buf)), Exit::IoOut(0x3f8, _)));
-        assert!(matches!(convert_exit(VcpuExit::MmioRead(0x1000, &mut buf)), Exit::MmioRead(0x1000, _)));
-        assert!(matches!(convert_exit(VcpuExit::MmioWrite(0x1000, &buf)), Exit::MmioWrite(0x1000, _)));
+        assert!(matches!(
+            convert_exit(VcpuExit::IoIn(0x3f8, &mut buf)),
+            Exit::IoIn(0x3f8, _)
+        ));
+        assert!(matches!(
+            convert_exit(VcpuExit::IoOut(0x3f8, &buf)),
+            Exit::IoOut(0x3f8, _)
+        ));
+        assert!(matches!(
+            convert_exit(VcpuExit::MmioRead(0x1000, &mut buf)),
+            Exit::MmioRead(0x1000, _)
+        ));
+        assert!(matches!(
+            convert_exit(VcpuExit::MmioWrite(0x1000, &buf)),
+            Exit::MmioWrite(0x1000, _)
+        ));
         assert!(matches!(convert_exit(VcpuExit::Hlt), Exit::Hlt));
         assert!(matches!(convert_exit(VcpuExit::Shutdown), Exit::Shutdown));
         assert!(matches!(
@@ -591,15 +624,28 @@ mod tests {
     fn rdmsr_and_wrmsr_convert_and_clear_the_error_flag() {
         let mut error = 1u8; // start "failed" to prove convert_exit clears it
         let mut data = 0u64;
-        let read = ReadMsrExit { error: &mut error, reason: MsrExitReason::Unknown, index: 0x10, data: &mut data };
+        let read = ReadMsrExit {
+            error: &mut error,
+            reason: MsrExitReason::Unknown,
+            index: 0x10,
+            data: &mut data,
+        };
         match convert_exit(VcpuExit::X86Rdmsr(read)) {
             Exit::Rdmsr(0x10, _) => {}
             other => panic!("expected Exit::Rdmsr, got {other:?}"),
         }
-        assert_eq!(error, 0, "a served RDMSR must never leave the #GP error flag set");
+        assert_eq!(
+            error, 0,
+            "a served RDMSR must never leave the #GP error flag set"
+        );
 
         let mut error2 = 1u8;
-        let write = WriteMsrExit { error: &mut error2, reason: MsrExitReason::Unknown, index: 0x10, data: 7 };
+        let write = WriteMsrExit {
+            error: &mut error2,
+            reason: MsrExitReason::Unknown,
+            index: 0x10,
+            data: 7,
+        };
         match convert_exit(VcpuExit::X86Wrmsr(write)) {
             Exit::Wrmsr(0x10, 7) => {}
             other => panic!("expected Exit::Wrmsr, got {other:?}"),
@@ -609,11 +655,24 @@ mod tests {
 
     #[test]
     fn unmodeled_exit_kinds_never_silently_pass_through() {
-        assert!(matches!(convert_exit(VcpuExit::Unknown), Exit::Unmodeled("Unknown")));
-        assert!(matches!(convert_exit(VcpuExit::Exception), Exit::Unmodeled("Exception")));
-        assert!(matches!(convert_exit(VcpuExit::Unsupported(999)), Exit::Unmodeled("Unsupported")));
         assert!(matches!(
-            convert_exit(VcpuExit::MemoryFault { flags: 0, gpa: 0, size: 0 }),
+            convert_exit(VcpuExit::Unknown),
+            Exit::Unmodeled("Unknown")
+        ));
+        assert!(matches!(
+            convert_exit(VcpuExit::Exception),
+            Exit::Unmodeled("Exception")
+        ));
+        assert!(matches!(
+            convert_exit(VcpuExit::Unsupported(999)),
+            Exit::Unmodeled("Unsupported")
+        ));
+        assert!(matches!(
+            convert_exit(VcpuExit::MemoryFault {
+                flags: 0,
+                gpa: 0,
+                size: 0
+            }),
             Exit::Unmodeled("MemoryFault")
         ));
     }
@@ -624,7 +683,10 @@ mod tests {
     /// `Unsupported` value (the test above covers 999 falling through as expected).
     #[test]
     fn baud_determinism_reason_converts_to_rdtsc_enforced() {
-        assert!(matches!(convert_exit(VcpuExit::Unsupported(41)), Exit::RdtscEnforced));
+        assert!(matches!(
+            convert_exit(VcpuExit::Unsupported(41)),
+            Exit::RdtscEnforced
+        ));
     }
 
     /// `run_and_convert` (not `convert_exit`, which never sees the payload) is what actually
@@ -633,7 +695,10 @@ mod tests {
     /// `rdrand-enforce.patch`'s doc) without needing a real vCPU.
     #[test]
     fn baud_determinism_payload_decodes_rdtsc_and_rdrand() {
-        assert!(matches!(decode_baud_determinism_exit(0), Exit::RdtscEnforced));
+        assert!(matches!(
+            decode_baud_determinism_exit(0),
+            Exit::RdtscEnforced
+        ));
         assert!(matches!(
             decode_baud_determinism_exit(1 | (6 << 8)),
             Exit::RdrandEnforced { gpr_index: 6 }
@@ -642,16 +707,43 @@ mod tests {
             decode_baud_determinism_exit(1 | (15 << 8)),
             Exit::RdrandEnforced { gpr_index: 15 }
         ));
-        assert!(matches!(decode_baud_determinism_exit(2), Exit::Unmodeled("BaudDeterminismUnknownKind")));
-        assert!(matches!(decode_baud_determinism_exit(3), Exit::RdtscpEnforced));
+        assert!(matches!(
+            decode_baud_determinism_exit(2),
+            Exit::Unmodeled("BaudDeterminismUnknownKind")
+        ));
+        assert!(matches!(
+            decode_baud_determinism_exit(3),
+            Exit::RdtscpEnforced
+        ));
     }
 
     #[test]
     fn gp_regs_layout_matches_kvm_regs_field_order() {
         // Documents the mapping `pmu::gp_regs_from_kvm` relies on so a future field reorder in
         // kvm-bindings is caught here rather than silently scrambling ExecPoint comparisons.
-        let regs = kvm_regs { rax: 1, rbx: 2, rcx: 3, rdx: 4, rsi: 5, rdi: 6, rbp: 7, rsp: 8,
-            r8: 9, r9: 10, r10: 11, r11: 12, r12: 13, r13: 14, r14: 15, r15: 16, rip: 0, rflags: 0 };
-        assert_eq!(pmu::gp_regs_from_kvm(&regs), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        let regs = kvm_regs {
+            rax: 1,
+            rbx: 2,
+            rcx: 3,
+            rdx: 4,
+            rsi: 5,
+            rdi: 6,
+            rbp: 7,
+            rsp: 8,
+            r8: 9,
+            r9: 10,
+            r10: 11,
+            r11: 12,
+            r12: 13,
+            r13: 14,
+            r14: 15,
+            r15: 16,
+            rip: 0,
+            rflags: 0,
+        };
+        assert_eq!(
+            pmu::gp_regs_from_kvm(&regs),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
     }
 }

@@ -3,8 +3,8 @@
 //
 // spec.toml parsing for baud-packages.
 
-use serde::{Deserialize, Serialize};
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,8 +33,8 @@ pub struct WorkloadSpec {
 // ---------------------------------------------------------------------------
 
 pub fn parse_and_lint(toml_str: &str) -> Result<WorkloadSpec> {
-    let spec: WorkloadSpec = toml::from_str(toml_str)
-        .map_err(|e| anyhow::anyhow!("spec.toml parse error: {e}"))?;
+    let spec: WorkloadSpec =
+        toml::from_str(toml_str).map_err(|e| anyhow::anyhow!("spec.toml parse error: {e}"))?;
 
     if spec.workload.name.is_empty() {
         bail!("workload.name must not be empty");

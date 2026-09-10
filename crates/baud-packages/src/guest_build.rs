@@ -75,11 +75,17 @@ pub fn hash_image(bzimage_bytes: &[u8], initramfs_bytes: &[u8]) -> (String, Stri
 /// `make`/`merge_config.sh` and reads every `initramfs_entries` source file from disk.
 pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildResult> {
     let fragment = fs::read_to_string(cfg.kernel.config_fragment).with_context(|| {
-        format!("failed to read kernel config fragment at {}", cfg.kernel.config_fragment.display())
+        format!(
+            "failed to read kernel config fragment at {}",
+            cfg.kernel.config_fragment.display()
+        )
     })?;
     let lint = crate::image::lint_kernel_config(&fragment);
     if !lint.ok() {
-        anyhow::bail!("guest kernel config fragment violates the image contract: {:?}", lint.violations);
+        anyhow::bail!(
+            "guest kernel config fragment violates the image contract: {:?}",
+            lint.violations
+        );
     }
     let bzimage_src = build_bzimage(&cfg.kernel)?;
     let bzimage_bytes = fs::read(&bzimage_src)
@@ -98,12 +104,20 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
         // image builder matters because entries are the last boundary before bytes become an
         // opaque initramfs. A raw instruction must never reach a cooperative stock-KVM guest.
         if contents.starts_with(b"\x7fELF") {
-            let (rewritten, _report) = crate::rdseed::rewrite_rdseed(&contents).with_context(|| {
-                format!("failed to rewrite rdseed in initramfs entry '{}'", entry.archive_path)
-            })?;
+            let (rewritten, _report) =
+                crate::rdseed::rewrite_rdseed(&contents).with_context(|| {
+                    format!(
+                        "failed to rewrite rdseed in initramfs entry '{}'",
+                        entry.archive_path
+                    )
+                })?;
             contents = rewritten;
         }
-        entries.push(InitramfsEntry::regular(entry.archive_path.clone(), entry.mode, contents));
+        entries.push(InitramfsEntry::regular(
+            entry.archive_path.clone(),
+            entry.mode,
+            contents,
+        ));
     }
     let initramfs_bytes = build_reproducible_initramfs(&entries)?;
 
@@ -145,13 +159,22 @@ mod tests {
         let (b2, i2, h2) = hash_image(b"kernel-bytes", b"initramfs-bytes");
         assert_eq!(b1, b2);
         assert_eq!(i1, i2);
-        assert_eq!(h1, h2, "identical inputs must yield an identical image_hash");
+        assert_eq!(
+            h1, h2,
+            "identical inputs must yield an identical image_hash"
+        );
 
         let (_, _, h3) = hash_image(b"kernel-bytes-changed", b"initramfs-bytes");
-        assert_ne!(h1, h3, "changing the kernel bytes must change the image hash");
+        assert_ne!(
+            h1, h3,
+            "changing the kernel bytes must change the image hash"
+        );
 
         let (_, _, h4) = hash_image(b"kernel-bytes", b"initramfs-bytes-changed");
-        assert_ne!(h1, h4, "changing the initramfs bytes must change the image hash");
+        assert_ne!(
+            h1, h4,
+            "changing the initramfs bytes must change the image hash"
+        );
     }
 
     #[test]
@@ -204,7 +227,8 @@ mod tests {
         };
         let err = build_guest_image(&cfg).unwrap_err();
         assert!(
-            err.to_string().contains("does not look like a kernel source tree"),
+            err.to_string()
+                .contains("does not look like a kernel source tree"),
             "{err}"
         );
     }
@@ -258,7 +282,9 @@ mod tests {
     fn gunzip(bytes: &[u8]) -> Vec<u8> {
         use std::io::Read;
         let mut out = Vec::new();
-        flate2::read::GzDecoder::new(bytes).read_to_end(&mut out).unwrap();
+        flate2::read::GzDecoder::new(bytes)
+            .read_to_end(&mut out)
+            .unwrap();
         out
     }
 
@@ -314,7 +340,8 @@ mod tests {
         assert_eq!(steps[0], "make mrproper");
         assert_eq!(steps[1], "make allnoconfig");
         assert!(
-            steps[2].starts_with("merge_config.sh -m .config /") && steps[2].ends_with("minimal.config"),
+            steps[2].starts_with("merge_config.sh -m .config /")
+                && steps[2].ends_with("minimal.config"),
             "merge_config.sh must be handed `-m .config <canonicalized fragment>`, got: {}",
             steps[2]
         );
@@ -322,14 +349,16 @@ mod tests {
         // deterministic_build_env() must reach the compiler's environment, or two builds of the
         // same source stop being byte-identical (the `image_build_is_reproducible` failure mode).
         assert_eq!(
-            steps[4],
-            "make bzImage ts=@0 user=baud host=baud epoch=0",
+            steps[4], "make bzImage ts=@0 user=baud host=baud epoch=0",
             "every build-identity variable deterministic_build_env() pins must be exported"
         );
 
         // 2. The built bzImage was copied out verbatim.
         assert_eq!(result.bzimage_path, output_dir.join("bzImage"));
-        assert_eq!(fs::read(&result.bzimage_path).unwrap(), b"stub-bzImage-bytes");
+        assert_eq!(
+            fs::read(&result.bzimage_path).unwrap(),
+            b"stub-bzImage-bytes"
+        );
         let metadata = fs::read_to_string(output_dir.join("metadata.json")).unwrap();
         assert!(metadata.contains("\"format\":\"baud-guest-image-v1\""));
         assert!(metadata.contains(&format!("\"image_hash\":\"{}\"", result.image_hash)));
@@ -362,7 +391,8 @@ mod tests {
         ] {
             assert_eq!(hash.len(), 64, "{label} must be 64 hex chars, got {hash:?}");
             assert!(
-                hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                hash.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
                 "{label} must be lowercase hex, got {hash:?}"
             );
         }

@@ -96,7 +96,11 @@ impl Watchdog {
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let fired = Arc::new(AtomicBool::new(false));
         if budget.is_zero() {
-            return Watchdog { done, fired, handle: None };
+            return Watchdog {
+                done,
+                fired,
+                handle: None,
+            };
         }
         ensure_handler_installed();
         // SAFETY: `pthread_self` has no preconditions and always succeeds.
@@ -118,7 +122,10 @@ impl Watchdog {
                 // `wait_timeout` can wake spuriously before `deadline`; looping back to recheck
                 // both `*guard` and the remaining time (rather than trusting a single wait) is
                 // what makes this correct in that case instead of just usually correct.
-                guard = cvar.wait_timeout(guard, deadline - now).expect("watchdog mutex poisoned").0;
+                guard = cvar
+                    .wait_timeout(guard, deadline - now)
+                    .expect("watchdog mutex poisoned")
+                    .0;
             }
             if !*guard {
                 fired2.store(true, Ordering::SeqCst);
@@ -137,7 +144,11 @@ impl Watchdog {
                 }
             }
         });
-        Watchdog { done, fired, handle: Some(handle) }
+        Watchdog {
+            done,
+            fired,
+            handle: Some(handle),
+        }
     }
 
     /// Cancel a still-pending watchdog and wait for its thread to actually exit — called
@@ -236,7 +247,10 @@ impl CancelKicker {
                     .0;
             }
         });
-        CancelKicker { done, handle: Some(handle) }
+        CancelKicker {
+            done,
+            handle: Some(handle),
+        }
     }
 }
 
@@ -263,9 +277,15 @@ mod tests {
     #[test]
     fn zero_budget_disables_the_watchdog_entirely() {
         let watchdog = Watchdog::arm(Duration::ZERO);
-        assert!(watchdog.handle.is_none(), "a zero budget must not spawn a watchdog thread at all");
+        assert!(
+            watchdog.handle.is_none(),
+            "a zero budget must not spawn a watchdog thread at all"
+        );
         std::thread::sleep(Duration::from_millis(50));
-        assert!(!watchdog.fired.load(Ordering::SeqCst), "a disabled watchdog must never fire");
+        assert!(
+            !watchdog.fired.load(Ordering::SeqCst),
+            "a disabled watchdog must never fire"
+        );
         watchdog.disarm();
     }
 
@@ -278,7 +298,10 @@ mod tests {
         // already either fired (the case under test) or exited having found `done` already
         // true, so `fired`'s value is stable and race-free to read right after this.
         watchdog.disarm();
-        assert!(fired.load(Ordering::SeqCst), "watchdog must fire once its budget elapses");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "watchdog must fire once its budget elapses"
+        );
     }
 
     #[test]
@@ -286,7 +309,10 @@ mod tests {
         let watchdog = Watchdog::arm(Duration::from_secs(5));
         let fired = Arc::clone(&watchdog.fired);
         watchdog.disarm(); // long before the 5s budget would elapse
-        assert!(!fired.load(Ordering::SeqCst), "disarming in time must prevent it from ever firing");
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "disarming in time must prevent it from ever firing"
+        );
     }
 
     /// The determinism guarantee [`CancelKicker`]'s doc makes, at the only place it can be checked
@@ -294,7 +320,10 @@ mod tests {
     #[test]
     fn no_cancel_flag_spawns_no_kicker_thread_at_all() {
         let kicker = CancelKicker::arm(None);
-        assert!(kicker.handle.is_none(), "an absent cancellation flag must not spawn a thread");
+        assert!(
+            kicker.handle.is_none(),
+            "an absent cancellation flag must not spawn a thread"
+        );
     }
 
     /// An armed-but-never-set flag must be equally silent — the case every `baud-server` run that
@@ -329,17 +358,29 @@ mod tests {
         };
         // `libc::nanosleep` (unlike `std::thread::sleep`, which restarts on EINTR internally)
         // returns -1/EINTR the moment a handled signal arrives — exactly `KVM_RUN`'s behaviour.
-        let req = libc::timespec { tv_sec: 30, tv_nsec: 0 };
-        let mut rem = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = libc::timespec {
+            tv_sec: 30,
+            tv_nsec: 0,
+        };
+        let mut rem = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let start = Instant::now();
         // SAFETY: both timespecs are live, initialized locals for the whole call.
         let rc = unsafe { libc::nanosleep(&req, &mut rem) };
         let elapsed = start.elapsed();
         setter.join().expect("setter thread panicked");
         drop(kicker);
-        assert_eq!(rc, -1, "the blocking syscall must have been interrupted, not have slept 30s");
+        assert_eq!(
+            rc, -1,
+            "the blocking syscall must have been interrupted, not have slept 30s"
+        );
         assert_eq!(io_errno(), libc::EINTR);
-        assert!(elapsed < Duration::from_secs(5), "cancellation must break out promptly (took {elapsed:?})");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancellation must break out promptly (took {elapsed:?})"
+        );
     }
 
     fn io_errno() -> libc::c_int {

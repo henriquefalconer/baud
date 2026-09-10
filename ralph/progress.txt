@@ -1684,3 +1684,102 @@ Focused verification is green: baud-packages (45 passed, 2 prerequisite-gated ig
   - Focused tests passed; full gate timed out after passing all completed units, so the ten locked queue entries remain open.
 
 ---
+
+## 2026-09-10T10:35:18 UTC (28min) - Session usage — ralph-4 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4384 (summed from 6 session transcripts: main $0.3304 · subagents $0.1081)
+- tokens input 658,414 · cache-read 13,716,480 · cache-write 0 · output 27,022 · reasoning 7,640
+- context 161,471 tok peak of 272K (59%) across 111 inference calls, monotonic
+- models gpt-5.6-luna $0.4384 (in 658,414 / out 34,662 / cache-read 13,716,480)
+- subagents (5) pi process x5
+  - delegate-6d9df3f243a7fbd3e7630892fc2623d4: gpt-5.6-luna $0.0278, 5 inference calls
+  - delegate-462dec7b9276428708a3c0d1e0c53168: gpt-5.6-luna $0.0224, 4 inference calls
+  - delegate-90daa40171ec33adfef602a3f01403f8: gpt-5.6-luna $0.0255, 6 inference calls
+  - delegate-0ae784b2afd9b181f5508f1d64f08926: gpt-5.6-luna $0.0263, 5 inference calls
+  - 01a08acb-265f-72a4-a1ef-da90b615ed51: gpt-5.6-luna $0.0060, 3 inference calls
+- transcript: ralph/.run/20260910T073659Z/004-ralph-4.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 5 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the full batch.
+
+Resetting the required perf setting before repository work.
+
+Reading the build queue and repository shape.
+
+Recording the binding batch and locating existing implementation before edits.
+
+Chose these 10 items: G1 exact-boundary interrupt proof and enforced capability, G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G8 production host safety contract — they are the first 10 highest-priority pending entries in the queue.
+
+Starting G1 exact-boundary interrupt proof and enforced capability.
+
+Running focused core tests to expose the real remaining failures before changing code.
+
+Core tests are green; inspecting lifecycle, ownership, and route plumbing for concrete gaps while specification studies finish.
+
+Tracing the exact authentication and lifecycle contract before implementing middleware.
+
+Authentication is an agent identity contract, not a generic HTTP token; locating the existing identity and tape-agent handshake.
+
+Waiting briefly for parallel specification searches while keeping the session alive.
+
+Implementing inherited affinity filtering in the authoritative host topology probe, with unit coverage.
+
+Affinity filtering is implemented; running host tests and formatting before continuing the batch.
+
+Running the host end-to-end probe to verify the affinity change on the actual server path.
+
+The first probe exposed an affinity interaction: the server reserve mask hid whole sibling pairs and reduced capacity to zero. Retaining only allowed siblings preserves the inherited mask without falsely discarding usable cores.
+
+The advertised run watch, pause, and resume commands now use real server routes and SSE instead of a status poll or placeholder text; compiling both crates next.
+
+Server and CLI tests pass, including the existing KVM route suite. Reviewing the diff and queue before the full gate result.
+
+The full diff contains the prior implementation batch plus this iteration’s affinity and lifecycle fixes. Checking whitespace and compile artifacts while the gate runs.
+
+Waiting for the required gate subagent to finish its complete validation run.
+
+The full gate is still running; no new edits are being made until its independent diagnostics arrive.
+
+Keeping the liveness log current while the gate works through the real drive suite.
+
+The gate subagent has started drive/gate.sh after reading the queue and operational instructions; continuing to wait for its terminal result.
+
+The gate subagent timed out at the prescribed 600-second limit without producing a unit result. Re-running the exact gate as a tracked shell task to obtain its terminal diagnostics.
+
+Retrying the exact gate in a shell task so the drive suite itself, rather than the agent wrapper, owns the timeout.
+
+The retry gate is still active; preserving the required liveness notes while it runs the full workspace and drive validation.
+
+No further code changes are being layered onto a running gate; waiting for its definitive result.
+
+Gate warm-up passed and phase 1+2 plus the long H5 drive are in progress.
+
+The gate remains in its expected H5 long-pole phase; waiting for all phases rather than declaring partial validation.
+
+The retry is approaching the allowed timeout with H5 still active; retaining the required progress signal.
+
+The required gate has not returned before its limit; waiting for the terminal event before recording the result.
+
+The full gate passed every unit through H5 and found one H6 fleet failure; rerunning H6 in isolation to capture the root assertion before repairing it.
+
+H6 passed in isolation, confirming the gate failure was a host-load timing flake rather than a reproducible defect. Starting the exact gate again with warmed package inputs.
+
+Final gate retry is running against warmed artifacts; preserving liveness while it executes.
+
+The final gate retry remains active; no code changes are being made during validation.
+
+The retry has passed H5, clippy, workspace tests, and most drive units; waiting for H6 and package stages.
+
+All gate checks through H6 and the cancellation package test are green; the real package-build CLI phase is still running.
+
+The gate reached the real pkg-build-cli phase but hit its 600-second wrapper limit without a result. Running that required unit in isolation to distinguish a slow real build from a failure.
+
+The isolated real image build confirms the remaining package acceptance is a genuine full kernel compilation and exceeded 600 seconds; it still uses the fixture config path, so G2 remains open. Saving the tested affinity and lifecycle fixes without falsely collapsing unresolved queue entries.
+
+Push completed; confirming the remote tip and clean working tree without rerunning validation.

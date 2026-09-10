@@ -177,7 +177,13 @@ impl VirtioMmioTransport {
     /// A transport for `device_id`, offering `device_features` (the full 64-bit bitmap) across
     /// `queue_count` identically-sized queues, each with a driver-visible max size of
     /// `queue_num_max` descriptors.
-    pub fn new(base: u64, device_id: u32, device_features: u64, queue_count: usize, queue_num_max: u32) -> Self {
+    pub fn new(
+        base: u64,
+        device_id: u32,
+        device_features: u64,
+        queue_count: usize,
+        queue_num_max: u32,
+    ) -> Self {
         VirtioMmioTransport {
             base,
             device_id,
@@ -262,7 +268,12 @@ impl VirtioMmioTransport {
         if !queue.ready {
             return None;
         }
-        Some(QueueRingConfig { num: queue.num, desc: queue.desc, driver: queue.driver, device: queue.device })
+        Some(QueueRingConfig {
+            num: queue.num,
+            desc: queue.desc,
+            driver: queue.driver,
+            device: queue.device,
+        })
     }
 
     /// Writing `0` to the status register is the driver's device-reset request (spec 1.1 §2.1:
@@ -314,11 +325,20 @@ impl VirtioMmioTransport {
             REG_INTERRUPT_STATUS => self.interrupt_status,
             REG_STATUS => self.status,
             REG_QUEUE_DESC_LOW => self.selected_queue().map(|q| q.desc as u32).unwrap_or(0),
-            REG_QUEUE_DESC_HIGH => self.selected_queue().map(|q| (q.desc >> 32) as u32).unwrap_or(0),
+            REG_QUEUE_DESC_HIGH => self
+                .selected_queue()
+                .map(|q| (q.desc >> 32) as u32)
+                .unwrap_or(0),
             REG_QUEUE_DRIVER_LOW => self.selected_queue().map(|q| q.driver as u32).unwrap_or(0),
-            REG_QUEUE_DRIVER_HIGH => self.selected_queue().map(|q| (q.driver >> 32) as u32).unwrap_or(0),
+            REG_QUEUE_DRIVER_HIGH => self
+                .selected_queue()
+                .map(|q| (q.driver >> 32) as u32)
+                .unwrap_or(0),
             REG_QUEUE_DEVICE_LOW => self.selected_queue().map(|q| q.device as u32).unwrap_or(0),
-            REG_QUEUE_DEVICE_HIGH => self.selected_queue().map(|q| (q.device >> 32) as u32).unwrap_or(0),
+            REG_QUEUE_DEVICE_HIGH => self
+                .selected_queue()
+                .map(|q| (q.device >> 32) as u32)
+                .unwrap_or(0),
             REG_CONFIG_GENERATION => 0, // never changes: config space is empty (virtio-rng) or fixed
             // Write-only registers read as 0 (spec places no meaning on reading them); anything
             // past REG_CONFIG_SPACE_START is virtio-rng's empty device-specific config space.
@@ -332,7 +352,8 @@ impl VirtioMmioTransport {
             REG_DRIVER_FEATURES => {
                 let shift = 32 * (self.driver_features_sel & 1);
                 let mask = 0xffff_ffffu64 << shift;
-                self.driver_features = (self.driver_features & !mask) | ((u64::from(value)) << shift);
+                self.driver_features =
+                    (self.driver_features & !mask) | ((u64::from(value)) << shift);
             }
             REG_DRIVER_FEATURES_SEL => self.driver_features_sel = value,
             REG_QUEUE_SEL => self.queue_sel = value,
@@ -479,7 +500,11 @@ mod tests {
         let mut t = VirtioMmioTransport::new_rng(BASE);
 
         write_reg(&mut t, REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE);
-        write_reg(&mut t, REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        write_reg(
+            &mut t,
+            REG_STATUS,
+            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER,
+        );
 
         write_reg(&mut t, REG_DEVICE_FEATURES_SEL, 1);
         let offered = read_reg(&mut t, REG_DEVICE_FEATURES);
@@ -490,7 +515,10 @@ mod tests {
             REG_STATUS,
             VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK,
         );
-        assert_eq!(read_reg(&mut t, REG_STATUS) & VIRTIO_STATUS_FEATURES_OK, VIRTIO_STATUS_FEATURES_OK);
+        assert_eq!(
+            read_reg(&mut t, REG_STATUS) & VIRTIO_STATUS_FEATURES_OK,
+            VIRTIO_STATUS_FEATURES_OK
+        );
 
         write_reg(&mut t, REG_QUEUE_SEL, 0);
         let max = read_reg(&mut t, REG_QUEUE_NUM_MAX);
@@ -516,7 +544,10 @@ mod tests {
                 | VIRTIO_STATUS_FEATURES_OK
                 | VIRTIO_STATUS_DRIVER_OK,
         );
-        assert_eq!(read_reg(&mut t, REG_STATUS) & VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_DRIVER_OK);
+        assert_eq!(
+            read_reg(&mut t, REG_STATUS) & VIRTIO_STATUS_DRIVER_OK,
+            VIRTIO_STATUS_DRIVER_OK
+        );
     }
 
     #[test]
@@ -526,7 +557,11 @@ mod tests {
         assert_eq!(read_reg(&mut t, REG_QUEUE_NUM_MAX), 0, "no such queue");
         write_reg(&mut t, REG_QUEUE_READY, 1); // must not panic or affect queue 0
         write_reg(&mut t, REG_QUEUE_SEL, 0);
-        assert_eq!(read_reg(&mut t, REG_QUEUE_READY), 0, "queue 1's write must not leak into queue 0");
+        assert_eq!(
+            read_reg(&mut t, REG_QUEUE_READY),
+            0,
+            "queue 1's write must not leak into queue 0"
+        );
     }
 
     #[test]
@@ -550,22 +585,36 @@ mod tests {
         assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), 0);
 
         t.raise_used_buffer_notification();
-        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), VIRTIO_MMIO_INT_VRING);
+        assert_eq!(
+            read_reg(&mut t, REG_INTERRUPT_STATUS),
+            VIRTIO_MMIO_INT_VRING
+        );
         assert_eq!(t.interrupt_status(), VIRTIO_MMIO_INT_VRING);
 
         // Raising it again while already set is idempotent (OR, not increment).
         t.raise_used_buffer_notification();
-        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), VIRTIO_MMIO_INT_VRING);
+        assert_eq!(
+            read_reg(&mut t, REG_INTERRUPT_STATUS),
+            VIRTIO_MMIO_INT_VRING
+        );
 
         // The driver acknowledges by writing the bit(s) it handled back to InterruptAck.
         write_reg(&mut t, REG_INTERRUPT_ACK, VIRTIO_MMIO_INT_VRING);
-        assert_eq!(read_reg(&mut t, REG_INTERRUPT_STATUS), 0, "ack clears the bit");
+        assert_eq!(
+            read_reg(&mut t, REG_INTERRUPT_STATUS),
+            0,
+            "ack clears the bit"
+        );
     }
 
     #[test]
     fn writing_zero_to_status_resets_negotiated_state_but_not_device_identity() {
         let mut t = VirtioMmioTransport::new_rng(BASE);
-        write_reg(&mut t, REG_STATUS, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        write_reg(
+            &mut t,
+            REG_STATUS,
+            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER,
+        );
         write_reg(&mut t, REG_QUEUE_SEL, 0);
         write_reg(&mut t, REG_QUEUE_READY, 1);
         write_reg(&mut t, REG_QUEUE_NOTIFY, 0);
@@ -574,11 +623,23 @@ mod tests {
         write_reg(&mut t, REG_STATUS, 0);
 
         assert_eq!(read_reg(&mut t, REG_STATUS), 0, "status resets");
-        assert_eq!(read_reg(&mut t, REG_QUEUE_READY), 0, "queue readiness resets");
+        assert_eq!(
+            read_reg(&mut t, REG_QUEUE_READY),
+            0,
+            "queue readiness resets"
+        );
         assert_eq!(t.notify_count(), 0, "notify counters reset");
-        assert_eq!(read_reg(&mut t, REG_DEVICE_ID), VIRTIO_DEVICE_ID_RNG, "device identity persists");
+        assert_eq!(
+            read_reg(&mut t, REG_DEVICE_ID),
+            VIRTIO_DEVICE_ID_RNG,
+            "device identity persists"
+        );
         write_reg(&mut t, REG_QUEUE_SEL, 0);
-        assert_eq!(read_reg(&mut t, REG_QUEUE_NUM_MAX), 256, "queue count/max persists");
+        assert_eq!(
+            read_reg(&mut t, REG_QUEUE_NUM_MAX),
+            256,
+            "queue count/max persists"
+        );
     }
 
     #[test]
@@ -595,7 +656,11 @@ mod tests {
     #[test]
     fn queue_ring_config_is_none_until_the_queue_is_marked_ready() {
         let mut t = VirtioMmioTransport::new_rng(BASE);
-        assert_eq!(t.queue_ring_config(0), None, "unready queue exposes no ring config");
+        assert_eq!(
+            t.queue_ring_config(0),
+            None,
+            "unready queue exposes no ring config"
+        );
         assert_eq!(t.queue_ring_config(1), None, "out-of-range queue index");
 
         write_reg(&mut t, REG_QUEUE_SEL, 0);
@@ -603,12 +668,21 @@ mod tests {
         write_reg(&mut t, REG_QUEUE_DESC_LOW, 0x1000_0000);
         write_reg(&mut t, REG_QUEUE_DRIVER_LOW, 0x1000_1000);
         write_reg(&mut t, REG_QUEUE_DEVICE_LOW, 0x1000_2000);
-        assert_eq!(t.queue_ring_config(0), None, "addresses alone are not enough without QueueReady");
+        assert_eq!(
+            t.queue_ring_config(0),
+            None,
+            "addresses alone are not enough without QueueReady"
+        );
 
         write_reg(&mut t, REG_QUEUE_READY, 1);
         assert_eq!(
             t.queue_ring_config(0),
-            Some(QueueRingConfig { num: 256, desc: 0x1000_0000, driver: 0x1000_1000, device: 0x1000_2000 }),
+            Some(QueueRingConfig {
+                num: 256,
+                desc: 0x1000_0000,
+                driver: 0x1000_1000,
+                device: 0x1000_2000
+            }),
         );
     }
 

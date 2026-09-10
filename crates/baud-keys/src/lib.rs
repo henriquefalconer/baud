@@ -11,13 +11,13 @@
 //   2. ~/Library/Application Support/sops/age/keys.txt  (macOS)
 //   3. ~/.config/sops/age/keys.txt                      (Linux)
 
+use baud_secret::SecretString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use baud_secret::SecretString;
 
-pub use baud_secret;
 pub use age;
+pub use baud_secret;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -214,7 +214,10 @@ pub fn doctor() -> DoctorReport {
 
 /// Check whether the age key at `key_path` is listed as a recipient in the sops-encrypted file.
 /// Returns `None` if either file doesn't exist or the check cannot be performed.
-fn check_is_recipient(key_path: Option<&std::path::Path>, secrets_file: &std::path::Path) -> Option<bool> {
+fn check_is_recipient(
+    key_path: Option<&std::path::Path>,
+    secrets_file: &std::path::Path,
+) -> Option<bool> {
     let key_path = key_path?;
     if !secrets_file.exists() {
         return None;
@@ -222,7 +225,8 @@ fn check_is_recipient(key_path: Option<&std::path::Path>, secrets_file: &std::pa
     // Read the age public key from the key file (lines starting with "# public key:")
     // or extract it via `age-keygen -y` if available.
     let key_contents = std::fs::read_to_string(key_path).ok()?;
-    let pub_key = key_contents.lines()
+    let pub_key = key_contents
+        .lines()
         .find(|l| l.starts_with("# public key:"))
         .and_then(|l| l.strip_prefix("# public key:"))
         .map(|s| s.trim().to_owned())?;
@@ -293,9 +297,8 @@ pub fn decrypt_secrets(secrets_path: &std::path::Path) -> Result<SecretsMap, Key
     }
 
     // Verify age key exists
-    let key_path = age_key_path().ok_or_else(|| {
-        KeysError::AgeKeyNotFound(PathBuf::from("<none found>"))
-    })?;
+    let key_path =
+        age_key_path().ok_or_else(|| KeysError::AgeKeyNotFound(PathBuf::from("<none found>")))?;
 
     let output = Command::new("sops")
         .args(["--decrypt", "--output-type", "json"])
@@ -376,7 +379,11 @@ pub fn identity_root_key(secrets: &SecretsMap) -> Result<&SecretString, KeysErro
 
 /// Initialize a new secrets/baud.enc.yaml from a template.
 /// Returns the sops command that was run.
-pub fn init_secrets(age_recipient: &str, template_path: &std::path::Path, out_path: &std::path::Path) -> Result<(), KeysError> {
+pub fn init_secrets(
+    age_recipient: &str,
+    template_path: &std::path::Path,
+    out_path: &std::path::Path,
+) -> Result<(), KeysError> {
     if Command::new("sops").arg("--version").output().is_err() {
         return Err(KeysError::SopsNotFound("not in PATH".into()));
     }
@@ -406,9 +413,8 @@ pub fn edit_secrets(secrets_path: &std::path::Path) -> Result<(), KeysError> {
         return Err(KeysError::SopsNotFound("not in PATH".into()));
     }
 
-    let key_path = age_key_path().ok_or_else(|| {
-        KeysError::AgeKeyNotFound(std::path::PathBuf::from("<none found>"))
-    })?;
+    let key_path = age_key_path()
+        .ok_or_else(|| KeysError::AgeKeyNotFound(std::path::PathBuf::from("<none found>")))?;
 
     // `sops <file>` opens the file in $EDITOR and re-encrypts on save
     let status = Command::new("sops")
@@ -417,9 +423,9 @@ pub fn edit_secrets(secrets_path: &std::path::Path) -> Result<(), KeysError> {
         .status()?;
 
     if !status.success() {
-        return Err(KeysError::SopsDecryptFailed(
-            format!("sops edit exited with status {status}")
-        ));
+        return Err(KeysError::SopsDecryptFailed(format!(
+            "sops edit exited with status {status}"
+        )));
     }
     Ok(())
 }
@@ -428,7 +434,9 @@ pub fn edit_secrets(secrets_path: &std::path::Path) -> Result<(), KeysError> {
 ///
 /// Returns a `HashMap<key_name, "[REDACTED]">` so callers can display the
 /// structure without exposing any secret values.
-pub fn show_redacted(secrets_path: &std::path::Path) -> Result<std::collections::HashMap<String, String>, KeysError> {
+pub fn show_redacted(
+    secrets_path: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, KeysError> {
     Ok(decrypt_secrets(secrets_path)?.redacted())
 }
 
@@ -446,11 +454,10 @@ pub fn show_redacted(secrets_path: &std::path::Path) -> Result<std::collections:
 /// completes, since sops needs a still-valid recipient key to perform the intermediate
 /// re-encryption — so this order is required, not incidental.
 pub fn rotate_secrets(secrets_path: &Path, new_recipient: &str) -> Result<(), KeysError> {
-    let key_path = age_key_path().ok_or_else(|| {
-        KeysError::AgeKeyNotFound(PathBuf::from("<none found>"))
-    })?;
-    let old_recipient = age_public_key()
-        .ok_or_else(|| KeysError::AgePublicKeyNotFound(key_path.clone()))?;
+    let key_path =
+        age_key_path().ok_or_else(|| KeysError::AgeKeyNotFound(PathBuf::from("<none found>")))?;
+    let old_recipient =
+        age_public_key().ok_or_else(|| KeysError::AgePublicKeyNotFound(key_path.clone()))?;
 
     // Checked before touching `sops` at all: a same-recipient "rotation" would still run
     // `--add-age`/`--rm-age`, but the `--rm-age` half would drop the only recipient the file
@@ -471,7 +478,7 @@ pub fn rotate_secrets(secrets_path: &Path, new_recipient: &str) -> Result<(), Ke
         .output()?;
     if !add.status.success() {
         return Err(KeysError::SopsDecryptFailed(
-            String::from_utf8_lossy(&add.stderr).to_string()
+            String::from_utf8_lossy(&add.stderr).to_string(),
         ));
     }
 
@@ -482,7 +489,7 @@ pub fn rotate_secrets(secrets_path: &Path, new_recipient: &str) -> Result<(), Ke
         .output()?;
     if !remove.status.success() {
         return Err(KeysError::SopsDecryptFailed(
-            String::from_utf8_lossy(&remove.stderr).to_string()
+            String::from_utf8_lossy(&remove.stderr).to_string(),
         ));
     }
     Ok(())
@@ -513,8 +520,11 @@ mod tests {
         assert_ne!(ciphertext, plaintext, "ciphertext must not equal plaintext");
 
         let tmp = tempfile::NamedTempFile::new().expect("tmp identity file");
-        std::fs::write(tmp.path(), format!("# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"))
-            .expect("write identity file");
+        std::fs::write(
+            tmp.path(),
+            format!("# public key: {TEST_RECIPIENT}\n{TEST_IDENTITY}\n"),
+        )
+        .expect("write identity file");
         let decrypted = age_decrypt(tmp.path(), &ciphertext).expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
@@ -538,7 +548,10 @@ mod tests {
         )
         .expect("write identity file");
         let err = age_decrypt(tmp.path(), &ciphertext).unwrap_err();
-        assert!(matches!(err, KeysError::AgeParseFailed(_)), "expected a parse error, got {err:?}");
+        assert!(
+            matches!(err, KeysError::AgeParseFailed(_)),
+            "expected a parse error, got {err:?}"
+        );
     }
 
     #[test]
@@ -569,7 +582,11 @@ mod tests {
 
     /// Run `f` with `SOPS_AGE_KEY_FILE` and `HOME` set to the given values (`None`
     /// removes the variable), restoring both afterwards.
-    fn with_key_env<R>(key_file: Option<&std::path::Path>, home: Option<&std::path::Path>, f: impl FnOnce() -> R) -> R {
+    fn with_key_env<R>(
+        key_file: Option<&std::path::Path>,
+        home: Option<&std::path::Path>,
+        f: impl FnOnce() -> R,
+    ) -> R {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_key = std::env::var_os("SOPS_AGE_KEY_FILE");
         let prev_home = std::env::var_os("HOME");
@@ -603,13 +620,19 @@ mod tests {
         // 1. Nothing anywhere: no env override, and an empty HOME so neither the macOS
         //    nor the Linux/XDG default exists → None (not a panic, not a stale path).
         let found = with_key_env(None, Some(home.path()), age_key_path);
-        assert_eq!(found, None, "no env override and no key under HOME must resolve to None");
+        assert_eq!(
+            found, None,
+            "no env override and no key under HOME must resolve to None"
+        );
 
         // 2. $SOPS_AGE_KEY_FILE pointing at a file that does not exist is ignored, and
         //    still falls through to None rather than returning the bogus path.
         let missing = home.path().join("nope/keys.txt");
         let found = with_key_env(Some(&missing), Some(home.path()), age_key_path);
-        assert_eq!(found, None, "a non-existent $SOPS_AGE_KEY_FILE must not be returned");
+        assert_eq!(
+            found, None,
+            "a non-existent $SOPS_AGE_KEY_FILE must not be returned"
+        );
 
         // 3. $SOPS_AGE_KEY_FILE pointing at an existing file wins, even though the
         //    Linux/XDG default also exists — that is the documented precedence.
@@ -619,7 +642,11 @@ mod tests {
         let override_file = home.path().join("override.txt");
         std::fs::write(&override_file, TEST_IDENTITY).expect("write override key");
         let found = with_key_env(Some(&override_file), Some(home.path()), age_key_path);
-        assert_eq!(found.as_deref(), Some(override_file.as_path()), "$SOPS_AGE_KEY_FILE must win");
+        assert_eq!(
+            found.as_deref(),
+            Some(override_file.as_path()),
+            "$SOPS_AGE_KEY_FILE must win"
+        );
 
         // 4. With the override gone, the Linux/XDG default is found.
         let found = with_key_env(None, Some(home.path()), age_key_path);
@@ -640,8 +667,16 @@ mod tests {
         let report = doctor();
 
         let on_path = |bin: &str| Command::new(bin).arg("--version").output().is_ok();
-        assert_eq!(report.sops_ok, on_path("sops"), "sops_ok must match whether sops is on PATH");
-        assert_eq!(report.age_ok, on_path("age"), "age_ok must match whether age is on PATH");
+        assert_eq!(
+            report.sops_ok,
+            on_path("sops"),
+            "sops_ok must match whether sops is on PATH"
+        );
+        assert_eq!(
+            report.age_ok,
+            on_path("age"),
+            "age_ok must match whether age is on PATH"
+        );
         assert_eq!(
             report.ssh_to_age_present,
             on_path("ssh-to-age"),
@@ -654,7 +689,11 @@ mod tests {
 
         // A reported key path must exist (age_key_path only returns paths it stat'd).
         if let Some(p) = &report.age_key_path {
-            assert!(p.exists(), "doctor reported a key path that does not exist: {}", p.display());
+            assert!(
+                p.exists(),
+                "doctor reported a key path that does not exist: {}",
+                p.display()
+            );
         }
         assert_eq!(
             report.secrets_file_exists,
@@ -694,7 +733,9 @@ mod tests {
             Some(API_KEY)
         );
         assert_eq!(
-            secrets.get("identity_root_key").map(|s| s.expose().as_str()),
+            secrets
+                .get("identity_root_key")
+                .map(|s| s.expose().as_str()),
             Some(ROOT_KEY)
         );
 
@@ -710,16 +751,26 @@ mod tests {
         );
         for (key, value) in &redacted {
             assert_eq!(
-                value, baud_secret::REDACTED,
+                value,
+                baud_secret::REDACTED,
                 "show_redacted: key '{key}' must have value '[REDACTED]', got '{value}'"
             );
         }
 
         // Nothing derived from the secret values may appear anywhere in the output.
         let rendered = format!("{redacted:?}");
-        assert!(!rendered.contains(API_KEY), "redacted output leaked the API key: {rendered}");
-        assert!(!rendered.contains(ROOT_KEY), "redacted output leaked the root key: {rendered}");
-        assert!(!rendered.contains("dt_live"), "redacted output leaked an API-key prefix: {rendered}");
+        assert!(
+            !rendered.contains(API_KEY),
+            "redacted output leaked the API key: {rendered}"
+        );
+        assert!(
+            !rendered.contains(ROOT_KEY),
+            "redacted output leaked the root key: {rendered}"
+        );
+        assert!(
+            !rendered.contains("dt_live"),
+            "redacted output leaked an API-key prefix: {rendered}"
+        );
 
         // And the whole-file entry point still refuses a missing file rather than
         // returning anything at all (CWD-independent: an absolute temp path).
@@ -773,13 +824,17 @@ mod tests {
 
         // age-keygen writes "# public key: age1..." + private key
         let gen_old = std::process::Command::new("age-keygen")
-            .arg("-o").arg(&old_key_path)
-            .output().expect("age-keygen old");
+            .arg("-o")
+            .arg(&old_key_path)
+            .output()
+            .expect("age-keygen old");
         assert!(gen_old.status.success(), "age-keygen old failed");
 
         let gen_new = std::process::Command::new("age-keygen")
-            .arg("-o").arg(&new_key_path)
-            .output().expect("age-keygen new");
+            .arg("-o")
+            .arg(&new_key_path)
+            .output()
+            .expect("age-keygen new");
         assert!(gen_new.status.success(), "age-keygen new failed");
 
         // Extract public keys from the key files
@@ -807,8 +862,7 @@ mod tests {
 
         // Encrypt with sops using old_pub as recipient
         let enc = std::process::Command::new("sops")
-            .args(["--encrypt", "--age", &old_pub,
-                   "--in-place"])
+            .args(["--encrypt", "--age", &old_pub, "--in-place"])
             .arg(&secrets_path)
             .env("SOPS_AGE_KEY_FILE", &old_key_path)
             .output();
@@ -897,8 +951,14 @@ mod tests {
     #[test]
     fn generated_identity_file_is_usable_end_to_end() {
         let contents = generate_identity_file();
-        assert!(contents.starts_with("# public key: age1"), "contents: {contents:?}");
-        assert!(contents.contains("AGE-SECRET-KEY-1"), "contents: {contents:?}");
+        assert!(
+            contents.starts_with("# public key: age1"),
+            "contents: {contents:?}"
+        );
+        assert!(
+            contents.contains("AGE-SECRET-KEY-1"),
+            "contents: {contents:?}"
+        );
 
         let recipient = parse_public_key(&contents).expect("recipient must parse out");
 

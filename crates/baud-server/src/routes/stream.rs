@@ -9,18 +9,18 @@
 //   POST /runs/:id/stream/render  → replay with capture, materialise frames (Y4M or QOI-seq)
 //   GET  /runs/:id/stream/tail    → SSE-like frame stream (returns list for now)
 
+use crate::state::unix_now;
+use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, Sse},
     Json,
 };
+use baud_stream::encode_qoi;
+use baud_stream::Y4mWriter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{convert::Infallible, path::PathBuf, time::Duration};
-use crate::AppState;
-use crate::state::unix_now;
-use baud_stream::Y4mWriter;
-use baud_stream::encode_qoi;
 
 // ---------------------------------------------------------------------------
 // POST /runs/:id/frames — append a frame record
@@ -60,7 +60,7 @@ pub async fn append_frame(
 
     let result = sqlx::query(
         "INSERT INTO frame_records (run_id, node, step, width, height, format, hash, recorded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&run_id)
     .bind(body.node as i64)
@@ -102,27 +102,33 @@ pub async fn list_frames(
            AND (? IS NULL OR node = ?)
            AND (? IS NULL OR step >= ?)
            AND (? IS NULL OR step <= ?)
-         ORDER BY step ASC"
+         ORDER BY step ASC",
     )
     .bind(&run_id)
-    .bind(q.node).bind(q.node)
-    .bind(q.from_step).bind(q.from_step)
-    .bind(q.to_step).bind(q.to_step)
+    .bind(q.node)
+    .bind(q.node)
+    .bind(q.from_step)
+    .bind(q.from_step)
+    .bind(q.to_step)
+    .bind(q.to_step)
     .fetch_all(&state.db)
     .await;
 
     match rows {
         Ok(rows) => {
-            let frames: Vec<Value> = rows.into_iter().map(|(node, step, w, h, fmt, hash)| {
-                json!({
-                    "node": node,
-                    "step": step,
-                    "width": w,
-                    "height": h,
-                    "format": fmt,
-                    "hash": hex_encode(&hash),
+            let frames: Vec<Value> = rows
+                .into_iter()
+                .map(|(node, step, w, h, fmt, hash)| {
+                    json!({
+                        "node": node,
+                        "step": step,
+                        "width": w,
+                        "height": h,
+                        "format": fmt,
+                        "hash": hex_encode(&hash),
+                    })
                 })
-            }).collect();
+                .collect();
             Json(json!({ "run_id": run_id, "frames": frames }))
         }
         Err(e) => Json(json!({ "error": format!("db error: {e}") })),
@@ -157,7 +163,27 @@ pub async fn render(
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
 
     #[allow(clippy::type_complexity)]
-    let kvm_meta = sqlx::query_as::<_, (String, String, String, Option<String>, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<i64>, Option<i64>, bool, Option<String>, Option<i64>, Option<i64>)>(
+    let kvm_meta = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            bool,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        ),
+    >(
         "SELECT kernel_path, cmdline, tape_hex, initramfs_path, periodic_timer_period_rcb, \
          periodic_timer_vector, periodic_timer_max_ticks, store_run_id, snapshot_node_id, \
          virtio_rng_seed, virtio_rng_vector, virtio_rng_max_exits, acpi, \
@@ -258,9 +284,13 @@ pub async fn render(
             let mut writer = Y4mWriter::new(&mut output, w, h, 30, 1)
                 .map_err(|e| format!("Y4mWriter init failed: {e}"))?;
             for (_, _, rgba) in &frames {
-                writer.write_frame(rgba).map_err(|e| format!("Y4mWriter frame: {e}"))?;
+                writer
+                    .write_frame(rgba)
+                    .map_err(|e| format!("Y4mWriter frame: {e}"))?;
             }
-            writer.finish().map_err(|e| format!("Y4mWriter finish: {e}"))?;
+            writer
+                .finish()
+                .map_err(|e| format!("Y4mWriter finish: {e}"))?;
         } else {
             // QOI sequence: each frame is a standalone QOI image concatenated
             for (fw, fh, rgba) in &frames {
@@ -343,7 +373,11 @@ async fn render_frames_from_real_replay(
     } = params;
     let tape = match hex_decode(&tape_hex) {
         Some(t) => t,
-        None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
+        None => {
+            return Err(
+                json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" }),
+            )
+        }
     };
     let initramfs = match &initramfs_path {
         Some(path) => match crate::routes::run_kvm::read_initramfs(path) {
@@ -464,7 +498,9 @@ struct RealRestoreParams {
 }
 
 #[cfg(target_os = "linux")]
-async fn render_frames_from_real_restore(params: RealRestoreParams) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+async fn render_frames_from_real_restore(
+    params: RealRestoreParams,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
     let RealRestoreParams {
         store,
         store_run_id,
@@ -477,7 +513,11 @@ async fn render_frames_from_real_restore(params: RealRestoreParams) -> Result<Ve
     } = params;
     let tape_suffix = match hex_decode(&tape_suffix_hex) {
         Some(t) => t,
-        None => return Err(json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" })),
+        None => {
+            return Err(
+                json!({ "error": "stored tape_hex is not valid hex (corrupt kvm_run_meta row)" }),
+            )
+        }
     };
     // No `run_kvm::CancelGuard` here, deliberately — unlike the reboot path above, this one is
     // materially different in the one way that matters: every loop it can dispatch to is a
@@ -488,7 +528,8 @@ async fn render_frames_from_real_restore(params: RealRestoreParams) -> Result<Ve
     // `baud-multiverse` learn to poll the flag, this call site gets the same three lines the
     // reboot path above has.
     let records = tokio::task::spawn_blocking(move || -> Result<Vec<baud_proto::Msg>, String> {
-        let universe = crate::routes::run_kvm::reconstruct_universe(&store, &store_run_id, &snapshot_node_id)?;
+        let universe =
+            crate::routes::run_kvm::reconstruct_universe(&store, &store_run_id, &snapshot_node_id)?;
         let mut branch = baud_multiverse::linux::Multiverse::branch(
             &universe,
             tape_suffix,
@@ -571,7 +612,9 @@ struct RealRestoreParams {
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn render_frames_from_real_restore(_params: RealRestoreParams) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
+async fn render_frames_from_real_restore(
+    _params: RealRestoreParams,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, Value> {
     Err(json!({ "error": "real KVM restore-replay is only available on target_os = \"linux\"" }))
 }
 
@@ -592,34 +635,49 @@ pub async fn tail(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let hashes_only = q.hashes_only.unwrap_or(false);
     let node = q.node;
-    let stream = futures_util::stream::unfold((state, run_id, node, 0_i64), move |(state, run_id, node, last_step)| async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
-            "SELECT node, step, width, height, format, hash
+    let stream = futures_util::stream::unfold(
+        (state, run_id, node, 0_i64),
+        move |(state, run_id, node, last_step)| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
+                "SELECT node, step, width, height, format, hash
              FROM frame_records
              WHERE run_id = ? AND (? IS NULL OR node = ?) AND step > ?
-             ORDER BY step ASC"
-        )
-        .bind(&run_id)
-        .bind(node).bind(node).bind(last_step)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
-        let next_step = rows.iter().map(|(_, step, _, _, _, _)| *step).max().unwrap_or(last_step);
-        if rows.is_empty() {
-            let event = Event::default().event("heartbeat").data("{}");
-            Some((Ok(event), (state, run_id, node, last_step)))
-        } else {
-            let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash)| {
+             ORDER BY step ASC",
+            )
+            .bind(&run_id)
+            .bind(node)
+            .bind(node)
+            .bind(last_step)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+            let next_step = rows
+                .iter()
+                .map(|(_, step, _, _, _, _)| *step)
+                .max()
+                .unwrap_or(last_step);
+            if rows.is_empty() {
+                let event = Event::default().event("heartbeat").data("{}");
+                Some((Ok(event), (state, run_id, node, last_step)))
+            } else {
+                let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash)| {
                 if hashes_only {
                     json!({ "run_id": run_id, "node": n, "step": step, "hash": hex_encode(&hash) })
                 } else {
                     json!({ "run_id": run_id, "node": n, "step": step, "width": w, "height": h, "format": fmt, "hash": hex_encode(&hash) })
                 }
             }).collect();
-            Some((Ok(Event::default().event("frame").json_data(data).unwrap_or_else(|_| Event::default().data("{}"))), (state, run_id, node, next_step)))
-        }
-    });
+                Some((
+                    Ok(Event::default()
+                        .event("frame")
+                        .json_data(data)
+                        .unwrap_or_else(|_| Event::default().data("{}"))),
+                    (state, run_id, node, next_step),
+                ))
+            }
+        },
+    );
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
@@ -665,7 +723,10 @@ mod hex {
                 .map_err(|_| "hash must be a 32-byte hexadecimal or base64 value".to_string())?
         };
         if bytes.len() != 32 {
-            return Err(format!("frame hash must contain exactly 32 bytes, got {}", bytes.len()));
+            return Err(format!(
+                "frame hash must contain exactly 32 bytes, got {}",
+                bytes.len()
+            ));
         }
         Ok(bytes)
     }

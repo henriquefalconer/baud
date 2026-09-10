@@ -6,13 +6,13 @@
 // Wraps only the endpoints baud calls. Retries with exponential backoff.
 // Recorded-fixture contract tests (not run in CI without a real API key).
 
-use std::path::Path;
-use std::time::Duration;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use baud_secret::SecretString;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::backend::Backend;
@@ -131,8 +131,7 @@ impl DaytonaBackend {
             if !status.is_success() {
                 bail!("GET {path} returned {status}: {body}");
             }
-            serde_json::from_str(&body)
-                .with_context(|| format!("parse response: {body}"))
+            serde_json::from_str(&body).with_context(|| format!("parse response: {body}"))
         })
         .await
     }
@@ -157,8 +156,7 @@ impl DaytonaBackend {
             if !status.is_success() {
                 bail!("POST {path} returned {status}: {body_text}");
             }
-            serde_json::from_str(&body_text)
-                .with_context(|| format!("parse response: {body_text}"))
+            serde_json::from_str(&body_text).with_context(|| format!("parse response: {body_text}"))
         })
         .await
     }
@@ -197,7 +195,11 @@ impl DaytonaBackend {
                     // Only retry on network-level errors or 5xx
                     if attempt < self.max_retries && is_retryable(&msg) {
                         let delay = Duration::from_millis(200 * (1 << attempt));
-                        warn!("attempt {}/{}: {msg}; retrying in {delay:?}", attempt + 1, self.max_retries);
+                        warn!(
+                            "attempt {}/{}: {msg}; retrying in {delay:?}",
+                            attempt + 1,
+                            self.max_retries
+                        );
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                     } else {
@@ -238,7 +240,8 @@ impl DaytonaBackend {
     }
 
     fn parse_status(r: WorkspaceResponse) -> SandboxStatus {
-        let created_at = r.created_at
+        let created_at = r
+            .created_at
             .and_then(|s| chrono_or_fallback(&s))
             .unwrap_or(0);
         SandboxStatus {
@@ -270,7 +273,12 @@ fn chrono_or_fallback(s: &str) -> Option<u64> {
     let _ = s;
     // Without chrono, return current time as best-effort
     use std::time::{SystemTime, UNIX_EPOCH};
-    Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+    Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
 }
 
 #[async_trait]
@@ -278,7 +286,10 @@ impl Backend for DaytonaBackend {
     async fn create(&self, spec: &SandboxSpec) -> Result<String> {
         // Always enforce hard constraints via the canonical helper — caller cannot override.
         let enforced = Self::enforce_spec(spec);
-        let name = format!("baud-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap());
+        let name = format!(
+            "baud-{}",
+            uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
+        );
         let req = CreateWorkspaceRequest {
             name,
             image: enforced.image.clone(),
@@ -394,10 +405,22 @@ mod tests {
 
     #[test]
     fn parse_state_known_values() {
-        assert_eq!(DaytonaBackend::parse_state(Some("running")), TapeState::Running);
-        assert_eq!(DaytonaBackend::parse_state(Some("stopped")), TapeState::Stopped);
-        assert_eq!(DaytonaBackend::parse_state(Some("archived")), TapeState::Archived);
-        assert_eq!(DaytonaBackend::parse_state(Some("deleted")), TapeState::Deleted);
+        assert_eq!(
+            DaytonaBackend::parse_state(Some("running")),
+            TapeState::Running
+        );
+        assert_eq!(
+            DaytonaBackend::parse_state(Some("stopped")),
+            TapeState::Stopped
+        );
+        assert_eq!(
+            DaytonaBackend::parse_state(Some("archived")),
+            TapeState::Archived
+        );
+        assert_eq!(
+            DaytonaBackend::parse_state(Some("deleted")),
+            TapeState::Deleted
+        );
     }
 
     #[test]
@@ -420,10 +443,10 @@ mod tests {
         // constraints (spec §2) — callers cannot accidentally over-provision or skip
         // the auto-stop timer.
         let caller_spec = SandboxSpec {
-            vcpus: 8,           // caller wants 8 CPUs — must be clamped to 1
-            memory_mib: 8192,   // caller wants 8 GiB — must be clamped to 1024
-            disk_mib: 512,      // caller wants 512 MiB — must be raised to 1024
-            auto_stop_secs: 0,  // caller disables auto-stop — must be forced to 60
+            vcpus: 8,             // caller wants 8 CPUs — must be clamped to 1
+            memory_mib: 8192,     // caller wants 8 GiB — must be clamped to 1024
+            disk_mib: 512,        // caller wants 512 MiB — must be raised to 1024
+            auto_stop_secs: 0,    // caller disables auto-stop — must be forced to 60
             auto_archive_secs: 0, // caller disables auto-archive — must be forced to 300
             image: None,
             labels: Default::default(),
@@ -431,11 +454,20 @@ mod tests {
 
         let enforced = DaytonaBackend::enforce_spec(&caller_spec);
 
-        assert_eq!(enforced.vcpus, 1,             "vcpus must always be 1");
-        assert_eq!(enforced.memory_mib, 1024,     "memory_mib must always be 1024");
-        assert_eq!(enforced.disk_mib, 1024,       "disk_mib must be at least 1024 (raised from 512)");
-        assert_eq!(enforced.auto_stop_secs, 60,   "auto_stop_secs must always be 60");
-        assert_eq!(enforced.auto_archive_secs, 300, "auto_archive_secs must always be 300");
+        assert_eq!(enforced.vcpus, 1, "vcpus must always be 1");
+        assert_eq!(enforced.memory_mib, 1024, "memory_mib must always be 1024");
+        assert_eq!(
+            enforced.disk_mib, 1024,
+            "disk_mib must be at least 1024 (raised from 512)"
+        );
+        assert_eq!(
+            enforced.auto_stop_secs, 60,
+            "auto_stop_secs must always be 60"
+        );
+        assert_eq!(
+            enforced.auto_archive_secs, 300,
+            "auto_archive_secs must always be 300"
+        );
 
         // Disk larger than 1024 is allowed (some platforms have a higher minimum)
         let large_disk_spec = SandboxSpec {
@@ -443,7 +475,10 @@ mod tests {
             ..SandboxSpec::default()
         };
         let large = DaytonaBackend::enforce_spec(&large_disk_spec);
-        assert_eq!(large.disk_mib, 4096, "disk_mib larger than 1024 must be preserved");
+        assert_eq!(
+            large.disk_mib, 4096,
+            "disk_mib larger than 1024 must be preserved"
+        );
     }
 }
 
@@ -462,8 +497,8 @@ mod tests {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
-    use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{method, path, header};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_client(base_url: &str) -> DaytonaBackend {
         use baud_secret::SecretString;
@@ -493,7 +528,10 @@ mod contract_tests {
         let client = make_client(&server.uri());
         let spec = SandboxSpec::default();
         let id = client.create(&spec).await.expect("create must succeed");
-        assert_eq!(id, "ws-abc123", "create must return the workspace id from fixture");
+        assert_eq!(
+            id, "ws-abc123",
+            "create must return the workspace id from fixture"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -516,11 +554,21 @@ mod contract_tests {
             .await;
 
         let client = make_client(&server.uri());
-        let status = client.status("ws-abc123").await.expect("status must succeed");
-        assert_eq!(status.state, TapeState::Running, "state 'running' must map to TapeState::Running");
+        let status = client
+            .status("ws-abc123")
+            .await
+            .expect("status must succeed");
+        assert_eq!(
+            status.state,
+            TapeState::Running,
+            "state 'running' must map to TapeState::Running"
+        );
         assert_eq!(status.vcpus, 1);
         assert_eq!(status.memory_mib, 1024);
-        assert_eq!(status.preview_url.as_deref(), Some("https://sandbox.example.com"));
+        assert_eq!(
+            status.preview_url.as_deref(),
+            Some("https://sandbox.example.com")
+        );
     }
 
     // ------------------------------------------------------------------
@@ -532,22 +580,27 @@ mod contract_tests {
 
         Mock::given(method("GET"))
             .and(path("/workspaces/ws-xyz"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_raw(
-                    r#"{"id":"ws-xyz","state":"auto-archived","cpu":0,"memory":0,"disk":0}"#,
-                    "application/json",
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"id":"ws-xyz","state":"auto-archived","cpu":0,"memory":0,"disk":0}"#,
+                "application/json",
+            ))
             .expect(1)
             .mount(&server)
             .await;
 
         let client = make_client(&server.uri());
         let status = client.status("ws-xyz").await.expect("status must succeed");
-        assert_eq!(status.state, TapeState::Archived, "'auto-archived' must map to TapeState::Archived");
+        assert_eq!(
+            status.state,
+            TapeState::Archived,
+            "'auto-archived' must map to TapeState::Archived"
+        );
         // Fallback values when API returns 0
         assert_eq!(status.vcpus, 1, "vcpus=0 from API must fall back to 1");
-        assert_eq!(status.memory_mib, 1024, "memory=0 from API must fall back to 1024");
+        assert_eq!(
+            status.memory_mib, 1024,
+            "memory=0 from API must fall back to 1024"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -560,7 +613,10 @@ mod contract_tests {
         // First call returns 503
         Mock::given(method("GET"))
             .and(path("/workspaces/ws-retry"))
-            .respond_with(ResponseTemplate::new(503).set_body_raw(r#"{"error":"unavailable"}"#, "application/json"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_raw(r#"{"error":"unavailable"}"#, "application/json"),
+            )
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -568,19 +624,20 @@ mod contract_tests {
         // Second call (retry) returns 200
         Mock::given(method("GET"))
             .and(path("/workspaces/ws-retry"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_raw(
-                    r#"{"id":"ws-retry","state":"running","cpu":1,"memory":1024,"disk":1024}"#,
-                    "application/json",
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"id":"ws-retry","state":"running","cpu":1,"memory":1024,"disk":1024}"#,
+                "application/json",
+            ))
             .mount(&server)
             .await;
 
         let mut client = make_client(&server.uri());
         // Reduce retry delay to make the test fast
         client.max_retries = 2;
-        let status = client.status("ws-retry").await.expect("status must succeed after retry");
+        let status = client
+            .status("ws-retry")
+            .await
+            .expect("status must succeed after retry");
         assert_eq!(status.state, TapeState::Running);
     }
 
@@ -599,6 +656,9 @@ mod contract_tests {
             .await;
 
         let client = make_client(&server.uri());
-        client.delete("ws-gone").await.expect("delete of already-gone workspace must not error");
+        client
+            .delete("ws-gone")
+            .await
+            .expect("delete of already-gone workspace must not error");
     }
 }

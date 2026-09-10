@@ -3,10 +3,10 @@
 //
 // baud shrink — shrink a crashed/completed run to the minimal tape reproducing the violation
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::Parser;
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct ShrinkArgs {

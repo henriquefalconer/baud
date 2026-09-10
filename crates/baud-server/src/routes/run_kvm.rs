@@ -360,7 +360,9 @@ pub(crate) struct CancelGuard {
 
 impl CancelGuard {
     pub(crate) fn new() -> Self {
-        CancelGuard { flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+        CancelGuard {
+            flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     /// A handle on the flag to hand to the blocking side (`Multiverse::set_cancel_flag`).
@@ -418,14 +420,22 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     // Mapped, not read: see `open_virtio_blk_image`'s doc for why this route never puts a disk
     // image on the heap (nor a second copy of it) any more.
     let virtio_blk_image = match &body.virtio_blk {
-        Some(spec) => match open_virtio_blk_image(&spec.image_path, virtio_blk_image_size_limit()) {
-            Ok(base) => Some(base),
-            Err(e) => return Json(json!({ "error": e })),
-        },
+        Some(spec) => {
+            match open_virtio_blk_image(&spec.image_path, virtio_blk_image_size_limit()) {
+                Ok(base) => Some(base),
+                Err(e) => return Json(json!({ "error": e })),
+            }
+        }
         None => None,
     };
-    let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
-    let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
+    let periodic_timer = body
+        .periodic_timer
+        .as_ref()
+        .map(|s| (s.period_rcb, s.vector, s.max_ticks));
+    let virtio_rng = body
+        .virtio_rng
+        .as_ref()
+        .map(|s| (s.seed, s.vector, s.max_exits));
     let virtio_blk_meta = body.virtio_blk.as_ref().map(|s| (s.vector, s.max_exits));
     let acpi = body.acpi;
     if body.halt_console_pattern_hex.is_some() && body.run_id.is_some() {
@@ -434,13 +444,21 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
         }));
     }
     if body.halt_console_pattern_hex.is_some() && periodic_timer.is_none() {
-        return Json(json!({ "error": "halt_console_pattern_hex requires periodic_timer to also be set" }));
+        return Json(
+            json!({ "error": "halt_console_pattern_hex requires periodic_timer to also be set" }),
+        );
     }
     let halt_console_pattern = match &body.halt_console_pattern_hex {
         Some(hex) => match hex_decode(hex) {
             Some(bytes) if !bytes.is_empty() => Some((bytes, body.halt_max_exits_per_burst)),
-            Some(_) => return Json(json!({ "error": "halt_console_pattern_hex must not be empty" })),
-            None => return Json(json!({ "error": "halt_console_pattern_hex must be a valid hex string" })),
+            Some(_) => {
+                return Json(json!({ "error": "halt_console_pattern_hex must not be empty" }))
+            }
+            None => {
+                return Json(
+                    json!({ "error": "halt_console_pattern_hex must be a valid hex string" }),
+                )
+            }
         },
         None => None,
     };
@@ -472,7 +490,9 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
             virtio_rng,
             virtio_blk,
             acpi,
-            halt_console_pattern.as_ref().map(|(p, m)| (p.as_slice(), *m)),
+            halt_console_pattern
+                .as_ref()
+                .map(|(p, m)| (p.as_slice(), *m)),
             periodic_tick_watchdog_budget_secs,
             Some(cancel_flag),
         )
@@ -499,7 +519,10 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                     initramfs_path: body.initramfs_path.as_deref(),
                     periodic_timer,
                     virtio_rng,
-                    virtio_blk: body.virtio_blk.as_ref().map(|s| (s.image_path.as_str(), s.vector, s.max_exits)),
+                    virtio_blk: body
+                        .virtio_blk
+                        .as_ref()
+                        .map(|s| (s.image_path.as_str(), s.vector, s.max_exits)),
                     acpi,
                     store_run_id: None,
                     snapshot_node_id: None,
@@ -687,8 +710,20 @@ type BranchRecords = Vec<Vec<baud_proto::Msg>>;
 
 #[cfg(test)]
 fn boot_and_run(kernel_path: &Path, cmdline: &str, tape: Vec<u8>) -> Result<BranchOutcome, String> {
-    boot_run_and_drain(kernel_path, cmdline, tape, None, None, None, None, false, None, None, None)
-        .map(|(outcome, _records)| outcome)
+    boot_run_and_drain(
+        kernel_path,
+        cmdline,
+        tape,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .map(|(outcome, _records)| outcome)
 }
 
 /// Boot `kernel_path` (plus an optional `initramfs`/`periodic_timer`/`virtio_rng`/`virtio_blk`/
@@ -727,7 +762,9 @@ pub(crate) fn boot_run_and_drain(
 ) -> Result<(BranchOutcome, Vec<baud_proto::Msg>), String> {
     // `virtio_blk`'s base image is moved into the device below, so keep the two scalars every
     // later dispatch arm needs (`(vector, max_exits)`) behind before that happens.
-    let virtio_blk_meta = virtio_blk.as_ref().map(|(_, vector, max_exits)| (*vector, *max_exits));
+    let virtio_blk_meta = virtio_blk
+        .as_ref()
+        .map(|(_, vector, max_exits)| (*vector, *max_exits));
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
     let mut mv = baud_multiverse::linux::Multiverse::boot_with_rdseed_sites(
         kernel_path,
@@ -747,7 +784,8 @@ pub(crate) fn boot_run_and_drain(
         mv.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(secs));
     }
     if acpi {
-        mv.write_acpi_tables().map_err(|e| format!("write_acpi_tables error: {e}"))?;
+        mv.write_acpi_tables()
+            .map_err(|e| format!("write_acpi_tables error: {e}"))?;
     }
     if let Some((seed, _, _)) = virtio_rng {
         mv.enable_virtio_rng();
@@ -801,31 +839,33 @@ pub(crate) fn boot_run_and_drain(
                 .map_err(run_loop_error)?;
             halt
         }
-        (None, None) => match (virtio_rng, virtio_blk_meta) {
-            (Some((_, rng_vector, max_exits)), None) => mv
-                .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
-                .map_err(run_loop_error)?,
-            (None, Some((blk_vector, max_exits))) => mv
-                .run_to_first_halt_with_virtio_pci_blk(blk_vector, max_exits)
-                .map_err(run_loop_error)?,
-            // No run loop drives two independent per-host-exit device polls at once without the
-            // periodic-timer engine's coarser per-tick polling to ride on (see
-            // RunKvmBody::virtio_blk's doc) — fail loud rather than silently starving one device.
-            (Some(_), Some(_)) => {
-                return Err(
+        (None, None) => {
+            match (virtio_rng, virtio_blk_meta) {
+                (Some((_, rng_vector, max_exits)), None) => mv
+                    .run_to_first_halt_with_virtio_rng(rng_vector, max_exits)
+                    .map_err(run_loop_error)?,
+                (None, Some((blk_vector, max_exits))) => mv
+                    .run_to_first_halt_with_virtio_pci_blk(blk_vector, max_exits)
+                    .map_err(run_loop_error)?,
+                // No run loop drives two independent per-host-exit device polls at once without the
+                // periodic-timer engine's coarser per-tick polling to ride on (see
+                // RunKvmBody::virtio_blk's doc) — fail loud rather than silently starving one device.
+                (Some(_), Some(_)) => return Err(
                     "virtio_rng + virtio_blk without periodic_timer has no combined run loop yet; \
                      set periodic_timer too (every real Linux guest needs it for calibrate_delay \
                      anyway)"
                         .to_string(),
-                )
+                ),
+                // `run_to_first_halt` (unlike every arm above) has no deterministic
+                // `max_exits`/`max_ticks` bound of its own, so its error can also be
+                // `RunLoopError::WatchdogKilled` (todo.md §14.1 "Still open" item 1) rather than a
+                // genuine determinism hole — reflect that in the message instead of always saying
+                // "determinism hole" for a failure that may not be one.
+                (None, None) => mv
+                    .run_to_first_halt()
+                    .map_err(|e| format!("run failed: {e}"))?,
             }
-            // `run_to_first_halt` (unlike every arm above) has no deterministic
-            // `max_exits`/`max_ticks` bound of its own, so its error can also be
-            // `RunLoopError::WatchdogKilled` (todo.md §14.1 "Still open" item 1) rather than a
-            // genuine determinism hole — reflect that in the message instead of always saying
-            // "determinism hole" for a failure that may not be one.
-            (None, None) => mv.run_to_first_halt().map_err(|e| format!("run failed: {e}"))?,
-        },
+        }
     };
     let records = mv.drain_tape_records();
     Ok(((halt.console_output, halt.ram_hash, None, None), records))
@@ -1083,13 +1123,18 @@ async fn persist_branch_frames(
 /// `thousand_branches_are_independent_and_deterministic` proves at the crate level, exposed here as
 /// the M-series' first real snapshot-tree-exploration server route (todo.md §14's "Natural next
 /// steps" for `/run/kvm`).
-pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranchBody>) -> Json<Value> {
+pub async fn branch(
+    State(state): State<AppState>,
+    Json(body): Json<RunKvmBranchBody>,
+) -> Json<Value> {
     if body.generate.is_some() && !body.branch_tapes_hex.is_empty() {
         return Json(json!({ "error": "specify either branch_tapes_hex or generate, not both" }));
     }
     let kernel_path = PathBuf::from(&body.kernel_path);
     let cmdline = body.cmdline.clone();
-    let persist = body.persist_run_id.map(|run_id| (state.snapshot_store.clone(), run_id));
+    let persist = body
+        .persist_run_id
+        .map(|run_id| (state.snapshot_store.clone(), run_id));
     let initramfs = match &body.initramfs_path {
         Some(path) => match read_initramfs(path) {
             Ok(bytes) => Some(bytes),
@@ -1097,8 +1142,14 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
         },
         None => None,
     };
-    let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
-    let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
+    let periodic_timer = body
+        .periodic_timer
+        .as_ref()
+        .map(|s| (s.period_rcb, s.vector, s.max_ticks));
+    let virtio_rng = body
+        .virtio_rng
+        .as_ref()
+        .map(|s| (s.seed, s.vector, s.max_exits));
     let acpi = body.acpi;
 
     if let Some(spec) = body.generate {
@@ -1115,7 +1166,9 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
         }
         let frame_run_id_prefix = spec.frame_run_id_prefix.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let persist_ref = persist.as_ref().map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
+            let persist_ref = persist
+                .as_ref()
+                .map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
             boot_snapshot_and_generate(
                 &kernel_path,
                 &cmdline,
@@ -1191,7 +1244,9 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
     // empty `tape_suffixes` correctly (`run_branches` returns `Ok(vec![])` for zero suffixes) —
     // only this HTTP-level guard needed relaxing.
     if body.branch_tapes_hex.is_empty() && persist.is_none() {
-        return Json(json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }));
+        return Json(
+            json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }),
+        );
     }
     if body.branch_tapes_hex.len() > MAX_BRANCHES_PER_REQUEST {
         return Json(json!({
@@ -1214,12 +1269,18 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
     for hex in &body.branch_tapes_hex {
         match hex_decode(hex) {
             Some(bytes) => tape_suffixes.push(bytes),
-            None => return Json(json!({ "error": "branch_tapes_hex must contain only valid hex strings" })),
+            None => {
+                return Json(
+                    json!({ "error": "branch_tapes_hex must contain only valid hex strings" }),
+                )
+            }
         }
     }
 
     let result = tokio::task::spawn_blocking(move || {
-        let persist_ref = persist.as_ref().map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
+        let persist_ref = persist
+            .as_ref()
+            .map(|(store, run_id)| (store.as_ref(), run_id.as_str()));
         boot_snapshot_and_branch(
             &kernel_path,
             &cmdline,
@@ -1253,8 +1314,9 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
                         store_run_id: None,
                         snapshot_node_id: None,
                     };
-                    frame_persistence
-                        .push(persist_branch_frames(&state, run_id, &params, &branch_records).await);
+                    frame_persistence.push(
+                        persist_branch_frames(&state, run_id, &params, &branch_records).await,
+                    );
                 }
                 branches.push(branch_outcome_to_json(outcome));
             }
@@ -1274,8 +1336,11 @@ pub async fn branch(State(state): State<AppState>, Json(body): Json<RunKvmBranch
 /// `BranchOutcome` → JSON, shared by `/run/kvm/branch` and `/run/kvm/resume`'s fixed-tape
 /// (`branch_tapes_hex`) response bodies. Mirrors `generated_outcome_to_json`'s `mark_branch_step`
 /// handling for the generate-mode response.
-fn branch_outcome_to_json((console_output, ram_hash, mark_branch_step, node_id): BranchOutcome) -> Value {
-    let mut value = json!({ "console_output_hex": hex_encode(&console_output), "ram_hash": ram_hash });
+fn branch_outcome_to_json(
+    (console_output, ram_hash, mark_branch_step, node_id): BranchOutcome,
+) -> Value {
+    let mut value =
+        json!({ "console_output_hex": hex_encode(&console_output), "ram_hash": ram_hash });
     if let Some(step) = mark_branch_step {
         value["mark_branch_step"] = json!(step);
     }
@@ -1311,10 +1376,12 @@ fn boot_and_snapshot(
     )
     .map_err(|e| format!("boot error: {e}"))?;
     if acpi {
-        boot.write_acpi_tables().map_err(|e| format!("write_acpi_tables error: {e}"))?;
+        boot.write_acpi_tables()
+            .map_err(|e| format!("write_acpi_tables error: {e}"))?;
     }
     let mut page_store = baud_snapshot::PageStore::new();
-    boot.snapshot(&mut page_store).map_err(|e| format!("snapshot error: {e}"))
+    boot.snapshot(&mut page_store)
+        .map_err(|e| format!("snapshot error: {e}"))
 }
 
 /// Fork one independent `Multiverse::branch` continuation per tape suffix and run each until it
@@ -1363,8 +1430,9 @@ fn run_branches(
     let mut offset: u64 = 0;
     for (i, suffix) in tape_suffixes.into_iter().enumerate() {
         let suffix_len = suffix.len() as u64;
-        let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix, WORK_CLOCK_K, None)
-            .map_err(|e| format!("branch {i} error: {e}"))?;
+        let mut branch =
+            baud_multiverse::linux::Multiverse::branch(universe, suffix, WORK_CLOCK_K, None)
+                .map_err(|e| format!("branch {i} error: {e}"))?;
         if let Some((seed, _, _)) = virtio_rng {
             branch.enable_virtio_rng();
             branch.seed_virtio_rng_entropy(seed);
@@ -1383,7 +1451,9 @@ fn run_branches(
             }
             (Some((period_rcb, vector, max_ticks)), None) => {
                 let (_ticks, outcome, records) = branch
-                    .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)
+                    .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(
+                        period_rcb, vector, max_ticks,
+                    )
                     .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
                 (outcome, records)
             }
@@ -1396,12 +1466,18 @@ fn run_branches(
         };
         records.extend(branch.drain_tape_records());
         let (console_output, mark_branch_step) = match &run_outcome {
-            baud_multiverse::linux::RunUntilBranchObservation::Halted(halt) => (halt.console_output.clone(), None),
+            baud_multiverse::linux::RunUntilBranchObservation::Halted(halt) => {
+                (halt.console_output.clone(), None)
+            }
             baud_multiverse::linux::RunUntilBranchObservation::MarkBranch { step } => {
                 (branch.console_output().to_vec(), Some(*step))
             }
         };
-        let ram_hash = if compute_ram_hash { branch.ram_hash() } else { String::new() };
+        let ram_hash = if compute_ram_hash {
+            branch.ram_hash()
+        } else {
+            String::new()
+        };
         let tape_range = (offset, offset + suffix_len);
         offset = tape_range.1;
         let node_id = if mark_branch_step.is_some() {
@@ -1411,8 +1487,14 @@ fn run_branches(
                     let branch_universe = branch
                         .snapshot(&mut page_store)
                         .map_err(|e| format!("branch {i} snapshot error: {e}"))?;
-                    let nid =
-                        persist_universe_as(store, run_id, &branch_universe, parent, tape_range.1, tape_range)?;
+                    let nid = persist_universe_as(
+                        store,
+                        run_id,
+                        &branch_universe,
+                        parent,
+                        tape_range.1,
+                        tape_range,
+                    )?;
                     Some(nid.to_hex())
                 }
                 None => None,
@@ -1462,8 +1544,14 @@ fn boot_snapshot_and_branch(
     };
     let parent = persisted_root_parent(&persisted)?;
     let branch_persist = persist.map(|(store, run_id)| (store, run_id, parent));
-    let (outcomes, records) =
-        run_branches(&universe, tape_suffixes, branch_persist, periodic_timer, virtio_rng, compute_ram_hash)?;
+    let (outcomes, records) = run_branches(
+        &universe,
+        tape_suffixes,
+        branch_persist,
+        periodic_timer,
+        virtio_rng,
+        compute_ram_hash,
+    )?;
     Ok((outcomes, records, persisted))
 }
 
@@ -1536,7 +1624,14 @@ fn boot_snapshot_and_generate(
     virtio_rng: Option<(u64, u8, u32)>,
     compute_ram_hash: bool,
     acpi: bool,
-) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary, Option<PersistedRef>), String> {
+) -> Result<
+    (
+        Vec<GeneratedBranchOutcome>,
+        DriverRunSummary,
+        Option<PersistedRef>,
+    ),
+    String,
+> {
     let universe = boot_and_snapshot(kernel_path, cmdline, initramfs, acpi)?;
     let persisted = match persist {
         Some((store, run_id)) => Some(persist_universe(store, run_id, &universe)?),
@@ -1607,13 +1702,19 @@ fn run_driver_generated_branches_with_persist(
     virtio_rng: Option<(u64, u8, u32)>,
     compute_ram_hash: bool,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
-    let mut driver = baud_driver::Driver::new(spec.seed, spec.strategy, baud_driver::TacticsSpec::default());
+    let mut driver = baud_driver::Driver::new(
+        spec.seed,
+        spec.strategy,
+        baud_driver::TacticsSpec::default(),
+    );
     if let Some((store, run_id)) = persist {
         let run = baud_snapshot_store::RunId::new(run_id.to_owned());
         if store.has_driver_state(&run) {
-            let bytes = store.get_driver_state(&run).map_err(|e| format!("get_driver_state error: {e}"))?;
-            let state: baud_driver::DriverState =
-                serde_json::from_slice(&bytes).map_err(|e| format!("decode driver state error: {e}"))?;
+            let bytes = store
+                .get_driver_state(&run)
+                .map_err(|e| format!("get_driver_state error: {e}"))?;
+            let state: baud_driver::DriverState = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("decode driver state error: {e}"))?;
             driver.apply_state(state);
         }
     }
@@ -1625,8 +1726,13 @@ fn run_driver_generated_branches_with_persist(
         for _ in 0..spec.tape_len_bytes {
             suffix.push(driver.draw_bits(8)[0]);
         }
-        let mut branch = baud_multiverse::linux::Multiverse::branch(universe, suffix.clone(), WORK_CLOCK_K, None)
-            .map_err(|e| format!("branch {i} error: {e}"))?;
+        let mut branch = baud_multiverse::linux::Multiverse::branch(
+            universe,
+            suffix.clone(),
+            WORK_CLOCK_K,
+            None,
+        )
+        .map_err(|e| format!("branch {i} error: {e}"))?;
         if let Some((seed, _, _)) = virtio_rng {
             branch.enable_virtio_rng();
             branch.seed_virtio_rng_entropy(seed);
@@ -1645,7 +1751,9 @@ fn run_driver_generated_branches_with_persist(
             }
             (Some((period_rcb, vector, max_ticks)), None) => {
                 let (_ticks, outcome, records) = branch
-                    .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)
+                    .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(
+                        period_rcb, vector, max_ticks,
+                    )
                     .map_err(|e| format!("branch {i} determinism hole: {e}"))?;
                 (outcome, records)
             }
@@ -1658,12 +1766,18 @@ fn run_driver_generated_branches_with_persist(
         };
         records.extend(branch.drain_tape_records());
         let (console_output, mark_branch_step) = match &run_outcome {
-            baud_multiverse::linux::RunUntilBranchObservation::Halted(halt) => (halt.console_output.clone(), None),
+            baud_multiverse::linux::RunUntilBranchObservation::Halted(halt) => {
+                (halt.console_output.clone(), None)
+            }
             baud_multiverse::linux::RunUntilBranchObservation::MarkBranch { step } => {
                 (branch.console_output().to_vec(), Some(*step))
             }
         };
-        let ram_hash = if compute_ram_hash { branch.ram_hash() } else { String::new() };
+        let ram_hash = if compute_ram_hash {
+            branch.ram_hash()
+        } else {
+            String::new()
+        };
         let (observations, crashed) = observations_from_records(&records, console_output.len());
         driver.end_run(&observations);
         let branch_goal = driver.is_goal_reached(&observations);
@@ -1691,7 +1805,14 @@ fn run_driver_generated_branches_with_persist(
                         i as u64 * spec.tape_len_bytes as u64,
                         (i as u64 + 1) * spec.tape_len_bytes as u64,
                     );
-                    let nid = persist_universe_as(store, run_id, &branch_universe, parent, tape_range.1, tape_range)?;
+                    let nid = persist_universe_as(
+                        store,
+                        run_id,
+                        &branch_universe,
+                        parent,
+                        tape_range.1,
+                        tape_range,
+                    )?;
                     Some(nid.to_hex())
                 }
                 None => None,
@@ -1721,7 +1842,9 @@ fn run_driver_generated_branches_with_persist(
         let run = baud_snapshot_store::RunId::new(run_id.to_owned());
         let encoded = serde_json::to_vec(&driver.export_state())
             .map_err(|e| format!("encode driver state error: {e}"))?;
-        store.put_driver_state(&run, &encoded).map_err(|e| format!("put_driver_state error: {e}"))?;
+        store
+            .put_driver_state(&run, &encoded)
+            .map_err(|e| format!("put_driver_state error: {e}"))?;
     }
     Ok((outcomes, summary))
 }
@@ -1734,7 +1857,10 @@ fn run_driver_generated_branches_with_persist(
 /// this port range"), so a `strategy.maximize` pointed at `console_len` still drives real,
 /// differentiated scoring today; any `Msg::Observe` records a guest does emit are additive on top
 /// of it, so this keeps working unchanged once a probe-emitting guest exists.
-fn observations_from_records(records: &[baud_proto::Msg], console_len: usize) -> (Vec<(String, f64)>, bool) {
+fn observations_from_records(
+    records: &[baud_proto::Msg],
+    console_len: usize,
+) -> (Vec<(String, f64)>, bool) {
     let mut observations = vec![("console_len".to_owned(), console_len as f64)];
     let mut crashed = false;
     for record in records {
@@ -1823,7 +1949,9 @@ fn persist_universe_as(
         if !seen.insert(hash) {
             continue;
         }
-        store.put_page(&run, bytes).map_err(|e| format!("persist page error: {e}"))?;
+        store
+            .put_page(&run, bytes)
+            .map_err(|e| format!("persist page error: {e}"))?;
     }
     let encoded = baud_snapshot::encode_universe_body(&universe.to_body())
         .map_err(|e| format!("encode universe body error: {e}"))?;
@@ -1889,15 +2017,24 @@ pub struct RunKvmResumeBody {
 /// ("accept an already-captured Universe ... as an alternative to kernel_path so a run can resume
 /// instead of always cold-booting") and the twice-flagged follow-up ("`/run/kvm/resume` still only
 /// accepts fixed `branch_tapes_hex`") symmetrically with `/run/kvm/branch`'s own generate mode.
-pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResumeBody>) -> Json<Value> {
+pub async fn resume(
+    State(state): State<AppState>,
+    Json(body): Json<RunKvmResumeBody>,
+) -> Json<Value> {
     if body.generate.is_some() && !body.branch_tapes_hex.is_empty() {
         return Json(json!({ "error": "specify either branch_tapes_hex or generate, not both" }));
     }
     let store = state.snapshot_store.clone();
     let run_id = body.run_id;
     let node_id_hex = body.node_id;
-    let periodic_timer = body.periodic_timer.as_ref().map(|s| (s.period_rcb, s.vector, s.max_ticks));
-    let virtio_rng = body.virtio_rng.as_ref().map(|s| (s.seed, s.vector, s.max_exits));
+    let periodic_timer = body
+        .periodic_timer
+        .as_ref()
+        .map(|s| (s.period_rcb, s.vector, s.max_ticks));
+    let virtio_rng = body
+        .virtio_rng
+        .as_ref()
+        .map(|s| (s.seed, s.vector, s.max_exits));
 
     if let Some(spec) = body.generate {
         if spec.count == 0 {
@@ -1962,7 +2099,8 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                             snapshot_node_id: Some(&node_id_hex),
                         };
                         frame_persistence.push(
-                            persist_branch_frames(&state, &frame_run_id, &params, &outcome.records).await,
+                            persist_branch_frames(&state, &frame_run_id, &params, &outcome.records)
+                                .await,
                         );
                     }
                     branches.push(generated_outcome_to_json(outcome));
@@ -1987,7 +2125,9 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
     }
 
     if body.branch_tapes_hex.is_empty() {
-        return Json(json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }));
+        return Json(
+            json!({ "error": "branch_tapes_hex must contain at least one tape, or set generate" }),
+        );
     }
     if body.branch_tapes_hex.len() > MAX_BRANCHES_PER_REQUEST {
         return Json(json!({
@@ -2010,7 +2150,11 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
     for hex in &body.branch_tapes_hex {
         match hex_decode(hex) {
             Some(bytes) => tape_suffixes.push(bytes),
-            None => return Json(json!({ "error": "branch_tapes_hex must contain only valid hex strings" })),
+            None => {
+                return Json(
+                    json!({ "error": "branch_tapes_hex must contain only valid hex strings" }),
+                )
+            }
         }
     }
 
@@ -2047,8 +2191,9 @@ pub async fn resume(State(state): State<AppState>, Json(body): Json<RunKvmResume
                         store_run_id: Some(&run_id),
                         snapshot_node_id: Some(&node_id_hex),
                     };
-                    frame_persistence
-                        .push(persist_branch_frames(&state, frame_run_id, &params, &branch_records).await);
+                    frame_persistence.push(
+                        persist_branch_frames(&state, frame_run_id, &params, &branch_records).await,
+                    );
                 }
                 branches.push(branch_outcome_to_json(outcome));
             }
@@ -2081,11 +2226,13 @@ pub(crate) fn reconstruct_universe(
     node_id_hex: &str,
 ) -> Result<baud_snapshot::Universe, String> {
     let run = baud_snapshot_store::RunId::new(run_id.to_owned());
-    let node_id =
-        baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
-    let body_bytes = store.get_universe(&run, node_id).map_err(|e| format!("get_universe error: {e}"))?;
-    let body =
-        baud_snapshot::decode_universe_body(&body_bytes).map_err(|e| format!("decode error: {e}"))?;
+    let node_id = baud_snapshot_store::NodeId::from_hex(node_id_hex)
+        .map_err(|e| format!("bad node_id: {e}"))?;
+    let body_bytes = store
+        .get_universe(&run, node_id)
+        .map_err(|e| format!("get_universe error: {e}"))?;
+    let body = baud_snapshot::decode_universe_body(&body_bytes)
+        .map_err(|e| format!("decode error: {e}"))?;
 
     let mut page_cache: std::collections::HashMap<baud_snapshot::PageHash, Vec<u8>> =
         std::collections::HashMap::new();
@@ -2118,7 +2265,8 @@ fn resume_and_branch(
     virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<(Vec<BranchOutcome>, BranchRecords), String> {
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
-    let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
+    let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex)
+        .map_err(|e| format!("bad node_id: {e}"))?;
     run_branches(
         &universe,
         tape_suffixes,
@@ -2146,7 +2294,8 @@ fn resume_and_generate(
     virtio_rng: Option<(u64, u8, u32)>,
 ) -> Result<(Vec<GeneratedBranchOutcome>, DriverRunSummary), String> {
     let universe = reconstruct_universe(store, run_id, node_id_hex)?;
-    let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex).map_err(|e| format!("bad node_id: {e}"))?;
+    let parent = baud_snapshot_store::NodeId::from_hex(node_id_hex)
+        .map_err(|e| format!("bad node_id: {e}"))?;
     run_driver_generated_branches_with_persist(
         &universe,
         spec,
@@ -2211,7 +2360,10 @@ mod tests {
     fn omitted_cmdline_defaults_to_the_deterministic_cmdline() {
         let body: RunKvmBody =
             serde_json::from_value(json!({ "kernel_path": "/does/not/matter" })).unwrap();
-        assert_eq!(body.cmdline, baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE);
+        assert_eq!(
+            body.cmdline,
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE
+        );
 
         let branch_body: RunKvmBranchBody = serde_json::from_value(json!({
             "kernel_path": "/does/not/matter",
@@ -2236,29 +2388,65 @@ mod tests {
         let kernel = framebuffer_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let first =
-            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false, None)
-                .expect("first boot failed");
-        let second =
-            boot_and_drain_frames(&kernel, cmdline, vec![], None, None, None, None, false, None)
-                .expect("second boot failed");
+        let first = boot_and_drain_frames(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("first boot failed");
+        let second = boot_and_drain_frames(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("second boot failed");
 
-        assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
-        assert_eq!(second.len(), 1, "framebuffer-guest emits exactly one Frame record: {second:?}");
+        assert_eq!(
+            first.len(),
+            1,
+            "framebuffer-guest emits exactly one Frame record: {first:?}"
+        );
+        assert_eq!(
+            second.len(),
+            1,
+            "framebuffer-guest emits exactly one Frame record: {second:?}"
+        );
 
         let frame = &first[0];
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 2);
         assert_eq!(frame.format, baud_proto::PixFmt::Indexed8);
         assert_eq!(frame.bytes.as_deref(), Some([10u8, 20, 30, 40].as_slice()));
-        assert_eq!(first[0].hash, second[0].hash, "frame hash must be identical across two boots");
-        assert_eq!(first[0].bytes, second[0].bytes, "raw pixel bytes must be identical across two boots");
+        assert_eq!(
+            first[0].hash, second[0].hash,
+            "frame hash must be identical across two boots"
+        );
+        assert_eq!(
+            first[0].bytes, second[0].bytes,
+            "raw pixel bytes must be identical across two boots"
+        );
 
         // What `render_frames_from_real_replay` actually feeds the Y4M/QOI encoder: real,
         // guest-produced pixels converted with baud-stream's own format conversion — not a
         // synthetic hash-seeded gradient.
         let rgba = baud_stream::to_rgba(frame.bytes.as_ref().unwrap(), &frame.format);
-        assert_eq!(rgba.len(), 2 * 2 * 4, "2x2 Indexed8 frame must expand to 16 RGBA bytes");
+        assert_eq!(
+            rgba.len(),
+            2 * 2 * 4,
+            "2x2 Indexed8 frame must expand to 16 RGBA bytes"
+        );
     }
 
     /// Closes the "`stream::render`'s real-replay path does not read the new `virtio_rng_*`
@@ -2277,12 +2465,36 @@ mod tests {
         let cmdline = "console=ttyS0";
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
-        let first = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
-            .expect("first boot failed");
-        let second = boot_and_drain_frames(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None)
-            .expect("second boot failed");
+        let first = boot_and_drain_frames(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            virtio_rng,
+            None,
+            false,
+            None,
+        )
+        .expect("first boot failed");
+        let second = boot_and_drain_frames(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            virtio_rng,
+            None,
+            false,
+            None,
+        )
+        .expect("second boot failed");
 
-        assert_eq!(first.len(), 1, "framebuffer-guest emits exactly one Frame record: {first:?}");
+        assert_eq!(
+            first.len(),
+            1,
+            "framebuffer-guest emits exactly one Frame record: {first:?}"
+        );
         assert_eq!(
             first[0].bytes, second[0].bytes,
             "enabling virtio_rng must not perturb framebuffer-guest's own emitted pixels"
@@ -2313,20 +2525,44 @@ mod tests {
         let cmdline = "console=ttyS0";
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
-        let (outcomes, _records, _persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![]], None, None, None, virtio_rng, false, false)
-                .expect("boot_snapshot_and_branch with virtio_rng failed");
+        let (outcomes, _records, _persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![vec![]],
+            None,
+            None,
+            None,
+            virtio_rng,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_branch with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 1);
         let (branch_console_output, _ram_hash, mark_branch_step, _node_id) = &outcomes[0];
-        assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
+        assert!(
+            mark_branch_step.is_none(),
+            "virtio-rng-guest never calls MARK_BRANCH"
+        );
 
-        let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None, None)
-                .expect("direct boot_run_and_drain with virtio_rng failed");
+        let ((direct_console_output, ..), _direct_records) = boot_run_and_drain(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            virtio_rng,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(
-            branch_console_output.first(), Some(&b'R'),
+            branch_console_output.first(),
+            Some(&b'R'),
             "the guest's own ISR marker must still be the first byte observed through a branch"
         );
         assert_eq!(
@@ -2358,19 +2594,35 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        let (outcomes, _summary, _persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, None, None, None, virtio_rng, false, false)
-                .expect("boot_snapshot_and_generate with virtio_rng failed");
+        let (outcomes, _summary, _persisted) = boot_snapshot_and_generate(
+            &kernel, cmdline, spec, None, None, None, virtio_rng, false, false,
+        )
+        .expect("boot_snapshot_and_generate with virtio_rng failed");
 
-        let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None, None)
-                .expect("direct boot_run_and_drain with virtio_rng failed");
+        let ((direct_console_output, ..), _direct_records) = boot_run_and_drain(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            virtio_rng,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(outcomes.len(), 3);
         for outcome in &outcomes {
-            assert!(outcome.mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
+            assert!(
+                outcome.mark_branch_step.is_none(),
+                "virtio-rng-guest never calls MARK_BRANCH"
+            );
             assert_eq!(
-                outcome.console_output.first(), Some(&b'R'),
+                outcome.console_output.first(),
+                Some(&b'R'),
                 "the guest's own ISR marker must still be the first byte observed through a \
                  generated branch"
             );
@@ -2398,8 +2650,14 @@ mod tests {
         let (second_console, second_hash, _, _) =
             boot_and_run(&kernel, cmdline, vec![]).expect("second boot failed");
 
-        assert_eq!(first_console, second_console, "console output must be identical across two boots");
-        assert_eq!(first_hash, second_hash, "RAM hash must be identical across two boots");
+        assert_eq!(
+            first_console, second_console,
+            "console output must be identical across two boots"
+        );
+        assert_eq!(
+            first_hash, second_hash,
+            "RAM hash must be identical across two boots"
+        );
     }
 
     fn linux_guest_kernel_path() -> PathBuf {
@@ -2432,20 +2690,21 @@ mod tests {
         const TIMER_VECTOR: u8 = 0xec;
         const MAX_TICKS: u32 = 2000;
 
-        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
-            &kernel,
-            cmdline,
-            vec![],
-            Some(&initramfs),
-            Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
-        .expect("real linux-guest boot through boot_run_and_drain failed");
+        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) =
+            boot_run_and_drain(
+                &kernel,
+                cmdline,
+                vec![],
+                Some(&initramfs),
+                Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+            )
+            .expect("real linux-guest boot through boot_run_and_drain failed");
 
         let console = String::from_utf8_lossy(&console_output);
         assert!(
@@ -2469,7 +2728,8 @@ mod tests {
     fn run_kvm_boots_a_real_linux_guest_with_acpi_enabled() {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_initramfs();
-        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
+        let cmdline =
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
         assert_ne!(
             cmdline,
             baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE,
@@ -2481,20 +2741,23 @@ mod tests {
 
         let mut consoles = Vec::new();
         for i in 0..2 {
-            let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
-                &kernel,
-                &cmdline,
-                vec![],
-                Some(&initramfs),
-                Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
-                None,
-                None,
-                true, // acpi
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|e| panic!("run {i}: acpi-enabled boot through boot_run_and_drain failed: {e}"));
+            let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) =
+                boot_run_and_drain(
+                    &kernel,
+                    &cmdline,
+                    vec![],
+                    Some(&initramfs),
+                    Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+                    None,
+                    None,
+                    true, // acpi
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("run {i}: acpi-enabled boot through boot_run_and_drain failed: {e}")
+                });
             let console = String::from_utf8_lossy(&console_output).to_string();
             assert!(
                 console.contains("baud-guest: minimal kernel reached /init"),
@@ -2584,7 +2847,10 @@ mod tests {
             None,
             None,
             false,
-            Some((b"this pattern never appears in this fixture's console output", 1_000_000)),
+            Some((
+                b"this pattern never appears in this fixture's console output",
+                1_000_000,
+            )),
             Some(1),
             None,
         ) else {
@@ -2622,7 +2888,8 @@ mod tests {
     fn run_kvm_boots_a_real_linux_guest_with_virtio_blk_enabled() {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_virtio_blk_initramfs();
-        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
+        let cmdline =
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
         assert_ne!(
             cmdline,
             baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE,
@@ -2633,34 +2900,39 @@ mod tests {
         const MAX_TICKS: u32 = 2000;
         const SECTORS: u64 = 4;
         let sector_size = baud_multiverse::virtio_blk::SECTOR_SIZE as usize;
-        let base_image: Vec<u8> = (0..(sector_size as u64 * SECTORS)).map(|i| (i % 256) as u8).collect();
+        let base_image: Vec<u8> = (0..(sector_size as u64 * SECTORS))
+            .map(|i| (i % 256) as u8)
+            .collect();
         // Through the real production path — an image file resolved by `open_virtio_blk_image`,
         // i.e. a read-only *mapping*, not bytes on the heap — so this test covers what `POST
         // /run/kvm` actually does with a `virtio_blk.image_path` rather than an owned-`Vec` shape
         // no caller uses any more.
         let image_file = tempfile::NamedTempFile::new().expect("create virtio-blk image tempfile");
         std::fs::write(image_file.path(), &base_image).expect("write virtio-blk image tempfile");
-        let base =
-            open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"), virtio_blk_image_size_limit())
-                .expect("map the virtio-blk image file");
-        let virtio_blk_vector = baud_multiverse::pic8259::isa_irq_vector(11); // matches
-                                                                               // PciHostBridge's
-                                                                               // VIRTIO_BLK_DEFAULT_IRQ_LINE
-
-        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) = boot_run_and_drain(
-            &kernel,
-            &cmdline,
-            vec![],
-            Some(&initramfs),
-            Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
-            None,
-            Some((base, virtio_blk_vector, 200_000)),
-            false,
-            None,
-            None,
-            None,
+        let base = open_virtio_blk_image(
+            image_file.path().to_str().expect("utf-8 tempfile path"),
+            virtio_blk_image_size_limit(),
         )
-        .expect("real linux-guest boot with virtio_blk through boot_run_and_drain failed");
+        .expect("map the virtio-blk image file");
+        let virtio_blk_vector = baud_multiverse::pic8259::isa_irq_vector(11); // matches
+                                                                              // PciHostBridge's
+                                                                              // VIRTIO_BLK_DEFAULT_IRQ_LINE
+
+        let ((console_output, _ram_hash, _mark_branch_step, _node_id), _records) =
+            boot_run_and_drain(
+                &kernel,
+                &cmdline,
+                vec![],
+                Some(&initramfs),
+                Some((PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)),
+                None,
+                Some((base, virtio_blk_vector, 200_000)),
+                false,
+                None,
+                None,
+                None,
+            )
+            .expect("real linux-guest boot with virtio_blk through boot_run_and_drain failed");
 
         let console = String::from_utf8_lossy(&console_output);
         assert!(
@@ -2705,13 +2977,19 @@ mod tests {
     fn cancelling_a_run_reports_a_cancellation_not_a_determinism_hole() {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_virtio_blk_initramfs();
-        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
+        let cmdline =
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let image_file = tempfile::NamedTempFile::new().expect("create virtio-blk image tempfile");
-        image_file.as_file().set_len(4 * baud_multiverse::virtio_blk::SECTOR_SIZE).expect("size image");
-        let base =
-            open_virtio_blk_image(image_file.path().to_str().expect("utf-8 tempfile path"), virtio_blk_image_size_limit())
-                .expect("map the virtio-blk image file");
+        image_file
+            .as_file()
+            .set_len(4 * baud_multiverse::virtio_blk::SECTOR_SIZE)
+            .expect("size image");
+        let base = open_virtio_blk_image(
+            image_file.path().to_str().expect("utf-8 tempfile path"),
+            virtio_blk_image_size_limit(),
+        )
+        .expect("map the virtio-blk image file");
 
         let Err(err) = boot_run_and_drain(
             &kernel,
@@ -2776,9 +3054,16 @@ mod tests {
         );
 
         let ordinary = tempfile::NamedTempFile::new().expect("create ordinary image tempfile");
-        ordinary.as_file().set_len(64 * 1024 * 1024).expect("set sparse length");
+        ordinary
+            .as_file()
+            .set_len(64 * 1024 * 1024)
+            .expect("set sparse length");
         assert!(
-            open_virtio_blk_image(ordinary.path().to_str().expect("utf-8 tempfile path"), limit).is_ok(),
+            open_virtio_blk_image(
+                ordinary.path().to_str().expect("utf-8 tempfile path"),
+                limit
+            )
+            .is_ok(),
             "an ordinary-sized image must still be accepted"
         );
 
@@ -2857,7 +3142,8 @@ mod tests {
     fn run_kvm_branch_boots_a_real_linux_guest_with_acpi_enabled() {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_initramfs();
-        let cmdline = baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
+        let cmdline =
+            baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
         assert_ne!(
             cmdline,
             baud_multiverse::linux::bootparams::DETERMINISTIC_CMDLINE,
@@ -2880,7 +3166,9 @@ mod tests {
                 false,
                 true, // acpi
             )
-            .unwrap_or_else(|e| panic!("run {i}: acpi-enabled branch through boot_snapshot_and_branch failed: {e}"));
+            .unwrap_or_else(|e| {
+                panic!("run {i}: acpi-enabled branch through boot_snapshot_and_branch failed: {e}")
+            });
             assert_eq!(outcomes.len(), 1);
             let (console_output, _ram_hash, mark_branch_step, _node_id) = &outcomes[0];
             let console = String::from_utf8_lossy(console_output).to_string();
@@ -2911,29 +3199,49 @@ mod tests {
         let cmdline = "console=ttyS0";
         let suffixes: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i, 0xAA, 0xBB, 0xCC]).collect();
 
-        let (first_run, _records, _) =
-            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), None, None, None, None, true, false)
-                .expect("boot_snapshot_and_branch failed");
+        let (first_run, _records, _) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            suffixes.clone(),
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+        )
+        .expect("boot_snapshot_and_branch failed");
         assert_eq!(first_run.len(), suffixes.len());
-        for (i, (console_output, _ram_hash, mark_branch_step, _node_id)) in first_run.iter().enumerate() {
+        for (i, (console_output, _ram_hash, mark_branch_step, _node_id)) in
+            first_run.iter().enumerate()
+        {
             assert_eq!(
                 console_output, &suffixes[i],
                 "branch {i} must echo exactly its own tape suffix, not another branch's state"
             );
-            assert_eq!(*mark_branch_step, None, "tape-echo-guest never calls MARK_BRANCH, only halts");
+            assert_eq!(
+                *mark_branch_step, None,
+                "tape-echo-guest never calls MARK_BRANCH, only halts"
+            );
         }
 
         // Re-forking from a fresh branch point with the same suffixes must be byte-identical —
         // both across branches (no cross-branch bleed) and across this whole re-run (determinism).
-        let (second_run, _records, _) = boot_snapshot_and_branch(&kernel, cmdline, suffixes, None, None, None, None, true, false)
-            .expect("second boot_snapshot_and_branch failed");
-        assert_eq!(first_run, second_run, "re-forking the same suffixes must reproduce byte-identically");
+        let (second_run, _records, _) = boot_snapshot_and_branch(
+            &kernel, cmdline, suffixes, None, None, None, None, true, false,
+        )
+        .expect("second boot_snapshot_and_branch failed");
+        assert_eq!(
+            first_run, second_run,
+            "re-forking the same suffixes must reproduce byte-identically"
+        );
     }
 
     fn temp_snapshot_store() -> (tempfile::TempDir, SnapshotStore) {
         let dir = tempfile::tempdir().expect("tempdir");
         let identity_path = dir.path().join("identity.txt");
-        std::fs::write(&identity_path, baud_keys::generate_identity_file()).expect("write identity");
+        std::fs::write(&identity_path, baud_keys::generate_identity_file())
+            .expect("write identity");
         let contents = std::fs::read_to_string(&identity_path).expect("read identity");
         let recipient = baud_keys::parse_public_key(&contents).expect("parse recipient");
         let store = SnapshotStore::open_with_keys(dir.path(), recipient, Some(identity_path));
@@ -2954,14 +3262,25 @@ mod tests {
         let (_dir, store) = temp_snapshot_store();
         let run_id = "persist-test-run";
 
-        let (direct_outcomes, _direct_records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, suffixes.clone(), Some((&store, run_id)), None, None, None, true, false)
-                .expect("boot_snapshot_and_branch with persist failed");
-        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        let (direct_outcomes, _direct_records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            suffixes.clone(),
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            true,
+            false,
+        )
+        .expect("boot_snapshot_and_branch with persist failed");
+        let (returned_run_id, node_id_hex) =
+            persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
-        let (resumed_outcomes, _resumed_records) = resume_and_branch(&store, run_id, &node_id_hex, suffixes, None, None)
-            .expect("resume_and_branch failed");
+        let (resumed_outcomes, _resumed_records) =
+            resume_and_branch(&store, run_id, &node_id_hex, suffixes, None, None)
+                .expect("resume_and_branch failed");
 
         assert_eq!(
             direct_outcomes, resumed_outcomes,
@@ -2985,10 +3304,20 @@ mod tests {
         let (_dir, store) = temp_snapshot_store();
         let run_id = "restore-replay-test";
 
-        let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false, false)
-                .expect("persist-only boot_snapshot_and_branch failed");
-        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        let (_outcomes, _records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![],
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("persist-only boot_snapshot_and_branch failed");
+        let (returned_run_id, node_id_hex) =
+            persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
         // What a live `POST /run/kvm/resume { frame_run_ids }` call drains and persists.
@@ -2998,10 +3327,11 @@ mod tests {
 
         // Independently reconstructing the same universe and re-forking it with the same suffix —
         // exactly what `render_frames_from_real_restore` does — must reproduce the same records.
-        let universe =
-            reconstruct_universe(&store, run_id, &node_id_hex).expect("reconstruct_universe failed");
-        let mut branch = baud_multiverse::linux::Multiverse::branch(&universe, vec![], WORK_CLOCK_K, None)
-            .expect("independent Multiverse::branch failed");
+        let universe = reconstruct_universe(&store, run_id, &node_id_hex)
+            .expect("reconstruct_universe failed");
+        let mut branch =
+            baud_multiverse::linux::Multiverse::branch(&universe, vec![], WORK_CLOCK_K, None)
+                .expect("independent Multiverse::branch failed");
         let (_outcome, mut second_records) = branch
             .run_until_branch_or_halt(BRANCH_MAX_EXITS)
             .expect("independent run_until_branch_or_halt failed");
@@ -3022,7 +3352,10 @@ mod tests {
             })
             .collect();
 
-        assert!(!first_frames.is_empty(), "framebuffer-guest must emit at least one Frame record");
+        assert!(
+            !first_frames.is_empty(),
+            "framebuffer-guest must emit at least one Frame record"
+        );
         assert_eq!(
             first_frames.len(),
             second_frames.len(),
@@ -3053,10 +3386,20 @@ mod tests {
         let run_id = "virtio-rng-restore-test";
         let virtio_rng = Some((42u64, 0x31u8, 200_000u32));
 
-        let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false, false)
-                .expect("persist-only boot_snapshot_and_branch failed");
-        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        let (_outcomes, _records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![],
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("persist-only boot_snapshot_and_branch failed");
+        let (returned_run_id, node_id_hex) =
+            persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
         let (resumed_outcomes, _resumed_records) =
@@ -3064,15 +3407,19 @@ mod tests {
                 .expect("resume_and_branch with virtio_rng failed");
         assert_eq!(resumed_outcomes.len(), 1);
         let (resumed_console_output, _ram_hash, mark_branch_step, _node_id) = &resumed_outcomes[0];
-        assert!(mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
+        assert!(
+            mark_branch_step.is_none(),
+            "virtio-rng-guest never calls MARK_BRANCH"
+        );
         assert_eq!(resumed_console_output.first(), Some(&b'R'));
 
         // Exactly what `render_frames_from_real_restore` does: reconstruct the same universe
         // independently, fork it fresh, and re-enable/re-seed virtio_rng on *that* branch.
-        let universe =
-            reconstruct_universe(&store, run_id, &node_id_hex).expect("reconstruct_universe failed");
-        let mut branch = baud_multiverse::linux::Multiverse::branch(&universe, vec![], WORK_CLOCK_K, None)
-            .expect("independent Multiverse::branch failed");
+        let universe = reconstruct_universe(&store, run_id, &node_id_hex)
+            .expect("reconstruct_universe failed");
+        let mut branch =
+            baud_multiverse::linux::Multiverse::branch(&universe, vec![], WORK_CLOCK_K, None)
+                .expect("independent Multiverse::branch failed");
         branch.enable_virtio_rng();
         branch.seed_virtio_rng_entropy(42);
         let (outcome, _records) = branch
@@ -3111,23 +3458,47 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        let (_outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![], Some((&store, run_id)), None, None, None, false, false)
-                .expect("persist-only boot_snapshot_and_branch failed");
-        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        let (_outcomes, _records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![],
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("persist-only boot_snapshot_and_branch failed");
+        let (returned_run_id, node_id_hex) =
+            persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
         let (resumed_outcomes, _summary) =
             resume_and_generate(&store, run_id, &node_id_hex, spec, None, virtio_rng)
                 .expect("resume_and_generate with virtio_rng failed");
 
-        let ((direct_console_output, ..), _direct_records) =
-            boot_run_and_drain(&kernel, cmdline, vec![], None, None, virtio_rng, None, false, None, None, None)
-                .expect("direct boot_run_and_drain with virtio_rng failed");
+        let ((direct_console_output, ..), _direct_records) = boot_run_and_drain(
+            &kernel,
+            cmdline,
+            vec![],
+            None,
+            None,
+            virtio_rng,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .expect("direct boot_run_and_drain with virtio_rng failed");
 
         assert_eq!(resumed_outcomes.len(), 3);
         for outcome in &resumed_outcomes {
-            assert!(outcome.mark_branch_step.is_none(), "virtio-rng-guest never calls MARK_BRANCH");
+            assert!(
+                outcome.mark_branch_step.is_none(),
+                "virtio-rng-guest never calls MARK_BRANCH"
+            );
             assert_eq!(
                 outcome.console_output, direct_console_output,
                 "a resumed, driver-generated branch must deliver the real virtio-rng interrupt to \
@@ -3140,8 +3511,15 @@ mod tests {
     #[test]
     fn resume_rejects_unknown_run() {
         let (_dir, store) = temp_snapshot_store();
-        let err = resume_and_branch(&store, "no-such-run", &"00".repeat(32), vec![vec![1, 2, 3, 4]], None, None)
-            .expect_err("resuming an unknown run must fail, not silently proceed");
+        let err = resume_and_branch(
+            &store,
+            "no-such-run",
+            &"00".repeat(32),
+            vec![vec![1, 2, 3, 4]],
+            None,
+            None,
+        )
+        .expect_err("resuming an unknown run must fail, not silently proceed");
         assert!(!err.is_empty());
     }
 
@@ -3170,7 +3548,11 @@ mod tests {
         assert!(crashed, "a Crash outcome must be detected");
         assert!(observations.contains(&("console_len".to_owned(), 3.0)));
         assert!(observations.contains(&("depth".to_owned(), 7.0)));
-        assert_eq!(observations.len(), 2, "MarkBranch must not contribute an observation");
+        assert_eq!(
+            observations.len(),
+            2,
+            "MarkBranch must not contribute an observation"
+        );
 
         let (observations, crashed) = observations_from_records(&[], 5);
         assert!(!crashed);
@@ -3194,7 +3576,10 @@ mod tests {
             seed: 42,
             count: 5,
             tape_len_bytes: 4,
-            strategy: baud_driver::StrategySpec { maximize: vec!["console_len".into()], ..Default::default() },
+            strategy: baud_driver::StrategySpec {
+                maximize: vec!["console_len".into()],
+                ..Default::default()
+            },
             frame_run_id_prefix: None,
         };
 
@@ -3209,9 +3594,15 @@ mod tests {
         assert_eq!(outcomes1.len(), 5);
         let tapes1: Vec<&String> = outcomes1.iter().map(|o| &o.tape_hex).collect();
         let tapes2: Vec<&String> = outcomes2.iter().map(|o| &o.tape_hex).collect();
-        assert_eq!(tapes1, tapes2, "same seed must generate identical tape suffixes");
+        assert_eq!(
+            tapes1, tapes2,
+            "same seed must generate identical tape suffixes"
+        );
         for (o1, o2) in outcomes1.iter().zip(outcomes2.iter()) {
-            assert_eq!(o1.console_output, o2.console_output, "reproducible branch outcomes");
+            assert_eq!(
+                o1.console_output, o2.console_output,
+                "reproducible branch outcomes"
+            );
             assert_eq!(o1.ram_hash, o2.ram_hash);
         }
         for o in &outcomes1 {
@@ -3222,7 +3613,10 @@ mod tests {
             );
         }
         assert_eq!(summary1.generations, 5);
-        assert_eq!(summary1.best_tape_hex, summary2.best_tape_hex, "reproducible driver summary");
+        assert_eq!(
+            summary1.best_tape_hex, summary2.best_tape_hex,
+            "reproducible driver summary"
+        );
     }
 
     /// A driver-generated branch point must persist and later resume exactly like a fixed-tape one
@@ -3244,14 +3638,31 @@ mod tests {
             strategy: baud_driver::StrategySpec::default(),
             frame_run_id_prefix: None,
         };
-        let (_outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false, false)
-                .expect("boot_snapshot_and_generate with persist failed");
-        let (returned_run_id, node_id_hex) = persisted.expect("persist must return a run_id/node_id");
+        let (_outcomes, _summary, persisted) = boot_snapshot_and_generate(
+            &kernel,
+            cmdline,
+            spec,
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_generate with persist failed");
+        let (returned_run_id, node_id_hex) =
+            persisted.expect("persist must return a run_id/node_id");
         assert_eq!(returned_run_id, run_id);
 
-        let (resumed, _records) = resume_and_branch(&store, run_id, &node_id_hex, vec![vec![9, 8, 7, 6]], None, None)
-            .expect("resume_and_branch failed");
+        let (resumed, _records) = resume_and_branch(
+            &store,
+            run_id,
+            &node_id_hex,
+            vec![vec![9, 8, 7, 6]],
+            None,
+            None,
+        )
+        .expect("resume_and_branch failed");
         assert_eq!(
             resumed[0].0,
             vec![9, 8, 7, 6],
@@ -3274,7 +3685,10 @@ mod tests {
             seed: 99,
             count: 4,
             tape_len_bytes: 4,
-            strategy: baud_driver::StrategySpec { maximize: vec!["console_len".into()], ..Default::default() },
+            strategy: baud_driver::StrategySpec {
+                maximize: vec!["console_len".into()],
+                ..Default::default()
+            },
             frame_run_id_prefix: None,
         };
 
@@ -3285,14 +3699,21 @@ mod tests {
 
         let (returned_run_id, node_id_hex) = persisted;
         assert_eq!(returned_run_id, run_id);
-        let reconstructed = reconstruct_universe(&store, run_id, &node_id_hex).expect("reconstruct");
+        let reconstructed =
+            reconstruct_universe(&store, run_id, &node_id_hex).expect("reconstruct");
         let (resumed_outcomes, resumed_summary) =
             run_driver_generated_branches(&reconstructed, spec()).expect("resumed generate");
 
         assert_eq!(resumed_outcomes.len(), direct_outcomes.len());
         for (r, d) in resumed_outcomes.iter().zip(direct_outcomes.iter()) {
-            assert_eq!(r.tape_hex, d.tape_hex, "same seed must generate identical tape suffixes");
-            assert_eq!(r.console_output, d.console_output, "resumed branch must reproduce the direct one");
+            assert_eq!(
+                r.tape_hex, d.tape_hex,
+                "same seed must generate identical tape suffixes"
+            );
+            assert_eq!(
+                r.console_output, d.console_output,
+                "resumed branch must reproduce the direct one"
+            );
             assert_eq!(r.ram_hash, d.ram_hash);
         }
         assert_eq!(resumed_summary.best_tape_hex, direct_summary.best_tape_hex);
@@ -3335,12 +3756,24 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        let (outcomes, summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false, false)
-                .expect("boot_snapshot_and_generate failed");
+        let (outcomes, summary, persisted) = boot_snapshot_and_generate(
+            &kernel,
+            cmdline,
+            spec,
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_generate failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
-        assert!(summary.goal_reached, "tape-echo-guest always reaches the console_len goal");
+        assert!(
+            summary.goal_reached,
+            "tape-echo-guest always reaches the console_len goal"
+        );
 
         assert_eq!(outcomes.len(), 4);
         let root_node_id =
@@ -3349,12 +3782,25 @@ mod tests {
         let mut seen_node_ids = std::collections::HashSet::new();
 
         for outcome in &outcomes {
-            assert!(outcome.interesting, "every branch must reach the console_len goal");
-            let node_id_hex = outcome.node_id.as_ref().expect("interesting branch must persist a node_id");
-            assert!(seen_node_ids.insert(node_id_hex.clone()), "every branch must get a distinct node_id");
-            assert_ne!(node_id_hex, &root_node_id_hex, "a branch's node must differ from the branch point's");
+            assert!(
+                outcome.interesting,
+                "every branch must reach the console_len goal"
+            );
+            let node_id_hex = outcome
+                .node_id
+                .as_ref()
+                .expect("interesting branch must persist a node_id");
+            assert!(
+                seen_node_ids.insert(node_id_hex.clone()),
+                "every branch must get a distinct node_id"
+            );
+            assert_ne!(
+                node_id_hex, &root_node_id_hex,
+                "a branch's node must differ from the branch point's"
+            );
 
-            let node_id = baud_snapshot_store::NodeId::from_hex(node_id_hex).expect("valid node_id");
+            let node_id =
+                baud_snapshot_store::NodeId::from_hex(node_id_hex).expect("valid node_id");
             let node = store.read_node(&run, node_id).expect("read_node failed");
             assert_eq!(
                 node.parent.as_deref(),
@@ -3366,8 +3812,15 @@ mod tests {
             // Resuming this exact node — with *any* tape, since the guest is already halted —
             // must reproduce this branch's own frozen output, proving the persisted state really
             // is this specific branch's final state, not some other one's.
-            let (resumed, _records) = resume_and_branch(&store, run_id, node_id_hex, vec![vec![0xAB, 0xCD]], None, None)
-                .expect("resuming a generated branch's node failed");
+            let (resumed, _records) = resume_and_branch(
+                &store,
+                run_id,
+                node_id_hex,
+                vec![vec![0xAB, 0xCD]],
+                None,
+                None,
+            )
+            .expect("resuming a generated branch's node failed");
             assert_eq!(
                 resumed[0].0, outcome.console_output,
                 "resuming a persisted interesting branch must reproduce its own frozen output"
@@ -3412,24 +3865,46 @@ mod tests {
             frame_run_id_prefix: None,
         };
 
-        let (outcomes, _summary, persisted) =
-            boot_snapshot_and_generate(&kernel, cmdline, spec, Some((&store, run_id)), None, None, None, false, false)
-                .expect("boot_snapshot_and_generate failed");
+        let (outcomes, _summary, persisted) = boot_snapshot_and_generate(
+            &kernel,
+            cmdline,
+            spec,
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_generate failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
 
         assert_eq!(outcomes.len(), 3);
         let mut seen_node_ids = std::collections::HashSet::new();
         for outcome in &outcomes {
-            assert_eq!(outcome.mark_branch_step, Some(1), "must stop right after the first MARK_BRANCH");
-            assert!(outcome.interesting, "a MARK_BRANCH stop must always be reported interesting");
+            assert_eq!(
+                outcome.mark_branch_step,
+                Some(1),
+                "must stop right after the first MARK_BRANCH"
+            );
+            assert!(
+                outcome.interesting,
+                "a MARK_BRANCH stop must always be reported interesting"
+            );
             assert_eq!(
                 outcome.console_output,
                 hex_decode(&outcome.tape_hex).unwrap(),
                 "console output at the checkpoint must be exactly the one byte read+echoed so far"
             );
-            let node_id_hex = outcome.node_id.as_ref().expect("a MARK_BRANCH stop must persist a node_id");
-            assert!(seen_node_ids.insert(node_id_hex.clone()), "every branch must get a distinct node_id");
+            let node_id_hex = outcome
+                .node_id
+                .as_ref()
+                .expect("a MARK_BRANCH stop must persist a node_id");
+            assert!(
+                seen_node_ids.insert(node_id_hex.clone()),
+                "every branch must get a distinct node_id"
+            );
 
             // Resume this exact checkpoint with fresh tape for the guest's next iteration. Index 0
             // is never re-read (the restored cursor is already past it, `Multiverse::branch`'s
@@ -3437,10 +3912,17 @@ mod tests {
             // loop iteration — `run_until_branch_or_halt` stops the instant it hits the guest's own
             // next MARK_BRANCH, so extra trailing bytes beyond that aren't needed or consumed.
             let fresh_suffix: Vec<u8> = vec![outcome.console_output[0], 0xAA];
-            let (resumed, _records) =
-                resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()], None, None)
-                    .expect("resuming a MARK_BRANCH-persisted node failed");
-            let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, _resumed_node_id) = &resumed[0];
+            let (resumed, _records) = resume_and_branch(
+                &store,
+                run_id,
+                node_id_hex,
+                vec![fresh_suffix.clone()],
+                None,
+                None,
+            )
+            .expect("resuming a MARK_BRANCH-persisted node failed");
+            let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, _resumed_node_id) =
+                &resumed[0];
             assert_eq!(
                 *resumed_mark_branch_step,
                 Some(2),
@@ -3474,25 +3956,47 @@ mod tests {
         // mark-branch-guest reads one byte, echoes it, then issues MARK_BRANCH —
         // run_until_branch_or_halt stops right there, same one-byte suffix the generate-mode
         // sibling test above uses (tape_len_bytes: 1).
-        let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false, false)
-                .expect("boot_snapshot_and_branch failed");
+        let (outcomes, _records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![vec![0x42]],
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_branch failed");
         let (root_run_id, root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
 
         assert_eq!(outcomes.len(), 1);
         let (console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
-        assert_eq!(*mark_branch_step, Some(1), "must stop right after the first MARK_BRANCH");
         assert_eq!(
-            console_output, &vec![0x42],
+            *mark_branch_step,
+            Some(1),
+            "must stop right after the first MARK_BRANCH"
+        );
+        assert_eq!(
+            console_output,
+            &vec![0x42],
             "console output at the checkpoint must be exactly the one byte read+echoed so far"
         );
-        let node_id_hex = node_id.as_ref().expect("a MARK_BRANCH stop must persist a node_id");
-        assert_ne!(node_id_hex, &root_node_id_hex, "a branch's node must differ from the branch point's");
+        let node_id_hex = node_id
+            .as_ref()
+            .expect("a MARK_BRANCH stop must persist a node_id");
+        assert_ne!(
+            node_id_hex, &root_node_id_hex,
+            "a branch's node must differ from the branch point's"
+        );
 
         let run = baud_snapshot_store::RunId::new(run_id.to_owned());
         let node = store
-            .read_node(&run, baud_snapshot_store::NodeId::from_hex(node_id_hex).expect("valid node_id"))
+            .read_node(
+                &run,
+                baud_snapshot_store::NodeId::from_hex(node_id_hex).expect("valid node_id"),
+            )
             .expect("read_node failed");
         assert_eq!(
             node.parent.as_deref(),
@@ -3504,9 +4008,17 @@ mod tests {
         // cursor is already past it) so it can be anything; index 1 is the one real new byte for
         // the guest's second loop iteration.
         let fresh_suffix: Vec<u8> = vec![console_output[0], 0xAA];
-        let (resumed, _records) = resume_and_branch(&store, run_id, node_id_hex, vec![fresh_suffix.clone()], None, None)
-            .expect("resuming a MARK_BRANCH-persisted node failed");
-        let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, resumed_node_id) = &resumed[0];
+        let (resumed, _records) = resume_and_branch(
+            &store,
+            run_id,
+            node_id_hex,
+            vec![fresh_suffix.clone()],
+            None,
+            None,
+        )
+        .expect("resuming a MARK_BRANCH-persisted node failed");
+        let (resumed_console, _resumed_ram_hash, resumed_mark_branch_step, resumed_node_id) =
+            &resumed[0];
         assert_eq!(
             *resumed_mark_branch_step,
             Some(2),
@@ -3518,14 +4030,18 @@ mod tests {
             "resuming past a MARK_BRANCH checkpoint with fresh tape must genuinely consume and \
              echo it, not replay a frozen halt"
         );
-        let resumed_node_id_hex =
-            resumed_node_id.as_ref().expect("resume_and_branch must also persist a further MARK_BRANCH stop");
+        let resumed_node_id_hex = resumed_node_id
+            .as_ref()
+            .expect("resume_and_branch must also persist a further MARK_BRANCH stop");
         assert_ne!(
             resumed_node_id_hex, node_id_hex,
             "the second checkpoint's node must differ from the first's"
         );
         let resumed_node = store
-            .read_node(&run, baud_snapshot_store::NodeId::from_hex(resumed_node_id_hex).expect("valid node_id"))
+            .read_node(
+                &run,
+                baud_snapshot_store::NodeId::from_hex(resumed_node_id_hex).expect("valid node_id"),
+            )
             .expect("read_node failed");
         assert_eq!(
             resumed_node.parent.as_deref(),
@@ -3553,14 +4069,26 @@ mod tests {
 
         // First branch point: boot + persist (no generate here — just get a root node to resume
         // from), mirroring boot_snapshot_and_branch's own root-then-children shape.
-        let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false, false)
-                .expect("boot_snapshot_and_branch failed");
+        let (outcomes, _records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![vec![0x42]],
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_branch failed");
         let (root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         assert_eq!(root_run_id, run_id);
         let (_console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
         assert_eq!(*mark_branch_step, Some(1));
-        let node_id_hex = node_id.as_ref().expect("first MARK_BRANCH stop must persist").clone();
+        let node_id_hex = node_id
+            .as_ref()
+            .expect("first MARK_BRANCH stop must persist")
+            .clone();
 
         // Resume that checkpoint in generate mode — this is the path that used to drop everything.
         let spec = DriverGenerateSpec {
@@ -3570,22 +4098,37 @@ mod tests {
             strategy: baud_driver::StrategySpec::default(),
             frame_run_id_prefix: None,
         };
-        let (outcomes, _summary) = resume_and_generate(&store, run_id, &node_id_hex, spec, None, None)
-            .expect("resume_and_generate failed");
+        let (outcomes, _summary) =
+            resume_and_generate(&store, run_id, &node_id_hex, spec, None, None)
+                .expect("resume_and_generate failed");
 
         assert_eq!(outcomes.len(), 3);
         let run = baud_snapshot_store::RunId::new(run_id.to_owned());
         let mut seen_node_ids = std::collections::HashSet::new();
         for outcome in &outcomes {
-            assert_eq!(outcome.mark_branch_step, Some(2), "must stop at the guest's next MARK_BRANCH");
-            assert!(outcome.interesting, "a MARK_BRANCH stop must always be reported interesting");
+            assert_eq!(
+                outcome.mark_branch_step,
+                Some(2),
+                "must stop at the guest's next MARK_BRANCH"
+            );
+            assert!(
+                outcome.interesting,
+                "a MARK_BRANCH stop must always be reported interesting"
+            );
             let child_node_id_hex = outcome
                 .node_id
                 .as_ref()
                 .expect("resume_and_generate must persist every MARK_BRANCH stop, not drop it");
-            assert!(seen_node_ids.insert(child_node_id_hex.clone()), "every branch must get a distinct node_id");
+            assert!(
+                seen_node_ids.insert(child_node_id_hex.clone()),
+                "every branch must get a distinct node_id"
+            );
             let child_node = store
-                .read_node(&run, baud_snapshot_store::NodeId::from_hex(child_node_id_hex).expect("valid node_id"))
+                .read_node(
+                    &run,
+                    baud_snapshot_store::NodeId::from_hex(child_node_id_hex)
+                        .expect("valid node_id"),
+                )
                 .expect("read_node failed");
             assert_eq!(
                 child_node.parent.as_deref(),
@@ -3607,13 +4150,25 @@ mod tests {
         let (_dir, store) = temp_snapshot_store();
         let run_id = "driver-state-resume-test";
 
-        let (outcomes, _records, persisted) =
-            boot_snapshot_and_branch(&kernel, cmdline, vec![vec![0x42]], Some((&store, run_id)), None, None, None, false, false)
-                .expect("boot_snapshot_and_branch failed");
+        let (outcomes, _records, persisted) = boot_snapshot_and_branch(
+            &kernel,
+            cmdline,
+            vec![vec![0x42]],
+            Some((&store, run_id)),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .expect("boot_snapshot_and_branch failed");
         let (_root_run_id, _root_node_id_hex) = persisted.expect("root branch point must persist");
         let (_console_output, _ram_hash, mark_branch_step, node_id) = &outcomes[0];
         assert_eq!(*mark_branch_step, Some(1));
-        let node_id_hex = node_id.as_ref().expect("first MARK_BRANCH stop must persist").clone();
+        let node_id_hex = node_id
+            .as_ref()
+            .expect("first MARK_BRANCH stop must persist")
+            .clone();
 
         let make_spec = || DriverGenerateSpec {
             seed: 99,
@@ -3626,16 +4181,28 @@ mod tests {
         resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None, None)
             .expect("first resume_and_generate failed");
         let run = baud_snapshot_store::RunId::new(run_id.to_owned());
-        assert!(store.has_driver_state(&run), "generate mode must persist driver state when it persists at all");
+        assert!(
+            store.has_driver_state(&run),
+            "generate mode must persist driver state when it persists at all"
+        );
         let state_after_first: baud_driver::DriverState =
-            serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state")).expect("decode state");
-        assert_eq!(state_after_first.generation, 3, "generation must advance by spec.count on the first call");
-        assert_eq!(state_after_first.reservoir.len(), 3, "every generation's tape should join the reservoir");
+            serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state"))
+                .expect("decode state");
+        assert_eq!(
+            state_after_first.generation, 3,
+            "generation must advance by spec.count on the first call"
+        );
+        assert_eq!(
+            state_after_first.reservoir.len(),
+            3,
+            "every generation's tape should join the reservoir"
+        );
 
         resume_and_generate(&store, run_id, &node_id_hex, make_spec(), None, None)
             .expect("second resume_and_generate failed");
         let state_after_second: baud_driver::DriverState =
-            serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state")).expect("decode state");
+            serde_json::from_slice(&store.get_driver_state(&run).expect("get_driver_state"))
+                .expect("decode state");
         assert_eq!(
             state_after_second.generation, 6,
             "a second resume_and_generate call must continue the same Driver's generation counter \
@@ -3654,6 +4221,10 @@ mod tests {
         assert_eq!(hex_decode(&hex_encode(&bytes)).unwrap(), bytes);
         assert_eq!(hex_decode(""), Some(Vec::new()));
         assert_eq!(hex_decode("abc"), None, "odd-length hex must be rejected");
-        assert_eq!(hex_decode("zz"), None, "non-hex characters must be rejected");
+        assert_eq!(
+            hex_decode("zz"),
+            None,
+            "non-hex characters must be rejected"
+        );
     }
 }

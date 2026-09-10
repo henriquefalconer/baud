@@ -102,7 +102,12 @@ pub fn ring_layout_from_pfn(pfn: u32, num: u32) -> QueueRingConfig {
     let driver = desc + u64::from(num) * DESC_ENTRY_SIZE;
     let avail_ring_end = driver + AVAIL_HEADER_LEN + u64::from(num) * 2;
     let device = (avail_ring_end + VIRTIO_PCI_VRING_ALIGN - 1) & !(VIRTIO_PCI_VRING_ALIGN - 1);
-    QueueRingConfig { num, desc, driver, device }
+    QueueRingConfig {
+        num,
+        desc,
+        driver,
+        device,
+    }
 }
 
 /// Everything the transport tracks per queue under the legacy interface: just the driver-written
@@ -145,8 +150,19 @@ impl VirtioPciTransport {
     /// negotiation `VIRTIO_F_VERSION_1` gates) across `queue_count` identically-sized queues, each
     /// `queue_num_max` descriptors. No device-specific config space (see [`Self::with_device_config`]
     /// for a device that has one).
-    pub fn new(device_kind: u32, host_features: u32, queue_count: usize, queue_num_max: u16) -> Self {
-        Self::with_device_config(device_kind, host_features, queue_count, queue_num_max, Vec::new())
+    pub fn new(
+        device_kind: u32,
+        host_features: u32,
+        queue_count: usize,
+        queue_num_max: u16,
+    ) -> Self {
+        Self::with_device_config(
+            device_kind,
+            host_features,
+            queue_count,
+            queue_num_max,
+            Vec::new(),
+        )
     }
 
     /// [`Self::new`] plus a device-specific configuration-space byte buffer, answered read-only at
@@ -230,7 +246,11 @@ impl VirtioPciTransport {
     pub fn in_range(&self, port: u16) -> Option<u16> {
         let base = self.io_base?;
         let offset = i32::from(port) - i32::from(base);
-        if (0..i32::from(VIRTIO_PCI_IO_WINDOW_LEN)).contains(&offset) { Some(offset as u16) } else { None }
+        if (0..i32::from(VIRTIO_PCI_IO_WINDOW_LEN)).contains(&offset) {
+            Some(offset as u16)
+        } else {
+            None
+        }
     }
 
     pub fn notify_count(&self) -> u64 {
@@ -269,7 +289,10 @@ impl VirtioPciTransport {
         if queue.pfn == 0 {
             return None;
         }
-        Some(ring_layout_from_pfn(queue.pfn, u32::from(self.queue_num_max)))
+        Some(ring_layout_from_pfn(
+            queue.pfn,
+            u32::from(self.queue_num_max),
+        ))
     }
 
     /// Writing `0` to `Device Status` is the driver's reset request (spec §2.1, same trigger as
@@ -309,16 +332,28 @@ impl Bus for VirtioPciTransport {
             // virtio-blk's `capacity` is a `le64`, read as two 32-bit halves by every real driver).
             let start = (offset - REG_DEVICE_CONFIG_START) as usize;
             for (i, b) in data.iter_mut().enumerate() {
-                *b = self.device_config.get(start + i).copied().unwrap_or(OPEN_BUS_BYTE);
+                *b = self
+                    .device_config
+                    .get(start + i)
+                    .copied()
+                    .unwrap_or(OPEN_BUS_BYTE);
             }
             return;
         }
         let word: [u8; 4] = match offset {
             REG_HOST_FEATURES => self.host_features.to_le_bytes(),
             REG_GUEST_FEATURES => self.guest_features.to_le_bytes(),
-            REG_QUEUE_ADDRESS => self.selected_queue().map(|q| q.pfn).unwrap_or(0).to_le_bytes(),
+            REG_QUEUE_ADDRESS => self
+                .selected_queue()
+                .map(|q| q.pfn)
+                .unwrap_or(0)
+                .to_le_bytes(),
             REG_QUEUE_SIZE => {
-                let size = if self.selected_queue().is_some() { self.queue_num_max } else { 0 };
+                let size = if self.selected_queue().is_some() {
+                    self.queue_num_max
+                } else {
+                    0
+                };
                 let b = size.to_le_bytes();
                 [b[0], b[1], 0, 0]
             }
@@ -341,7 +376,9 @@ impl Bus for VirtioPciTransport {
     }
 
     fn pio_write(&mut self, port: u16, data: &[u8]) {
-        let Some(offset) = self.in_range(port) else { return };
+        let Some(offset) = self.in_range(port) else {
+            return;
+        };
         let mut word = [0u8; 4];
         let n = data.len().min(4);
         word[..n].copy_from_slice(&data[..n]);
@@ -407,18 +444,28 @@ mod tests {
         let config = ring_layout_from_pfn(1, 256);
         assert_eq!(config.num, 256);
         assert_eq!(config.desc, 0x1000);
-        assert_eq!(config.driver, 0x1000 + 256 * 16, "avail ring starts right after the desc table");
+        assert_eq!(
+            config.driver,
+            0x1000 + 256 * 16,
+            "avail ring starts right after the desc table"
+        );
         // avail ring end = driver + 4 (header) + 256*2 (ring) = driver + 0x204; next 4096 boundary.
         let avail_end = config.driver + 4 + 256 * 2;
         let expected_used = avail_end.div_ceil(4096) * 4096;
         assert_eq!(config.device, expected_used);
-        assert!(config.device >= avail_end, "used ring must never overlap the avail ring");
+        assert!(
+            config.device >= avail_end,
+            "used ring must never overlap the avail ring"
+        );
     }
 
     #[test]
     fn ring_layout_is_a_pure_function_of_pfn_and_num() {
         assert_eq!(ring_layout_from_pfn(5, 128), ring_layout_from_pfn(5, 128));
-        assert_ne!(ring_layout_from_pfn(5, 128).desc, ring_layout_from_pfn(6, 128).desc);
+        assert_ne!(
+            ring_layout_from_pfn(5, 128).desc,
+            ring_layout_from_pfn(6, 128).desc
+        );
     }
 
     #[test]
@@ -426,16 +473,27 @@ mod tests {
         let mut t = VirtioPciTransport::new_rng();
         let mut data = [0u8; 4];
         t.pio_read(BASE, &mut data);
-        assert_eq!(data, [OPEN_BUS_BYTE; 4], "no I/O base assigned yet: nothing should decode");
+        assert_eq!(
+            data, [OPEN_BUS_BYTE; 4],
+            "no I/O base assigned yet: nothing should decode"
+        );
         t.pio_write(BASE, &[1, 2, 3, 4]); // must not panic
     }
 
     #[test]
     fn host_features_are_fixed_and_read_only() {
         let mut t = transport();
-        assert_eq!(read_reg(&mut t, REG_HOST_FEATURES), 0, "virtio-rng defines no feature bits");
+        assert_eq!(
+            read_reg(&mut t, REG_HOST_FEATURES),
+            0,
+            "virtio-rng defines no feature bits"
+        );
         write_reg(&mut t, REG_HOST_FEATURES, 0xffff_ffff);
-        assert_eq!(read_reg(&mut t, REG_HOST_FEATURES), 0, "writes to a read-only register are absorbed");
+        assert_eq!(
+            read_reg(&mut t, REG_HOST_FEATURES),
+            0,
+            "writes to a read-only register are absorbed"
+        );
     }
 
     #[test]
@@ -456,7 +514,10 @@ mod tests {
         write_reg(&mut t, REG_QUEUE_SELECT, 0);
         assert_eq!(read_reg(&mut t, REG_QUEUE_SIZE), 256);
         write_reg(&mut t, REG_QUEUE_ADDRESS, 0x100); // pfn=0x100
-        assert_eq!(t.queue_ring_config(0), Some(ring_layout_from_pfn(0x100, 256)));
+        assert_eq!(
+            t.queue_ring_config(0),
+            Some(ring_layout_from_pfn(0x100, 256))
+        );
 
         write_reg(&mut t, REG_DEVICE_STATUS, 1 | 2 | 4); // + DRIVER_OK
         assert_eq!(read_reg(&mut t, REG_DEVICE_STATUS), 1 | 2 | 4);
@@ -469,7 +530,11 @@ mod tests {
         assert_eq!(read_reg(&mut t, REG_QUEUE_SIZE), 0, "no such queue");
         write_reg(&mut t, REG_QUEUE_ADDRESS, 0x100); // must not panic or affect queue 0
         write_reg(&mut t, REG_QUEUE_SELECT, 0);
-        assert_eq!(t.queue_ring_config(0), None, "queue 1's write must not leak into queue 0");
+        assert_eq!(
+            t.queue_ring_config(0),
+            None,
+            "queue 1's write must not leak into queue 0"
+        );
     }
 
     #[test]
@@ -491,7 +556,11 @@ mod tests {
         write_reg(&mut t, REG_QUEUE_NOTIFY, 0);
         assert_eq!(t.notify_count(), 2);
         assert_eq!(t.last_notified_queue(), Some(0));
-        assert_eq!(read_reg(&mut t, REG_QUEUE_NOTIFY), 0, "write-only: reads back 0");
+        assert_eq!(
+            read_reg(&mut t, REG_QUEUE_NOTIFY),
+            0,
+            "write-only: reads back 0"
+        );
     }
 
     #[test]
@@ -500,8 +569,16 @@ mod tests {
         assert_eq!(read_reg(&mut t, REG_ISR_STATUS), 0);
         t.raise_used_buffer_notification();
         assert_eq!(t.isr_status(), VIRTIO_PCI_ISR_QUEUE);
-        assert_eq!(read_reg(&mut t, REG_ISR_STATUS), u32::from(VIRTIO_PCI_ISR_QUEUE), "first read observes it");
-        assert_eq!(read_reg(&mut t, REG_ISR_STATUS), 0, "reading clears it: a second read sees nothing");
+        assert_eq!(
+            read_reg(&mut t, REG_ISR_STATUS),
+            u32::from(VIRTIO_PCI_ISR_QUEUE),
+            "first read observes it"
+        );
+        assert_eq!(
+            read_reg(&mut t, REG_ISR_STATUS),
+            0,
+            "reading clears it: a second read sees nothing"
+        );
     }
 
     #[test]
@@ -519,7 +596,11 @@ mod tests {
         assert_eq!(t.queue_ring_config(0), None, "queue PFN resets");
         assert_eq!(t.notify_count(), 0, "notify counters reset");
         write_reg(&mut t, REG_QUEUE_SELECT, 0);
-        assert_eq!(read_reg(&mut t, REG_QUEUE_SIZE), 256, "queue count/max persists (device identity)");
+        assert_eq!(
+            read_reg(&mut t, REG_QUEUE_SIZE),
+            256,
+            "queue count/max persists (device identity)"
+        );
     }
 
     #[test]
@@ -549,18 +630,29 @@ mod tests {
         let mut high = [0u8; 4];
         t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut low);
         t.pio_read(BASE + REG_DEVICE_CONFIG_START + 4, &mut high);
-        let capacity = u64::from(u32::from_le_bytes(low)) | (u64::from(u32::from_le_bytes(high)) << 32);
-        assert_eq!(capacity, 12345, "capacity round-trips as two little-endian 32-bit halves");
+        let capacity =
+            u64::from(u32::from_le_bytes(low)) | (u64::from(u32::from_le_bytes(high)) << 32);
+        assert_eq!(
+            capacity, 12345,
+            "capacity round-trips as two little-endian 32-bit halves"
+        );
     }
 
     #[test]
     fn device_config_is_read_only() {
         let mut t = VirtioPciTransport::new_blk(1);
         t.set_io_base(Some(BASE));
-        t.pio_write(BASE + REG_DEVICE_CONFIG_START, &0xFFFF_FFFFu32.to_le_bytes());
+        t.pio_write(
+            BASE + REG_DEVICE_CONFIG_START,
+            &0xFFFF_FFFFu32.to_le_bytes(),
+        );
         let mut low = [0u8; 4];
         t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut low);
-        assert_eq!(u32::from_le_bytes(low), 1, "a write to device config must be absorbed, not stored");
+        assert_eq!(
+            u32::from_le_bytes(low),
+            1,
+            "a write to device config must be absorbed, not stored"
+        );
     }
 
     #[test]
@@ -568,7 +660,10 @@ mod tests {
         let mut t = transport(); // new_rng: empty device_config
         let mut data = [0u8; 4];
         t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut data);
-        assert_eq!(data, [OPEN_BUS_BYTE; 4], "virtio-rng defines no device-specific config fields");
+        assert_eq!(
+            data, [OPEN_BUS_BYTE; 4],
+            "virtio-rng defines no device-specific config fields"
+        );
     }
 
     #[test]
@@ -578,6 +673,9 @@ mod tests {
         t.set_io_base(None);
         let mut data = [0u8; 4];
         t.pio_read(BASE + REG_GUEST_FEATURES, &mut data);
-        assert_eq!(data, [OPEN_BUS_BYTE; 4], "with the BAR unassigned, nothing should decode");
+        assert_eq!(
+            data, [OPEN_BUS_BYTE; 4],
+            "with the BAR unassigned, nothing should decode"
+        );
     }
 }

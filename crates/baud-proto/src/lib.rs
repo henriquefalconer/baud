@@ -21,15 +21,16 @@ pub const MAX_BYTES_LEN: usize = 64 * 1024 * 1024;
 pub const MAX_STRING_LIST_LEN: usize = 1024;
 
 mod bounded {
-    use serde::{Deserializer, de};
     use super::{MAX_BYTES_LEN, MAX_STRING_LIST_LEN};
+    use serde::{de, Deserializer};
 
     /// Deserialize a `Vec<u8>` capped at `MAX_BYTES_LEN`.
     pub fn bytes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let v: Vec<u8> = Vec::deserialize(d)?;
         if v.len() > MAX_BYTES_LEN {
             return Err(de::Error::custom(format!(
-                "byte field exceeds max length ({} > {MAX_BYTES_LEN})", v.len()
+                "byte field exceeds max length ({} > {MAX_BYTES_LEN})",
+                v.len()
             )));
         }
         Ok(v)
@@ -41,7 +42,8 @@ mod bounded {
         if let Some(ref b) = v {
             if b.len() > MAX_BYTES_LEN {
                 return Err(de::Error::custom(format!(
-                    "byte field exceeds max length ({} > {MAX_BYTES_LEN})", b.len()
+                    "byte field exceeds max length ({} > {MAX_BYTES_LEN})",
+                    b.len()
                 )));
             }
         }
@@ -53,7 +55,8 @@ mod bounded {
         let v: Vec<String> = Vec::deserialize(d)?;
         if v.len() > MAX_STRING_LIST_LEN {
             return Err(de::Error::custom(format!(
-                "string list exceeds max length ({} > {MAX_STRING_LIST_LEN})", v.len()
+                "string list exceeds max length ({} > {MAX_STRING_LIST_LEN})",
+                v.len()
             )));
         }
         Ok(v)
@@ -69,7 +72,8 @@ mod bounded {
         let v: Vec<T> = Vec::deserialize(d)?;
         if v.len() > MAX_STRING_LIST_LEN {
             return Err(de::Error::custom(format!(
-                "list field exceeds max length ({} > {MAX_STRING_LIST_LEN})", v.len()
+                "list field exceeds max length ({} > {MAX_STRING_LIST_LEN})",
+                v.len()
             )));
         }
         Ok(v)
@@ -189,7 +193,8 @@ impl<'de> serde::Deserialize<'de> for Value {
             ValueHelper::Bytes(b) => {
                 if b.len() > MAX_BYTES_LEN {
                     return Err(serde::de::Error::custom(format!(
-                        "Value::Bytes exceeds max length ({} > {MAX_BYTES_LEN})", b.len()
+                        "Value::Bytes exceeds max length ({} > {MAX_BYTES_LEN})",
+                        b.len()
                     )));
                 }
                 Ok(Value::Bytes(b))
@@ -212,7 +217,9 @@ pub struct Observation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Outcome {
-    GoalReached { metric: String },
+    GoalReached {
+        metric: String,
+    },
     Crash {
         node: Option<u16>,
         invariant: Option<String>,
@@ -443,11 +450,12 @@ pub fn with_extra_field(msg: &Msg) -> Result<Vec<u8>, EncodeError> {
     // For testing purposes, we encode a wrapper structure with an extra key.
     let mut out = vec![PROTO_VERSION];
     // Encode a ciborium Value representation with an extra field injected
-    let inner: ciborium::Value = ciborium::de::from_reader(&encoded[1..])
-        .map_err(|e| EncodeError(ciborium::ser::Error::Io(std::io::Error::new(
+    let inner: ciborium::Value = ciborium::de::from_reader(&encoded[1..]).map_err(|e| {
+        EncodeError(ciborium::ser::Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             e.to_string(),
-        ))))?;
+        )))
+    })?;
     // Build an augmented map
     let augmented = match inner {
         ciborium::Value::Map(mut pairs) => {
@@ -476,7 +484,9 @@ pub fn with_extra_field(msg: &Msg) -> Result<Vec<u8>, EncodeError> {
 pub struct EncodeError(pub ciborium::ser::Error<std::io::Error>);
 
 impl From<ciborium::ser::Error<std::io::Error>> for EncodeError {
-    fn from(e: ciborium::ser::Error<std::io::Error>) -> Self { EncodeError(e) }
+    fn from(e: ciborium::ser::Error<std::io::Error>) -> Self {
+        EncodeError(e)
+    }
 }
 
 impl std::fmt::Display for EncodeError {
@@ -521,8 +531,7 @@ mod tests {
 
         // Strategies for generating arbitrary Msg values
         fn arb_hash() -> impl Strategy<Value = Hash> {
-            prop::array::uniform32(0u8..)
-                .prop_map(Hash)
+            prop::array::uniform32(0u8..).prop_map(Hash)
         }
 
         fn arb_value() -> impl Strategy<Value = Value> {
@@ -535,23 +544,24 @@ mod tests {
         }
 
         fn arb_observation() -> impl Strategy<Value = Observation> {
-            (".*", 0u16.., arb_value(), 0u64..).prop_map(|(probe, node, value, step)| {
-                Observation { probe, node, value, step }
+            (".*", 0u16.., arb_value(), 0u64..).prop_map(|(probe, node, value, step)| Observation {
+                probe,
+                node,
+                value,
+                step,
             })
         }
 
         fn arb_markov_params() -> impl Strategy<Value = MarkovParams> {
-            (0.0f64..=1.0f64, 0.0f64..=1.0f64).prop_map(|(p_start, p_stop)| {
-                MarkovParams { p_start, p_stop }
-            })
+            (0.0f64..=1.0f64, 0.0f64..=1.0f64)
+                .prop_map(|(p_start, p_stop)| MarkovParams { p_start, p_stop })
         }
 
         fn arb_draw_request() -> impl Strategy<Value = DrawRequest> {
             prop_oneof![
                 (0u32..).prop_map(DrawRequest::Bits),
-                (prop::num::i64::ANY, prop::num::i64::ANY).prop_map(|(lo, hi)| {
-                    DrawRequest::Int { lo, hi }
-                }),
+                (prop::num::i64::ANY, prop::num::i64::ANY)
+                    .prop_map(|(lo, hi)| { DrawRequest::Int { lo, hi } }),
                 prop::collection::vec(0u32.., 0..8).prop_map(DrawRequest::Choice),
                 (0u32..).prop_map(|mean| DrawRequest::Hold { mean }),
                 arb_markov_params().prop_map(DrawRequest::Weather),
@@ -559,10 +569,15 @@ mod tests {
         }
 
         fn arb_syscall_record() -> impl Strategy<Value = SyscallRecord> {
-            (0u16.., 0u32.., arb_hash(), prop::num::i64::ANY, 0u64..)
-                .prop_map(|(node, sysno, args_digest, ret, vtime)| {
-                    SyscallRecord { node, sysno, args_digest, ret, vtime }
-                })
+            (0u16.., 0u32.., arb_hash(), prop::num::i64::ANY, 0u64..).prop_map(
+                |(node, sysno, args_digest, ret, vtime)| SyscallRecord {
+                    node,
+                    sysno,
+                    args_digest,
+                    ret,
+                    vtime,
+                },
+            )
         }
 
         fn arb_source() -> impl Strategy<Value = Source> {
@@ -570,10 +585,15 @@ mod tests {
         }
 
         fn arb_ebpf_record() -> impl Strategy<Value = EbpfRecord> {
-            (0u16.., ".*", 0u64.., 0u64.., arb_source())
-                .prop_map(|(node, event, value, vtime, source)| {
-                    EbpfRecord { node, event, value, vtime, source }
-                })
+            (0u16.., ".*", 0u64.., 0u64.., arb_source()).prop_map(
+                |(node, event, value, vtime, source)| EbpfRecord {
+                    node,
+                    event,
+                    value,
+                    vtime,
+                    source,
+                },
+            )
         }
 
         fn arb_pixfmt() -> impl Strategy<Value = PixFmt> {
@@ -585,9 +605,22 @@ mod tests {
         }
 
         fn arb_frame_record() -> impl Strategy<Value = FrameRecord> {
-            (0u16.., 0u64.., 0u32..=256u32, 0u32..=240u32, arb_pixfmt(), arb_hash())
-                .prop_map(|(node, step, width, height, format, hash)| {
-                    FrameRecord { node, step, width, height, format, hash, bytes: None }
+            (
+                0u16..,
+                0u64..,
+                0u32..=256u32,
+                0u32..=240u32,
+                arb_pixfmt(),
+                arb_hash(),
+            )
+                .prop_map(|(node, step, width, height, format, hash)| FrameRecord {
+                    node,
+                    step,
+                    width,
+                    height,
+                    format,
+                    hash,
+                    bytes: None,
                 })
         }
 
@@ -595,7 +628,10 @@ mod tests {
             prop_oneof![
                 // Hello
                 (".*", arb_hash()).prop_map(|(identity, manifest_hash)| {
-                    Msg::Hello { identity, manifest_hash }
+                    Msg::Hello {
+                        identity,
+                        manifest_hash,
+                    }
                 }),
                 // Observe
                 arb_observation().prop_map(Msg::Observe),
@@ -605,9 +641,15 @@ mod tests {
                     prop::option::of(".*"),
                     prop::option::of(prop::num::i32::ANY),
                     ".*"
-                ).prop_map(|(node, invariant, signal, detail)| {
-                    Msg::Outcome(Outcome::Crash { node, invariant, signal, detail })
-                }),
+                )
+                    .prop_map(|(node, invariant, signal, detail)| {
+                        Msg::Outcome(Outcome::Crash {
+                            node,
+                            invariant,
+                            signal,
+                            detail,
+                        })
+                    }),
                 // Outcome::GoalReached
                 ".*".prop_map(|metric| Msg::Outcome(Outcome::GoalReached { metric })),
                 // Eof
@@ -624,15 +666,13 @@ mod tests {
                 // Frame
                 arb_frame_record().prop_map(Msg::Frame),
                 // Checkpoint
-                (arb_hash(), 0u64..).prop_map(|(stream_hash, step)| {
-                    Msg::Checkpoint { stream_hash, step }
-                }),
+                (arb_hash(), 0u64..)
+                    .prop_map(|(stream_hash, step)| { Msg::Checkpoint { stream_hash, step } }),
                 // MarkBranch
                 (0u64..).prop_map(|step| Msg::MarkBranch { step }),
                 // Log
-                (prop::collection::vec(0u8.., 0..64), 0u64..).prop_map(|(bytes, step)| {
-                    Msg::Log { bytes, step }
-                }),
+                (prop::collection::vec(0u8.., 0..64), 0u64..)
+                    .prop_map(|(bytes, step)| { Msg::Log { bytes, step } }),
             ]
         }
 
@@ -694,15 +734,17 @@ mod tests {
         for (name, hex) in vectors {
             let bytes: Vec<u8> = (0..hex.len())
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i+2], 16).unwrap())
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
                 .collect();
-            let msg = decode(&bytes).unwrap_or_else(|e| {
-                panic!("golden vector '{name}' failed to decode: {e}")
-            });
+            let msg = decode(&bytes)
+                .unwrap_or_else(|e| panic!("golden vector '{name}' failed to decode: {e}"));
             // Re-encode and verify byte-stability
             let re = encode(&msg).unwrap();
             let re_hex: String = re.iter().map(|b| format!("{b:02x}")).collect();
-            assert_eq!(re_hex, *hex, "golden vector '{name}' re-encoded differently (wire format changed!)");
+            assert_eq!(
+                re_hex, *hex,
+                "golden vector '{name}' re-encoded differently (wire format changed!)"
+            );
         }
     }
 
@@ -711,22 +753,31 @@ mod tests {
     fn print_golden_vectors() {
         // Run with `cargo test print_golden_vectors -- --ignored --nocapture` to regenerate
         let msgs: &[(&str, Msg)] = &[
-            ("hello", Msg::Hello {
-                identity: "baud://tape/t1/run/r1".into(),
-                manifest_hash: Hash([0u8; 32]),
-            }),
-            ("observe_u64", Msg::Observe(Observation {
-                probe: "depth".into(),
-                node: 0,
-                value: Value::U64(42),
-                step: 100,
-            })),
-            ("outcome_crash", Msg::Outcome(Outcome::Crash {
-                node: Some(1),
-                invariant: Some("log_prefix_agreement".into()),
-                signal: None,
-                detail: "two leaders in same term".into(),
-            })),
+            (
+                "hello",
+                Msg::Hello {
+                    identity: "baud://tape/t1/run/r1".into(),
+                    manifest_hash: Hash([0u8; 32]),
+                },
+            ),
+            (
+                "observe_u64",
+                Msg::Observe(Observation {
+                    probe: "depth".into(),
+                    node: 0,
+                    value: Value::U64(42),
+                    step: 100,
+                }),
+            ),
+            (
+                "outcome_crash",
+                Msg::Outcome(Outcome::Crash {
+                    node: Some(1),
+                    invariant: Some("log_prefix_agreement".into()),
+                    signal: None,
+                    detail: "two leaders in same term".into(),
+                }),
+            ),
             ("eof", Msg::Eof),
         ];
         for (name, msg) in msgs {
@@ -784,14 +835,20 @@ mod tests {
 
     #[test]
     fn log_roundtrip() {
-        roundtrip(Msg::Log { bytes: b"guest log line".to_vec(), step: 7 });
+        roundtrip(Msg::Log {
+            bytes: b"guest log line".to_vec(),
+            step: 7,
+        });
     }
 
     #[test]
     fn wrong_version_rejected() {
         let mut bad = encode(&Msg::Eof).unwrap();
         bad[0] = 99;
-        assert!(matches!(decode(&bad), Err(DecodeError::UnsupportedVersion(99))));
+        assert!(matches!(
+            decode(&bad),
+            Err(DecodeError::UnsupportedVersion(99))
+        ));
     }
 
     #[test]
@@ -825,6 +882,9 @@ mod tests {
         let mut cbor_buf = Vec::new();
         ciborium::into_writer(&spec, &mut cbor_buf).unwrap();
         let result: Result<NodeSpec, _> = ciborium::from_reader(cbor_buf.as_slice());
-        assert!(result.is_err(), "NodeSpec with 1025 argv entries must be rejected by length cap");
+        assert!(
+            result.is_err(),
+            "NodeSpec with 1025 argv entries must be rejected by length cap"
+        );
     }
 }

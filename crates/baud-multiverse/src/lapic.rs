@@ -264,7 +264,10 @@ mod tests {
     }
 
     fn write_reg(l: &mut LocalApic, offset: u64, value: u32) {
-        l.mmio_write(crate::layout::LAPIC_MMIO_BASE + offset, &value.to_le_bytes());
+        l.mmio_write(
+            crate::layout::LAPIC_MMIO_BASE + offset,
+            &value.to_le_bytes(),
+        );
     }
 
     #[test]
@@ -279,8 +282,15 @@ mod tests {
     fn version_register_reports_an_integrated_apic_with_seven_lvt_entries() {
         let mut l = LocalApic::default();
         let lvr = read_reg(&mut l, REG_LVR);
-        assert!(lvr & 0xff >= 0x10, "version must read >= 0x10 for lapic_is_integrated()");
-        assert_eq!((lvr >> 16) & 0xff, 6, "Max LVT Entry = 6 -- 7 LVT registers total");
+        assert!(
+            lvr & 0xff >= 0x10,
+            "version must read >= 0x10 for lapic_is_integrated()"
+        );
+        assert_eq!(
+            (lvr >> 16) & 0xff,
+            6,
+            "Max LVT Entry = 6 -- 7 LVT registers total"
+        );
     }
 
     #[test]
@@ -290,7 +300,11 @@ mod tests {
             for i in 0..8 {
                 let offset = base + i * 0x10;
                 write_reg(&mut l, offset, 0xffff_ffff);
-                assert_eq!(read_reg(&mut l, offset), 0, "offset {offset:#x} must always read 0");
+                assert_eq!(
+                    read_reg(&mut l, offset),
+                    0,
+                    "offset {offset:#x} must always read 0"
+                );
             }
         }
     }
@@ -310,8 +324,15 @@ mod tests {
         let mut l = LocalApic::default();
         write_reg(&mut l, REG_ICR_LOW, 0xffff_ffff);
         let icr_low = read_reg(&mut l, REG_ICR_LOW);
-        assert_eq!(icr_low & ICR_DELIVERY_STATUS_BIT, 0, "delivery-status bit must never read set");
-        assert_eq!(icr_low, !ICR_DELIVERY_STATUS_BIT, "every other bit round-trips");
+        assert_eq!(
+            icr_low & ICR_DELIVERY_STATUS_BIT,
+            0,
+            "delivery-status bit must never read set"
+        );
+        assert_eq!(
+            icr_low, !ICR_DELIVERY_STATUS_BIT,
+            "every other bit round-trips"
+        );
     }
 
     #[test]
@@ -332,7 +353,11 @@ mod tests {
             REG_SPIV,
         ] {
             write_reg(&mut l, offset, 0x1234_5678);
-            assert_eq!(read_reg(&mut l, offset), 0x1234_5678, "offset {offset:#x} must round-trip");
+            assert_eq!(
+                read_reg(&mut l, offset),
+                0x1234_5678,
+                "offset {offset:#x} must round-trip"
+            );
         }
     }
 
@@ -351,7 +376,11 @@ mod tests {
         let mut l = LocalApic::default();
         write_reg(&mut l, REG_TMICT, 0xffff_ffff);
         write_reg(&mut l, REG_TDCR, 0x3);
-        assert_eq!(read_reg(&mut l, REG_TMCCT), 0xffff_ffff, "not a functioning timer -- see module doc");
+        assert_eq!(
+            read_reg(&mut l, REG_TMCCT),
+            0xffff_ffff,
+            "not a functioning timer -- see module doc"
+        );
         assert_eq!(read_reg(&mut l, REG_TMICT), 0xffff_ffff);
         assert_eq!(read_reg(&mut l, REG_TDCR), 0x3);
         // A second read must be identical -- proving nothing decrements between reads.
@@ -363,7 +392,10 @@ mod tests {
         let mut l = LocalApic::default();
         let before = l;
         write_reg(&mut l, 0x0B0, 0xffff_ffff);
-        assert_eq!(l.spurious_interrupt_vector, before.spurious_interrupt_vector);
+        assert_eq!(
+            l.spurious_interrupt_vector,
+            before.spurious_interrupt_vector
+        );
         assert_eq!(l.lvt_timer, before.lvt_timer);
     }
 
@@ -371,9 +403,15 @@ mod tests {
     fn addresses_outside_the_window_are_open_bus() {
         let mut l = LocalApic::default();
         let mut data = [0u8; 4];
-        l.mmio_read(crate::layout::LAPIC_MMIO_BASE + LocalApic::WINDOW_LEN, &mut data);
+        l.mmio_read(
+            crate::layout::LAPIC_MMIO_BASE + LocalApic::WINDOW_LEN,
+            &mut data,
+        );
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
-        assert_eq!(LocalApic::in_range(crate::layout::LAPIC_MMIO_BASE - 1), None);
+        assert_eq!(
+            LocalApic::in_range(crate::layout::LAPIC_MMIO_BASE - 1),
+            None
+        );
         assert_eq!(LocalApic::in_range(crate::layout::LAPIC_MMIO_BASE), Some(0));
     }
 

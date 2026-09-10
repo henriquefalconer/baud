@@ -76,7 +76,9 @@ pub struct Console {
 
 impl Default for Console {
     fn default() -> Self {
-        Console { serial: Serial::new(NoIrqTrigger::default(), Vec::new()) }
+        Console {
+            serial: Serial::new(NoIrqTrigger::default(), Vec::new()),
+        }
     }
 }
 
@@ -89,7 +91,9 @@ impl Console {
     /// implementor), so pre-filling it and letting subsequent `write()` calls append is exact — no
     /// separate "history" field is needed.
     pub fn with_output(output: Vec<u8>) -> Self {
-        Console { serial: Serial::new(NoIrqTrigger::default(), output) }
+        Console {
+            serial: Serial::new(NoIrqTrigger::default(), output),
+        }
     }
 
     /// Bytes the guest has written to the UART's transmit register so far, in order.
@@ -309,7 +313,10 @@ impl DeviceBus {
     /// module (struct-update syntax like `DeviceBus { tape, ..Default::default() }` cannot be used
     /// from outside `console.rs`).
     pub fn with_tape(tape: Vec<u8>) -> Self {
-        DeviceBus { tape: TapeBus::new(tape), ..Default::default() }
+        DeviceBus {
+            tape: TapeBus::new(tape),
+            ..Default::default()
+        }
     }
 
     /// The dual-8259 PIC's current bookkeeping state — exposed so a caller/test can confirm a
@@ -335,7 +342,9 @@ impl DeviceBus {
     /// convention) — call [`Self::seed_virtio_rng_entropy`] before any guest code runs to make it
     /// tape-derived instead.
     pub fn enable_virtio_rng(&mut self) {
-        self.virtio_rng = Some(VirtioMmioTransport::new_rng(crate::layout::VIRTIO_MMIO_RNG_BASE));
+        self.virtio_rng = Some(VirtioMmioTransport::new_rng(
+            crate::layout::VIRTIO_MMIO_RNG_BASE,
+        ));
         #[cfg(target_os = "linux")]
         {
             self.virtio_rng_queue = None;
@@ -357,7 +366,8 @@ impl DeviceBus {
     /// constructor calls this, so bus 0's enumeration is unchanged for any caller that never opts
     /// in.
     pub fn enable_virtio_pci_rng(&mut self) {
-        self.pci.attach_virtio_rng(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
+        self.pci
+            .attach_virtio_rng(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
         self.virtio_pci_rng = Some(VirtioPciTransport::new_rng());
     }
 
@@ -395,8 +405,13 @@ impl DeviceBus {
     /// interrupt` is the real caller, invoked with the guest's real memory after an `MmioWrite`
     /// lands on `QueueNotify`.
     #[cfg(target_os = "linux")]
-    pub fn service_virtio_rng<M: GuestMemoryBackend>(&mut self, mem: &M) -> Result<u32, VirtqueueError> {
-        let Some(transport) = self.virtio_rng.as_ref() else { return Ok(0) };
+    pub fn service_virtio_rng<M: GuestMemoryBackend>(
+        &mut self,
+        mem: &M,
+    ) -> Result<u32, VirtqueueError> {
+        let Some(transport) = self.virtio_rng.as_ref() else {
+            return Ok(0);
+        };
         let Some(config) = transport.queue_ring_config(0) else {
             self.virtio_rng_queue = None; // not ready (e.g. just reset): drop any stale cursor
             return Ok(0);
@@ -438,7 +453,8 @@ impl DeviceBus {
     pub fn enable_virtio_pci_blk(&mut self, base_image: impl Into<crate::virtio_blk::BlockBase>) {
         let base = base_image.into();
         let capacity_sectors = base.len() as u64 / crate::virtio_blk::SECTOR_SIZE;
-        self.pci.attach_virtio_blk(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
+        self.pci
+            .attach_virtio_blk(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
         self.virtio_pci_blk = Some(VirtioPciTransport::new_blk(capacity_sectors));
         #[cfg(target_os = "linux")]
         {
@@ -468,8 +484,13 @@ impl DeviceBus {
     /// also raises the transport's ISR "used buffer" bit, same convention as
     /// [`Self::service_virtio_rng`].
     #[cfg(target_os = "linux")]
-    pub fn service_virtio_blk<M: GuestMemoryBackend>(&mut self, mem: &M) -> Result<u32, VirtqueueError> {
-        let Some(transport) = self.virtio_pci_blk.as_ref() else { return Ok(0) };
+    pub fn service_virtio_blk<M: GuestMemoryBackend>(
+        &mut self,
+        mem: &M,
+    ) -> Result<u32, VirtqueueError> {
+        let Some(transport) = self.virtio_pci_blk.as_ref() else {
+            return Ok(0);
+        };
         let Some(config) = transport.queue_ring_config(0) else {
             self.virtio_blk_queue = None; // not ready (e.g. just reset): drop any stale cursor
             return Ok(0);
@@ -478,8 +499,13 @@ impl DeviceBus {
             self.virtio_blk_queue = Some(SplitVirtqueue::new(config));
         }
         let queue = self.virtio_blk_queue.as_mut().expect("just set above");
-        let store = self.virtio_blk_store.as_mut().expect("installed alongside the transport by enable_virtio_pci_blk");
-        let processed = queue.process_available_chains(mem, |mem, chain| crate::virtio_blk::service_request(mem, chain, store))?;
+        let store = self
+            .virtio_blk_store
+            .as_mut()
+            .expect("installed alongside the transport by enable_virtio_pci_blk");
+        let processed = queue.process_available_chains(mem, |mem, chain| {
+            crate::virtio_blk::service_request(mem, chain, store)
+        })?;
         if processed > 0 {
             self.virtio_pci_blk
                 .as_mut()
@@ -534,10 +560,24 @@ impl Bus for DeviceBus {
             self.pic.pio_read(port, data);
         } else if PciHostBridge::in_range(port) {
             self.pci.pio_read(port, data);
-        } else if self.virtio_pci_rng.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
-            self.virtio_pci_rng.as_mut().expect("checked Some above").pio_read(port, data);
-        } else if self.virtio_pci_blk.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
-            self.virtio_pci_blk.as_mut().expect("checked Some above").pio_read(port, data);
+        } else if self
+            .virtio_pci_rng
+            .as_ref()
+            .is_some_and(|t| t.in_range(port).is_some())
+        {
+            self.virtio_pci_rng
+                .as_mut()
+                .expect("checked Some above")
+                .pio_read(port, data);
+        } else if self
+            .virtio_pci_blk
+            .as_ref()
+            .is_some_and(|t| t.in_range(port).is_some())
+        {
+            self.virtio_pci_blk
+                .as_mut()
+                .expect("checked Some above")
+                .pio_read(port, data);
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -563,10 +603,24 @@ impl Bus for DeviceBus {
             if let Some(transport) = self.virtio_pci_blk.as_mut() {
                 transport.set_io_base(self.pci.virtio_blk_io_base());
             }
-        } else if self.virtio_pci_rng.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
-            self.virtio_pci_rng.as_mut().expect("checked Some above").pio_write(port, data);
-        } else if self.virtio_pci_blk.as_ref().is_some_and(|t| t.in_range(port).is_some()) {
-            self.virtio_pci_blk.as_mut().expect("checked Some above").pio_write(port, data);
+        } else if self
+            .virtio_pci_rng
+            .as_ref()
+            .is_some_and(|t| t.in_range(port).is_some())
+        {
+            self.virtio_pci_rng
+                .as_mut()
+                .expect("checked Some above")
+                .pio_write(port, data);
+        } else if self
+            .virtio_pci_blk
+            .as_ref()
+            .is_some_and(|t| t.in_range(port).is_some())
+        {
+            self.virtio_pci_blk
+                .as_mut()
+                .expect("checked Some above")
+                .pio_write(port, data);
         } else {
             self.fallback.pio_write(port, data);
         }
@@ -620,7 +674,11 @@ mod tests {
         assert_eq!(written, 2);
         let mut lsr = [0u8; 1];
         console.pio_read(COM1_BASE + 5, &mut lsr);
-        assert_eq!(lsr[0] & 0b0000_0001, 1, "LSR data-ready bit must be set once input is queued");
+        assert_eq!(
+            lsr[0] & 0b0000_0001,
+            1,
+            "LSR data-ready bit must be set once input is queued"
+        );
         let mut byte = [0u8; 1];
         console.pio_read(COM1_BASE, &mut byte);
         assert_eq!(byte, *b"h");
@@ -635,7 +693,11 @@ mod tests {
         let mut console = Console::default();
         let mut lsr = [0u8; 1];
         console.pio_read(COM1_BASE + 5, &mut lsr);
-        assert_eq!(lsr[0] & 0b0110_0000, 0b0110_0000, "THR-empty and idle bits must both be set");
+        assert_eq!(
+            lsr[0] & 0b0110_0000,
+            0b0110_0000,
+            "THR-empty and idle bits must both be set"
+        );
     }
 
     #[test]
@@ -673,7 +735,11 @@ mod tests {
         cmos.pio_write(CMOS_ADDR_PORT, &[0x0A]); // select Status Register A
         let mut value = [0xFFu8]; // start from a value that WOULD show UIP set, to prove it's overwritten
         cmos.pio_read(CMOS_DATA_PORT, &mut value);
-        assert_eq!(value[0] & 0b1000_0000, 0, "UIP bit must read clear or the guest's poll loop hangs");
+        assert_eq!(
+            value[0] & 0b1000_0000,
+            0,
+            "UIP bit must read clear or the guest's poll loop hangs"
+        );
     }
 
     #[test]
@@ -681,7 +747,11 @@ mod tests {
         let mut bus = DeviceBus::default();
         let mut value = [0xFFu8];
         bus.pio_read(CMOS_DATA_PORT, &mut value);
-        assert_eq!(value, [0], "CMOS data-port reads must not fall through to open-bus (0xFF)");
+        assert_eq!(
+            value,
+            [0],
+            "CMOS data-port reads must not fall through to open-bus (0xFF)"
+        );
     }
 
     #[test]
@@ -705,12 +775,22 @@ mod tests {
         use crate::tape_bus::{TapeBus, TAPE_DEVICE_BASE};
         use baud_tape_device::{reg, ControlOp};
 
-        let mut bus = DeviceBus { tape: TapeBus::new(vec![0x42]), ..Default::default() };
+        let mut bus = DeviceBus {
+            tape: TapeBus::new(vec![0x42]),
+            ..Default::default()
+        };
         let mut data = [0u8; 1];
         bus.pio_read(TAPE_DEVICE_BASE + reg::DATA, &mut data);
-        assert_eq!(data, [0x42], "tape device window must not fall through to open-bus");
+        assert_eq!(
+            data,
+            [0x42],
+            "tape device window must not fall through to open-bus"
+        );
 
-        bus.pio_write(TAPE_DEVICE_BASE + reg::CONTROL, &[ControlOp::MarkBranch as u8]);
+        bus.pio_write(
+            TAPE_DEVICE_BASE + reg::CONTROL,
+            &[ControlOp::MarkBranch as u8],
+        );
         assert_eq!(bus.tape.device_mut().drain_records().len(), 1);
     }
 
@@ -733,21 +813,32 @@ mod tests {
         // Before any guest write, the transport's window is not yet live.
         let mut probe = [0u8; 4];
         bus.pio_read(ASSIGNED_BASE, &mut probe);
-        assert_eq!(probe, [OPEN_BUS_BYTE; 4], "unassigned BAR0: nothing should decode yet");
+        assert_eq!(
+            probe, [OPEN_BUS_BYTE; 4],
+            "unassigned BAR0: nothing should decode yet"
+        );
 
         // A real guest's __pci_read_base: size the BAR, then assign a real base.
         bus.pio_write(PCI_CONFIG_ADDRESS, &select_bar0.to_le_bytes());
         bus.pio_write(PCI_CONFIG_DATA, &0xFFFF_FFFFu32.to_le_bytes());
         let mut size_probe = [0u8; 4];
         bus.pio_read(PCI_CONFIG_DATA, &mut size_probe);
-        assert_ne!(u32::from_le_bytes(size_probe), 0, "a real device must answer the sizing probe");
+        assert_ne!(
+            u32::from_le_bytes(size_probe),
+            0,
+            "a real device must answer the sizing probe"
+        );
 
         bus.pio_write(PCI_CONFIG_DATA, &(ASSIGNED_BASE as u32).to_le_bytes());
 
         // Now the transport's own window at the assigned base is live.
         let mut data = [0u8; 4];
         bus.pio_read(ASSIGNED_BASE, &mut data); // REG_HOST_FEATURES: virtio-rng offers none
-        assert_eq!(u32::from_le_bytes(data), 0, "the real transport now answers, not open bus");
+        assert_eq!(
+            u32::from_le_bytes(data),
+            0,
+            "the real transport now answers, not open bus"
+        );
         assert_eq!(
             bus.virtio_pci_rng().and_then(|t| t.io_base()),
             Some(ASSIGNED_BASE),
@@ -775,13 +866,20 @@ mod tests {
 
         let mut probe = [0u8; 4];
         bus.pio_read(ASSIGNED_BASE, &mut probe);
-        assert_eq!(probe, [OPEN_BUS_BYTE; 4], "unassigned BAR0: nothing should decode yet");
+        assert_eq!(
+            probe, [OPEN_BUS_BYTE; 4],
+            "unassigned BAR0: nothing should decode yet"
+        );
 
         bus.pio_write(PCI_CONFIG_ADDRESS, &select_bar0.to_le_bytes());
         bus.pio_write(PCI_CONFIG_DATA, &0xFFFF_FFFFu32.to_le_bytes());
         let mut size_probe = [0u8; 4];
         bus.pio_read(PCI_CONFIG_DATA, &mut size_probe);
-        assert_ne!(u32::from_le_bytes(size_probe), 0, "a real device must answer the sizing probe");
+        assert_ne!(
+            u32::from_le_bytes(size_probe),
+            0,
+            "a real device must answer the sizing probe"
+        );
 
         bus.pio_write(PCI_CONFIG_DATA, &(ASSIGNED_BASE as u32).to_le_bytes());
 
@@ -794,7 +892,11 @@ mod tests {
         // (the legacy interface's fixed register block ends there, virtio spec's own layout).
         let mut low = [0u8; 4];
         bus.pio_read(ASSIGNED_BASE + 0x14, &mut low);
-        assert_eq!(u32::from_le_bytes(low), 8, "capacity_sectors for a 4096-byte image");
+        assert_eq!(
+            u32::from_le_bytes(low),
+            8,
+            "capacity_sectors for a 4096-byte image"
+        );
     }
 
     #[test]
@@ -802,7 +904,10 @@ mod tests {
         let mut bus = DeviceBus::default();
         let mut data = [0u8; 4];
         bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE, &mut data);
-        assert_eq!(data, [OPEN_BUS_BYTE; 4], "no MMIO device is modeled until opted in");
+        assert_eq!(
+            data, [OPEN_BUS_BYTE; 4],
+            "no MMIO device is modeled until opted in"
+        );
 
         bus.enable_virtio_rng();
         bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE, &mut data);
@@ -812,7 +917,10 @@ mod tests {
             "once enabled, the window must route to the real transport, not open bus"
         );
         // An address just past the device's window still falls through to open bus.
-        bus.mmio_read(crate::layout::VIRTIO_MMIO_RNG_BASE + crate::layout::VIRTIO_MMIO_RNG_LEN, &mut data);
+        bus.mmio_read(
+            crate::layout::VIRTIO_MMIO_RNG_BASE + crate::layout::VIRTIO_MMIO_RNG_LEN,
+            &mut data,
+        );
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
     }
 
@@ -824,14 +932,23 @@ mod tests {
         let mut bus = DeviceBus::default();
         let mut data = [0u8; 4];
         bus.mmio_read(crate::layout::LAPIC_MMIO_BASE + 0x30, &mut data); // LVR
-        assert_ne!(data, [OPEN_BUS_BYTE; 4], "the LAPIC version register must not be open bus");
+        assert_ne!(
+            data, [OPEN_BUS_BYTE; 4],
+            "the LAPIC version register must not be open bus"
+        );
 
         let vector = 0x2ecu32;
-        bus.mmio_write(crate::layout::LAPIC_MMIO_BASE + 0x320, &vector.to_le_bytes()); // LVT Timer
+        bus.mmio_write(
+            crate::layout::LAPIC_MMIO_BASE + 0x320,
+            &vector.to_le_bytes(),
+        ); // LVT Timer
         assert_eq!(bus.lapic().lvt_timer(), vector);
 
         // Just past the 4 KiB window still falls through to open bus.
-        bus.mmio_read(crate::layout::LAPIC_MMIO_BASE + LocalApic::WINDOW_LEN, &mut data);
+        bus.mmio_read(
+            crate::layout::LAPIC_MMIO_BASE + LocalApic::WINDOW_LEN,
+            &mut data,
+        );
         assert_eq!(data, [OPEN_BUS_BYTE; 4]);
     }
 
@@ -889,7 +1006,8 @@ mod tests {
 mod virtio_rng_service_tests {
     use super::*;
     use crate::virtio_mmio::{
-        VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
+        VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER, VIRTIO_STATUS_DRIVER_OK,
+        VIRTIO_STATUS_FEATURES_OK,
     };
     use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
@@ -906,7 +1024,10 @@ mod virtio_rng_service_tests {
     }
 
     fn write_reg(bus: &mut DeviceBus, offset: u64, value: u32) {
-        bus.mmio_write(crate::layout::VIRTIO_MMIO_RNG_BASE + offset, &value.to_le_bytes());
+        bus.mmio_write(
+            crate::layout::VIRTIO_MMIO_RNG_BASE + offset,
+            &value.to_le_bytes(),
+        );
     }
 
     fn read_reg(bus: &mut DeviceBus, offset: u64) -> u32 {
@@ -926,7 +1047,11 @@ mod virtio_rng_service_tests {
         let offered = read_reg(bus, 0x010);
         write_reg(bus, 0x024, 1); // DriverFeaturesSel = word 1
         write_reg(bus, 0x020, offered);
-        write_reg(bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
+        write_reg(
+            bus,
+            0x070,
+            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK,
+        );
 
         write_reg(bus, 0x030, 0); // QueueSel = 0
         write_reg(bus, 0x038, 256); // QueueNum
@@ -937,7 +1062,10 @@ mod virtio_rng_service_tests {
         write_reg(
             bus,
             0x070,
-            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK,
+            VIRTIO_STATUS_ACKNOWLEDGE
+                | VIRTIO_STATUS_DRIVER
+                | VIRTIO_STATUS_FEATURES_OK
+                | VIRTIO_STATUS_DRIVER_OK,
         );
 
         let mut raw = [0u8; 16];
@@ -945,16 +1073,20 @@ mod virtio_rng_service_tests {
         raw[8..12].copy_from_slice(&len.to_le_bytes());
         raw[12..14].copy_from_slice(&2u16.to_le_bytes()); // VIRTQ_DESC_F_WRITE
         raw[14..16].copy_from_slice(&0u16.to_le_bytes());
-        mem.write_slice(&raw, GuestAddress(DESC_BASE)).expect("write descriptor");
-        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(AVAIL_BASE + 2)).expect("avail.idx = 1");
-        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(AVAIL_BASE + 4)).expect("avail.ring[0] = 0");
+        mem.write_slice(&raw, GuestAddress(DESC_BASE))
+            .expect("write descriptor");
+        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(AVAIL_BASE + 2))
+            .expect("avail.idx = 1");
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(AVAIL_BASE + 4))
+            .expect("avail.ring[0] = 0");
 
         write_reg(bus, 0x050, 0); // QueueNotify
     }
 
     fn read_used_buffer(mem: &GuestMemory, len: usize) -> Vec<u8> {
         let mut buf = vec![0u8; len];
-        mem.read_slice(&mut buf, GuestAddress(BUF_BASE)).expect("read filled buffer");
+        mem.read_slice(&mut buf, GuestAddress(BUF_BASE))
+            .expect("read filled buffer");
         buf
     }
 
@@ -962,10 +1094,18 @@ mod virtio_rng_service_tests {
     fn service_virtio_rng_is_a_harmless_no_op_before_enable_ready_or_notify() {
         let mem = test_guest_mem();
         let mut bus = DeviceBus::default();
-        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0, "virtio-rng was never enabled");
+        assert_eq!(
+            bus.service_virtio_rng(&mem).unwrap(),
+            0,
+            "virtio-rng was never enabled"
+        );
 
         bus.enable_virtio_rng();
-        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0, "queue never negotiated/ready");
+        assert_eq!(
+            bus.service_virtio_rng(&mem).unwrap(),
+            0,
+            "queue never negotiated/ready"
+        );
     }
 
     #[test]
@@ -978,9 +1118,17 @@ mod virtio_rng_service_tests {
 
         let processed = bus.service_virtio_rng(&mem).unwrap();
         assert_eq!(processed, 1);
-        assert_eq!(read_reg(&mut bus, 0x044), 1, "queue is still ready after servicing");
+        assert_eq!(
+            read_reg(&mut bus, 0x044),
+            1,
+            "queue is still ready after servicing"
+        );
         let written = read_used_buffer(&mem, 32);
-        assert_ne!(written, vec![0u8; 32], "the buffer must actually be filled, not left zeroed");
+        assert_ne!(
+            written,
+            vec![0u8; 32],
+            "the buffer must actually be filled, not left zeroed"
+        );
 
         // A second call with no further driver activity drains nothing new.
         assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0);
@@ -995,7 +1143,11 @@ mod virtio_rng_service_tests {
         let mut bus = DeviceBus::default();
         bus.enable_virtio_rng();
         bus.seed_virtio_rng_entropy(1);
-        assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0, "nothing raised before any activity");
+        assert_eq!(
+            read_reg(&mut bus, REG_INTERRUPT_STATUS),
+            0,
+            "nothing raised before any activity"
+        );
 
         negotiate_and_post_one_descriptor(&mut bus, &mem, 8);
         // QueueNotify alone (before the caller drains the ring) must not raise it -- only actually
@@ -1004,10 +1156,18 @@ mod virtio_rng_service_tests {
         assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0);
 
         assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 1);
-        assert_ne!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0, "draining a chain raises the vring bit");
+        assert_ne!(
+            read_reg(&mut bus, REG_INTERRUPT_STATUS),
+            0,
+            "draining a chain raises the vring bit"
+        );
 
         write_reg(&mut bus, REG_INTERRUPT_ACK, u32::MAX);
-        assert_eq!(read_reg(&mut bus, REG_INTERRUPT_STATUS), 0, "driver ack clears it");
+        assert_eq!(
+            read_reg(&mut bus, REG_INTERRUPT_STATUS),
+            0,
+            "driver ack clears it"
+        );
 
         // Nothing left to drain, so servicing again must not re-raise it.
         assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0);
@@ -1026,8 +1186,16 @@ mod virtio_rng_service_tests {
             read_used_buffer(&mem, 24)
         };
 
-        assert_eq!(bytes_from(7), bytes_from(7), "same seed must reproduce the identical byte stream");
-        assert_ne!(bytes_from(7), bytes_from(8), "a different seed must change the byte stream");
+        assert_eq!(
+            bytes_from(7),
+            bytes_from(7),
+            "same seed must reproduce the identical byte stream"
+        );
+        assert_ne!(
+            bytes_from(7),
+            bytes_from(8),
+            "a different seed must change the byte stream"
+        );
     }
 
     #[test]
@@ -1042,7 +1210,11 @@ mod virtio_rng_service_tests {
         // Device reset (status = 0) clears queue readiness; a real driver would renegotiate with
         // potentially different ring addresses before posting again.
         write_reg(&mut bus, 0x070, 0);
-        assert_eq!(bus.service_virtio_rng(&mem).unwrap(), 0, "queue is unready right after reset");
+        assert_eq!(
+            bus.service_virtio_rng(&mem).unwrap(),
+            0,
+            "queue is unready right after reset"
+        );
 
         const NEW_DESC_BASE: u64 = 0x5000;
         const NEW_AVAIL_BASE: u64 = 0x6000;
@@ -1050,7 +1222,11 @@ mod virtio_rng_service_tests {
         const NEW_BUF_BASE: u64 = 0x8000;
 
         write_reg(&mut bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE);
-        write_reg(&mut bus, 0x070, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+        write_reg(
+            &mut bus,
+            0x070,
+            VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER,
+        );
         write_reg(&mut bus, 0x014, 1);
         let offered = read_reg(&mut bus, 0x010);
         write_reg(&mut bus, 0x024, 1);
@@ -1081,14 +1257,20 @@ mod virtio_rng_service_tests {
         raw[12..14].copy_from_slice(&2u16.to_le_bytes());
         raw[14..16].copy_from_slice(&0u16.to_le_bytes());
         mem.write_slice(&raw, GuestAddress(NEW_DESC_BASE)).unwrap();
-        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(NEW_AVAIL_BASE + 2)).unwrap();
-        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(NEW_AVAIL_BASE + 4)).unwrap();
+        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(NEW_AVAIL_BASE + 2))
+            .unwrap();
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(NEW_AVAIL_BASE + 4))
+            .unwrap();
         write_reg(&mut bus, 0x050, 0);
 
         let processed = bus.service_virtio_rng(&mem).unwrap();
-        assert_eq!(processed, 1, "the rebuilt cursor must walk the new ring, not a stale one");
+        assert_eq!(
+            processed, 1,
+            "the rebuilt cursor must walk the new ring, not a stale one"
+        );
         let mut written = [0u8; 8];
-        mem.read_slice(&mut written, GuestAddress(NEW_BUF_BASE)).unwrap();
+        mem.read_slice(&mut written, GuestAddress(NEW_BUF_BASE))
+            .unwrap();
         assert_ne!(written, [0u8; 8]);
     }
 }
@@ -1178,28 +1360,38 @@ mod virtio_blk_service_tests {
         header[8..16].copy_from_slice(&sector.to_le_bytes());
         mem.write_slice(&header, GuestAddress(HEADER_BASE)).unwrap();
 
-        let write_descriptor = |index: u16, addr: u64, len: u32, write: bool, next_flag: bool, next: u16| {
-            let mut raw = [0u8; 16];
-            raw[0..8].copy_from_slice(&addr.to_le_bytes());
-            raw[8..12].copy_from_slice(&len.to_le_bytes());
-            let mut flags = 0u16;
-            if write {
-                flags |= 2; // VIRTQ_DESC_F_WRITE
-            }
-            if next_flag {
-                flags |= 1; // VIRTQ_DESC_F_NEXT
-            }
-            raw[12..14].copy_from_slice(&flags.to_le_bytes());
-            raw[14..16].copy_from_slice(&next.to_le_bytes());
-            mem.write_slice(&raw, GuestAddress(layout.desc + u64::from(index) * 16)).unwrap();
-        };
+        let write_descriptor =
+            |index: u16, addr: u64, len: u32, write: bool, next_flag: bool, next: u16| {
+                let mut raw = [0u8; 16];
+                raw[0..8].copy_from_slice(&addr.to_le_bytes());
+                raw[8..12].copy_from_slice(&len.to_le_bytes());
+                let mut flags = 0u16;
+                if write {
+                    flags |= 2; // VIRTQ_DESC_F_WRITE
+                }
+                if next_flag {
+                    flags |= 1; // VIRTQ_DESC_F_NEXT
+                }
+                raw[12..14].copy_from_slice(&flags.to_le_bytes());
+                raw[14..16].copy_from_slice(&next.to_le_bytes());
+                mem.write_slice(&raw, GuestAddress(layout.desc + u64::from(index) * 16))
+                    .unwrap();
+            };
         write_descriptor(0, HEADER_BASE, 16, false, true, 1);
         write_descriptor(1, DATA_BASE, data_len, data_write, true, 2);
         write_descriptor(2, STATUS_BASE, 1, true, false, 0);
 
         let ring_slot = call_number % QUEUE_NUM_MAX as u16;
-        mem.write_slice(&(call_number + 1).to_le_bytes(), GuestAddress(layout.driver + 2)).unwrap(); // avail.idx
-        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(layout.driver + 4 + u64::from(ring_slot) * 2)).unwrap(); // ring[slot] = head 0
+        mem.write_slice(
+            &(call_number + 1).to_le_bytes(),
+            GuestAddress(layout.driver + 2),
+        )
+        .unwrap(); // avail.idx
+        mem.write_slice(
+            &0u16.to_le_bytes(),
+            GuestAddress(layout.driver + 4 + u64::from(ring_slot) * 2),
+        )
+        .unwrap(); // ring[slot] = head 0
 
         bus.pio_write(IO_BASE + REG_QUEUE_NOTIFY, &0u16.to_le_bytes());
     }
@@ -1208,10 +1400,18 @@ mod virtio_blk_service_tests {
     fn service_virtio_blk_is_a_harmless_no_op_before_enable_ready_or_notify() {
         let mem = test_guest_mem();
         let mut bus = DeviceBus::default();
-        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 0, "virtio-blk was never enabled");
+        assert_eq!(
+            bus.service_virtio_blk(&mem).unwrap(),
+            0,
+            "virtio-blk was never enabled"
+        );
 
         bus.enable_virtio_pci_blk(base_image(16));
-        assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 0, "queue never negotiated/ready");
+        assert_eq!(
+            bus.service_virtio_blk(&mem).unwrap(),
+            0,
+            "queue never negotiated/ready"
+        );
     }
 
     #[test]
@@ -1221,7 +1421,15 @@ mod virtio_blk_service_tests {
         bus.enable_virtio_pci_blk(base_image(16));
         assign_bar0(&mut bus);
 
-        negotiate_and_post_request(&mut bus, &mem, 0, 0 /* VIRTIO_BLK_T_IN */, 2, SECTOR_SIZE as u32, true);
+        negotiate_and_post_request(
+            &mut bus,
+            &mem,
+            0,
+            0, /* VIRTIO_BLK_T_IN */
+            2,
+            SECTOR_SIZE as u32,
+            true,
+        );
 
         let mut isr = [0u8; 1];
         bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
@@ -1232,11 +1440,17 @@ mod virtio_blk_service_tests {
 
         let mut data = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut data, GuestAddress(0x201_000)).unwrap();
-        let expected: Vec<u8> = (2 * SECTOR_SIZE..3 * SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
-        assert_eq!(data, expected, "sector 2's real content from the base image");
+        let expected: Vec<u8> = (2 * SECTOR_SIZE..3 * SECTOR_SIZE)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        assert_eq!(
+            data, expected,
+            "sector 2's real content from the base image"
+        );
 
         let mut status = [0u8; 1];
-        mem.read_slice(&mut status, GuestAddress(0x202_000)).unwrap();
+        mem.read_slice(&mut status, GuestAddress(0x202_000))
+            .unwrap();
         assert_eq!(status, [0], "VIRTIO_BLK_S_OK");
 
         bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
@@ -1255,21 +1469,44 @@ mod virtio_blk_service_tests {
         bus.enable_virtio_pci_blk(base_image(16));
         assign_bar0(&mut bus);
 
-        mem.write_slice(&[0x77; SECTOR_SIZE as usize], GuestAddress(0x201_000)).unwrap();
-        negotiate_and_post_request(&mut bus, &mem, 0, 1 /* VIRTIO_BLK_T_OUT */, 4, SECTOR_SIZE as u32, false);
+        mem.write_slice(&[0x77; SECTOR_SIZE as usize], GuestAddress(0x201_000))
+            .unwrap();
+        negotiate_and_post_request(
+            &mut bus,
+            &mem,
+            0,
+            1, /* VIRTIO_BLK_T_OUT */
+            4,
+            SECTOR_SIZE as u32,
+            false,
+        );
         assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 1);
         let mut status = [0u8; 1];
-        mem.read_slice(&mut status, GuestAddress(0x202_000)).unwrap();
+        mem.read_slice(&mut status, GuestAddress(0x202_000))
+            .unwrap();
         assert_eq!(status, [0], "VIRTIO_BLK_S_OK");
 
         // Overwrite the guest buffer, then issue a read of the same sector: it must observe the
         // just-written overlay content, not the pristine base image.
-        mem.write_slice(&[0u8; SECTOR_SIZE as usize], GuestAddress(0x201_000)).unwrap();
-        negotiate_and_post_request(&mut bus, &mem, 1, 0 /* VIRTIO_BLK_T_IN */, 4, SECTOR_SIZE as u32, true);
+        mem.write_slice(&[0u8; SECTOR_SIZE as usize], GuestAddress(0x201_000))
+            .unwrap();
+        negotiate_and_post_request(
+            &mut bus,
+            &mem,
+            1,
+            0, /* VIRTIO_BLK_T_IN */
+            4,
+            SECTOR_SIZE as u32,
+            true,
+        );
         assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 1);
         let mut data = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut data, GuestAddress(0x201_000)).unwrap();
-        assert_eq!(data, vec![0x77; SECTOR_SIZE as usize], "the read observes the overlay written above");
+        assert_eq!(
+            data,
+            vec![0x77; SECTOR_SIZE as usize],
+            "the read observes the overlay written above"
+        );
     }
 
     #[test]
@@ -1282,7 +1519,8 @@ mod virtio_blk_service_tests {
         negotiate_and_post_request(&mut bus, &mem, 0, 0, 100, SECTOR_SIZE as u32, true);
         assert_eq!(bus.service_virtio_blk(&mem).unwrap(), 1);
         let mut status = [0u8; 1];
-        mem.read_slice(&mut status, GuestAddress(0x202_000)).unwrap();
+        mem.read_slice(&mut status, GuestAddress(0x202_000))
+            .unwrap();
         assert_eq!(status, [1], "VIRTIO_BLK_S_IOERR");
     }
 }

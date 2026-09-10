@@ -95,7 +95,9 @@ pub struct PageStore {
 
 impl PageStore {
     pub fn new() -> Self {
-        PageStore { pages: HashMap::new() }
+        PageStore {
+            pages: HashMap::new(),
+        }
     }
 
     /// Intern one page's bytes, returning a [`PageRef`] shared with every other page in this store
@@ -104,7 +106,11 @@ impl PageStore {
     /// regardless of how many universes/branches reference them.
     pub fn intern(&mut self, bytes: &[u8; PAGE_SIZE]) -> PageRef {
         let hash = PageHash::of(bytes);
-        let arc = self.pages.entry(hash).or_insert_with(|| Arc::new(*bytes)).clone();
+        let arc = self
+            .pages
+            .entry(hash)
+            .or_insert_with(|| Arc::new(*bytes))
+            .clone();
         PageRef { hash, bytes: arc }
     }
 
@@ -132,8 +138,15 @@ mod tests {
         let mut store = PageStore::new();
         let a = store.intern(&page(0x42));
         let b = store.intern(&page(0x42));
-        assert!(a.is_same_allocation(&b), "identical content must share one Arc, not be copied");
-        assert_eq!(store.len(), 1, "one distinct content -> one stored allocation");
+        assert!(
+            a.is_same_allocation(&b),
+            "identical content must share one Arc, not be copied"
+        );
+        assert_eq!(
+            store.len(),
+            1,
+            "one distinct content -> one stored allocation"
+        );
     }
 
     #[test]
@@ -165,14 +178,27 @@ mod tests {
                     refs.push(store.intern(&page(0))); // shared, unwritten zero page
                 }
             }
-            assert!(refs[1].is_same_allocation(&refs[2]), "unwritten pages within one universe share too");
+            assert!(
+                refs[1].is_same_allocation(&refs[2]),
+                "unwritten pages within one universe share too"
+            );
         }
-        assert_eq!(store.len(), 1 + 1000, "1 shared zero page + 1000 unique pages, not 1000*16");
+        assert_eq!(
+            store.len(),
+            1 + 1000,
+            "1 shared zero page + 1000 unique pages, not 1000*16"
+        );
     }
 
     #[test]
     fn page_hash_hex_is_stable_for_identical_content() {
-        assert_eq!(PageHash::of(&page(7)).to_hex(), PageHash::of(&page(7)).to_hex());
-        assert_ne!(PageHash::of(&page(7)).to_hex(), PageHash::of(&page(8)).to_hex());
+        assert_eq!(
+            PageHash::of(&page(7)).to_hex(),
+            PageHash::of(&page(7)).to_hex()
+        );
+        assert_ne!(
+            PageHash::of(&page(7)).to_hex(),
+            PageHash::of(&page(8)).to_hex()
+        );
     }
 }

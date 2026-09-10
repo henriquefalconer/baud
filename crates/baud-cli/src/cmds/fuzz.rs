@@ -3,10 +3,10 @@
 //
 // baud fuzz — fuzz loop commands (M4)
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct FuzzCmd {
@@ -70,7 +70,10 @@ pub async fn run(cmd: FuzzCmd, c: &Client, json: bool) -> Result<()> {
             fmt::print(&v, json);
 
             // Exit with code 2 if goal reached
-            if v.get("goal_reached").and_then(|x| x.as_bool()).unwrap_or(false) {
+            if v.get("goal_reached")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false)
+            {
                 std::process::exit(2);
             }
             if v.get("error").is_some() {

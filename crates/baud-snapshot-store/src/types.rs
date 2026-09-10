@@ -135,10 +135,22 @@ mod tests {
     #[test]
     fn node_identity_differs_on_any_field_change() {
         let base = Sha::of_node_identity(None, 10, (0, 10));
-        assert_ne!(base, Sha::of_node_identity(None, 11, (0, 10)), "at_step must matter");
-        assert_ne!(base, Sha::of_node_identity(None, 10, (0, 11)), "tape_range must matter");
+        assert_ne!(
+            base,
+            Sha::of_node_identity(None, 11, (0, 10)),
+            "at_step must matter"
+        );
+        assert_ne!(
+            base,
+            Sha::of_node_identity(None, 10, (0, 11)),
+            "tape_range must matter"
+        );
         let parent = Sha::of(b"some parent");
-        assert_ne!(base, Sha::of_node_identity(Some(parent), 10, (0, 10)), "parent must matter");
+        assert_ne!(
+            base,
+            Sha::of_node_identity(Some(parent), 10, (0, 10)),
+            "parent must matter"
+        );
     }
 
     #[test]

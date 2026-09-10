@@ -431,10 +431,14 @@ mod tests {
     fn reports_halted_instead_of_injecting_when_guest_halts_before_target() {
         let mut stepper = ScriptedStepper::new(500, 0);
         stepper.halt_at_rcb = Some(510); // halts partway through the single-step walk to 1_000
-        let outcome = inject_at(&mut stepper, 1_000, 42).expect("a graceful halt must not surface as an error");
+        let outcome = inject_at(&mut stepper, 1_000, 42)
+            .expect("a graceful halt must not surface as an error");
         assert_eq!(outcome, InjectOutcome::Halted(stepper.point_at(510)));
         assert!(!outcome.was_injected());
-        assert!(stepper.injected.is_none(), "must never inject once the guest has halted on its own");
+        assert!(
+            stepper.injected.is_none(),
+            "must never inject once the guest has halted on its own"
+        );
     }
 
     /// [`run_to_events`]'s core contract, mirroring [`injects_exactly_at_target_rcb`] but without
@@ -449,8 +453,14 @@ mod tests {
         assert_eq!(outcome.point().rcb, 1_000);
         assert_eq!(stepper.armed, Some(1_000 - MARGIN));
         assert_eq!(stepper.steps_taken as u64, MARGIN);
-        assert!(stepper.injected.is_none(), "run_to_events must never inject anything");
-        assert_eq!(stepper.windows_opened, 0, "run_to_events must never open an interrupt window");
+        assert!(
+            stepper.injected.is_none(),
+            "run_to_events must never inject anything"
+        );
+        assert_eq!(
+            stepper.windows_opened, 0,
+            "run_to_events must never open an interrupt window"
+        );
     }
 
     /// The fingerprint's own determinism proof in miniature (specs/baud-fingerprint.md §8's
@@ -472,7 +482,8 @@ mod tests {
     fn reports_halted_when_guest_halts_before_target_rcb() {
         let mut stepper = ScriptedStepper::new(500, 0);
         stepper.halt_at_rcb = Some(510);
-        let outcome = run_to_events(&mut stepper, 1_000).expect("a graceful halt must not surface as an error");
+        let outcome = run_to_events(&mut stepper, 1_000)
+            .expect("a graceful halt must not surface as an error");
         assert_eq!(outcome, RunToEventsOutcome::Halted(stepper.point_at(510)));
         assert!(!outcome.was_reached());
     }
@@ -486,10 +497,17 @@ mod tests {
     fn inject_at_stops_mid_walk_when_the_stepper_reports_cancellation() {
         let mut stepper = ScriptedStepper::new(1_000, 0);
         stepper.cancel_after_steps = Some(3); // the walk to 1_000 would otherwise take MARGIN steps
-        let err = inject_at(&mut stepper, 1_000, 42).expect_err("a cancelled walk must not succeed");
+        let err =
+            inject_at(&mut stepper, 1_000, 42).expect_err("a cancelled walk must not succeed");
         assert_eq!(err, "cancelled");
-        assert_eq!(stepper.steps_taken, 3, "the walk must stop at the first check that reports cancellation");
-        assert!(stepper.injected.is_none(), "a cancelled walk must never inject anything");
+        assert_eq!(
+            stepper.steps_taken, 3,
+            "the walk must stop at the first check that reports cancellation"
+        );
+        assert!(
+            stepper.injected.is_none(),
+            "a cancelled walk must never inject anything"
+        );
     }
 
     /// [`run_to_events`]'s half of the same fix — the fingerprint-capture walk is the identical
@@ -498,7 +516,8 @@ mod tests {
     fn run_to_events_stops_mid_walk_when_the_stepper_reports_cancellation() {
         let mut stepper = ScriptedStepper::new(1_000, 0);
         stepper.cancel_after_steps = Some(2);
-        let err = run_to_events(&mut stepper, 1_000).expect_err("a cancelled walk must not succeed");
+        let err =
+            run_to_events(&mut stepper, 1_000).expect_err("a cancelled walk must not succeed");
         assert_eq!(err, "cancelled");
         assert_eq!(stepper.steps_taken, 2);
     }
@@ -519,12 +538,27 @@ mod tests {
 
     #[test]
     fn collides_without_stack_checksum_ignores_stack_when_absent() {
-        let a = ExecPoint { rip: 1, gp_regs: [0; 16], rcb: 1, rcx: None, stack_checksum: None };
-        let b = ExecPoint { rip: 1, gp_regs: [0; 16], rcb: 1, rcx: None, stack_checksum: None };
+        let a = ExecPoint {
+            rip: 1,
+            gp_regs: [0; 16],
+            rcb: 1,
+            rcx: None,
+            stack_checksum: None,
+        };
+        let b = ExecPoint {
+            rip: 1,
+            gp_regs: [0; 16],
+            rcb: 1,
+            rcx: None,
+            stack_checksum: None,
+        };
         assert!(a.collides_without_stack_checksum(&b));
         assert!(a.has_same_identity(&b));
 
-        let c = ExecPoint { stack_checksum: Some(7), ..a.clone() };
+        let c = ExecPoint {
+            stack_checksum: Some(7),
+            ..a.clone()
+        };
         assert!(!a.collides_without_stack_checksum(&c));
         assert!(!a.has_same_identity(&c));
     }

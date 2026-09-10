@@ -27,10 +27,10 @@
 //   - deps = {ciborium, blake3, serde, baud-proto, anyhow}
 //   - Streaming reader: indexed by (run, step)
 
-use std::path::{Path, PathBuf};
-use std::fs;
-use serde::{Deserialize, Serialize};
 use baud_proto::{Msg, Observation};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Journal chunk types
@@ -115,11 +115,19 @@ impl Journal {
     /// Open or create a journal with age encryption enabled.
     ///
     /// `age_recipient` is the age public key (e.g. `age1...`) to encrypt to.
-    pub fn open_encrypted(base: &Path, run_id: &str, age_recipient: &str) -> Result<Self, JournalError> {
+    pub fn open_encrypted(
+        base: &Path,
+        run_id: &str,
+        age_recipient: &str,
+    ) -> Result<Self, JournalError> {
         Self::open_with_encryption(base, run_id, Some(age_recipient.to_owned()))
     }
 
-    fn open_with_encryption(base: &Path, run_id: &str, age_recipient: Option<String>) -> Result<Self, JournalError> {
+    fn open_with_encryption(
+        base: &Path,
+        run_id: &str,
+        age_recipient: Option<String>,
+    ) -> Result<Self, JournalError> {
         let run_dir = base.join(run_id);
         fs::create_dir_all(run_dir.join("chunks"))
             .map_err(|e| JournalError::Io(format!("create_dir_all: {e}")))?;
@@ -127,8 +135,8 @@ impl Journal {
         // Load existing index if present
         let index_path = run_dir.join("index.cbor");
         let index = if index_path.exists() {
-            let bytes = fs::read(&index_path)
-                .map_err(|e| JournalError::Io(format!("read index: {e}")))?;
+            let bytes =
+                fs::read(&index_path).map_err(|e| JournalError::Io(format!("read index: {e}")))?;
             ciborium::from_reader(bytes.as_slice())
                 .map_err(|e| JournalError::Cbor(e.to_string()))?
         } else {
@@ -178,7 +186,10 @@ impl Journal {
         self.stream_hasher.update(&cbor_bytes);
 
         // Record in index
-        self.index.push(IndexEntry { step, chunk_addr: addr_hex.clone() });
+        self.index.push(IndexEntry {
+            step,
+            chunk_addr: addr_hex.clone(),
+        });
 
         // Persist index
         self.flush_index()?;
@@ -211,7 +222,9 @@ impl Journal {
     pub fn iter_to_step(&self, max_step: u64) -> Result<Vec<JournalChunk>, JournalError> {
         let mut result = Vec::new();
         for entry in &self.index {
-            if entry.step > max_step { break; }
+            if entry.step > max_step {
+                break;
+            }
             let chunk = self.read_chunk(&entry.chunk_addr)?;
             result.push(chunk);
         }
@@ -221,8 +234,8 @@ impl Journal {
     /// Read a chunk by its address.
     fn read_chunk(&self, addr: &str) -> Result<JournalChunk, JournalError> {
         let path = self.chunk_path(addr);
-        let stored_bytes = fs::read(&path)
-            .map_err(|e| JournalError::Io(format!("read chunk {addr}: {e}")))?;
+        let stored_bytes =
+            fs::read(&path).map_err(|e| JournalError::Io(format!("read chunk {addr}: {e}")))?;
 
         // Decrypt if encryption is enabled
         let plaintext = if self.age_recipient.is_some() {
@@ -248,8 +261,7 @@ impl Journal {
             });
         }
 
-        ciborium::from_reader(plaintext.as_slice())
-            .map_err(|e| JournalError::Cbor(e.to_string()))
+        ciborium::from_reader(plaintext.as_slice()).map_err(|e| JournalError::Cbor(e.to_string()))
     }
 
     /// Get the run directory.
@@ -266,17 +278,23 @@ impl Journal {
         let mut bytes = Vec::new();
         ciborium::into_writer(&self.index, &mut bytes)
             .map_err(|e| JournalError::Cbor(e.to_string()))?;
-        fs::write(index_path, bytes)
-            .map_err(|e| JournalError::Io(format!("write index: {e}")))?;
+        fs::write(index_path, bytes).map_err(|e| JournalError::Io(format!("write index: {e}")))?;
         Ok(())
     }
 
     /// Return all observations for this run.
     pub fn observations(&self) -> Result<Vec<Observation>, JournalError> {
         let chunks = self.iter()?;
-        Ok(chunks.into_iter().filter_map(|c| {
-            if let JournalChunk::Observe(o) = c { Some(o) } else { None }
-        }).collect())
+        Ok(chunks
+            .into_iter()
+            .filter_map(|c| {
+                if let JournalChunk::Observe(o) = c {
+                    Some(o)
+                } else {
+                    None
+                }
+            })
+            .collect())
     }
 
     /// Return the index entries (step → chunk_addr pairs).
@@ -351,7 +369,10 @@ mod tests {
         let addr2 = j.append_observation(obs("x", 1)).unwrap();
 
         // Same content → same address
-        assert_eq!(addr1, addr2, "identical chunks should have identical addresses");
+        assert_eq!(
+            addr1, addr2,
+            "identical chunks should have identical addresses"
+        );
 
         // But index has 2 entries
         assert_eq!(j.index().len(), 2);
@@ -359,7 +380,11 @@ mod tests {
         // Only one chunk file on disk
         let chunk_dir = dir.path().join("run-002").join("chunks");
         let files: Vec<_> = fs::read_dir(&chunk_dir).unwrap().collect();
-        assert_eq!(files.len(), 1, "deduplication: only 1 chunk file for identical content");
+        assert_eq!(
+            files.len(),
+            1,
+            "deduplication: only 1 chunk file for identical content"
+        );
     }
 
     #[test]
@@ -386,8 +411,11 @@ mod tests {
         j1.append_observation(obs("depth", 10)).unwrap();
         j2.append_observation(obs("depth", 10)).unwrap();
 
-        assert_eq!(j1.stream_hash().0, j2.stream_hash().0,
-            "same content → same stream hash (reproducibility)");
+        assert_eq!(
+            j1.stream_hash().0,
+            j2.stream_hash().0,
+            "same content → same stream hash (reproducibility)"
+        );
     }
 
     #[test]
@@ -400,7 +428,11 @@ mod tests {
         j.append_observation(obs("x", 10)).unwrap();
 
         let chunks = j.iter_to_step(5).unwrap();
-        assert_eq!(chunks.len(), 2, "iter_to_step(5) should return chunks at step 1 and 5");
+        assert_eq!(
+            chunks.len(),
+            2,
+            "iter_to_step(5) should return chunks at step 1 and 5"
+        );
     }
 
     #[test]
@@ -419,8 +451,10 @@ mod tests {
 
         // Reading should fail with integrity error
         let result = j.iter();
-        assert!(matches!(result, Err(JournalError::Integrity { .. })),
-            "corrupted chunk should fail integrity check");
+        assert!(
+            matches!(result, Err(JournalError::Integrity { .. })),
+            "corrupted chunk should fail integrity check"
+        );
     }
 
     #[test]
@@ -437,7 +471,11 @@ mod tests {
 
         // Reopen and verify
         let j = Journal::open(dir.path(), "run-007").unwrap();
-        assert_eq!(j.index().len(), 3, "reopened journal should have 3 index entries");
+        assert_eq!(
+            j.index().len(),
+            3,
+            "reopened journal should have 3 index entries"
+        );
         let obs_list = j.observations().unwrap();
         assert_eq!(obs_list.len(), 3);
         assert_eq!(obs_list[1].probe, "b");
@@ -534,10 +572,15 @@ mod tests {
         let data_dir = TempDir::new().unwrap();
         let mut j = Journal::open_encrypted(data_dir.path(), "enc-run-001", &recipient)
             .expect("open_encrypted should succeed");
-        let addr = j.append_observation(obs("probe", 1))
+        let addr = j
+            .append_observation(obs("probe", 1))
             .expect("append_observation should succeed");
 
-        let chunk_path = data_dir.path().join("enc-run-001").join("chunks").join(&addr);
+        let chunk_path = data_dir
+            .path()
+            .join("enc-run-001")
+            .join("chunks")
+            .join(&addr);
         let on_disk = fs::read(&chunk_path).expect("chunk file should exist");
         assert!(
             on_disk.starts_with(b"age-encryption.org/v1"),
@@ -567,6 +610,9 @@ mod tests {
             String::from_utf8_lossy(&decrypt_out.stderr)
         );
         // The decrypted bytes should be valid CBOR (non-empty)
-        assert!(!decrypt_out.stdout.is_empty(), "decrypted chunk should be non-empty CBOR");
+        assert!(
+            !decrypt_out.stdout.is_empty(),
+            "decrypted chunk should be non-empty CBOR"
+        );
     }
 }

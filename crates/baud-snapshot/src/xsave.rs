@@ -41,7 +41,13 @@ pub fn allocate(bytes: usize) -> Result<Xsave, XsaveError> {
 
 pub fn encode(buffer: &Xsave, bytes: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes);
-    for word in buffer.as_fam_struct_ref().xsave.region.iter().chain(buffer.as_slice()) {
+    for word in buffer
+        .as_fam_struct_ref()
+        .xsave
+        .region
+        .iter()
+        .chain(buffer.as_slice())
+    {
         out.extend_from_slice(&word.to_ne_bytes());
     }
     out.truncate(bytes);

@@ -158,9 +158,14 @@ mod tests {
     fn capacity_refuses_sibling_split() {
         let host = Host::probe_with(&fake_checks_ok(hyperthreaded_topology(4)));
         let plan = host.place(host.capacity() + 1);
-        assert!(plan.is_err(), "placing one VM over capacity must be refused");
+        assert!(
+            plan.is_err(),
+            "placing one VM over capacity must be refused"
+        );
 
-        let full = host.place(host.capacity()).expect("placing at capacity must succeed");
+        let full = host
+            .place(host.capacity())
+            .expect("placing at capacity must succeed");
         assert!(full.no_two_on_sibling_threads());
     }
 
@@ -211,8 +216,16 @@ mod tests {
         let host = Host::probe_with(&checks);
         let v = serde_json::to_value(&host.report).unwrap();
         for key in [
-            "kvm", "vmx", "cpuid", "tsc_stable", "msr_filter", "singlestep",
-            "rcb_deterministic", "nested", "vendor", "enforced_module_present",
+            "kvm",
+            "vmx",
+            "cpuid",
+            "tsc_stable",
+            "msr_filter",
+            "singlestep",
+            "rcb_deterministic",
+            "nested",
+            "vendor",
+            "enforced_module_present",
         ] {
             assert!(v.get(key).is_some(), "missing field {key} in Probe JSON");
         }

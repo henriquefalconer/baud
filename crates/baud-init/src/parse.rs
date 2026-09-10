@@ -6,10 +6,10 @@
 // Five directive kinds: nix, files, env, nodes, adapters.
 // Unknown directives are hard errors.
 
+use crate::adapter::{parse_adapters, Adapter};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use anyhow::{bail, Result};
-use crate::adapter::{parse_adapters, Adapter};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -55,8 +55,8 @@ pub struct SpecDoc {
 const VALID_DIRECTIVES: &[&str] = &["nix", "files", "env", "nodes", "adapters"];
 
 pub fn parse_and_lint(yaml: &str) -> Result<SpecDoc> {
-    let v: serde_yaml::Value = serde_yaml::from_str(yaml)
-        .map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+    let v: serde_yaml::Value =
+        serde_yaml::from_str(yaml).map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
     lint_value(v)
 }
 
@@ -68,7 +68,9 @@ pub fn lint_value(v: serde_yaml::Value) -> Result<SpecDoc> {
 
     // Check for unknown directives (hard error)
     for (k, _) in m {
-        let key = k.as_str().ok_or_else(|| anyhow::anyhow!("directive key must be a string"))?;
+        let key = k
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("directive key must be a string"))?;
         if !VALID_DIRECTIVES.contains(&key) {
             bail!(
                 "unknown directive '{key}'; valid directives: {}",
@@ -104,12 +106,14 @@ pub fn lint_value(v: serde_yaml::Value) -> Result<SpecDoc> {
             // Security: reject absolute paths and path traversal (spec §8 Fixture path escape)
             if path.starts_with('/') {
                 return Err(anyhow::anyhow!(
-                    "file path '{}' must be relative (no absolute paths allowed)", path
+                    "file path '{}' must be relative (no absolute paths allowed)",
+                    path
                 ));
             }
             if path.split('/').any(|c| c == "..") {
                 return Err(anyhow::anyhow!(
-                    "file path '{}' contains '..' traversal components (not allowed)", path
+                    "file path '{}' contains '..' traversal components (not allowed)",
+                    path
                 ));
             }
             files.push(FilesEntry { path, content });
@@ -163,7 +167,13 @@ pub fn lint_value(v: serde_yaml::Value) -> Result<SpecDoc> {
         None
     };
 
-    Ok(SpecDoc { nix, files, env, nodes, adapters })
+    Ok(SpecDoc {
+        nix,
+        files,
+        env,
+        nodes,
+        adapters,
+    })
 }
 
 fn parse_node(v: &serde_yaml::Value) -> Result<NodeSpec> {
@@ -203,5 +213,9 @@ fn parse_node(v: &serde_yaml::Value) -> Result<NodeSpec> {
         }
     }
 
-    Ok(NodeSpec { name, argv, adapters })
+    Ok(NodeSpec {
+        name,
+        argv,
+        adapters,
+    })
 }

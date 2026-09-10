@@ -6,9 +6,9 @@
 // baud syscalls tail --run <id> [--node <n>] [--sysno <N>]
 // baud syscalls get  --run <id> [--node <n>] [--sysno <N>]
 
+use crate::client::Client;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crate::client::Client;
 
 #[derive(Parser)]
 pub struct SyscallsCmd {

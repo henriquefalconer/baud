@@ -60,10 +60,10 @@ pub mod acpi;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,11 @@ pub enum MultiverseError {
     #[error("guest image count mismatch: manifest has {expected}, supplied {actual}")]
     ImageCountMismatch { expected: usize, actual: usize },
     #[error("guest image checksum mismatch for node {node}: expected {expected}, got {actual}")]
-    BinaryChecksum { node: u32, expected: String, actual: String },
+    BinaryChecksum {
+        node: u32,
+        expected: String,
+        actual: String,
+    },
     #[error("manifest parse error: {0}")]
     ManifestError(String),
     #[error("supervisor setup failed: {0}")]
@@ -184,7 +188,11 @@ impl ChannelDrawSource {
         let (req_tx, req_rx) = std::sync::mpsc::channel();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         (
-            ChannelDrawSource { req_tx, result_rx, exhausted: false },
+            ChannelDrawSource {
+                req_tx,
+                result_rx,
+                exhausted: false,
+            },
             req_rx,
             result_tx,
         )
@@ -223,7 +231,10 @@ impl DrawSource for ChannelDrawSource {
         if self.exhausted {
             return lo;
         }
-        let req = baud_proto::DrawRequest::Int { lo: lo as i64, hi: hi as i64 };
+        let req = baud_proto::DrawRequest::Int {
+            lo: lo as i64,
+            hi: hi as i64,
+        };
         if self.req_tx.send(req).is_err() {
             self.exhausted = true;
             return lo;
@@ -339,7 +350,10 @@ impl ObservationStream {
         // In simulation mode: check that an `exit` observation was produced for at
         // least one guest and no `crash` probe appears.
         let has_exit = self.observations.iter().any(|o| o.probe == "exit");
-        let has_crash = self.observations.iter().any(|o| o.probe.contains("crash") || o.probe.contains("killed"));
+        let has_crash = self
+            .observations
+            .iter()
+            .any(|o| o.probe.contains("crash") || o.probe.contains("killed"));
         !self.observations.is_empty() && (has_exit || !has_crash)
     }
 
@@ -349,7 +363,9 @@ impl ObservationStream {
     /// In simulation mode, the virtual clock always advances forward, so this is
     /// trivially satisfied when vtime values are ordered.
     pub fn tsc_reads_are_monotonic_virtual(&self) -> bool {
-        let tsc_reads: Vec<u64> = self.observations.iter()
+        let tsc_reads: Vec<u64> = self
+            .observations
+            .iter()
             .filter(|o| o.probe == "rdtsc" || o.probe == "tsc_read")
             .map(|o| o.vtime)
             .collect();
@@ -507,7 +523,9 @@ impl Default for FsDevice {
 
 impl FsDevice {
     pub fn read(&self, path: &PathBuf) -> Option<&[u8]> {
-        self.cow.get(path).map(|v| v.as_slice())
+        self.cow
+            .get(path)
+            .map(|v| v.as_slice())
             .or_else(|| self.snapshot.get(path).map(|v| v.as_slice()))
     }
 
@@ -791,7 +809,8 @@ impl Multiverse {
         let mut guest_alive: Vec<bool> = vec![true; self.manifest.guests.len()];
         // Ensure quantum step counters are sized correctly
         if self.guest_quantum_steps.len() < self.manifest.guests.len() {
-            self.guest_quantum_steps.resize(self.manifest.guests.len(), 0);
+            self.guest_quantum_steps
+                .resize(self.manifest.guests.len(), 0);
         }
         // Reset quantum counters for this run
         for c in self.guest_quantum_steps.iter_mut() {
@@ -940,7 +959,12 @@ impl Multiverse {
         // Final-state observations
         for (i, &alive) in guest_alive.iter().enumerate() {
             if !alive {
-                let exit_code = self.exit_dev.exit_codes.get(&(i as u32)).copied().unwrap_or(0);
+                let exit_code = self
+                    .exit_dev
+                    .exit_codes
+                    .get(&(i as u32))
+                    .copied()
+                    .unwrap_or(0);
                 observations.push(ObservationEntry {
                     step: self.step,
                     node: i as u32,
@@ -1034,13 +1058,18 @@ mod tests {
     use super::*;
 
     fn make_manifest(n_guests: usize) -> RunManifest {
-        let guests = (0..n_guests).map(|i| GuestSpec {
-            node_id: i as u32,
-            binary: PathBuf::from(""), // empty = no real binary (simulation mode)
-            argv: Vec::new(),
-            binary_hash: String::new(),
-        }).collect();
-        RunManifest { guests, ..Default::default() }
+        let guests = (0..n_guests)
+            .map(|i| GuestSpec {
+                node_id: i as u32,
+                binary: PathBuf::from(""), // empty = no real binary (simulation mode)
+                argv: Vec::new(),
+                binary_hash: String::new(),
+            })
+            .collect();
+        RunManifest {
+            guests,
+            ..Default::default()
+        }
     }
 
     /// VR1-B3 test 1: two runs with the same tape produce byte-identical observation stream hashes.
@@ -1056,7 +1085,13 @@ mod tests {
             Ok(_) => panic!("an incomplete image list must be rejected"),
             Err(error) => error,
         };
-        assert!(matches!(error, MultiverseError::ImageCountMismatch { expected: 2, actual: 1 }));
+        assert!(matches!(
+            error,
+            MultiverseError::ImageCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
     }
 
     #[test]
@@ -1068,7 +1103,10 @@ mod tests {
             Ok(_) => panic!("a mismatched image checksum must be rejected"),
             Err(error) => error,
         };
-        assert!(matches!(error, MultiverseError::BinaryChecksum { node: 0, .. }));
+        assert!(matches!(
+            error,
+            MultiverseError::BinaryChecksum { node: 0, .. }
+        ));
     }
 
     #[test]
@@ -1082,7 +1120,9 @@ mod tests {
 
     #[test]
     fn double_run_is_bit_identical() {
-        let tape_bytes: Vec<u8> = (0..64).map(|i: u8| i.wrapping_mul(31).wrapping_add(7)).collect();
+        let tape_bytes: Vec<u8> = (0..64)
+            .map(|i: u8| i.wrapping_mul(31).wrapping_add(7))
+            .collect();
 
         let manifest = make_manifest(2);
 
@@ -1113,11 +1153,13 @@ mod tests {
             "double run: observation count must be identical"
         );
 
-        for (i, (o1, o2)) in obs1.observations.iter().zip(obs2.observations.iter()).enumerate() {
-            assert_eq!(
-                o1.probe, o2.probe,
-                "observation[{i}]: probe mismatch"
-            );
+        for (i, (o1, o2)) in obs1
+            .observations
+            .iter()
+            .zip(obs2.observations.iter())
+            .enumerate()
+        {
+            assert_eq!(o1.probe, o2.probe, "observation[{i}]: probe mismatch");
             assert_eq!(
                 o1.value, o2.value,
                 "observation[{i}]: value mismatch for probe '{}'",
@@ -1144,13 +1186,25 @@ mod tests {
         let m = Multiverse::load(manifest.clone(), vec![]).expect("load manifest");
 
         // sysno 56 = clone — NOT on the allowlist
-        assert!(!m.is_permitted(56), "clone (sysno 56) must not be on the allowlist");
+        assert!(
+            !m.is_permitted(56),
+            "clone (sysno 56) must not be on the allowlist"
+        );
         // sysno 57 = fork — also not permitted
-        assert!(!m.is_permitted(57), "fork (sysno 57) must not be on the allowlist");
+        assert!(
+            !m.is_permitted(57),
+            "fork (sysno 57) must not be on the allowlist"
+        );
         // sysno 58 = vfork — also not permitted
-        assert!(!m.is_permitted(58), "vfork (sysno 58) must not be on the allowlist");
+        assert!(
+            !m.is_permitted(58),
+            "vfork (sysno 58) must not be on the allowlist"
+        );
         // sysno 59 = execve — also not permitted post-start
-        assert!(!m.is_permitted(59), "execve (sysno 59) must not be on the allowlist post-start");
+        assert!(
+            !m.is_permitted(59),
+            "execve (sysno 59) must not be on the allowlist post-start"
+        );
         // Permitted syscalls work
         assert!(m.is_permitted(0), "read (sysno 0) must be permitted");
         assert!(m.is_permitted(1), "write (sysno 1) must be permitted");
@@ -1168,7 +1222,9 @@ mod tests {
         );
         let error_detail = clone_result.unwrap_err();
         assert!(
-            error_detail.contains("56") || error_detail.contains("clone") || error_detail.contains("not permitted"),
+            error_detail.contains("56")
+                || error_detail.contains("clone")
+                || error_detail.contains("not permitted"),
             "kill-with-report detail must reference clone syscall: {error_detail}"
         );
 
@@ -1213,7 +1269,9 @@ mod tests {
     /// observation stream methods reflect the correct properties.
     #[test]
     fn rdtsc_is_trapped_and_served_virtual_time() {
-        let tape_bytes: Vec<u8> = (0..64).map(|i: u8| i.wrapping_mul(31).wrapping_add(7)).collect();
+        let tape_bytes: Vec<u8> = (0..64)
+            .map(|i: u8| i.wrapping_mul(31).wrapping_add(7))
+            .collect();
         let manifest = make_manifest(1);
         let mut m = Multiverse::load(manifest.clone(), vec![]).expect("load manifest");
         let mut tape = TapeDrawSource::new(tape_bytes.clone());
@@ -1242,8 +1300,14 @@ mod tests {
         m2.clock.advance(500);
         let t2 = m2.clock.now_nanos();
 
-        assert!(t1 >= t0, "virtual clock must be non-decreasing: t0={t0} t1={t1}");
-        assert!(t2 >= t1, "virtual clock must be non-decreasing: t1={t1} t2={t2}");
+        assert!(
+            t1 >= t0,
+            "virtual clock must be non-decreasing: t0={t0} t1={t1}"
+        );
+        assert!(
+            t2 >= t1,
+            "virtual clock must be non-decreasing: t1={t1} t2={t2}"
+        );
         assert_eq!(t1 - t0, 1000, "clock advance of 1000 ticks");
         assert_eq!(t2 - t1, 500, "clock advance of 500 ticks");
 
@@ -1252,8 +1316,14 @@ mod tests {
         let t3_0 = m3.clock.now_nanos();
         m3.clock.advance(1000);
         let t3_1 = m3.clock.now_nanos();
-        assert_eq!(t0, t3_0, "initial virtual time must be identical across replays");
-        assert_eq!(t1, t3_1, "virtual clock after advance must be identical across replays");
+        assert_eq!(
+            t0, t3_0,
+            "initial virtual time must be identical across replays"
+        );
+        assert_eq!(
+            t1, t3_1,
+            "virtual clock after advance must be identical across replays"
+        );
     }
 
     /// Non-triviality counterpart to `double_run_is_bit_identical`: the tape actually
@@ -1279,8 +1349,16 @@ mod tests {
         let obs_write = m_write.run(&mut TapeDrawSource::new(action_tape(1, 8))); // sysno 1 = write
 
         let sysnos = |m: &Multiverse| m.syscall_log().iter().map(|e| e.sysno).collect::<Vec<_>>();
-        assert_eq!(sysnos(&m_read), vec![0u32; 8], "tape must select `read` every quantum");
-        assert_eq!(sysnos(&m_write), vec![1u32; 8], "tape must select `write` every quantum");
+        assert_eq!(
+            sysnos(&m_read),
+            vec![0u32; 8],
+            "tape must select `read` every quantum"
+        );
+        assert_eq!(
+            sysnos(&m_write),
+            vec![1u32; 8],
+            "tape must select `write` every quantum"
+        );
         assert_ne!(
             sysnos(&m_read),
             sysnos(&m_write),
@@ -1306,7 +1384,11 @@ mod tests {
         assert!(
             obs_exit.observations.iter().any(|o| o.probe == "exit"),
             "the exit tape must produce an exit observation: {:?}",
-            obs_exit.observations.iter().map(|o| o.probe.as_str()).collect::<Vec<_>>()
+            obs_exit
+                .observations
+                .iter()
+                .map(|o| o.probe.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(
             !obs_read.observations.iter().any(|o| o.probe == "exit"),
@@ -1364,7 +1446,10 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!(
                     "spinning guest must be killed with a crash observation; got {:?}",
-                    obs.observations.iter().map(|o| o.probe.as_str()).collect::<Vec<_>>()
+                    obs.observations
+                        .iter()
+                        .map(|o| o.probe.as_str())
+                        .collect::<Vec<_>>()
                 )
             });
         assert_eq!(crash.node, 0, "the crash must name the spinning guest");
@@ -1382,7 +1467,10 @@ mod tests {
         );
         // It fires as soon as the limit is exceeded — the 3rd consecutive non-yielding
         // quantum with a 2-quantum limit — not merely "eventually".
-        assert_eq!(crash.step, 2, "watchdog must fire on the quantum after the limit is exceeded");
+        assert_eq!(
+            crash.step, 2,
+            "watchdog must fire on the quantum after the limit is exceeded"
+        );
         // Observably killed: a spinning guest never reached a syscall, and once killed
         // it never runs again — no syscall is logged for it despite 7 quanta of tape
         // remaining after the kill.
@@ -1392,7 +1480,9 @@ mod tests {
             m.syscall_log()
         );
         assert!(
-            obs.observations.iter().any(|o| o.probe == "exit_code" && o.node == 0),
+            obs.observations
+                .iter()
+                .any(|o| o.probe == "exit_code" && o.node == 0),
             "a killed guest must be reported dead in the final-state observations"
         );
         assert!(
@@ -1403,7 +1493,7 @@ mod tests {
         // --- 2. A guest that yields every quantum is NOT killed ---------------------
         let mut m_ok = Multiverse::load(make_manifest(1), vec![]).expect("load manifest");
         m_ok.quantum_limit_ms = 200; // same tight limit
-        // 40 quanta, every one of them reaching syscall 0 (read) — 20x the limit.
+                                     // 40 quanta, every one of them reaching syscall 0 (read) — 20x the limit.
         let mut tape_ok = TapeDrawSource::new(action_tape(0, 40));
         let obs_ok = m_ok.run(&mut tape_ok);
         assert!(
@@ -1432,7 +1522,8 @@ mod tests {
         let mut tape2 = TapeDrawSource::new(action_tape(SPIN_ACTION, 10));
         let obs2 = m2.run(&mut tape2);
         assert_eq!(
-            obs.stream_hash(), obs2.stream_hash(),
+            obs.stream_hash(),
+            obs2.stream_hash(),
             "watchdog-enabled runs must still be deterministic"
         );
     }
@@ -1443,17 +1534,11 @@ mod tests {
         let m = Multiverse::load(make_manifest(0), vec![]).expect("load manifest");
         let expected_permitted = [0u32, 1, 60, 228, 318, 9, 10, 11, 12];
         for sysno in expected_permitted {
-            assert!(
-                m.is_permitted(sysno),
-                "sysno {sysno} should be permitted"
-            );
+            assert!(m.is_permitted(sysno), "sysno {sysno} should be permitted");
         }
         let expected_denied = [56u32, 57, 58, 59, 100, 200];
         for sysno in expected_denied {
-            assert!(
-                !m.is_permitted(sysno),
-                "sysno {sysno} should be denied"
-            );
+            assert!(!m.is_permitted(sysno), "sysno {sysno} should be denied");
         }
     }
 }

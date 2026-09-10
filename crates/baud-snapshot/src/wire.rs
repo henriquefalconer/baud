@@ -39,7 +39,11 @@ pub enum WireError {
     #[error("page {hash}: fetch failed: {reason}")]
     PageFetchFailed { hash: String, reason: String },
     #[error("page {hash}: expected {expected} bytes, got {actual}")]
-    WrongPageLength { hash: String, expected: usize, actual: usize },
+    WrongPageLength {
+        hash: String,
+        expected: usize,
+        actual: usize,
+    },
     #[error("universe body contains malformed state: {0}")]
     MalformedState(String),
     #[error("page {hash}: fetched bytes hash to a different address ({actual}) — corrupt or substituted page")]
@@ -101,8 +105,8 @@ pub fn decode_universe_body(bytes: &[u8]) -> Result<UniverseBody, WireError> {
         )));
     }
     let mut cursor = Cursor::new(rest);
-    let body: UniverseBody = ciborium::from_reader(&mut cursor)
-        .map_err(|e| WireError::Decode(e.to_string()))?;
+    let body: UniverseBody =
+        ciborium::from_reader(&mut cursor).map_err(|e| WireError::Decode(e.to_string()))?;
     if cursor.position() as usize != rest.len() {
         return Err(WireError::Decode(format!(
             "trailing bytes after universe body: {}",
@@ -120,7 +124,8 @@ fn validate_body(body: &UniverseBody) -> Result<(), WireError> {
     const MAX_STATE_FIELD_BYTES: usize = 1 << 20;
     if body.ram_page_hashes.len() > MAX_RAM_PAGES {
         return Err(WireError::MalformedState(format!(
-            "RAM page count {} exceeds {MAX_RAM_PAGES}", body.ram_page_hashes.len()
+            "RAM page count {} exceeds {MAX_RAM_PAGES}",
+            body.ram_page_hashes.len()
         )));
     }
     for (name, bytes) in [
@@ -140,7 +145,9 @@ fn validate_body(body: &UniverseBody) -> Result<(), WireError> {
         }
     }
     if body.vcpu.msrs.len() > MAX_STATE_FIELD_BYTES / std::mem::size_of::<MsrWrite>() {
-        return Err(WireError::MalformedState("MSR list is too large".to_owned()));
+        return Err(WireError::MalformedState(
+            "MSR list is too large".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -160,13 +167,19 @@ pub fn universe_from_body(
     let mut ram = Vec::with_capacity(body.ram_page_hashes.len());
     for hash_bytes in body.ram_page_hashes {
         let hash = PageHash::from_bytes(hash_bytes);
-        let bytes = fetch_page(hash)
-            .map_err(|reason| WireError::PageFetchFailed { hash: hash.to_hex(), reason })?;
-        let page: [u8; PAGE_SIZE] = bytes.as_slice().try_into().map_err(|_| WireError::WrongPageLength {
+        let bytes = fetch_page(hash).map_err(|reason| WireError::PageFetchFailed {
             hash: hash.to_hex(),
-            expected: PAGE_SIZE,
-            actual: bytes.len(),
+            reason,
         })?;
+        let page: [u8; PAGE_SIZE] =
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| WireError::WrongPageLength {
+                    hash: hash.to_hex(),
+                    expected: PAGE_SIZE,
+                    actual: bytes.len(),
+                })?;
         let page_ref = page_store.intern(&page);
         if page_ref.hash() != hash {
             return Err(WireError::PageContentMismatch {
@@ -199,7 +212,10 @@ mod tests {
             vcpu: VcpuState {
                 regs: vec![1, 2, 3],
                 sregs: vec![4, 5],
-                msrs: vec![MsrWrite { index: 0x10, data: 42 }],
+                msrs: vec![MsrWrite {
+                    index: 0x10,
+                    data: 42,
+                }],
                 xsave: vec![9; 8],
                 xcrs: vec![1],
                 events: vec![2, 3],
@@ -214,7 +230,10 @@ mod tests {
                 tsc_aux: 1,
                 entropy_state: 0xABCD_EF01,
             },
-            device: DeviceState { tape_cursor: 4, console: vec![1, 2, 3, 4] },
+            device: DeviceState {
+                tape_cursor: 4,
+                console: vec![1, 2, 3, 4],
+            },
             cpu_signature: 0x0006_5000,
         }
     }
@@ -237,7 +256,10 @@ mod tests {
     #[test]
     fn decode_rejects_unsupported_version() {
         let bytes = vec![0xFFu8, 0, 0];
-        assert!(matches!(decode_universe_body(&bytes), Err(WireError::UnsupportedVersion(0xFF))));
+        assert!(matches!(
+            decode_universe_body(&bytes),
+            Err(WireError::UnsupportedVersion(0xFF))
+        ));
     }
 
     #[test]
@@ -246,7 +268,10 @@ mod tests {
         let encoded = encode_universe_body(&sample_universe(&mut store).to_body()).unwrap();
         let mut truncated = encoded.clone();
         truncated.extend_from_slice(&[0x00, 0x01]);
-        assert!(matches!(decode_universe_body(&truncated), Err(WireError::Decode(_))));
+        assert!(matches!(
+            decode_universe_body(&truncated),
+            Err(WireError::Decode(_))
+        ));
     }
 
     #[test]
@@ -262,7 +287,10 @@ mod tests {
 
         let mut restore_store = PageStore::new();
         let restored = universe_from_body(body, &mut restore_store, |hash| {
-            page_bytes.get(&hash).cloned().ok_or_else(|| "missing page".to_owned())
+            page_bytes
+                .get(&hash)
+                .cloned()
+                .ok_or_else(|| "missing page".to_owned())
         })
         .expect("reconstruct");
 
@@ -282,7 +310,8 @@ mod tests {
         let universe = sample_universe(&mut store);
         let body = universe.to_body();
         let mut restore_store = PageStore::new();
-        let err = universe_from_body(body, &mut restore_store, |_| Err("boom".to_owned())).unwrap_err();
+        let err =
+            universe_from_body(body, &mut restore_store, |_| Err("boom".to_owned())).unwrap_err();
         assert!(matches!(err, WireError::PageFetchFailed { .. }));
     }
 
@@ -303,7 +332,8 @@ mod tests {
         let body = universe.to_body();
         let mut restore_store = PageStore::new();
         // Full-size page, but the wrong content for the claimed hash.
-        let err = universe_from_body(body, &mut restore_store, |_| Ok(vec![0xEEu8; PAGE_SIZE])).unwrap_err();
+        let err = universe_from_body(body, &mut restore_store, |_| Ok(vec![0xEEu8; PAGE_SIZE]))
+            .unwrap_err();
         assert!(matches!(err, WireError::PageContentMismatch { .. }));
     }
 
@@ -333,11 +363,18 @@ mod tests {
                 tsc_aux: 0,
                 entropy_state: 0,
             },
-            device: DeviceState { tape_cursor: 0, console: vec![] },
+            device: DeviceState {
+                tape_cursor: 0,
+                console: vec![],
+            },
             cpu_signature: 0,
         };
         let body = universe.to_body();
-        assert_eq!(body.ram_page_hashes.len(), 2, "one entry per RAM slot, not per distinct content");
+        assert_eq!(
+            body.ram_page_hashes.len(),
+            2,
+            "one entry per RAM slot, not per distinct content"
+        );
         assert_eq!(body.ram_page_hashes[0], body.ram_page_hashes[1]);
     }
 }

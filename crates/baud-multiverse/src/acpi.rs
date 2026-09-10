@@ -285,7 +285,11 @@ mod tests {
     use crate::linux::GuestMemory;
 
     fn table_checksum_is_zero(table: &[u8]) {
-        assert_eq!(table.iter().fold(0u8, |acc, &b| acc.wrapping_add(b)), 0, "table bytes must sum to 0 mod 256");
+        assert_eq!(
+            table.iter().fold(0u8, |acc, &b| acc.wrapping_add(b)),
+            0,
+            "table bytes must sum to 0 mod 256"
+        );
     }
 
     #[test]
@@ -301,7 +305,10 @@ mod tests {
         assert_eq!(&rsdp[0..8], b"RSD PTR ");
         table_checksum_is_zero(&rsdp[0..20]); // ACPI 1.0 checksum region
         table_checksum_is_zero(&rsdp[0..36]); // extended checksum region
-        assert_eq!(rsdp[15], 2, "Revision must be >= 2 for the XsdtAddress field to be trusted");
+        assert_eq!(
+            rsdp[15], 2,
+            "Revision must be >= 2 for the XsdtAddress field to be trusted"
+        );
         assert_eq!(&rsdp[24..32], &layout::ACPI_XSDT_ADDR.to_le_bytes());
     }
 
@@ -331,24 +338,51 @@ mod tests {
         assert_eq!(&fadt[0..4], b"FACP");
         table_checksum_is_zero(&fadt);
         assert_eq!(fadt.len(), 244);
-        assert_eq!(&fadt[40..44], &(layout::ACPI_DSDT_ADDR as u32).to_le_bytes(), "32-bit Dsdt pointer");
-        assert_eq!(&fadt[140..148], &layout::ACPI_DSDT_ADDR.to_le_bytes(), "64-bit X_Dsdt pointer");
+        assert_eq!(
+            &fadt[40..44],
+            &(layout::ACPI_DSDT_ADDR as u32).to_le_bytes(),
+            "32-bit Dsdt pointer"
+        );
+        assert_eq!(
+            &fadt[140..148],
+            &layout::ACPI_DSDT_ADDR.to_le_bytes(),
+            "64-bit X_Dsdt pointer"
+        );
     }
 
     #[test]
     fn fadt_declares_hardware_reduced_acpi_and_no_smi_mediated_enable() {
         let fadt = build_fadt();
         let flags = u32::from_le_bytes(fadt[112..116].try_into().unwrap());
-        assert_eq!(flags & (1 << 20), 1 << 20, "HW_REDUCED_ACPI bit must be set");
+        assert_eq!(
+            flags & (1 << 20),
+            1 << 20,
+            "HW_REDUCED_ACPI bit must be set"
+        );
         let smi_cmd = u32::from_le_bytes(fadt[48..52].try_into().unwrap());
-        assert_eq!(smi_cmd, 0, "SMI_CMD=0 must make acpi_enable() skip issuing any SMI");
+        assert_eq!(
+            smi_cmd, 0,
+            "SMI_CMD=0 must make acpi_enable() skip issuing any SMI"
+        );
     }
 
     #[test]
     fn fadt_declares_every_fixed_hardware_register_block_absent() {
         let fadt = build_fadt();
-        for &(offset, len) in &[(56, 4), (60, 4), (64, 4), (68, 4), (72, 4), (76, 4), (80, 4), (84, 4)] {
-            assert!(fadt[offset..offset + len].iter().all(|&b| b == 0), "PM register block at offset {offset} must be all-zero");
+        for &(offset, len) in &[
+            (56, 4),
+            (60, 4),
+            (64, 4),
+            (68, 4),
+            (72, 4),
+            (76, 4),
+            (80, 4),
+            (84, 4),
+        ] {
+            assert!(
+                fadt[offset..offset + len].iter().all(|&b| b == 0),
+                "PM register block at offset {offset} must be all-zero"
+            );
         }
     }
 
@@ -357,7 +391,11 @@ mod tests {
         let dsdt = build_dsdt();
         assert_eq!(&dsdt[0..4], b"DSDT");
         table_checksum_is_zero(&dsdt);
-        assert_eq!(dsdt.len(), 36, "an empty definition block is exactly one header, no AML bytes");
+        assert_eq!(
+            dsdt.len(),
+            36,
+            "an empty definition block is exactly one header, no AML bytes"
+        );
     }
 
     #[test]
@@ -367,13 +405,28 @@ mod tests {
         table_checksum_is_zero(&madt);
         assert_eq!(&madt[36..40], &LOCAL_APIC_MMIO_BASE.to_le_bytes());
         let flags = u32::from_le_bytes(madt[40..44].try_into().unwrap());
-        assert_eq!(flags & 1, 1, "PCAT_COMPAT must be set: Pic8259 is also modeled");
-        assert_eq!(madt.len(), 36 + 8 + 8, "header + local-apic-address/flags + exactly one entry");
+        assert_eq!(
+            flags & 1,
+            1,
+            "PCAT_COMPAT must be set: Pic8259 is also modeled"
+        );
+        assert_eq!(
+            madt.len(),
+            36 + 8 + 8,
+            "header + local-apic-address/flags + exactly one entry"
+        );
         assert_eq!(madt[44], 0, "entry type 0: Processor Local APIC");
         assert_eq!(madt[45], 8, "entry length 8");
-        assert_eq!(madt[47], 0, "APIC ID 0 -- the sole CPU this crate ever models");
+        assert_eq!(
+            madt[47], 0,
+            "APIC ID 0 -- the sole CPU this crate ever models"
+        );
         let entry_flags = u32::from_le_bytes(madt[48..52].try_into().unwrap());
-        assert_eq!(entry_flags & 1, 1, "the LAPIC entry's own Enabled bit must be set");
+        assert_eq!(
+            entry_flags & 1,
+            1,
+            "the LAPIC entry's own Enabled bit must be set"
+        );
     }
 
     #[test]
@@ -383,27 +436,37 @@ mod tests {
         write_acpi_tables(&guest_mem).expect("write must succeed");
 
         let mut rsdp = [0u8; 36];
-        guest_mem.read_slice(&mut rsdp, GuestAddress(layout::ACPI_RSDP_ADDR)).unwrap();
+        guest_mem
+            .read_slice(&mut rsdp, GuestAddress(layout::ACPI_RSDP_ADDR))
+            .unwrap();
         assert_eq!(rsdp, build_rsdp());
 
         let xsdt = build_xsdt();
         let mut read_back = vec![0u8; xsdt.len()];
-        guest_mem.read_slice(&mut read_back, GuestAddress(layout::ACPI_XSDT_ADDR)).unwrap();
+        guest_mem
+            .read_slice(&mut read_back, GuestAddress(layout::ACPI_XSDT_ADDR))
+            .unwrap();
         assert_eq!(read_back, xsdt);
 
         let fadt = build_fadt();
         let mut read_back = vec![0u8; fadt.len()];
-        guest_mem.read_slice(&mut read_back, GuestAddress(layout::ACPI_FADT_ADDR)).unwrap();
+        guest_mem
+            .read_slice(&mut read_back, GuestAddress(layout::ACPI_FADT_ADDR))
+            .unwrap();
         assert_eq!(read_back, fadt);
 
         let dsdt = build_dsdt();
         let mut read_back = vec![0u8; dsdt.len()];
-        guest_mem.read_slice(&mut read_back, GuestAddress(layout::ACPI_DSDT_ADDR)).unwrap();
+        guest_mem
+            .read_slice(&mut read_back, GuestAddress(layout::ACPI_DSDT_ADDR))
+            .unwrap();
         assert_eq!(read_back, dsdt);
 
         let madt = build_madt();
         let mut read_back = vec![0u8; madt.len()];
-        guest_mem.read_slice(&mut read_back, GuestAddress(layout::ACPI_MADT_ADDR)).unwrap();
+        guest_mem
+            .read_slice(&mut read_back, GuestAddress(layout::ACPI_MADT_ADDR))
+            .unwrap();
         assert_eq!(read_back, madt);
     }
 

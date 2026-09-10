@@ -133,7 +133,12 @@ fn violation_opcode_emits_crash_with_the_buffered_utf8_invariant_name() {
     let records = dev.drain_records();
     assert_eq!(records.len(), 1);
     match &records[0] {
-        Msg::Outcome(Outcome::Crash { invariant, node, signal, .. }) => {
+        Msg::Outcome(Outcome::Crash {
+            invariant,
+            node,
+            signal,
+            ..
+        }) => {
             assert_eq!(invariant.as_deref(), Some("no_double_free"));
             assert_eq!(*node, None);
             assert_eq!(*signal, None);
@@ -193,7 +198,10 @@ fn frame_opcode_decodes_format_dimensions_and_pixels_and_hashes_them() {
             assert_eq!(rec.height, 2);
             assert_eq!(rec.format, baud_proto::PixFmt::Indexed8);
             assert_eq!(rec.bytes.as_deref(), Some([10u8, 20, 30, 40].as_slice()));
-            assert_eq!(rec.hash, baud_proto::Hash(*blake3::hash(&[10, 20, 30, 40]).as_bytes()));
+            assert_eq!(
+                rec.hash,
+                baud_proto::Hash(*blake3::hash(&[10, 20, 30, 40]).as_bytes())
+            );
         }
         other => panic!("expected Frame, got {other:?}"),
     }
@@ -231,7 +239,11 @@ fn frame_opcode_two_identical_payloads_hash_identically() {
 #[test]
 fn frame_opcode_with_unknown_format_byte_is_malformed() {
     let mut dev = TapeDevice::new(vec![]);
-    let payload: Vec<u8> = [0xffu8].into_iter().chain(0u32.to_le_bytes()).chain(0u32.to_le_bytes()).collect();
+    let payload: Vec<u8> = [0xffu8]
+        .into_iter()
+        .chain(0u32.to_le_bytes())
+        .chain(0u32.to_le_bytes())
+        .collect();
     for b in payload {
         dev.pio_write(reg::DATA, b);
     }
@@ -255,7 +267,11 @@ fn frame_opcode_with_header_shorter_than_nine_bytes_is_malformed() {
 fn frame_opcode_with_zero_pixel_bytes_is_malformed_for_nonzero_geometry() {
     // A nonzero frame geometry must carry exactly its declared pixel buffer at the device boundary.
     let mut dev = TapeDevice::new(vec![]);
-    let payload: Vec<u8> = [1u8].into_iter().chain(3u32.to_le_bytes()).chain(3u32.to_le_bytes()).collect();
+    let payload: Vec<u8> = [1u8]
+        .into_iter()
+        .chain(3u32.to_le_bytes())
+        .chain(3u32.to_le_bytes())
+        .collect();
     for b in payload {
         dev.pio_write(reg::DATA, b);
     }
@@ -394,8 +410,14 @@ fn read_past_end_is_fixed() {
     let short_tape = vec![1, 2, 3];
     let (out_a, hit_a) = drain_guest(short_tape.clone(), 16);
     let (out_b, hit_b) = drain_guest(short_tape, 16);
-    assert!(hit_a && hit_b, "reading well past the tape's length must hit the EOT sentinel");
-    assert_eq!(out_a, out_b, "EOT behavior must itself be deterministic across a double-run");
+    assert!(
+        hit_a && hit_b,
+        "reading well past the tape's length must hit the EOT sentinel"
+    );
+    assert_eq!(
+        out_a, out_b,
+        "EOT behavior must itself be deterministic across a double-run"
+    );
     assert!(out_a[3..].iter().all(|&b| b == EOT_SENTINEL));
 }
 

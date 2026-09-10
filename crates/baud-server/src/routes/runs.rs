@@ -8,11 +8,16 @@
 //   GET  /runs         → list runs (run ls)
 //   GET  /runs/:id     → run status
 //   POST /runs/:id/abort → abort a run
+//   POST /runs/:id/pause → pause a run
+//   POST /runs/:id/resume → resume a paused run
 
-use axum::{extract::{Path, State}, Json};
+use crate::AppState;
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -38,17 +43,18 @@ pub struct RunStartBody {
     pub backend: String,
 }
 
-fn default_budget() -> u64 { 60 }
-fn default_backend() -> String { "local".to_owned() }
+fn default_budget() -> u64 {
+    60
+}
+fn default_backend() -> String {
+    "local".to_owned()
+}
 
 // ---------------------------------------------------------------------------
 // POST /runs — start a run
 // ---------------------------------------------------------------------------
 
-pub async fn start(
-    State(state): State<AppState>,
-    Json(body): Json<RunStartBody>,
-) -> Json<Value> {
+pub async fn start(State(state): State<AppState>, Json(body): Json<RunStartBody>) -> Json<Value> {
     // 1. Lint the spec via baud-init
     let spec_doc = match baud_init::lint(&body.spec) {
         Ok(doc) => doc,
@@ -56,7 +62,10 @@ pub async fn start(
     };
 
     // 2. Compute spec hash
-    let spec_hash = format!("blake3:{}", hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes()));
+    let spec_hash = format!(
+        "blake3:{}",
+        hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes())
+    );
 
     // 3. Compute the canonical input closure identity before journaling ownership.
     let closure_hash = compute_closure_hash(&spec_doc);
@@ -64,10 +73,28 @@ pub async fn start(
     // 4. Journal ownership before acknowledging the run. A run without a durable tape
     // reservation cannot be replayed or cancelled safely, so create both rows in one transaction.
     if body.backend != "local" && body.backend != "daytona" {
-        return Json(json!({ "error": format!("unsupported backend '{}'; expected local or daytona", body.backend) }));
+        return Json(
+            json!({ "error": format!("unsupported backend '{}'; expected local or daytona", body.backend) }),
+        );
     }
-    let run_id = format!("run-{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>());
-    let tape_id = format!("tape-{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>());
+    let run_id = format!(
+        "run-{}",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .replace('-', "")
+            .chars()
+            .take(12)
+            .collect::<String>()
+    );
+    let tape_id = format!(
+        "tape-{}",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .replace('-', "")
+            .chars()
+            .take(12)
+            .collect::<String>()
+    );
     let now = crate::state::unix_now() as i64;
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
@@ -113,7 +140,9 @@ pub async fn start(
             let db = state.db.clone();
             let run_id_clone = run_id.clone();
             let tape_id_clone = tape_id.clone();
-            tokio::spawn(async move { provision_run(&db, &run_id_clone, &tape_id_clone).await; });
+            tokio::spawn(async move {
+                provision_run(&db, &run_id_clone, &tape_id_clone).await;
+            });
             Json(json!({
                 "id": run_id,
                 "tape_id": tape_id,
@@ -164,11 +193,23 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// but it must keep the run and its tape in matching states.
 async fn provision_run(db: &sqlx::SqlitePool, run_id: &str, tape_id: &str) {
     let now = crate::state::unix_now() as i64;
-    let mut tx = match db.begin().await { Ok(tx) => tx, Err(_) => return };
+    let mut tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return,
+    };
     if sqlx::query("UPDATE runs SET status = 'provisioning', updated_at = ? WHERE id = ? AND status = 'pending'")
         .bind(now).bind(run_id).execute(&mut *tx).await.is_err() { return; }
-    if sqlx::query("UPDATE tapes SET state = 'running', updated_at = ? WHERE id = ? AND state = 'creating'")
-        .bind(now).bind(tape_id).execute(&mut *tx).await.is_err() { return; }
+    if sqlx::query(
+        "UPDATE tapes SET state = 'running', updated_at = ? WHERE id = ? AND state = 'creating'",
+    )
+    .bind(now)
+    .bind(tape_id)
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        return;
+    }
     if sqlx::query("UPDATE runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'provisioning'")
         .bind(now).bind(run_id).execute(&mut *tx).await.is_err() { return; }
     let _ = tx.commit().await;
@@ -187,18 +228,23 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 
     match rows {
         Ok(rows) => {
-            let runs: Vec<Value> = rows.into_iter().map(|(id, spec_hash, nix_ref, closure_hash, seed, status, ca, ua)| {
-                json!({
-                    "id": id,
-                    "spec_hash": spec_hash,
-                    "nix_ref": nix_ref,
-                    "closure_hash": closure_hash,
-                    "seed": seed,
-                    "status": status,
-                    "created_at": ca,
-                    "updated_at": ua,
-                })
-            }).collect();
+            let runs: Vec<Value> = rows
+                .into_iter()
+                .map(
+                    |(id, spec_hash, nix_ref, closure_hash, seed, status, ca, ua)| {
+                        json!({
+                            "id": id,
+                            "spec_hash": spec_hash,
+                            "nix_ref": nix_ref,
+                            "closure_hash": closure_hash,
+                            "seed": seed,
+                            "status": status,
+                            "created_at": ca,
+                            "updated_at": ua,
+                        })
+                    },
+                )
+                .collect();
             Json(json!({ "runs": runs }))
         }
         Err(e) => Json(json!({ "error": format!("db error: {e}") })),
@@ -209,10 +255,7 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 // GET /runs/:id — run status
 // ---------------------------------------------------------------------------
 
-pub async fn status(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<Value> {
+pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
     let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64, String, i64, i64)>(
         "SELECT id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, status, created_at, updated_at FROM runs WHERE id = ?"
     )
@@ -221,7 +264,18 @@ pub async fn status(
     .await;
 
     match row {
-        Ok(Some((id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, status, ca, ua))) => {
+        Ok(Some((
+            id,
+            spec_hash,
+            nix_ref,
+            closure_hash,
+            tape_id,
+            seed,
+            budget_minutes,
+            status,
+            ca,
+            ua,
+        ))) => {
             // exit_code: 0=completed, 1=error/aborted, 2=goal/violation (spec baud-cli.md §4)
             let exit_code: u8 = match status.as_str() {
                 "crashed" | "goal" | "violation_found" => 2,
@@ -248,13 +302,51 @@ pub async fn status(
 }
 
 // ---------------------------------------------------------------------------
+// POST /runs/:id/pause and /runs/:id/resume — lifecycle controls
+// ---------------------------------------------------------------------------
+
+pub async fn pause(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+    transition_status(&state, &id, "paused", &["running", "provisioning"]).await
+}
+
+pub async fn resume(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+    transition_status(&state, &id, "running", &["paused"]).await
+}
+
+async fn transition_status(
+    state: &AppState,
+    id: &str,
+    target: &str,
+    allowed: &[&str],
+) -> Json<Value> {
+    let now = crate::state::unix_now() as i64;
+    let placeholders = std::iter::repeat("?")
+        .take(allowed.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "UPDATE runs SET status = ?, updated_at = ? WHERE id = ? AND status IN ({placeholders})"
+    );
+    let mut query = sqlx::query(&sql).bind(target).bind(now).bind(id);
+    for state_name in allowed {
+        query = query.bind(state_name);
+    }
+    match query.execute(&state.db).await {
+        Ok(result) if result.rows_affected() == 1 => {
+            Json(json!({ "ok": true, "id": id, "status": target }))
+        }
+        Ok(_) => Json(
+            json!({ "error": format!("run {id} not found or not in a {target} transition state") }),
+        ),
+        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /runs/:id/abort — abort a run
 // ---------------------------------------------------------------------------
 
-pub async fn abort(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<Value> {
+pub async fn abort(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
     let now = crate::state::unix_now() as i64;
     let result = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status IN ('pending','provisioning','running')")
         .bind(now)

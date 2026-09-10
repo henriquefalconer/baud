@@ -23,7 +23,9 @@ pub mod pagetables;
 use crate::console::DeviceBus;
 use crate::cpuid::{self, CpuidEntry};
 use crate::layout;
-use crate::timesource::{BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_DEADLINE, MSR_IA32_TSC_AUX};
+use crate::timesource::{
+    BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_AUX, MSR_IA32_TSC_DEADLINE,
+};
 use crate::virtio_mmio::VirtioMmioTransport;
 use baud_snapshot::{PageRef, PageStore, Universe};
 use baud_vcpu::{DeterminismHole, RunLoopError};
@@ -31,7 +33,10 @@ use kvm_bindings::{
     kvm_cpuid_entry2, kvm_enable_cap, kvm_msr_entry, kvm_userspace_memory_region, Msrs,
     KVM_MAX_CPUID_ENTRIES, KVM_MEM_LOG_DIRTY_PAGES,
 };
-use kvm_ioctls::{Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd, VmFd};
+use kvm_ioctls::{
+    Cap, Kvm, MsrExitReason, MsrFilterDefaultAction, MsrFilterRange, MsrFilterRangeFlags, VcpuFd,
+    VmFd,
+};
 use perf_event::{Builder, Counter};
 use std::ffi::CString;
 use std::io;
@@ -128,7 +133,15 @@ fn create_vm_vcpu_shell(
         .map(|entries| baud_snapshot::linux::DirtyRing::open(&vcpu, entries))
         .transpose()?;
 
-    Ok((BootedGuest { kvm, vm, vcpu, guest_mem }, dirty_ring))
+    Ok((
+        BootedGuest {
+            kvm,
+            vm,
+            vcpu,
+            guest_mem,
+        },
+        dirty_ring,
+    ))
 }
 
 /// Pin the vCPU's *raw* TSC value (what a guest's own `rdtsc`/`rdtscp` instructions read,
@@ -153,7 +166,11 @@ fn create_vm_vcpu_shell(
 /// the *high* bits of a `VIRTUAL_TSC_KHZ`-scaled read stay identical across boots (todo.md §3.3's
 /// test spec: cooperative asserts the high bits / work-derived field, not full equality).
 fn pin_tsc_value(vcpu: &VcpuFd, value: u64) -> Result<(), BootError> {
-    let entry = kvm_msr_entry { index: MSR_IA32_TSC, data: value, ..Default::default() };
+    let entry = kvm_msr_entry {
+        index: MSR_IA32_TSC,
+        data: value,
+        ..Default::default()
+    };
     let msrs = Msrs::from_entries(&[entry]).map_err(BootError::MsrAlloc)?;
     vcpu.set_msrs(&msrs)?;
     Ok(())
@@ -182,7 +199,11 @@ fn pin_apic_base_msr(vcpu: &VcpuFd) -> Result<(), BootError> {
     const APICBASE_BSP: u64 = 1 << 8;
     const APICBASE_ENABLE: u64 = 1 << 11;
     let value = layout::LAPIC_MMIO_BASE | APICBASE_BSP | APICBASE_ENABLE;
-    let entry = kvm_msr_entry { index: MSR_IA32_APICBASE, data: value, ..Default::default() };
+    let entry = kvm_msr_entry {
+        index: MSR_IA32_APICBASE,
+        data: value,
+        ..Default::default()
+    };
     let msrs = Msrs::from_entries(&[entry]).map_err(BootError::MsrAlloc)?;
     vcpu.set_msrs(&msrs)?;
     Ok(())
@@ -318,14 +339,19 @@ fn allocate_and_register_guest_ram(
         .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
-        return Err(BootError::GuestMemory(ram_size, io::Error::last_os_error().to_string()));
+        return Err(BootError::GuestMemory(
+            ram_size,
+            io::Error::last_os_error().to_string(),
+        ));
     }
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.set_len(ram_size as u64)
         .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
-    let guest_mem = GuestMemory::from_ranges_with_files(&[
-        (GuestAddress(layout::GUEST_RAM_START), ram_size, Some(FileOffset::new(file, 0))),
-    ])
+    let guest_mem = GuestMemory::from_ranges_with_files(&[(
+        GuestAddress(layout::GUEST_RAM_START),
+        ram_size,
+        Some(FileOffset::new(file, 0)),
+    )])
     .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
 
     let host_addr = guest_mem
@@ -338,7 +364,11 @@ fn allocate_and_register_guest_ram(
     // forever, no matter how much the guest actually writes. Only set when a caller actually wants
     // dirty tracking (`dirty_ring_entries.is_some()`, `create_vm_vcpu_shell`'s caller) — the flag
     // has a real cost (write-protecting the slot) callers that never reset shouldn't pay.
-    let flags = if log_dirty_pages { KVM_MEM_LOG_DIRTY_PAGES } else { 0 };
+    let flags = if log_dirty_pages {
+        KVM_MEM_LOG_DIRTY_PAGES
+    } else {
+        0
+    };
     let region = kvm_userspace_memory_region {
         slot: 0,
         guest_phys_addr: layout::GUEST_RAM_START,
@@ -777,7 +807,11 @@ pub enum RunUntilBranchObservation {
 /// the counted window, for both boots alike.
 fn entropy_seed_from_tape(tape: &[u8]) -> u64 {
     let hash = blake3::hash(tape);
-    u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("blake3 hash is at least 8 bytes"))
+    u64::from_le_bytes(
+        hash.as_bytes()[..8]
+            .try_into()
+            .expect("blake3 hash is at least 8 bytes"),
+    )
 }
 
 /// Derive the `SETUP_RNG_SEED` `setup_data` seed (specs/baud-multiverse.md §3.8's "Boot RNG seed")
@@ -874,7 +908,16 @@ impl Multiverse {
         tape: Vec<u8>,
         dirty_ring_entries: Option<u32>,
     ) -> Result<Self, BootError> {
-        Self::boot_with_rdseed_sites(kernel_path, cmdline, base, k, tape, dirty_ring_entries, None, [])
+        Self::boot_with_rdseed_sites(
+            kernel_path,
+            cmdline,
+            base,
+            k,
+            tape,
+            dirty_ring_entries,
+            None,
+            [],
+        )
     }
 
     /// [`boot`](Self::boot) plus this guest image's known `rdseed`→`UD2` rewrite sites
@@ -915,7 +958,8 @@ impl Multiverse {
         initramfs: Option<&[u8]>,
         rdseed_sites: impl IntoIterator<Item = (u64, baud_vcpu::EnforcedRdseedSite)>,
     ) -> Result<Self, BootError> {
-        let (guest, dirty_ring) = boot_guest(kernel_path, cmdline, &tape, dirty_ring_entries, initramfs)?;
+        let (guest, dirty_ring) =
+            boot_guest(kernel_path, cmdline, &tape, dirty_ring_entries, initramfs)?;
         // Must come before `LinuxBranchCounter::new()` — see `entropy_seed_from_tape`'s doc.
         let entropy_seed = entropy_seed_from_tape(&tape);
         let counter = LinuxBranchCounter::new()?;
@@ -923,7 +967,15 @@ impl Multiverse {
         let time = WorkClock::new(base, k, counter)
             .with_entropy_seed(entropy_seed)
             .with_rdseed_sites(rdseed_sites);
-        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET, cancel: None })
+        Ok(Multiverse {
+            guest,
+            bus,
+            time,
+            dirty_ring,
+            watchdog_budget: DEFAULT_WATCHDOG_BUDGET,
+            periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET,
+            cancel: None,
+        })
     }
 
     /// Capture this `Multiverse`'s complete state into a [`Universe`] (specs/baud-snapshot.md §2's
@@ -1026,7 +1078,11 @@ impl Multiverse {
     ) -> Result<Self, RestoreError> {
         let (guest, dirty_ring) = restore_guest(universe, template_active, dirty_ring_entries)?;
         let counter = LinuxBranchCounter::new().map_err(BootError::BranchCounter)?;
-        let bus = DeviceBus::restore(tape, universe.device.tape_cursor, universe.device.console.clone());
+        let bus = DeviceBus::restore(
+            tape,
+            universe.device.tape_cursor,
+            universe.device.console.clone(),
+        );
         let time = WorkClock::restore(
             universe.clock.work_clock_base,
             k,
@@ -1036,7 +1092,15 @@ impl Multiverse {
             universe.clock.entropy_state,
             counter,
         );
-        Ok(Multiverse { guest, bus, time, dirty_ring, watchdog_budget: DEFAULT_WATCHDOG_BUDGET, periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET, cancel: None })
+        Ok(Multiverse {
+            guest,
+            bus,
+            time,
+            dirty_ring,
+            watchdog_budget: DEFAULT_WATCHDOG_BUDGET,
+            periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET,
+            cancel: None,
+        })
     }
 
     /// Fork a new, independent continuation from a captured [`Universe`] on its own tape suffix
@@ -1085,7 +1149,11 @@ impl Multiverse {
     /// written back, so a mid-loop I/O failure never tells the kernel pages were reclaimed that
     /// this call did not actually restore.
     pub fn reset_dirty_pages(&mut self, base_ram: &[PageRef]) -> Result<usize, ResetError> {
-        let harvested = self.dirty_ring.as_mut().ok_or(ResetError::NotEnabled)?.collect();
+        let harvested = self
+            .dirty_ring
+            .as_mut()
+            .ok_or(ResetError::NotEnabled)?
+            .collect();
         let pages = crate::dirty::ram_page_indices(&harvested, crate::dirty::RAM_SLOT);
         for &page in &pages {
             let page_ref = base_ram.get(page).ok_or(ResetError::PageOutOfRange(page))?;
@@ -1184,7 +1252,9 @@ impl Multiverse {
     /// set. `None` (no flag installed) short-circuits without any atomic access at all, so the
     /// overwhelmingly common case costs one `Option` discriminant test per loop iteration.
     fn is_cancelled(&self) -> bool {
-        self.cancel.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        self.cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
     }
 
     /// Arm this run's `SIGUSR1` kicker for the duration of one run-loop call
@@ -1205,8 +1275,12 @@ impl Multiverse {
     /// call site uses, so none of them can forget the flag.
     fn cancellable_stepper(&mut self) -> baud_vcpu::linux::pmu::LinuxPmuStepper<'_, '_> {
         let cancel = self.cancel.clone();
-        baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time)
-            .with_cancel(cancel)
+        baud_vcpu::linux::pmu::LinuxPmuStepper::new(
+            &mut self.guest.vcpu,
+            &mut self.bus,
+            &mut self.time,
+        )
+        .with_cancel(cancel)
     }
 
     /// Classify a boundary-engine (`inject_at`/`PmuStepper`) failure: a run whose supervisor
@@ -1290,7 +1364,11 @@ impl Multiverse {
     /// The vCPU's current RIP (`KVM_GET_REGS`) — the building block [`HaltOutcome::exit_pc`] and
     /// every other halt-site call below reads to name the exact instruction a shutdown landed at.
     fn current_rip(&self) -> Result<u64, DeterminismHole> {
-        self.guest.vcpu.get_regs().map(|regs| regs.rip).map_err(|e| DeterminismHole(e.to_string()))
+        self.guest
+            .vcpu
+            .get_regs()
+            .map(|regs| regs.rip)
+            .map_err(|e| DeterminismHole(e.to_string()))
     }
 
     /// Every byte the guest has written to the console so far, in order — the live equivalent of
@@ -1326,7 +1404,11 @@ impl Multiverse {
     /// same "no silent continuation" convention every other run-loop entry point here follows) if
     /// `max_exits` is exhausted first — a caller-supplied bound that is too tight to observe real,
     /// intended guest progress, not a determinism violation in itself.
-    pub fn run_until_console_len(&mut self, target_len: usize, max_exits: u32) -> Result<(), RunLoopError> {
+    pub fn run_until_console_len(
+        &mut self,
+        target_len: usize,
+        max_exits: u32,
+    ) -> Result<(), RunLoopError> {
         let _kicker = self.arm_cancel_kicker();
         let mut exits = 0u32;
         while self.console_output().len() < target_len {
@@ -1378,7 +1460,9 @@ impl Multiverse {
                 ram_hash: self.ram_hash(),
                 exit_pc: h.exit_pc,
             }),
-            RunUntilBranchObservation::MarkBranch { step } => RunUntilBranchOutcome::MarkBranch { step },
+            RunUntilBranchObservation::MarkBranch { step } => {
+                RunUntilBranchOutcome::MarkBranch { step }
+            }
         }
     }
 
@@ -1411,12 +1495,17 @@ impl Multiverse {
             let outcome = self.step_exit_cancellable()?;
             exits += 1;
             if matches!(outcome, baud_vcpu::DispatchOutcome::Halted) {
-                let halt =
-                    HaltObservation { console_output: self.bus.console.output().to_vec(), exit_pc: self.current_rip()? };
+                let halt = HaltObservation {
+                    console_output: self.bus.console.output().to_vec(),
+                    exit_pc: self.current_rip()?,
+                };
                 return Ok((RunUntilBranchObservation::Halted(halt), records));
             }
             let mut drained = self.bus.tape.device_mut().drain_records();
-            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+            if let Some(pos) = drained
+                .iter()
+                .position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. }))
+            {
                 let step = match drained[pos] {
                     baud_proto::Msg::MarkBranch { step } => step,
                     _ => unreachable!("position() only matched MarkBranch entries"),
@@ -1438,7 +1527,11 @@ impl Multiverse {
     /// epoched counter of its own — todo.md §14 next-actions item 2(c)), then calls
     /// `boundary::inject_at`. Returns the exact `(rip, rcb)` the interrupt landed at — the tuple
     /// `timer_tick_lands_at_identical_instruction` compares across a double-run.
-    pub fn inject_timer_tick(&mut self, period_rcb: u64, vector: u8) -> Result<TimerTick, RunLoopError> {
+    pub fn inject_timer_tick(
+        &mut self,
+        period_rcb: u64,
+        vector: u8,
+    ) -> Result<TimerTick, RunLoopError> {
         let baseline = self.time.current_rcb();
         let target_rcb = baseline.saturating_add(period_rcb);
         let mut stepper = self.cancellable_stepper();
@@ -1447,9 +1540,10 @@ impl Multiverse {
         // `stepper_error` (which needs `&self` to read the cancellation flag) is free to run here.
         let outcome = result.map_err(|e| self.stepper_error(e))?;
         match outcome {
-            baud_vcpu::boundary::InjectOutcome::Injected(point) => {
-                Ok(TimerTick { rip: point.rip, rcb: point.rcb })
-            }
+            baud_vcpu::boundary::InjectOutcome::Injected(point) => Ok(TimerTick {
+                rip: point.rip,
+                rcb: point.rcb,
+            }),
             baud_vcpu::boundary::InjectOutcome::Halted(point) => Err(DeterminismHole(format!(
                 "inject_timer_tick: guest halted at rcb={} before reaching target_rcb={target_rcb} \
                  -- use run_to_first_halt_with_periodic_timer for a guest whose tick count is not \
@@ -1522,7 +1616,10 @@ impl Multiverse {
             let outcome = result.map_err(|e| self.stepper_error(e))?;
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
-                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                    ticks.push(TimerTick {
+                        rip: point.rip,
+                        rcb: point.rcb,
+                    });
                 }
                 // The guest halted on its own before this tick's target: the run is over. Do not
                 // call `run_to_first_halt` here — the `Hlt`/`Shutdown` exit that set this was
@@ -1581,8 +1678,10 @@ impl Multiverse {
         vector: u8,
         max_ticks: u32,
     ) -> Result<(Vec<TimerTick>, RunUntilBranchOutcome, Vec<baud_proto::Msg>), RunLoopError> {
-        let (ticks, observed, records) =
-            self.run_until_branch_or_halt_with_periodic_timer_without_ram_hash(period_rcb, vector, max_ticks)?;
+        let (ticks, observed, records) = self
+            .run_until_branch_or_halt_with_periodic_timer_without_ram_hash(
+                period_rcb, vector, max_ticks,
+            )?;
         Ok((ticks, self.observation_to_outcome(observed), records))
     }
 
@@ -1595,7 +1694,14 @@ impl Multiverse {
         period_rcb: u64,
         vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), RunLoopError> {
+    ) -> Result<
+        (
+            Vec<TimerTick>,
+            RunUntilBranchObservation,
+            Vec<baud_proto::Msg>,
+        ),
+        RunLoopError,
+    > {
         let _kicker = self.arm_cancel_kicker();
         let mut ticks = Vec::new();
         let mut records = Vec::new();
@@ -1609,18 +1715,28 @@ impl Multiverse {
             let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, vector);
             let outcome = result.map_err(|e| self.stepper_error(e))?;
             let mut drained = self.bus.tape.device_mut().drain_records();
-            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+            if let Some(pos) = drained
+                .iter()
+                .position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. }))
+            {
                 let step = match drained[pos] {
                     baud_proto::Msg::MarkBranch { step } => step,
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
                 records.extend(drained.drain(..=pos));
-                return Ok((ticks, RunUntilBranchObservation::MarkBranch { step }, records));
+                return Ok((
+                    ticks,
+                    RunUntilBranchObservation::MarkBranch { step },
+                    records,
+                ));
             }
             records.extend(drained);
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
-                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                    ticks.push(TimerTick {
+                        rip: point.rip,
+                        rcb: point.rcb,
+                    });
                 }
                 baud_vcpu::boundary::InjectOutcome::Halted(_) => {
                     let halt = HaltObservation {
@@ -1683,7 +1799,8 @@ impl Multiverse {
     /// `acpi=on` and whose kernel is `CONFIG_ACPI=y` — every existing caller that never calls this
     /// keeps booting with no ACPI tables present at all, exactly as before this method existed.
     pub fn write_acpi_tables(&self) -> Result<(), DeterminismHole> {
-        crate::acpi::write_acpi_tables(&self.guest.guest_mem).map_err(|e| DeterminismHole(e.to_string()))
+        crate::acpi::write_acpi_tables(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))
     }
 
     /// Enable the virtio-blk device on this guest's device bus
@@ -1743,13 +1860,20 @@ impl Multiverse {
     /// [`step_exit`](Self::step_exit) is safe here: a real block-request completion wait
     /// (`wait_for_completion_io`) reaches the idle loop's `safe_halt()`, `RFLAGS.IF=1` guaranteed,
     /// the same as virtio-rng's `wait_for_completion_killable`).
-    fn service_virtio_blk_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, RunLoopError> {
+    fn service_virtio_blk_interrupt_while_halted(
+        &mut self,
+        vector: u8,
+    ) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         if processed > 0 {
-            let mut events = self.guest.vcpu.get_vcpu_events().map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut events = self
+                .guest
+                .vcpu
+                .get_vcpu_events()
+                .map_err(|e| DeterminismHole(e.to_string()))?;
             events.interrupt.injected = 1;
             events.interrupt.nr = vector;
             events.interrupt.soft = 0;
@@ -1877,13 +2001,20 @@ impl Multiverse {
     /// `request_interrupt_window`), staging the interrupt directly via `KVM_SET_VCPU_EVENTS` and
     /// re-entering with one plain [`step_exit`](Self::step_exit) is safe and mirrors exactly how
     /// real hardware wakes a halted core: the very next `KVM_RUN` delivers it and resumes.
-    fn service_virtio_rng_interrupt_while_halted(&mut self, vector: u8) -> Result<u32, RunLoopError> {
+    fn service_virtio_rng_interrupt_while_halted(
+        &mut self,
+        vector: u8,
+    ) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
             .service_virtio_rng(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         if processed > 0 {
-            let mut events = self.guest.vcpu.get_vcpu_events().map_err(|e| DeterminismHole(e.to_string()))?;
+            let mut events = self
+                .guest
+                .vcpu
+                .get_vcpu_events()
+                .map_err(|e| DeterminismHole(e.to_string()))?;
             events.interrupt.injected = 1;
             events.interrupt.nr = vector;
             events.interrupt.soft = 0;
@@ -2019,8 +2150,10 @@ impl Multiverse {
         };
         let mut ticks = Vec::new();
         let _kicker = self.arm_cancel_kicker();
-        let mut last_notify: Vec<u64> =
-            devices.iter().map(|d| (d.notify_count)(self).unwrap_or(0)).collect();
+        let mut last_notify: Vec<u64> = devices
+            .iter()
+            .map(|d| (d.notify_count)(self).unwrap_or(0))
+            .collect();
         let progress_start = std::time::Instant::now();
         for tick_index in 0..max_ticks {
             if self.is_cancelled() {
@@ -2050,7 +2183,9 @@ impl Multiverse {
             let inject_at_start = std::time::Instant::now();
             let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector);
             let inject_at_elapsed = inject_at_start.elapsed();
-            let tick_timed_out = tick_watchdog.fired.load(std::sync::atomic::Ordering::SeqCst);
+            let tick_timed_out = tick_watchdog
+                .fired
+                .load(std::sync::atomic::Ordering::SeqCst);
             tick_watchdog.disarm();
             if inject_at_elapsed >= SLOW_TICK_PHASE_LOG_THRESHOLD {
                 info!(
@@ -2080,7 +2215,10 @@ impl Multiverse {
             })?;
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
-                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                    ticks.push(TimerTick {
+                        rip: point.rip,
+                        rcb: point.rcb,
+                    });
                     for (i, dev) in devices.iter().enumerate() {
                         let notify_count = (dev.notify_count)(self).unwrap_or(0);
                         if notify_count != last_notify[i] {
@@ -2145,12 +2283,18 @@ impl Multiverse {
                     // (unlike a device), so deliver it directly (safe: `safe_halt()` guarantees
                     // `RFLAGS.IF=1` right here) and drain forced exits until the guest halts again
                     // or `p` appears.
-                    let mut events =
-                        self.guest.vcpu.get_vcpu_events().map_err(|e| DeterminismHole(e.to_string()))?;
+                    let mut events = self
+                        .guest
+                        .vcpu
+                        .get_vcpu_events()
+                        .map_err(|e| DeterminismHole(e.to_string()))?;
                     events.interrupt.injected = 1;
                     events.interrupt.nr = timer_vector;
                     events.interrupt.soft = 0;
-                    self.guest.vcpu.set_vcpu_events(&events).map_err(|e| DeterminismHole(e.to_string()))?;
+                    self.guest
+                        .vcpu
+                        .set_vcpu_events(&events)
+                        .map_err(|e| DeterminismHole(e.to_string()))?;
                     let mut burst_exits = 0u32;
                     loop {
                         if self.is_cancelled() {
@@ -2176,8 +2320,11 @@ impl Multiverse {
                         // stall lived in exactly this loop, a code path distinct from `inject_at`
                         // that the per-tick watchdog above never covered).
                         let burst_watchdog = baud_vcpu::linux::Watchdog::arm(tick_watchdog_budget);
-                        let dispatch = self.step_exit_cancellable_with_watchdog(&burst_watchdog.fired);
-                        let burst_timed_out = burst_watchdog.fired.load(std::sync::atomic::Ordering::SeqCst);
+                        let dispatch =
+                            self.step_exit_cancellable_with_watchdog(&burst_watchdog.fired);
+                        let burst_timed_out = burst_watchdog
+                            .fired
+                            .load(std::sync::atomic::Ordering::SeqCst);
                         burst_watchdog.disarm();
                         let dispatch = dispatch.map_err(|e| {
                             if burst_timed_out && !self.is_cancelled() {
@@ -2419,7 +2566,8 @@ impl Multiverse {
         vector: u8,
         max_exits: u32,
     ) -> Result<(RunUntilBranchOutcome, Vec<baud_proto::Msg>), RunLoopError> {
-        let (observed, records) = self.run_until_branch_or_halt_with_virtio_rng_without_ram_hash(vector, max_exits)?;
+        let (observed, records) =
+            self.run_until_branch_or_halt_with_virtio_rng_without_ram_hash(vector, max_exits)?;
         Ok((self.observation_to_outcome(observed), records))
     }
 
@@ -2456,7 +2604,10 @@ impl Multiverse {
                 return Ok((RunUntilBranchObservation::Halted(halt), records));
             }
             let mut drained = self.bus.tape.device_mut().drain_records();
-            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+            if let Some(pos) = drained
+                .iter()
+                .position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. }))
+            {
                 let step = match drained[pos] {
                     baud_proto::Msg::MarkBranch { step } => step,
                     _ => unreachable!("position() only matched MarkBranch entries"),
@@ -2510,7 +2661,14 @@ impl Multiverse {
         timer_vector: u8,
         virtio_rng_vector: u8,
         max_ticks: u32,
-    ) -> Result<(Vec<TimerTick>, RunUntilBranchObservation, Vec<baud_proto::Msg>), RunLoopError> {
+    ) -> Result<
+        (
+            Vec<TimerTick>,
+            RunUntilBranchObservation,
+            Vec<baud_proto::Msg>,
+        ),
+        RunLoopError,
+    > {
         let _kicker = self.arm_cancel_kicker();
         let mut ticks = Vec::new();
         let mut records = Vec::new();
@@ -2525,18 +2683,28 @@ impl Multiverse {
             let result = baud_vcpu::boundary::inject_at(&mut stepper, target_rcb, timer_vector);
             let outcome = result.map_err(|e| self.stepper_error(e))?;
             let mut drained = self.bus.tape.device_mut().drain_records();
-            if let Some(pos) = drained.iter().position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. })) {
+            if let Some(pos) = drained
+                .iter()
+                .position(|m| matches!(m, baud_proto::Msg::MarkBranch { .. }))
+            {
                 let step = match drained[pos] {
                     baud_proto::Msg::MarkBranch { step } => step,
                     _ => unreachable!("position() only matched MarkBranch entries"),
                 };
                 records.extend(drained.drain(..=pos));
-                return Ok((ticks, RunUntilBranchObservation::MarkBranch { step }, records));
+                return Ok((
+                    ticks,
+                    RunUntilBranchObservation::MarkBranch { step },
+                    records,
+                ));
             }
             records.extend(drained);
             match outcome {
                 baud_vcpu::boundary::InjectOutcome::Injected(point) => {
-                    ticks.push(TimerTick { rip: point.rip, rcb: point.rcb });
+                    ticks.push(TimerTick {
+                        rip: point.rip,
+                        rcb: point.rcb,
+                    });
                     let notify_count = self.virtio_rng().map(|t| t.notify_count()).unwrap_or(0);
                     if notify_count != last_notify_count {
                         last_notify_count = notify_count;
@@ -2618,9 +2786,13 @@ impl Multiverse {
         &mut self,
         target_rcb: u64,
     ) -> Result<baud_vcpu::boundary::RunToEventsOutcome, DeterminismHole> {
-        let mut stepper =
-            baud_vcpu::linux::pmu::LinuxPmuStepper::new(&mut self.guest.vcpu, &mut self.bus, &mut self.time);
-        baud_vcpu::boundary::run_to_events(&mut stepper, target_rcb).map_err(|e| DeterminismHole(e.to_string()))
+        let mut stepper = baud_vcpu::linux::pmu::LinuxPmuStepper::new(
+            &mut self.guest.vcpu,
+            &mut self.bus,
+            &mut self.time,
+        );
+        baud_vcpu::boundary::run_to_events(&mut stepper, target_rcb)
+            .map_err(|e| DeterminismHole(e.to_string()))
     }
 
     /// Guest-virtual → guest-physical translation (specs/baud-ubuntu.md §6, specs/baud-fingerprint.md
@@ -2630,10 +2802,18 @@ impl Multiverse {
     /// rather than trusted from the ioctl alone. Returns `None` if `gva` is unmapped; a
     /// [`DeterminismHole`] if the two methods disagree (an unmodeled bug, not a valid outcome).
     pub fn translate_gva(&self, gva: u64) -> Result<Option<u64>, DeterminismHole> {
-        let kvm_result = self.guest.vcpu.translate_gva(gva).map_err(|e| DeterminismHole(e.to_string()))?;
+        let kvm_result = self
+            .guest
+            .vcpu
+            .translate_gva(gva)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
         let kvm_gpa = (kvm_result.valid != 0).then_some(kvm_result.physical_address);
 
-        let sregs = self.guest.vcpu.get_sregs().map_err(|e| DeterminismHole(e.to_string()))?;
+        let sregs = self
+            .guest
+            .vcpu
+            .get_sregs()
+            .map_err(|e| DeterminismHole(e.to_string()))?;
         let walked_gpa = walk_cr3(&self.guest.guest_mem, sregs.cr3, gva);
 
         if kvm_gpa != walked_gpa {
@@ -2651,7 +2831,10 @@ impl Multiverse {
     /// not `target_rcb` verbatim. Errors (rather than silently fingerprinting the wrong state) if
     /// the guest halted on its own before `target_rcb` — the same "did not reach the requested
     /// point" contract `specs/baud-fingerprint.md` §5's `FpError::NoBanner` describes.
-    pub fn capture_fingerprint(&mut self, target_rcb: u64) -> Result<TimedExitFingerprint, DeterminismHole> {
+    pub fn capture_fingerprint(
+        &mut self,
+        target_rcb: u64,
+    ) -> Result<TimedExitFingerprint, DeterminismHole> {
         let outcome = self.run_to_events(target_rcb)?;
         let point = match outcome {
             baud_vcpu::boundary::RunToEventsOutcome::Reached(point) => point,
@@ -2700,7 +2883,7 @@ pub struct TimedExitFingerprint {
 fn walk_cr3<M: GuestMemoryBackend>(guest_mem: &M, cr3: u64, lin: u64) -> Option<u64> {
     /// `(high bit, low bit, PS-mask)` for each of the 4 levels, high-to-low (PML4 first).
     const LEVELS: [(u32, u32, u64); 4] = [
-        (47, 39, 0),                    // PML4E — never a large-page terminator
+        (47, 39, 0),                     // PML4E — never a large-page terminator
         (38, 30, 0x000f_ffff_c000_0000), // PDPTE — PS=1 means a 1 GiB page
         (29, 21, 0x000f_ffff_ffe0_0000), // PDE — PS=1 means a 2 MiB page
         (20, 12, 0),                     // PTE — the walk's normal 4 KiB terminator
@@ -2712,7 +2895,9 @@ fn walk_cr3<M: GuestMemoryBackend>(guest_mem: &M, cr3: u64, lin: u64) -> Option<
         let bits = hi - lo + 1;
         let index = (lin >> lo) & ((1u64 << bits) - 1);
         let mut raw = [0u8; 8];
-        guest_mem.read_slice(&mut raw, GuestAddress(table + index * 8)).ok()?;
+        guest_mem
+            .read_slice(&mut raw, GuestAddress(table + index * 8))
+            .ok()?;
         let entry = u64::from_le_bytes(raw);
         if entry & 1 == 0 {
             return None; // not present
@@ -2745,7 +2930,10 @@ pub enum FleetError {
     #[error("VM on core {core_id} failed to boot: {source}")]
     Boot { core_id: usize, source: BootError },
     #[error("VM on core {core_id} failed to run: {source}")]
-    Run { core_id: usize, source: RunLoopError },
+    Run {
+        core_id: usize,
+        source: RunLoopError,
+    },
     #[error("VM thread on core {core_id} panicked")]
     ThreadPanicked { core_id: usize },
 }
@@ -2784,14 +2972,22 @@ pub fn run_fleet(
                     let outcome = vm
                         .run_to_first_halt()
                         .map_err(|source| FleetError::Run { core_id, source })?;
-                    Ok(FleetVmResult { core_id, outcome, elapsed: start.elapsed() })
+                    Ok(FleetVmResult {
+                        core_id,
+                        outcome,
+                        elapsed: start.elapsed(),
+                    })
                 })
             })
             .collect();
 
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or(Err(FleetError::ThreadPanicked { core_id: usize::MAX })))
+            .map(|h| {
+                h.join().unwrap_or(Err(FleetError::ThreadPanicked {
+                    core_id: usize::MAX,
+                }))
+            })
             .collect()
     })
 }
@@ -2814,7 +3010,11 @@ mod tests {
         }];
         cpuid::apply_determinism_mask(&mut kvm_entries);
         assert_eq!(kvm_entries[0].ecx & (1 << 30), 0, "RDRAND must be cleared");
-        assert_eq!(kvm_entries[0].ecx & (1 << 31), 1 << 31, "hypervisor-present must be set");
+        assert_eq!(
+            kvm_entries[0].ecx & (1 << 31),
+            1 << 31,
+            "hypervisor-present must be set"
+        );
     }
 
     /// H1's real bootable fixture (`tests/fixtures/hello-guest/`, see that directory's
@@ -2843,7 +3043,8 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_outcome = first.run_to_first_halt().expect("first run failed");
         assert_eq!(
             String::from_utf8_lossy(&first_outcome.console_output),
@@ -2851,7 +3052,8 @@ mod tests {
             "guest must print exactly its marker line before halting"
         );
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
@@ -2879,7 +3081,8 @@ mod tests {
     /// end-to-end (todo.md §14 item 17's finding: that loop, not `inject_at`, is where a real H9
     /// stall actually lived).
     fn halt_then_spin_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/halt-then-spin-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/halt-then-spin-guest/bzImage")
     }
 
     /// The concrete fix for todo.md §14.1 "Still open" item 1: before the watchdog existed,
@@ -2892,7 +3095,8 @@ mod tests {
     fn wall_clock_watchdog_kills_a_truly_spinning_guest() {
         let kernel = spin_guest_kernel_path();
         let budget = std::time::Duration::from_millis(300);
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_watchdog_budget(budget);
 
         let start = std::time::Instant::now();
@@ -2904,13 +3108,21 @@ mod tests {
             "the watchdog must reclaim a spinning guest promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(baud_vcpu::RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }) => {
+            Err(baud_vcpu::RunLoopError::WatchdogKilled {
+                budget_ms,
+                guest_rip,
+                console_tail,
+            }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
                 // todo.md §14.2 H9 item 20's own named next diagnostic: the guest's own RIP, not
                 // just a host-side stack trace. `spin-guest` is exactly `1: jmp 1b`, so a captured
                 // RIP must land inside that one instruction's own address, not merely be present.
-                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
-                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                let rip =
+                    guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(
+                    rip > 0,
+                    "captured guest RIP must be a real address, got {rip:#x}"
+                );
                 // This kill comes through `run_to_first_halt` -> `baud_vcpu::linux::run_until_
                 // halted`'s own whole-run watchdog, which has no console/device model in scope at
                 // all (that is `Multiverse`'s job) — structurally `None`, per item 21's doc.
@@ -2929,11 +3141,17 @@ mod tests {
     #[test]
     fn wall_clock_watchdog_does_not_fire_on_a_normal_guest() {
         let kernel = hello_guest_kernel_path();
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_watchdog_budget(std::time::Duration::from_secs(5));
 
-        let outcome = mv.run_to_first_halt().expect("a guest that halts well within its budget must succeed");
-        assert_eq!(String::from_utf8_lossy(&outcome.console_output), HELLO_GUEST_MARKER);
+        let outcome = mv
+            .run_to_first_halt()
+            .expect("a guest that halts well within its budget must succeed");
+        assert_eq!(
+            String::from_utf8_lossy(&outcome.console_output),
+            HELLO_GUEST_MARKER
+        );
     }
 
     /// The per-*tick* sibling of [`wall_clock_watchdog_kills_a_truly_spinning_guest`]: proves
@@ -2948,12 +3166,19 @@ mod tests {
     fn periodic_tick_watchdog_kills_a_stuck_tick() {
         let kernel = spin_guest_kernel_path();
         let budget = std::time::Duration::from_millis(300);
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_periodic_tick_watchdog_budget(budget);
 
         let start = std::time::Instant::now();
-        let result =
-            mv.run_to_first_halt_with_periodic_timer_and_devices(500_000, TIMER_VECTOR, &[], 20_000, None, 0);
+        let result = mv.run_to_first_halt_with_periodic_timer_and_devices(
+            500_000,
+            TIMER_VECTOR,
+            &[],
+            20_000,
+            None,
+            0,
+        );
         let elapsed = start.elapsed();
 
         assert!(
@@ -2961,10 +3186,18 @@ mod tests {
             "the per-tick watchdog must reclaim a wedged tick promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }) => {
+            Err(RunLoopError::WatchdogKilled {
+                budget_ms,
+                guest_rip,
+                console_tail,
+            }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
-                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
-                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                let rip =
+                    guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(
+                    rip > 0,
+                    "captured guest RIP must be a real address, got {rip:#x}"
+                );
                 // This kill comes through the tick loop's own `inject_at` watchdog, which does have
                 // a console/device model in scope (`Multiverse::bus.console`) — `Some`, not `None`,
                 // even though `spin-guest` (`1: jmp 1b`, no I/O) never actually writes to it.
@@ -2984,11 +3217,19 @@ mod tests {
     #[test]
     fn periodic_tick_watchdog_does_not_fire_on_a_normal_tick() {
         let kernel = timer_guest_kernel_path();
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(5));
 
-        mv.run_to_first_halt_with_periodic_timer_and_devices(200_000, TIMER_VECTOR, &[], 20, None, 0)
-            .expect("a tick that completes well within its budget must succeed");
+        mv.run_to_first_halt_with_periodic_timer_and_devices(
+            200_000,
+            TIMER_VECTOR,
+            &[],
+            20,
+            None,
+            0,
+        )
+        .expect("a tick that completes well within its budget must succeed");
     }
 
     /// Reproduces the exact thread the real `baud-server` run loop executes on: every real boot
@@ -3048,10 +3289,21 @@ mod tests {
         runtime.shutdown_timeout(std::time::Duration::from_millis(500));
 
         match outcome {
-            Ok((RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }, elapsed)) => {
+            Ok((
+                RunLoopError::WatchdogKilled {
+                    budget_ms,
+                    guest_rip,
+                    console_tail,
+                },
+                elapsed,
+            )) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
-                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
-                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                let rip =
+                    guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(
+                    rip > 0,
+                    "captured guest RIP must be a real address, got {rip:#x}"
+                );
                 assert_eq!(
                     console_tail,
                     Some(String::new()),
@@ -3081,7 +3333,8 @@ mod tests {
     fn halt_then_spin_burst_watchdog_kills_a_wedged_burst_exit() {
         let kernel = halt_then_spin_guest_kernel_path();
         let budget = std::time::Duration::from_millis(300);
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_periodic_tick_watchdog_budget(budget);
 
         let start = std::time::Instant::now();
@@ -3101,14 +3354,22 @@ mod tests {
              promptly, not merely eventually (took {elapsed:?})"
         );
         match result {
-            Err(RunLoopError::WatchdogKilled { budget_ms, guest_rip, console_tail }) => {
+            Err(RunLoopError::WatchdogKilled {
+                budget_ms,
+                guest_rip,
+                console_tail,
+            }) => {
                 assert_eq!(budget_ms, budget.as_millis() as u64);
                 // This is the exact call site todo.md §14.2 H9 items 18/20 traced a real Ubuntu
                 // boot stall to — `halt-then-spin-guest`'s ISR resumes into `spin: jmp spin`, so a
                 // captured RIP here must land inside that one instruction, same shape as the real
                 // H9 stall this fixture models.
-                let rip = guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
-                assert!(rip > 0, "captured guest RIP must be a real address, got {rip:#x}");
+                let rip =
+                    guest_rip.expect("watchdog kill must capture the guest's RIP via KVM_GET_REGS");
+                assert!(
+                    rip > 0,
+                    "captured guest RIP must be a real address, got {rip:#x}"
+                );
                 // `payload.s`'s ISR writes exactly one 'T' byte to COM1 before falling into `spin`
                 // — proves the capture reaches real, non-empty console content at the moment of a
                 // kill, the exact scenario todo.md §14.2 H9 item 21 found in a real Ubuntu attempt
@@ -3136,7 +3397,8 @@ mod tests {
     #[test]
     fn burst_watchdog_does_not_fire_on_normal_resume_past_halt() {
         let kernel = timer_guest_kernel_path();
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(5));
 
         let (_, outcome) = mv
@@ -3150,7 +3412,10 @@ mod tests {
             )
             .expect("a normal resume-past-halt run must succeed within its burst watchdog budget");
         assert!(
-            outcome.console_output.windows(3).any(|w| w == [TIMER_MARKER, TIMER_MARKER, TIMER_MARKER]),
+            outcome
+                .console_output
+                .windows(3)
+                .any(|w| w == [TIMER_MARKER, TIMER_MARKER, TIMER_MARKER]),
             "expected three consecutive timer-interrupt marker bytes on the console"
         );
     }
@@ -3189,7 +3454,8 @@ mod tests {
         }
 
         let kernel = halt_then_multi_io_guest_kernel_path();
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
 
         let devices = [TickPolledDevice {
             vector: 0,
@@ -3249,7 +3515,8 @@ mod tests {
     #[test]
     fn cancelling_a_spinning_guest_stops_the_run_promptly() {
         let kernel = spin_guest_kernel_path();
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         mv.set_watchdog_budget(std::time::Duration::from_secs(60));
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         mv.set_cancel_flag(std::sync::Arc::clone(&flag));
@@ -3284,7 +3551,8 @@ mod tests {
     #[test]
     fn cancelling_a_periodic_timer_run_stops_inside_one_unbounded_tick() {
         let kernel = spin_guest_kernel_path();
-        let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
+        let mut mv =
+            Multiverse::boot(&kernel, "console=ttyS0", 0, 1, vec![], None).expect("boot failed");
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         mv.set_cancel_flag(std::sync::Arc::clone(&flag));
         let setter = set_flag_after(&flag, std::time::Duration::from_millis(100));
@@ -3318,19 +3586,29 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut plain = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("plain boot failed");
+        let mut plain =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("plain boot failed");
         let plain_outcome = plain.run_to_first_halt().expect("plain run failed");
 
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut flagged = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("flagged boot failed");
+        let mut flagged =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("flagged boot failed");
         flagged.set_cancel_flag(std::sync::Arc::clone(&flag));
-        let flagged_outcome = flagged.run_to_first_halt().expect("a never-set flag must not disturb the run");
+        let flagged_outcome = flagged
+            .run_to_first_halt()
+            .expect("a never-set flag must not disturb the run");
 
-        assert_eq!(String::from_utf8_lossy(&plain_outcome.console_output), HELLO_GUEST_MARKER);
+        assert_eq!(
+            String::from_utf8_lossy(&plain_outcome.console_output),
+            HELLO_GUEST_MARKER
+        );
         assert_eq!(flagged_outcome.console_output, plain_outcome.console_output);
         assert_eq!(flagged_outcome.ram_hash, plain_outcome.ram_hash);
         assert_eq!(flagged_outcome.exit_pc, plain_outcome.exit_pc);
-        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst), "nothing may set the flag but the supervisor");
+        assert!(
+            !flag.load(std::sync::atomic::Ordering::SeqCst),
+            "nothing may set the flag but the supervisor"
+        );
     }
 
     /// The same determinism check on the path cancellation actually had to be threaded *into* —
@@ -3345,26 +3623,34 @@ mod tests {
         const PERIOD_RCB: u64 = 200_000;
         const MAX_TICKS: u32 = 20;
 
-        let mut plain = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("plain boot failed");
+        let mut plain =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("plain boot failed");
         let (plain_ticks, plain_halt) = plain
             .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
             .expect("plain periodic run failed");
 
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut flagged = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("flagged boot failed");
+        let mut flagged =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("flagged boot failed");
         flagged.set_cancel_flag(std::sync::Arc::clone(&flag));
         let (flagged_ticks, flagged_halt) = flagged
             .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
             .expect("a never-set flag must not disturb the periodic-timer run");
 
-        assert!(!plain_ticks.is_empty(), "the fixture must survive at least one tick for this to prove anything");
+        assert!(
+            !plain_ticks.is_empty(),
+            "the fixture must survive at least one tick for this to prove anything"
+        );
         assert_eq!(
             flagged_ticks.len(),
             plain_ticks.len(),
             "an installed-but-unset flag must not change how many ticks the guest survives"
         );
         for (i, (a, b)) in plain_ticks.iter().zip(flagged_ticks.iter()).enumerate() {
-            assert_eq!(a.rip, b.rip, "tick {i}: landing rip must be unchanged by an unset cancellation flag");
+            assert_eq!(
+                a.rip, b.rip,
+                "tick {i}: landing rip must be unchanged by an unset cancellation flag"
+            );
             // Read through a binding, exactly like the sibling assertions in
             // `timer_tick_lands_at_identical_instruction` — see their comment.
             let tolerance = RCB_HARDWARE_JITTER_TOLERANCE;
@@ -3389,7 +3675,8 @@ mod tests {
     fn read_rng_seed_via_hdr(mv: &Multiverse) -> [u8; bootparams::RNG_SEED_LEN] {
         use vm_memory::Bytes;
 
-        let mut zero_page = vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
+        let mut zero_page =
+            vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
         mv.guest
             .guest_mem
             .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
@@ -3423,12 +3710,17 @@ mod tests {
         let tape_a = b"tape A".to_vec();
         let tape_b = b"tape B".to_vec();
 
-        let boot_a1 = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None).expect("boot A1 failed");
+        let boot_a1 =
+            Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None).expect("boot A1 failed");
         let seed_a1 = read_rng_seed_via_hdr(&boot_a1);
 
-        let boot_a2 = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a, None).expect("boot A2 failed");
+        let boot_a2 =
+            Multiverse::boot(&kernel, cmdline, 0, 1, tape_a, None).expect("boot A2 failed");
         let seed_a2 = read_rng_seed_via_hdr(&boot_a2);
-        assert_eq!(seed_a1, seed_a2, "the same tape must reproduce the identical RNG seed");
+        assert_eq!(
+            seed_a1, seed_a2,
+            "the same tape must reproduce the identical RNG seed"
+        );
 
         let boot_b = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b, None).expect("boot B failed");
         let seed_b = read_rng_seed_via_hdr(&boot_b);
@@ -3451,15 +3743,20 @@ mod tests {
         let cmdline = "console=ttyS0";
         let tape = b"boot-params-seed-is-pinned tape".to_vec();
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape.clone(), None).expect("first boot failed");
+        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape.clone(), None)
+            .expect("first boot failed");
         let first_seed = read_rng_seed_via_hdr(&first);
         let first_halt = first.run_to_first_halt().expect("first run failed");
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, tape, None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, tape, None).expect("second boot failed");
         let second_seed = read_rng_seed_via_hdr(&second);
         let second_halt = second.run_to_first_halt().expect("second run failed");
 
-        assert_eq!(first_seed, second_seed, "two boots of the same tape must write an identical RNG-seed node");
+        assert_eq!(
+            first_seed, second_seed,
+            "two boots of the same tape must write an identical RNG-seed node"
+        );
         assert_eq!(
             first_halt.console_output, second_halt.console_output,
             "a reproducible seed node must not perturb the rest of the deterministic boot"
@@ -3494,7 +3791,8 @@ mod tests {
         )
         .expect("boot with initramfs failed");
 
-        let mut zero_page = vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
+        let mut zero_page =
+            vec![0u8; std::mem::size_of::<linux_loader::loader::bootparam::boot_params>()];
         mv.guest
             .guest_mem
             .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
@@ -3512,9 +3810,14 @@ mod tests {
             .guest_mem
             .read_slice(&mut initramfs_back, GuestAddress(layout::INITRAMFS_ADDR))
             .expect("read back the initramfs bytes from real guest RAM");
-        assert_eq!(initramfs_back, initramfs, "initramfs must land verbatim in real guest RAM");
+        assert_eq!(
+            initramfs_back, initramfs,
+            "initramfs must land verbatim in real guest RAM"
+        );
 
-        let outcome = mv.run_to_first_halt().expect("boot with an (unread) initramfs must still run cleanly");
+        let outcome = mv
+            .run_to_first_halt()
+            .expect("boot with an (unread) initramfs must still run cleanly");
         assert_eq!(
             String::from_utf8_lossy(&outcome.console_output),
             HELLO_GUEST_MARKER,
@@ -3538,14 +3841,16 @@ mod tests {
         let kernel = hello_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_cpuid = first
             .guest
             .vcpu
             .get_cpuid2(KVM_MAX_CPUID_ENTRIES)
             .expect("KVM_GET_CPUID2 (first boot)");
 
-        let second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_cpuid = second
             .guest
             .vcpu
@@ -3563,17 +3868,37 @@ mod tests {
             .iter()
             .find(|e| e.function == 0x1 && e.index == 0)
             .expect("leaf 01H:0 must be present in the served CPUID set");
-        assert_eq!(leaf1.ecx & (1 << 30), 0, "RDRAND (01H:ECX[30]) must read back cleared");
-        assert_eq!(leaf1.ecx & (1 << 21), 0, "x2APIC (01H:ECX[21]) must read back cleared");
+        assert_eq!(
+            leaf1.ecx & (1 << 30),
+            0,
+            "RDRAND (01H:ECX[30]) must read back cleared"
+        );
+        assert_eq!(
+            leaf1.ecx & (1 << 21),
+            0,
+            "x2APIC (01H:ECX[21]) must read back cleared"
+        );
 
         let leaf7 = first_cpuid
             .as_slice()
             .iter()
             .find(|e| e.function == 0x7 && e.index == 0)
             .expect("leaf 07H:0 must be present in the served CPUID set");
-        assert_eq!(leaf7.ebx & (1 << 18), 0, "RDSEED (07H:EBX[18]) must read back cleared");
-        assert_eq!(leaf7.ebx & (1 << 4), 0, "TSX HLE (07H:EBX[4]) must read back cleared");
-        assert_eq!(leaf7.ebx & (1 << 11), 0, "TSX RTM (07H:EBX[11]) must read back cleared");
+        assert_eq!(
+            leaf7.ebx & (1 << 18),
+            0,
+            "RDSEED (07H:EBX[18]) must read back cleared"
+        );
+        assert_eq!(
+            leaf7.ebx & (1 << 4),
+            0,
+            "TSX HLE (07H:EBX[4]) must read back cleared"
+        );
+        assert_eq!(
+            leaf7.ebx & (1 << 11),
+            0,
+            "TSX RTM (07H:EBX[11]) must read back cleared"
+        );
     }
 
     /// `tests/fixtures/tape-echo-guest/`'s payload: reads exactly 4 bytes from the tape device's
@@ -3581,7 +3906,8 @@ mod tests {
     /// real single-byte `IN` per byte) and echoes each one straight to COM1 (`out dx, al`, port
     /// `0x3f8`), then halts — see that directory's `BUILD.md` for exact provenance.
     fn tape_echo_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tape-echo-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tape-echo-guest/bzImage")
     }
 
     /// specs/baud-tape-device.md §5 / todo.md test-matrix row 21's `all_input_is_tape_derived`,
@@ -3602,7 +3928,9 @@ mod tests {
 
         let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None)
             .expect("first boot (tape A) failed");
-        let first_outcome = first.run_to_first_halt().expect("first run (tape A) failed");
+        let first_outcome = first
+            .run_to_first_halt()
+            .expect("first run (tape A) failed");
         assert_eq!(
             first_outcome.console_output, tape_a,
             "guest must echo exactly the 4 tape bytes it read, byte for byte"
@@ -3610,7 +3938,9 @@ mod tests {
 
         let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, tape_a.clone(), None)
             .expect("second boot (tape A) failed");
-        let second_outcome = second.run_to_first_halt().expect("second run (tape A) failed");
+        let second_outcome = second
+            .run_to_first_halt()
+            .expect("second run (tape A) failed");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
             "same tape twice must produce byte-identical guest output"
@@ -3618,7 +3948,9 @@ mod tests {
 
         let mut third = Multiverse::boot(&kernel, cmdline, 0, 1, tape_b.clone(), None)
             .expect("third boot (tape B) failed");
-        let third_outcome = third.run_to_first_halt().expect("third run (tape B) failed");
+        let third_outcome = third
+            .run_to_first_halt()
+            .expect("third run (tape B) failed");
         assert_eq!(
             third_outcome.console_output, tape_b,
             "guest must echo exactly tape B's bytes, not a stale/synthetic copy of tape A's"
@@ -3667,7 +3999,8 @@ mod tests {
         let kernel = rdrand_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_outcome = first.run_to_first_halt().expect("first run failed");
         assert_eq!(
             first_outcome.console_output, RDRAND_GUEST_MARKER,
@@ -3675,7 +4008,8 @@ mod tests {
              bit must #UD immediately (real hardware behavior), not execute and produce output"
         );
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
@@ -3731,7 +4065,8 @@ mod tests {
             .run_to_first_halt()
             .expect("warm-up run failed");
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_outcome = first.run_to_first_halt().expect("first run failed");
         assert_eq!(
             first_outcome.console_output.len(),
@@ -3742,11 +4077,13 @@ mod tests {
         assert_eq!(first_outcome.console_output[0], RDTSC_GUEST_MARKER);
         let first_tsc = u64::from_le_bytes(first_outcome.console_output[1..9].try_into().unwrap());
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
         assert_eq!(second_outcome.console_output.len(), 9);
         assert_eq!(second_outcome.console_output[0], RDTSC_GUEST_MARKER);
-        let second_tsc = u64::from_le_bytes(second_outcome.console_output[1..9].try_into().unwrap());
+        let second_tsc =
+            u64::from_le_bytes(second_outcome.console_output[1..9].try_into().unwrap());
 
         assert_eq!(
             first_tsc & RDTSC_JITTER_MASK,
@@ -3784,18 +4121,22 @@ mod tests {
             .run_to_first_halt()
             .expect("warm-up run failed");
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
-        let first_outcome =
-            first.run_to_first_halt().expect("first run failed (enforced RDTSC exit not served?)");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_outcome = first
+            .run_to_first_halt()
+            .expect("first run failed (enforced RDTSC exit not served?)");
         assert_eq!(first_outcome.console_output.len(), 9);
         assert_eq!(first_outcome.console_output[0], RDTSC_GUEST_MARKER);
         let first_tsc = u64::from_le_bytes(first_outcome.console_output[1..9].try_into().unwrap());
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
         assert_eq!(second_outcome.console_output.len(), 9);
         assert_eq!(second_outcome.console_output[0], RDTSC_GUEST_MARKER);
-        let second_tsc = u64::from_le_bytes(second_outcome.console_output[1..9].try_into().unwrap());
+        let second_tsc =
+            u64::from_le_bytes(second_outcome.console_output[1..9].try_into().unwrap());
 
         assert_eq!(
             first_tsc, second_tsc,
@@ -3826,9 +4167,11 @@ mod tests {
         let kernel = rdrand_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
-        let first_outcome =
-            first.run_to_first_halt().expect("first run failed (enforced RDRAND exit not served?)");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_outcome = first
+            .run_to_first_halt()
+            .expect("first run failed (enforced RDRAND exit not served?)");
         assert_eq!(
             first_outcome.console_output.len(),
             RDRAND_GUEST_MARKER.len() + 4,
@@ -3836,11 +4179,16 @@ mod tests {
              regime: {:?}",
             first_outcome.console_output
         );
-        assert_eq!(&first_outcome.console_output[..RDRAND_GUEST_MARKER.len()], RDRAND_GUEST_MARKER);
+        assert_eq!(
+            &first_outcome.console_output[..RDRAND_GUEST_MARKER.len()],
+            RDRAND_GUEST_MARKER
+        );
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
-        let second_outcome =
-            second.run_to_first_halt().expect("second run failed (enforced RDRAND exit not served?)");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_outcome = second
+            .run_to_first_halt()
+            .expect("second run failed (enforced RDRAND exit not served?)");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
             "enforced-regime RDRAND is served entirely from a tape-seeded deterministic PRNG, so it \
@@ -3876,8 +4224,10 @@ mod tests {
     /// `gpr_index: 0` == `RAX`/`EAX` (the `0F C7 F8` encoding's ModRM `rm` field);
     /// `length: 3` == the original `RDSEED r32` encoding, so a served value resumes at
     /// `RDSEED_GUEST_UD2_ADDR + 3` — past the `NOP` padding, not at it.
-    const RDSEED_GUEST_SITE: baud_vcpu::EnforcedRdseedSite =
-        baud_vcpu::EnforcedRdseedSite { gpr_index: 0, length: 3 };
+    const RDSEED_GUEST_SITE: baud_vcpu::EnforcedRdseedSite = baud_vcpu::EnforcedRdseedSite {
+        gpr_index: 0,
+        length: 3,
+    };
 
     /// Enforced-regime RDSEED (todo.md §4, §3.8), the third and last of the enforced-instruction
     /// tests. Requires the patched `kvm_intel.ko` (`kernel-module/baud-enforced/ud2-enforce.patch`
@@ -3910,8 +4260,9 @@ mod tests {
         let mut first =
             Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, None, sites)
                 .expect("first boot failed");
-        let first_outcome =
-            first.run_to_first_halt().expect("first run failed (enforced RDSEED exit not served?)");
+        let first_outcome = first
+            .run_to_first_halt()
+            .expect("first run failed (enforced RDSEED exit not served?)");
         assert_eq!(
             first_outcome.console_output.len(),
             RDSEED_GUEST_MARKER.len() + 4,
@@ -3920,13 +4271,17 @@ mod tests {
              served, i.e. the site table did not match the trapping RIP: {:?}",
             first_outcome.console_output
         );
-        assert_eq!(&first_outcome.console_output[..RDSEED_GUEST_MARKER.len()], RDSEED_GUEST_MARKER);
+        assert_eq!(
+            &first_outcome.console_output[..RDSEED_GUEST_MARKER.len()],
+            RDSEED_GUEST_MARKER
+        );
 
         let mut second =
             Multiverse::boot_with_rdseed_sites(&kernel, cmdline, 0, 1, vec![], None, None, sites)
                 .expect("second boot failed");
-        let second_outcome =
-            second.run_to_first_halt().expect("second run failed (enforced RDSEED exit not served?)");
+        let second_outcome = second
+            .run_to_first_halt()
+            .expect("second run failed (enforced RDSEED exit not served?)");
         assert_eq!(
             second_outcome.console_output, first_outcome.console_output,
             "enforced-regime RDSEED is served entirely from a tape-seeded deterministic PRNG, so it \
@@ -3977,7 +4332,8 @@ mod tests {
     /// for exact provenance — the first guest fixture in this workspace to exercise
     /// `baud_tape_device::ControlOp::Frame`.
     fn framebuffer_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/framebuffer-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/framebuffer-guest/bzImage")
     }
 
     /// The single marker byte `tests/fixtures/framebuffer-guest/payload.s` writes to COM1 before
@@ -3995,18 +4351,31 @@ mod tests {
         let kernel = framebuffer_guest_kernel_path();
         let cmdline = "console=ttyS0";
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let first_outcome = first.run_to_first_halt().expect("first run failed");
         assert_eq!(first_outcome.console_output, vec![FRAMEBUFFER_GUEST_MARKER]);
         let first_records = first.drain_tape_records();
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let second_outcome = second.run_to_first_halt().expect("second run failed");
-        assert_eq!(second_outcome.console_output, vec![FRAMEBUFFER_GUEST_MARKER]);
+        assert_eq!(
+            second_outcome.console_output,
+            vec![FRAMEBUFFER_GUEST_MARKER]
+        );
         let second_records = second.drain_tape_records();
 
-        assert_eq!(first_records.len(), 1, "guest emits exactly one Frame record: {first_records:?}");
-        assert_eq!(second_records.len(), 1, "guest emits exactly one Frame record: {second_records:?}");
+        assert_eq!(
+            first_records.len(),
+            1,
+            "guest emits exactly one Frame record: {first_records:?}"
+        );
+        assert_eq!(
+            second_records.len(),
+            1,
+            "guest emits exactly one Frame record: {second_records:?}"
+        );
 
         let as_frame = |records: Vec<baud_proto::Msg>| match records.into_iter().next() {
             Some(baud_proto::Msg::Frame(rec)) => rec,
@@ -4018,7 +4387,10 @@ mod tests {
         assert_eq!(first_frame.width, 2);
         assert_eq!(first_frame.height, 2);
         assert_eq!(first_frame.format, baud_proto::PixFmt::Indexed8);
-        assert_eq!(first_frame.bytes.as_deref(), Some([10u8, 20, 30, 40].as_slice()));
+        assert_eq!(
+            first_frame.bytes.as_deref(),
+            Some([10u8, 20, 30, 40].as_slice())
+        );
 
         assert_eq!(
             first_frame.hash, second_frame.hash,
@@ -4040,8 +4412,12 @@ mod tests {
             first_frame.width,
             first_frame.height,
             &first_frame.format,
-        ).expect("fixture's frame geometry must be internally consistent");
-        assert_eq!(first_frame.hash, expected_hash, "tape-device hash must match baud_stream::fingerprint");
+        )
+        .expect("fixture's frame geometry must be internally consistent");
+        assert_eq!(
+            first_frame.hash, expected_hash,
+            "tape-device hash must match baud_stream::fingerprint"
+        );
     }
 
     /// `tests/fixtures/timer-guest/`'s payload: builds a real IDT (one gate at vector `0x30`
@@ -4101,12 +4477,14 @@ mod tests {
         const PERIOD_RCB: u64 = 100_000;
         const NUM_TICKS: u32 = 2;
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let (first_ticks, first_halt) = first
             .run_with_timer_ticks(PERIOD_RCB, TIMER_VECTOR, NUM_TICKS)
             .expect("first run with timer ticks failed");
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let (second_ticks, second_halt) = second
             .run_with_timer_ticks(PERIOD_RCB, TIMER_VECTOR, NUM_TICKS)
             .expect("second run with timer ticks failed");
@@ -4183,12 +4561,14 @@ mod tests {
         const PERIOD_RCB: u64 = 200_000;
         const MAX_TICKS: u32 = 20;
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let (first_ticks, first_halt) = first
             .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
             .expect("first periodic run failed");
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let (second_ticks, second_halt) = second
             .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
             .expect("second periodic run failed");
@@ -4258,7 +4638,11 @@ mod tests {
         fn event(&self, event: &tracing::Event<'_>) {
             struct MessageVisitor(String);
             impl tracing::field::Visit for MessageVisitor {
-                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
                     if field.name() == "message" {
                         self.0 = format!("{value:?}");
                     }
@@ -4288,7 +4672,9 @@ mod tests {
         const MAX_TICKS: u32 = 20;
 
         let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = RecordingSubscriber { messages: messages.clone() };
+        let subscriber = RecordingSubscriber {
+            messages: messages.clone(),
+        };
 
         // Deliberately calls the private `_and_devices` engine directly (accessible here since
         // `tests` is a descendant module), not the public `run_to_first_halt_with_periodic_timer`
@@ -4296,7 +4682,8 @@ mod tests {
         // not carry this progress logging); the real H9 boot path
         // (`run_until_console_pattern_with_periodic_timer_and_devices`, `baud-server`'s
         // `routes/run_kvm.rs`) always goes through this shared engine.
-        let mut guest = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+        let mut guest =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
         tracing::subscriber::with_default(subscriber, || {
             guest
                 .run_to_first_halt_with_periodic_timer_and_devices(
@@ -4339,7 +4726,8 @@ mod tests {
     /// across repeated idle halts, the gap H9's real-Ubuntu-boot attempt found (todo.md §14 item
     /// 12).
     fn idle_halt_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/idle-halt-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/idle-halt-guest/bzImage")
     }
 
     /// `tests/fixtures/idle-halt-guest/payload.s`'s target message, written to COM1 only on the
@@ -4365,7 +4753,8 @@ mod tests {
         const MAX_TICKS: u32 = 20;
         const MAX_EXITS_PER_BURST: u32 = 4096;
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
         let (first_ticks, first_halt) = first
             .run_until_console_pattern_with_periodic_timer(
                 PERIOD_RCB,
@@ -4376,7 +4765,8 @@ mod tests {
             )
             .expect("first run did not reach the target console pattern");
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
         let (second_ticks, second_halt) = second
             .run_until_console_pattern_with_periodic_timer(
                 PERIOD_RCB,
@@ -4388,7 +4778,10 @@ mod tests {
             .expect("second run did not reach the target console pattern");
 
         assert!(
-            first_halt.console_output.windows(IDLE_HALT_TARGET.len()).any(|w| w == IDLE_HALT_TARGET),
+            first_halt
+                .console_output
+                .windows(IDLE_HALT_TARGET.len())
+                .any(|w| w == IDLE_HALT_TARGET),
             "the run must stop only once the target pattern actually appears in the console \
              output, not on an earlier idle halt: got {:?}",
             String::from_utf8_lossy(&first_halt.console_output)
@@ -4457,11 +4850,17 @@ mod tests {
         let cmdline = "console=ttyS0";
         const TARGET_RCB: u64 = 100_000;
 
-        let mut first = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
-        let first_fp = first.capture_fingerprint(TARGET_RCB).expect("first capture failed");
+        let mut first =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("first boot failed");
+        let first_fp = first
+            .capture_fingerprint(TARGET_RCB)
+            .expect("first capture failed");
 
-        let mut second = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
-        let second_fp = second.capture_fingerprint(TARGET_RCB).expect("second capture failed");
+        let mut second =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("second boot failed");
+        let second_fp = second
+            .capture_fingerprint(TARGET_RCB)
+            .expect("second capture failed");
 
         assert_eq!(
             first_fp.events, TARGET_RCB,
@@ -4471,7 +4870,11 @@ mod tests {
              root cause (a CPL-0 guest filtered out of the work-clock counter by \
              `perf_event::Builder`'s default `exclude_kernel = 1`)"
         );
-        assert_eq!(first_fp.gpa, Some(first_fp.rip), "timer-guest never leaves the fixed identity map");
+        assert_eq!(
+            first_fp.gpa,
+            Some(first_fp.rip),
+            "timer-guest never leaves the fixed identity map"
+        );
         assert_eq!(
             second_fp, first_fp,
             "the same (image, tape, N) must produce a byte-identical fingerprint across two \
@@ -4507,7 +4910,8 @@ mod tests {
         let mut landed_rips = Vec::new();
         for offset in 0..8u64 {
             let target = BASE_RCB + offset;
-            let mut m = Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
+            let mut m =
+                Multiverse::boot(&kernel, cmdline, 0, 1, vec![], None).expect("boot failed");
             let outcome = m.run_to_events(target).expect("run_to_events failed");
             assert!(
                 outcome.was_reached(),
@@ -4538,7 +4942,8 @@ mod tests {
     /// with no in-kernel irqchip at all, via the same "stage `KVM_SET_VCPU_EVENTS`, let the next
     /// `KVM_RUN` deliver it" trick `timer-guest` already proved for the LAPIC timer's fixed vector.
     fn virtio_rng_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/virtio-rng-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/virtio-rng-guest/bzImage")
     }
 
     /// The vector `tests/fixtures/virtio-rng-guest/payload.s`'s IDT gate is registered at.
@@ -4566,7 +4971,9 @@ mod tests {
         let halt = mv
             .run_to_first_halt_with_virtio_rng(VIRTIO_RNG_VECTOR, MAX_EXITS)
             .expect("run_to_first_halt_with_virtio_rng failed");
-        let expected_byte = crate::timesource::SplitMix64::new(seed).next_u64().to_le_bytes()[0];
+        let expected_byte = crate::timesource::SplitMix64::new(seed)
+            .next_u64()
+            .to_le_bytes()[0];
         (halt, expected_byte)
     }
 
@@ -4592,7 +4999,10 @@ mod tests {
     fn virtio_rng_interrupt_delivery_is_reproducible_across_two_boots() {
         let (first, expected_byte) = run_virtio_rng_guest_once(7);
         let (second, expected_byte_again) = run_virtio_rng_guest_once(7);
-        assert_eq!(expected_byte, expected_byte_again, "same seed must reproduce the identical entropy byte");
+        assert_eq!(
+            expected_byte, expected_byte_again,
+            "same seed must reproduce the identical entropy byte"
+        );
         assert_eq!(
             first.console_output, second.console_output,
             "console output (marker + entropy byte) must be identical across two boots of the same \
@@ -4676,7 +5086,9 @@ mod tests {
                 panic!("virtio-rng-guest never calls MARK_BRANCH, got one at step {step}")
             }
         };
-        let expected_byte = crate::timesource::SplitMix64::new(42).next_u64().to_le_bytes()[0];
+        let expected_byte = crate::timesource::SplitMix64::new(42)
+            .next_u64()
+            .to_le_bytes()[0];
         assert_eq!(
             halt.console_output,
             vec![b'R', expected_byte],
@@ -4693,8 +5105,8 @@ mod tests {
     }
 
     fn linux_guest_initramfs() -> Vec<u8> {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-guest/initramfs.cpio.gz");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/linux-guest/initramfs.cpio.gz");
         std::fs::read(path).expect("read linux-guest initramfs fixture")
     }
 
@@ -4781,7 +5193,11 @@ mod tests {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_initramfs();
         let cmdline = bootparams::DETERMINISTIC_CMDLINE.replace("acpi=off ", "");
-        assert_ne!(cmdline, bootparams::DETERMINISTIC_CMDLINE, "the replace must actually have matched");
+        assert_ne!(
+            cmdline,
+            bootparams::DETERMINISTIC_CMDLINE,
+            "the replace must actually have matched"
+        );
         const PERIOD_RCB: u64 = 500_000;
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR
@@ -4799,7 +5215,8 @@ mod tests {
                 [],
             )
             .unwrap_or_else(|e| panic!("run {i}: boot failed: {e}"));
-            m.write_acpi_tables().unwrap_or_else(|e| panic!("run {i}: write_acpi_tables failed: {e}"));
+            m.write_acpi_tables()
+                .unwrap_or_else(|e| panic!("run {i}: write_acpi_tables failed: {e}"));
             let (_ticks, halt) = m
                 .run_to_first_halt_with_periodic_timer(PERIOD_RCB, TIMER_VECTOR, MAX_TICKS)
                 .unwrap_or_else(|e| panic!("run {i}: periodic run failed: {e}"));
@@ -4820,9 +5237,15 @@ mod tests {
             // own real MMIO writes, not a log line, are what a fake/absent LAPIC could never
             // produce.
             let spiv = m.lapic().spurious_interrupt_vector();
-            assert_ne!(spiv, 0, "run {i}: the kernel must have written APIC_SPIV (software-enable) itself");
+            assert_ne!(
+                spiv, 0,
+                "run {i}: the kernel must have written APIC_SPIV (software-enable) itself"
+            );
             let lvt_timer = m.lapic().lvt_timer();
-            assert_ne!(lvt_timer, 0, "run {i}: the kernel must have armed APIC_LVT_TIMER itself");
+            assert_ne!(
+                lvt_timer, 0,
+                "run {i}: the kernel must have armed APIC_LVT_TIMER itself"
+            );
             consoles.push((console, spiv, lvt_timer));
         }
         assert_eq!(
@@ -4863,7 +5286,10 @@ mod tests {
     fn run_linux_guest_virtio_rng_once(seed: u64) -> String {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_virtio_rng_initramfs();
-        let cmdline = format!("{} virtio_mmio.device=0x200@0xd0000000:5", bootparams::DETERMINISTIC_CMDLINE);
+        let cmdline = format!(
+            "{} virtio_mmio.device=0x200@0xd0000000:5",
+            bootparams::DETERMINISTIC_CMDLINE
+        );
         const PERIOD_RCB: u64 = 500_000;
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR
@@ -4883,7 +5309,12 @@ mod tests {
         m.enable_virtio_rng();
         m.seed_virtio_rng_entropy(seed);
         let (_ticks, halt) = m
-            .run_to_first_halt_with_periodic_timer_and_virtio_rng(PERIOD_RCB, TIMER_VECTOR, virtio_rng_vector, MAX_TICKS)
+            .run_to_first_halt_with_periodic_timer_and_virtio_rng(
+                PERIOD_RCB,
+                TIMER_VECTOR,
+                virtio_rng_vector,
+                MAX_TICKS,
+            )
             .expect("periodic-timer + virtio-rng run failed");
         String::from_utf8_lossy(&halt.console_output).to_string()
     }
@@ -4970,7 +5401,10 @@ mod tests {
     fn guest_virtio_mmio_rng_driver_entropy_is_reproducible_across_two_boots() {
         let first = run_linux_guest_virtio_rng_once(7);
         let second = run_linux_guest_virtio_rng_once(7);
-        assert!(first.contains("baud-guest: hwrng-bytes:"), "first boot must complete a real hwrng read; got:\n{first}");
+        assert!(
+            first.contains("baud-guest: hwrng-bytes:"),
+            "first boot must complete a real hwrng read; got:\n{first}"
+        );
         assert_eq!(
             first, second,
             "two boots of the same image+tape+seed must produce byte-identical console output, \
@@ -4989,11 +5423,15 @@ mod tests {
     /// (byte-identical console vs. the plain `run_linux_guest_virtio_rng_once` path), and (2) the
     /// combined run stays fully deterministic across two boots with the third device present.
     #[test]
-    fn periodic_timer_virtio_rng_and_virtio_pci_blk_combinator_does_not_perturb_an_unused_third_device() {
+    fn periodic_timer_virtio_rng_and_virtio_pci_blk_combinator_does_not_perturb_an_unused_third_device(
+    ) {
         fn run_once(seed: u64) -> (String, u64) {
             let kernel = linux_guest_kernel_path();
             let initramfs = linux_guest_virtio_rng_initramfs();
-            let cmdline = format!("{} virtio_mmio.device=0x200@0xd0000000:5", bootparams::DETERMINISTIC_CMDLINE);
+            let cmdline = format!(
+                "{} virtio_mmio.device=0x200@0xd0000000:5",
+                bootparams::DETERMINISTIC_CMDLINE
+            );
             const PERIOD_RCB: u64 = 500_000;
             const MAX_TICKS: u32 = 2000;
             const TIMER_VECTOR: u8 = 0xec;
@@ -5023,8 +5461,14 @@ mod tests {
                     MAX_TICKS,
                 )
                 .expect("periodic-timer + virtio-rng + virtio-blk run failed");
-            let notify_count = m.virtio_pci_blk().map(|t| t.notify_count()).unwrap_or(u64::MAX);
-            (String::from_utf8_lossy(&halt.console_output).to_string(), notify_count)
+            let notify_count = m
+                .virtio_pci_blk()
+                .map(|t| t.notify_count())
+                .unwrap_or(u64::MAX);
+            (
+                String::from_utf8_lossy(&halt.console_output).to_string(),
+                notify_count,
+            )
         }
 
         let (first, first_blk_notify) = run_once(99);
@@ -5046,7 +5490,10 @@ mod tests {
             "two boots of the same image+tape+seed with all three devices enabled must still \
              produce byte-identical console output"
         );
-        assert_eq!(first_blk_notify, second_blk_notify, "the untouched device's notify count must match across boots too");
+        assert_eq!(
+            first_blk_notify, second_blk_notify,
+            "the untouched device's notify count must match across boots too"
+        );
     }
 
     /// specs/baud-multiverse.md §4.3's `init_powers_off_deterministically`: "a clean VMM-detected
@@ -5115,7 +5562,9 @@ mod tests {
     /// backing-store content in a console hex dump, distinct from an all-zero or all-`0xff` image
     /// that could equally be an unwritten/open-bus artifact.
     fn virtio_blk_test_base_image(sectors: u64) -> Vec<u8> {
-        (0..(crate::virtio_blk::SECTOR_SIZE * sectors)).map(|i| (i % 256) as u8).collect()
+        (0..(crate::virtio_blk::SECTOR_SIZE * sectors))
+            .map(|i| (i % 256) as u8)
+            .collect()
     }
 
     /// `virtio_blk_init.c`'s fixed sector-1 write pattern (`wbuf[i] = i & 0xff` for `i` in
@@ -5140,13 +5589,17 @@ mod tests {
         let kernel = linux_guest_kernel_path();
         let initramfs = linux_guest_virtio_blk_initramfs();
         let cmdline = bootparams::DETERMINISTIC_CMDLINE.replace("pci=off ", "");
-        assert_ne!(cmdline, bootparams::DETERMINISTIC_CMDLINE, "the replace must actually have matched");
+        assert_ne!(
+            cmdline,
+            bootparams::DETERMINISTIC_CMDLINE,
+            "the replace must actually have matched"
+        );
         const PERIOD_RCB: u64 = 500_000;
         const MAX_TICKS: u32 = 2000;
         const TIMER_VECTOR: u8 = 0xec; // Linux's LOCAL_TIMER_VECTOR
         const VIRTIO_RNG_VECTOR_UNUSED: u8 = 0xeb; // never serviced: virtio-rng is never enabled below
         let virtio_blk_vector = crate::pic8259::isa_irq_vector(11); // matches PciHostBridge's
-                                                                     // VIRTIO_BLK_DEFAULT_IRQ_LINE
+                                                                    // VIRTIO_BLK_DEFAULT_IRQ_LINE
 
         let mut m = Multiverse::boot_with_rdseed_sites(
             &kernel,
@@ -5198,9 +5651,11 @@ mod tests {
         // Sector 1's pristine base-image content, before the guest ever writes to it — asserted
         // first so the write-then-readback check below actually proves the write landed, rather
         // than trivially matching content that was already there.
-        let sector1_base_slice =
-            &base_image[crate::virtio_blk::SECTOR_SIZE as usize..2 * crate::virtio_blk::SECTOR_SIZE as usize];
-        let write_pattern: Vec<u8> = (0..crate::virtio_blk::SECTOR_SIZE).map(|i| (i % 256) as u8).collect();
+        let sector1_base_slice = &base_image
+            [crate::virtio_blk::SECTOR_SIZE as usize..2 * crate::virtio_blk::SECTOR_SIZE as usize];
+        let write_pattern: Vec<u8> = (0..crate::virtio_blk::SECTOR_SIZE)
+            .map(|i| (i % 256) as u8)
+            .collect();
         assert_eq!(
             sector1_base_slice, &write_pattern[..],
             "this test's own fixed base-image formula and virtio_blk_init.c's fixed write pattern \
@@ -5220,7 +5675,9 @@ mod tests {
              open /dev/vda; got:\n{console}"
         );
         assert!(
-            console.contains(&format!("baud-guest: blk-sector0-bytes:{sector0_expected}\n")),
+            console.contains(&format!(
+                "baud-guest: blk-sector0-bytes:{sector0_expected}\n"
+            )),
             "a real VIRTIO_BLK_T_IN read of sector 0 must return the base image's pristine \
              content unmodified; got:\n{console}"
         );
@@ -5229,7 +5686,9 @@ mod tests {
             "a real VIRTIO_BLK_T_OUT write to sector 1 must complete; got:\n{console}"
         );
         assert!(
-            console.contains(&format!("baud-guest: blk-sector1-readback-bytes:{sector1_expected}\n")),
+            console.contains(&format!(
+                "baud-guest: blk-sector1-readback-bytes:{sector1_expected}\n"
+            )),
             "a fresh VIRTIO_BLK_T_IN read of sector 1 must observe the just-written overlay \
              content, proving the write actually persisted; got:\n{console}"
         );
@@ -5294,7 +5753,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("failed to spawn musl-gcc for {source}: {e}"));
             assert!(status.success(), "musl-gcc failed to compile {source}");
             let strip_status = std::process::Command::new("strip").arg(output).status();
-            assert!(strip_status.map(|s| s.success()).unwrap_or(false), "strip failed for {source}");
+            assert!(
+                strip_status.map(|s| s.success()).unwrap_or(false),
+                "strip failed for {source}"
+            );
         };
 
         let init_bin = scratch.path().join("init");
@@ -5303,8 +5765,16 @@ mod tests {
         compile("helper.c", &helper_bin);
 
         let entries = [
-            baud_packages::InitramfsEntry::regular("init", 0o755, std::fs::read(&init_bin).unwrap()),
-            baud_packages::InitramfsEntry::regular("helper", 0o755, std::fs::read(&helper_bin).unwrap()),
+            baud_packages::InitramfsEntry::regular(
+                "init",
+                0o755,
+                std::fs::read(&init_bin).unwrap(),
+            ),
+            baud_packages::InitramfsEntry::regular(
+                "helper",
+                0o755,
+                std::fs::read(&helper_bin).unwrap(),
+            ),
         ];
         let initramfs = baud_packages::build_reproducible_initramfs(&entries)
             .expect("pipeline-built multi-file initramfs must assemble successfully");
@@ -5402,7 +5872,11 @@ mod tests {
         assert!(status.success(), "gcc failed to compile dynamic_init.c");
 
         let entries = [
-            baud_packages::InitramfsEntry::regular("init", 0o755, std::fs::read(&init_bin).unwrap()),
+            baud_packages::InitramfsEntry::regular(
+                "init",
+                0o755,
+                std::fs::read(&init_bin).unwrap(),
+            ),
             baud_packages::InitramfsEntry::regular(
                 "lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
                 0o755,
@@ -5691,12 +6165,16 @@ mod tests {
                 // Kept as a live diagnostic in case any disagreement still surfaces post-fix.
                 let mut first_divergence = None;
                 for idx in 0..n0 {
-                    let d0 = tick_runs[0][idx]
-                        .rcb
-                        .saturating_sub(if idx == 0 { 0 } else { tick_runs[0][idx - 1].rcb });
-                    let d1 = tick_runs[1][idx]
-                        .rcb
-                        .saturating_sub(if idx == 0 { 0 } else { tick_runs[1][idx - 1].rcb });
+                    let d0 = tick_runs[0][idx].rcb.saturating_sub(if idx == 0 {
+                        0
+                    } else {
+                        tick_runs[0][idx - 1].rcb
+                    });
+                    let d1 = tick_runs[1][idx].rcb.saturating_sub(if idx == 0 {
+                        0
+                    } else {
+                        tick_runs[1][idx - 1].rcb
+                    });
                     if d0 != d1 {
                         first_divergence = Some((idx, d0, d1));
                         break;
@@ -5898,21 +6376,23 @@ mod tests {
         const WORK_CLOCK_K: u64 = 1;
 
         // The straight run: both ticks delivered on one continuous Multiverse, never snapshotted.
-        let mut straight =
-            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None).expect("straight boot failed");
+        let mut straight = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None)
+            .expect("straight boot failed");
         let straight_tick_1 = straight
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
             .expect("straight run: first tick failed");
         let straight_tick_2 = straight
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
             .expect("straight run: second tick failed");
-        let straight_halt = straight.run_to_first_halt().expect("straight run: halt failed");
+        let straight_halt = straight
+            .run_to_first_halt()
+            .expect("straight run: halt failed");
 
         // The capture-then-restore run: only the first tick is delivered before capturing at K;
         // the second tick and the halt happen on a brand-new `Multiverse` reconstructed from that
         // capture, sharing nothing with the original beyond the `Universe` value itself.
-        let mut capture_run =
-            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None).expect("capture-run boot failed");
+        let mut capture_run = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None)
+            .expect("capture-run boot failed");
         let capture_tick_1 = capture_run
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
             .expect("capture run: first tick failed");
@@ -5923,14 +6403,18 @@ mod tests {
         );
 
         let mut page_store = PageStore::new();
-        let universe = capture_run.snapshot(&mut page_store).expect("snapshot (capture at K) failed");
+        let universe = capture_run
+            .snapshot(&mut page_store)
+            .expect("snapshot (capture at K) failed");
 
         let mut restored = Multiverse::restore(&universe, vec![], WORK_CLOCK_K, false, None)
             .expect("restore from captured universe failed");
         let restored_tick_2 = restored
             .inject_timer_tick(PERIOD_RCB, TIMER_VECTOR)
             .expect("restored run: second tick failed");
-        let restored_halt = restored.run_to_first_halt().expect("restored run: halt failed");
+        let restored_halt = restored
+            .run_to_first_halt()
+            .expect("restored run: halt failed");
 
         assert_eq!(
             restored_tick_2.rip, straight_tick_2.rip,
@@ -5994,8 +6478,15 @@ mod tests {
                 captured,
                 current,
             })) => {
-                assert_eq!(captured, real_signature ^ 1, "error must report the forged captured signature");
-                assert_eq!(current, real_signature, "error must report this host's real signature");
+                assert_eq!(
+                    captured,
+                    real_signature ^ 1,
+                    "error must report the forged captured signature"
+                );
+                assert_eq!(
+                    current, real_signature,
+                    "error must report this host's real signature"
+                );
             }
             Ok(_) => panic!(
                 "restoring a universe with a mismatched cpu_signature and no active CPUID \
@@ -6064,11 +6555,14 @@ mod tests {
         /// reset cost scales with the write set rather than total RAM.
         const UPPER_BOUND: usize = 64;
 
-        let mut multiverse = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], Some(4096))
-            .expect("boot with dirty ring failed");
+        let mut multiverse =
+            Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], Some(4096))
+                .expect("boot with dirty ring failed");
 
         let mut page_store = PageStore::new();
-        let base = multiverse.snapshot(&mut page_store).expect("base snapshot (pristine, pre-run) failed");
+        let base = multiverse
+            .snapshot(&mut page_store)
+            .expect("base snapshot (pristine, pre-run) failed");
         let base_ram_hash = multiverse.ram_hash();
 
         let (ticks, halt) = multiverse
@@ -6081,8 +6575,9 @@ mod tests {
              reset-then-compare assertion below would be vacuous"
         );
 
-        let reset_count =
-            multiverse.reset_dirty_pages(&base.ram).expect("reset_dirty_pages failed");
+        let reset_count = multiverse
+            .reset_dirty_pages(&base.ram)
+            .expect("reset_dirty_pages failed");
 
         assert!(
             reset_count > 0,
@@ -6177,7 +6672,9 @@ mod tests {
         let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![], None)
             .expect("boot (branch point) failed");
         let mut page_store = PageStore::new();
-        let universe = boot.snapshot(&mut page_store).expect("snapshot at branch point failed");
+        let universe = boot
+            .snapshot(&mut page_store)
+            .expect("snapshot at branch point failed");
 
         let suffix_for = |i: usize| -> Vec<u8> {
             let i = i as u32;
@@ -6198,11 +6695,13 @@ mod tests {
         // one fd or one RAM region is invisible in any other test but shows up here ~1000x over —
         // so measure both explicitly rather than relying on an eventual Err/OOM.
         let open_fds = || {
-            std::fs::read_dir("/proc/self/fd").expect("/proc/self/fd is readable on Linux").count()
+            std::fs::read_dir("/proc/self/fd")
+                .expect("/proc/self/fd is readable on Linux")
+                .count()
         };
         let vm_rss_kib = || -> u64 {
-            let status =
-                std::fs::read_to_string("/proc/self/status").expect("/proc/self/status is readable on Linux");
+            let status = std::fs::read_to_string("/proc/self/status")
+                .expect("/proc/self/status is readable on Linux");
             status
                 .lines()
                 .find_map(|line| line.strip_prefix("VmRSS:"))
@@ -6267,11 +6766,12 @@ mod tests {
         // branch, unordered; the caller sorts by index. Every worker joins before this returns, so
         // afterwards no branch is alive anywhere — which is what makes the RSS samples below
         // comparable to the sequential version's.
-        let run_branch_wave = |range: std::ops::Range<usize>| -> Vec<(usize, Vec<u8>, Option<String>)> {
-            let universe = &universe;
-            let suffix_for = &suffix_for;
-            std::thread::scope(|scope| {
-                let handles: Vec<_> = (0..BRANCH_WORKERS)
+        let run_branch_wave =
+            |range: std::ops::Range<usize>| -> Vec<(usize, Vec<u8>, Option<String>)> {
+                let universe = &universe;
+                let suffix_for = &suffix_for;
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = (0..BRANCH_WORKERS)
                     .map(|worker| {
                         let range = range.clone();
                         scope.spawn(move || {
@@ -6303,7 +6803,7 @@ mod tests {
                         })
                     })
                     .collect();
-                handles
+                    handles
                     .into_iter()
                     .flat_map(|handle| {
                         handle.join().unwrap_or_else(|_| {
@@ -6311,8 +6811,8 @@ mod tests {
                         })
                     })
                     .collect()
-            })
-        };
+                })
+            };
 
         let fds_before = open_fds();
 
@@ -6338,8 +6838,10 @@ mod tests {
             "every branch index must come back from exactly one worker thread"
         );
         results.sort_unstable_by_key(|(i, _, _)| *i);
-        let outputs: Vec<(Vec<u8>, Option<String>)> =
-            results.into_iter().map(|(_, suffix, ram_hash)| (suffix, ram_hash)).collect();
+        let outputs: Vec<(Vec<u8>, Option<String>)> = results
+            .into_iter()
+            .map(|(_, suffix, ram_hash)| (suffix, ram_hash))
+            .collect();
         eprintln!(
             "thousand_branches_are_independent_and_deterministic: fds {fds_before} -> {fds_after}, \
              VmRSS {rss_warm_kib} KiB (after branch {RSS_WARM_BRANCH}) -> {rss_after_kib} KiB"
@@ -6364,8 +6866,13 @@ mod tests {
         // above), so distinct suffixes trivially mean distinct expected outputs — this is an
         // explicit restatement of "no branch perturbs another" (the spec pseudocode's
         // `no_branch_perturbs_another`) rather than a new check.
-        let unique_suffixes: std::collections::HashSet<_> = outputs.iter().map(|(s, _)| s.clone()).collect();
-        assert_eq!(unique_suffixes.len(), NUM_BRANCHES, "every branch's tape suffix must be unique by construction");
+        let unique_suffixes: std::collections::HashSet<_> =
+            outputs.iter().map(|(s, _)| s.clone()).collect();
+        assert_eq!(
+            unique_suffixes.len(),
+            NUM_BRANCHES,
+            "every branch's tape suffix must be unique by construction"
+        );
 
         // A sample of branches, re-forked from the same universe with the same suffix, must be
         // internally deterministic (the spec pseudocode's `b.is_deterministic_double_run()`).
@@ -6373,14 +6880,15 @@ mod tests {
             let suffix = suffix_for(i);
             let mut replay = Multiverse::branch(&universe, suffix.clone(), WORK_CLOCK_K, None)
                 .unwrap_or_else(|e| panic!("branch {i} replay failed: {e}"));
-            let replay_outcome =
-                replay.run_to_first_halt().unwrap_or_else(|e| panic!("branch {i} replay run failed: {e}"));
+            let replay_outcome = replay
+                .run_to_first_halt()
+                .unwrap_or_else(|e| panic!("branch {i} replay run failed: {e}"));
             let (_, first_ram_hash) = &outputs[i];
             // `sample_stride` selects exactly the indices the loop above hashed, so this is
             // infallible by construction — the `expect` only pins that invariant in place.
-            let first_ram_hash = first_ram_hash
-                .as_ref()
-                .unwrap_or_else(|| panic!("branch {i} is a sampled index, so its RAM hash was recorded"));
+            let first_ram_hash = first_ram_hash.as_ref().unwrap_or_else(|| {
+                panic!("branch {i} is a sampled index, so its RAM hash was recorded")
+            });
             assert_eq!(
                 replay_outcome.console_output, suffix,
                 "branch {i} replayed from the same universe+suffix must produce the same output"
@@ -6433,8 +6941,13 @@ mod tests {
             host.place(host.capacity() + 1).is_err(),
             "placing one VM over real capacity must be refused"
         );
-        let full = host.place(host.capacity()).expect("placing at capacity must succeed");
-        assert!(full.no_two_on_sibling_threads(), "no two placed VMs may share an SMT sibling pair");
+        let full = host
+            .place(host.capacity())
+            .expect("placing at capacity must succeed");
+        assert!(
+            full.no_two_on_sibling_threads(),
+            "no two placed VMs may share an SMT sibling pair"
+        );
 
         let kernel = tape_echo_guest_kernel_path();
         let cmdline = "console=ttyS0";
@@ -6534,7 +7047,9 @@ mod tests {
         assert_eq!(boot.console_output(), SHELL_GUEST_PROMPT);
 
         let mut page_store = PageStore::new();
-        let universe = boot.snapshot(&mut page_store).expect("snapshot at the prompt failed");
+        let universe = boot
+            .snapshot(&mut page_store)
+            .expect("snapshot at the prompt failed");
         assert_eq!(
             universe.device.console, SHELL_GUEST_PROMPT,
             "captured universe's console history must be exactly the prompt observed pre-capture"
@@ -6583,7 +7098,8 @@ mod tests {
     /// keeps running after a branch point instead of halting on tape exhaustion (see that
     /// directory's `BUILD.md`).
     fn mark_branch_guest_kernel_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mark-branch-guest/bzImage")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mark-branch-guest/bzImage")
     }
 
     /// [`Multiverse::run_until_branch_or_halt`]'s basic contract: it stops before `Hlt`, at the
@@ -6597,15 +7113,30 @@ mod tests {
         let cmdline = "console=ttyS0";
         const MAX_EXITS: u32 = 16;
 
-        let mut boot = Multiverse::boot(&kernel, cmdline, 0, 1, vec![1, 2, 3, 4], None).expect("boot failed");
-        let (outcome, records) = boot.run_until_branch_or_halt(MAX_EXITS).expect("run_until_branch_or_halt failed");
+        let mut boot =
+            Multiverse::boot(&kernel, cmdline, 0, 1, vec![1, 2, 3, 4], None).expect("boot failed");
+        let (outcome, records) = boot
+            .run_until_branch_or_halt(MAX_EXITS)
+            .expect("run_until_branch_or_halt failed");
 
         match outcome {
-            RunUntilBranchOutcome::MarkBranch { step } => assert_eq!(step, 1, "the first MARK_BRANCH must land right after the first tape byte is consumed"),
-            RunUntilBranchOutcome::Halted(_) => panic!("must stop at MARK_BRANCH, not run all the way to Hlt"),
+            RunUntilBranchOutcome::MarkBranch { step } => assert_eq!(
+                step, 1,
+                "the first MARK_BRANCH must land right after the first tape byte is consumed"
+            ),
+            RunUntilBranchOutcome::Halted(_) => {
+                panic!("must stop at MARK_BRANCH, not run all the way to Hlt")
+            }
         }
-        assert_eq!(records.len(), 1, "exactly one record (the MarkBranch itself) must have been drained");
-        assert!(matches!(records[0], baud_proto::Msg::MarkBranch { step: 1 }));
+        assert_eq!(
+            records.len(),
+            1,
+            "exactly one record (the MarkBranch itself) must have been drained"
+        );
+        assert!(matches!(
+            records[0],
+            baud_proto::Msg::MarkBranch { step: 1 }
+        ));
         assert_eq!(
             boot.console_output(),
             &[1],
@@ -6632,22 +7163,43 @@ mod tests {
 
         // A straight, never-forked run of the same image+tape, to compare the "same suffix"
         // fork against below.
-        let mut straight = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, original_tape.clone(), None)
-            .expect("straight boot failed");
+        let mut straight = Multiverse::boot(
+            &kernel,
+            cmdline,
+            0,
+            WORK_CLOCK_K,
+            original_tape.clone(),
+            None,
+        )
+        .expect("straight boot failed");
         let straight_outcome = straight.run_to_first_halt().expect("straight run failed");
         assert_eq!(straight_outcome.console_output, original_tape);
 
         // The checkpoint: run the same image+tape only up to the first MARK_BRANCH, then snapshot.
-        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, original_tape.clone(), None)
-            .expect("checkpoint boot failed");
-        let (outcome, _records) = boot.run_until_branch_or_halt(MAX_EXITS).expect("run_until_branch_or_halt failed");
+        let mut boot = Multiverse::boot(
+            &kernel,
+            cmdline,
+            0,
+            WORK_CLOCK_K,
+            original_tape.clone(),
+            None,
+        )
+        .expect("checkpoint boot failed");
+        let (outcome, _records) = boot
+            .run_until_branch_or_halt(MAX_EXITS)
+            .expect("run_until_branch_or_halt failed");
         let step = match outcome {
             RunUntilBranchOutcome::MarkBranch { step } => step,
             RunUntilBranchOutcome::Halted(_) => panic!("must stop at MARK_BRANCH"),
         };
         let mut page_store = PageStore::new();
-        let universe = boot.snapshot(&mut page_store).expect("snapshot at checkpoint failed");
-        assert_eq!(universe.device.tape_cursor, step, "the captured tape cursor must match the marker's own step");
+        let universe = boot
+            .snapshot(&mut page_store)
+            .expect("snapshot at checkpoint failed");
+        assert_eq!(
+            universe.device.tape_cursor, step,
+            "the captured tape cursor must match the marker's own step"
+        );
 
         let padded_tape = |suffix: &[u8]| -> Vec<u8> {
             let mut tape = vec![0u8; step as usize];
@@ -6685,8 +7237,9 @@ mod tests {
         // Fork C: handed back its own original continuation bytes must reproduce the straight
         // run's tail exactly, proving the checkpoint really is this run's own live state.
         let original_suffix = &original_tape[step as usize..];
-        let mut fork_c = Multiverse::branch(&universe, padded_tape(original_suffix), WORK_CLOCK_K, None)
-            .expect("fork C failed");
+        let mut fork_c =
+            Multiverse::branch(&universe, padded_tape(original_suffix), WORK_CLOCK_K, None)
+                .expect("fork C failed");
         let outcome_c = fork_c.run_to_first_halt().expect("fork C run failed");
         assert_eq!(
             outcome_c.console_output, straight_outcome.console_output,
@@ -6709,28 +7262,41 @@ mod tests {
         const WORK_CLOCK_K: u64 = 1;
         const MAX_EXITS: u32 = 16;
 
-        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![10u8], None).expect("boot failed");
-        let (outcome1, _) = boot.run_until_branch_or_halt(MAX_EXITS).expect("first run_until_branch_or_halt failed");
+        let mut boot = Multiverse::boot(&kernel, cmdline, 0, WORK_CLOCK_K, vec![10u8], None)
+            .expect("boot failed");
+        let (outcome1, _) = boot
+            .run_until_branch_or_halt(MAX_EXITS)
+            .expect("first run_until_branch_or_halt failed");
         let step1 = match outcome1 {
             RunUntilBranchOutcome::MarkBranch { step } => step,
             RunUntilBranchOutcome::Halted(_) => panic!("must stop at the first MARK_BRANCH"),
         };
         assert_eq!(step1, 1);
         let mut page_store = PageStore::new();
-        let checkpoint1 = boot.snapshot(&mut page_store).expect("snapshot at first checkpoint failed");
+        let checkpoint1 = boot
+            .snapshot(&mut page_store)
+            .expect("snapshot at first checkpoint failed");
 
         // Fork checkpoint 1 onto fresh input, but only run to the SECOND marker, not to halt.
         let second_byte = 21u8;
-        let mut fork1 = Multiverse::branch(&checkpoint1, vec![0u8, second_byte], WORK_CLOCK_K, None)
-            .expect("fork of checkpoint 1 failed");
-        let (outcome2, _) = fork1.run_until_branch_or_halt(MAX_EXITS).expect("second run_until_branch_or_halt failed");
+        let mut fork1 =
+            Multiverse::branch(&checkpoint1, vec![0u8, second_byte], WORK_CLOCK_K, None)
+                .expect("fork of checkpoint 1 failed");
+        let (outcome2, _) = fork1
+            .run_until_branch_or_halt(MAX_EXITS)
+            .expect("second run_until_branch_or_halt failed");
         let step2 = match outcome2 {
             RunUntilBranchOutcome::MarkBranch { step } => step,
             RunUntilBranchOutcome::Halted(_) => panic!("must stop at the second MARK_BRANCH"),
         };
-        assert_eq!(step2, 2, "the second marker's step must be the cursor after the second byte is read");
+        assert_eq!(
+            step2, 2,
+            "the second marker's step must be the cursor after the second byte is read"
+        );
         assert_eq!(fork1.console_output(), &[10u8, second_byte]);
-        let checkpoint2 = fork1.snapshot(&mut page_store).expect("snapshot at second checkpoint failed");
+        let checkpoint2 = fork1
+            .snapshot(&mut page_store)
+            .expect("snapshot at second checkpoint failed");
 
         // Fork checkpoint 2 onto yet another fresh suffix and finish the fixture's remaining
         // two loop iterations to Hlt.
@@ -6750,4 +7316,3 @@ mod tests {
         );
     }
 }
-

@@ -32,7 +32,7 @@
 //
 // Soft budget: ≤ 1,200 LOC (actual LOC well under).
 
-use baud_proto::{EbpfRecord, SyscallRecord, Source};
+use baud_proto::{EbpfRecord, Source, SyscallRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -132,9 +132,8 @@ impl BpfAvailability {
             let license_ptr = license.as_ptr() as u64;
             attr[16..24].copy_from_slice(&license_ptr.to_ne_bytes());
 
-            let ret = unsafe {
-                libc::syscall(BPF_SYSCALL_NR, BPF_PROG_LOAD, attr.as_ptr(), attr.len())
-            };
+            let ret =
+                unsafe { libc::syscall(BPF_SYSCALL_NR, BPF_PROG_LOAD, attr.as_ptr(), attr.len()) };
 
             if ret >= 0 {
                 // BPF prog loaded successfully — close the fd and return Native
@@ -188,8 +187,8 @@ impl BpfAvailability {
 #[cfg(target_os = "linux")]
 pub fn load_native_probes() -> Option<NativeProbeHandle> {
     // Locate probe objects directory
-    let probe_dir = std::env::var("BAUD_BPF_PROBES_DIR")
-        .unwrap_or_else(|_| "/usr/lib/baud/probes".to_string());
+    let probe_dir =
+        std::env::var("BAUD_BPF_PROBES_DIR").unwrap_or_else(|_| "/usr/lib/baud/probes".to_string());
     let probe_path = std::path::Path::new(&probe_dir).join("baud_tracing.bpf.o");
     if !probe_path.exists() {
         tracing::debug!(
@@ -203,7 +202,10 @@ pub fn load_native_probes() -> Option<NativeProbeHandle> {
     let bpf_bytes = match std::fs::read(&probe_path) {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("baud-tracing: failed to read probe object {:?}: {e}", probe_path);
+            tracing::warn!(
+                "baud-tracing: failed to read probe object {:?}: {e}",
+                probe_path
+            );
             return None;
         }
     };
@@ -231,7 +233,8 @@ pub fn load_native_probes() -> Option<NativeProbeHandle> {
             if let Ok(tp) = TryFrom::<&mut aya::programs::Program>::try_from(prog)
                 .map_err(|_| ())
                 .and_then(|tp: &mut TracePoint| {
-                    tp.load().and_then(|_| tp.attach(category, name))
+                    tp.load()
+                        .and_then(|_| tp.attach(category, name))
                         .map_err(|_| ())
                 })
             {
@@ -362,16 +365,15 @@ impl TracingSession {
     /// Return all records filtered by event kind.
     pub fn filter_by_kind(&self, kind: &EventKind) -> Vec<&EbpfRecord> {
         let prefix = kind.to_string();
-        self.records.iter()
+        self.records
+            .iter()
             .filter(|r| r.event.starts_with(&prefix))
             .collect()
     }
 
     /// Return all records for a specific node.
     pub fn filter_by_node(&self, node_id: u16) -> Vec<&EbpfRecord> {
-        self.records.iter()
-            .filter(|r| r.node == node_id)
-            .collect()
+        self.records.iter().filter(|r| r.node == node_id).collect()
     }
 
     /// Syscall counts per node (from eBPF plane).
@@ -383,11 +385,17 @@ impl TracingSession {
     pub fn summary(&self) -> TracingSummary {
         let mut counts: HashMap<String, u64> = HashMap::new();
         for r in &self.records {
-            let kind = if r.event.starts_with("syscall:") { "syscall" }
-                else if r.event.starts_with("sched_switch") { "sched_switch" }
-                else if r.event == "exec" { "exec" }
-                else if r.event == "fault" { "fault" }
-                else { "other" };
+            let kind = if r.event.starts_with("syscall:") {
+                "syscall"
+            } else if r.event.starts_with("sched_switch") {
+                "sched_switch"
+            } else if r.event == "exec" {
+                "exec"
+            } else if r.event == "fault" {
+                "fault"
+            } else {
+                "other"
+            };
             *counts.entry(kind.into()).or_insert(0) += 1;
         }
         TracingSummary {
@@ -440,13 +448,13 @@ pub struct CrossCheckResult {
 /// A failed cross-check indicates a supervisor bug or an escaped guest.
 pub fn cross_check(
     run_id: &str,
-    syscall_records: &[SyscallRecord],  // plane 1: from supervisor
-    ebpf_session: &TracingSession,       // plane 2: from eBPF/fallback
+    syscall_records: &[SyscallRecord], // plane 1: from supervisor
+    ebpf_session: &TracingSession,     // plane 2: from eBPF/fallback
 ) -> CrossCheckResult {
     // Compute per-node syscall counts and ordered sequences from plane 1
     let mut plane1_counts: HashMap<u16, u64> = HashMap::new();
     let mut plane1_sequences: HashMap<u16, Vec<u32>> = HashMap::new(); // node → ordered sysno by vtime
-    // plane 1 records are assumed ordered by vtime; preserve order
+                                                                       // plane 1 records are assumed ordered by vtime; preserve order
     for r in syscall_records {
         *plane1_counts.entry(r.node).or_insert(0) += 1;
         plane1_sequences.entry(r.node).or_default().push(r.sysno);
@@ -457,7 +465,9 @@ pub fn cross_check(
     // Build plane 2 ordered sequences from eBPF records
     // Filter to only syscall events, sort by vtime, extract sysno
     let mut plane2_sequences: HashMap<u16, Vec<u32>> = HashMap::new();
-    let mut syscall_recs: Vec<&baud_proto::EbpfRecord> = ebpf_session.records.iter()
+    let mut syscall_recs: Vec<&baud_proto::EbpfRecord> = ebpf_session
+        .records
+        .iter()
         .filter(|r| r.event.starts_with("syscall:"))
         .collect();
     syscall_recs.sort_by_key(|r| r.vtime);
@@ -503,8 +513,14 @@ pub fn cross_check(
             }
         } else {
             // Counts agree: also compare ordered sequence
-            let seq1 = plane1_sequences.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
-            let seq2 = plane2_sequences.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
+            let seq1 = plane1_sequences
+                .get(&node)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let seq2 = plane2_sequences
+                .get(&node)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             for (step, (s1, s2)) in seq1.iter().zip(seq2.iter()).enumerate() {
                 if s1 != s2 {
                     passed = false;
@@ -556,10 +572,7 @@ pub fn cross_check(
 /// This simulates the fallback /proc-sampling path when real eBPF is not available.
 ///
 /// Each SyscallRecord from plane 1 is mirrored into a corresponding EbpfRecord.
-pub fn synthetic_from_syscalls(
-    run_id: &str,
-    syscall_records: &[SyscallRecord],
-) -> TracingSession {
+pub fn synthetic_from_syscalls(run_id: &str, syscall_records: &[SyscallRecord]) -> TracingSession {
     let mut session = TracingSession::new(run_id);
     // Register synthetic pids (node_id → pid = node_id + 1000)
     let nodes: std::collections::BTreeSet<u16> = syscall_records.iter().map(|r| r.node).collect();
@@ -604,7 +617,11 @@ mod tests {
         let _ = avail.source(); // also exercises the source() method
 
         #[cfg(not(target_os = "linux"))]
-        assert_eq!(avail, BpfAvailability::Fallback, "non-Linux must always be Fallback");
+        assert_eq!(
+            avail,
+            BpfAvailability::Fallback,
+            "non-Linux must always be Fallback"
+        );
     }
 
     #[test]
@@ -651,17 +668,18 @@ mod tests {
         ];
         let session = synthetic_from_syscalls("run1", &syscalls);
         let result = cross_check("run1", &syscalls, &session);
-        assert!(result.passed, "expected cross-check to pass: {}", result.message);
+        assert!(
+            result.passed,
+            "expected cross-check to pass: {}",
+            result.message
+        );
         assert_eq!(result.plane1_counts.get(&0), Some(&2));
         assert_eq!(result.plane1_counts.get(&1), Some(&1));
     }
 
     #[test]
     fn test_cross_check_fail_divergent() {
-        let syscalls_p1 = vec![
-            make_syscall(0, 1, 10),
-            make_syscall(0, 2, 20),
-        ];
+        let syscalls_p1 = vec![make_syscall(0, 1, 10), make_syscall(0, 2, 20)];
         // eBPF plane only sees 1 syscall for node 0 (simulating supervisor bug)
         let syscalls_p2 = vec![make_syscall(0, 1, 10)];
         let session = synthetic_from_syscalls("run2", &syscalls_p2);
@@ -707,7 +725,10 @@ mod tests {
     #[test]
     fn test_event_kind_parse() {
         assert_eq!("syscall".parse::<EventKind>().unwrap(), EventKind::Syscall);
-        assert_eq!("sched".parse::<EventKind>().unwrap(), EventKind::SchedSwitch);
+        assert_eq!(
+            "sched".parse::<EventKind>().unwrap(),
+            EventKind::SchedSwitch
+        );
         assert_eq!("exec".parse::<EventKind>().unwrap(), EventKind::Exec);
         assert!("bogus".parse::<EventKind>().is_err());
     }
@@ -721,10 +742,7 @@ mod tests {
     #[test]
     fn cross_check_detects_sequence_divergence() {
         // Plane 1: node 0 makes syscall 1 then syscall 2
-        let syscalls_p1 = vec![
-            make_syscall(0, 1, 10),
-            make_syscall(0, 2, 20),
-        ];
+        let syscalls_p1 = vec![make_syscall(0, 1, 10), make_syscall(0, 2, 20)];
         // Plane 2: same count but reversed order (2 then 1) — simulates supervisor bug
         let syscalls_p2 = vec![
             make_syscall(0, 2, 10), // different sysno at same step
@@ -733,9 +751,19 @@ mod tests {
         let session = synthetic_from_syscalls("seq-test", &syscalls_p2);
         let result = cross_check("seq-test", &syscalls_p1, &session);
         // Counts agree (2 each) but sequences differ — must fail
-        assert!(!result.passed, "cross_check_detects_sequence_divergence: must fail on sequence mismatch");
-        assert!(result.divergent_sequence_step.is_some(), "divergent_sequence_step must be set");
-        assert_eq!(result.divergent_sequence_step.unwrap().0, 0, "divergence on node 0");
+        assert!(
+            !result.passed,
+            "cross_check_detects_sequence_divergence: must fail on sequence mismatch"
+        );
+        assert!(
+            result.divergent_sequence_step.is_some(),
+            "divergent_sequence_step must be set"
+        );
+        assert_eq!(
+            result.divergent_sequence_step.unwrap().0,
+            0,
+            "divergence on node 0"
+        );
     }
 
     /// planes_agree_on_healthy_run: plane 1 (supervisor syscall log) and plane 2
@@ -745,11 +773,11 @@ mod tests {
     fn planes_agree_on_healthy_run() {
         // Build a known syscall log (plane 1)
         let syscalls = vec![
-            make_syscall(0, 1, 10),   // node 0, sysno 1, vtime 10
-            make_syscall(0, 2, 20),   // node 0, sysno 2, vtime 20
-            make_syscall(0, 60, 30),  // node 0, exit (sysno 60), vtime 30
-            make_syscall(1, 1, 15),   // node 1, sysno 1, vtime 15
-            make_syscall(1, 60, 35),  // node 1, exit, vtime 35
+            make_syscall(0, 1, 10),  // node 0, sysno 1, vtime 10
+            make_syscall(0, 2, 20),  // node 0, sysno 2, vtime 20
+            make_syscall(0, 60, 30), // node 0, exit (sysno 60), vtime 30
+            make_syscall(1, 1, 15),  // node 1, sysno 1, vtime 15
+            make_syscall(1, 60, 35), // node 1, exit, vtime 35
         ];
 
         // Derive plane 2 from the same syscall log (as a fallback eBPF session)
@@ -762,7 +790,10 @@ mod tests {
             "planes_agree_on_healthy_run: cross-check must PASS for healthy run. {}",
             result.message
         );
-        assert_eq!(result.divergent_node, None, "no divergent node in healthy run");
+        assert_eq!(
+            result.divergent_node, None,
+            "no divergent node in healthy run"
+        );
 
         // Node 0 has 3 syscalls, node 1 has 2
         assert_eq!(result.plane1_counts.get(&0), Some(&3));
@@ -775,10 +806,7 @@ mod tests {
     #[test]
     fn fallback_emits_same_schema() {
         // Build a synthetic fallback session from syscall records
-        let syscalls = vec![
-            make_syscall(0, 1, 10),
-            make_syscall(0, 2, 20),
-        ];
+        let syscalls = vec![make_syscall(0, 1, 10), make_syscall(0, 2, 20)];
         let session = synthetic_from_syscalls("fallback-run", &syscalls);
 
         // All records must carry the fallback source flag
@@ -791,12 +819,23 @@ mod tests {
         }
 
         // Records must have the same shape as native BPF records
-        assert_eq!(session.records.len(), 2, "fallback session must emit one record per syscall");
+        assert_eq!(
+            session.records.len(),
+            2,
+            "fallback session must emit one record per syscall"
+        );
         assert_eq!(session.records[0].node, 0);
-        assert!(session.records[0].event.starts_with("syscall:"), "event must be prefixed 'syscall:'");
+        assert!(
+            session.records[0].event.starts_with("syscall:"),
+            "event must be prefixed 'syscall:'"
+        );
 
         // Cross-check must succeed even with fallback source
         let result = cross_check("fallback-run", &syscalls, &session);
-        assert!(result.passed, "fallback source must still pass cross-check: {}", result.message);
+        assert!(
+            result.passed,
+            "fallback source must still pass cross-check: {}",
+            result.message
+        );
     }
 }

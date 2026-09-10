@@ -87,4 +87,6 @@ pub use dirty_ring::{harvest, RawDirtyGfn, DIRTY_BIT, RESET_BIT};
 pub use page_store::{PageHash, PageRef, PageStore, PAGE_SIZE};
 pub use tree::{NodeId, Tree};
 pub use universe::{ClockState, DeviceState, MsrWrite, Universe, VcpuState};
-pub use wire::{decode_universe_body, encode_universe_body, universe_from_body, UniverseBody, WireError};
+pub use wire::{
+    decode_universe_body, encode_universe_body, universe_from_body, UniverseBody, WireError,
+};

@@ -10,7 +10,11 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum FrameError {
     #[error("frame geometry is too large: {width}x{height} pixels in {format:?}")]
-    GeometryOverflow { width: u32, height: u32, format: PixFmt },
+    GeometryOverflow {
+        width: u32,
+        height: u32,
+        format: PixFmt,
+    },
     #[error("frame exceeds the {limit} byte safety limit: {got} bytes")]
     GeometryTooLarge { limit: usize, got: usize },
     #[error("frame size mismatch: expected {expected} bytes, got {got}")]
@@ -50,8 +54,20 @@ impl FrameProcessor {
 
     /// Ingest a raw frame buffer at the processor's configured geometry.
     /// Returns the processed frame (or error if size mismatch).
-    pub fn ingest(&mut self, step: u64, buf: &[u8], hash_only: bool) -> Result<&ProcessedFrame, FrameError> {
-        self.ingest_frame(step, self.width, self.height, self.format.clone(), buf, hash_only)
+    pub fn ingest(
+        &mut self,
+        step: u64,
+        buf: &[u8],
+        hash_only: bool,
+    ) -> Result<&ProcessedFrame, FrameError> {
+        self.ingest_frame(
+            step,
+            self.width,
+            self.height,
+            self.format.clone(),
+            buf,
+            hash_only,
+        )
     }
 
     /// Ingest a frame whose geometry and pixel format arrive with the frame record.
@@ -84,7 +100,10 @@ impl FrameProcessor {
 
     /// List all frame hashes in order.
     pub fn frame_hashes(&self) -> Vec<(u64, Hash)> {
-        self.frames.iter().map(|f| (f.record.step, f.record.hash.clone())).collect()
+        self.frames
+            .iter()
+            .map(|f| (f.record.step, f.record.hash.clone()))
+            .collect()
     }
 
     /// Check whether this is a duplicate of the previous frame.
@@ -131,7 +150,10 @@ mod tests {
         // (This is the half the old test never covered — `is_duplicate` returning
         // `true` unconditionally would have passed it.)
         let hash_b = fingerprint(&frame_b, proc.width, proc.height, &proc.format).unwrap();
-        assert_ne!(hash_a, hash_b, "different pixel content must fingerprint differently");
+        assert_ne!(
+            hash_a, hash_b,
+            "different pixel content must fingerprint differently"
+        );
         assert!(
             !proc.is_duplicate(&hash_b),
             "a frame with different content must not be reported as a duplicate"
@@ -140,7 +162,10 @@ mod tests {
         // Ingesting the different frame moves `prev_hash` on: the new frame is now the
         // duplicate candidate and the old one no longer is.
         proc.ingest(1, &frame_b, true).unwrap();
-        assert!(proc.is_duplicate(&hash_b), "prev_hash must track the most recent frame");
+        assert!(
+            proc.is_duplicate(&hash_b),
+            "prev_hash must track the most recent frame"
+        );
         assert!(
             !proc.is_duplicate(&hash_a),
             "the previous frame's hash must stop being a duplicate once a new frame is ingested"
@@ -149,7 +174,10 @@ mod tests {
         // Ingesting identical content again yields the same hash — the duplicate the
         // dedup bookkeeping exists to spot.
         let repeat = proc.ingest(2, &frame_b, true).unwrap().record.hash.clone();
-        assert_eq!(repeat, hash_b, "identical content must produce an identical fingerprint");
+        assert_eq!(
+            repeat, hash_b,
+            "identical content must produce an identical fingerprint"
+        );
         assert!(proc.is_duplicate(&repeat));
     }
 
@@ -157,7 +185,14 @@ mod tests {
     fn ingest_accepts_geometry_declared_by_each_frame() {
         let mut proc = FrameProcessor::new(0, 4, 4, PixFmt::Indexed8);
         let frame = proc
-            .ingest_frame(7, 2, 1, PixFmt::Rgba8888, &[1, 2, 3, 255, 4, 5, 6, 255], true)
+            .ingest_frame(
+                7,
+                2,
+                1,
+                PixFmt::Rgba8888,
+                &[1, 2, 3, 255, 4, 5, 6, 255],
+                true,
+            )
             .unwrap();
         assert_eq!((frame.record.width, frame.record.height), (2, 1));
         assert_eq!(frame.record.format, PixFmt::Rgba8888);

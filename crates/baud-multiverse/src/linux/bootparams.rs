@@ -73,7 +73,12 @@ pub enum BootParamsError {
          exceeds ram_size ({ram_size} bytes) — this kernel's own init_size ({kernel_init_size:#x}) \
          pushed the load address past available RAM"
     )]
-    InitramfsDoesNotFit { addr: u64, initramfs_len: usize, ram_size: usize, kernel_init_size: u32 },
+    InitramfsDoesNotFit {
+        addr: u64,
+        initramfs_len: usize,
+        ram_size: usize,
+        kernel_init_size: u32,
+    },
 }
 
 /// Write the `SETUP_RNG_SEED` `setup_data` node — `{next: 0, type: SETUP_RNG_SEED, len:
@@ -128,7 +133,9 @@ pub fn load_kernel_and_write_boot_params<M: GuestMemoryBackend>(
         Some(GuestAddress(layout::HIMEM_START)),
     )?;
 
-    let mut hdr = loader_result.setup_header.ok_or(BootParamsError::MissingSetupHeader)?;
+    let mut hdr = loader_result
+        .setup_header
+        .ok_or(BootParamsError::MissingSetupHeader)?;
     hdr.type_of_loader = KERNEL_LOADER_OTHER;
     // A bzImage's own `setup_header` doesn't set the boot-flag/HdrS magics or a minimum kernel
     // alignment for a from-scratch VMM boot — `BzImage::load` only fills in what it read off disk
@@ -144,8 +151,12 @@ pub fn load_kernel_and_write_boot_params<M: GuestMemoryBackend>(
     kernel_cmdline
         .insert_str(cmdline)
         .map_err(|e| BootParamsError::InvalidCmdline(format!("{e:?}")))?;
-    load_cmdline(guest_mem, GuestAddress(layout::CMDLINE_ADDR), &kernel_cmdline)
-        .map_err(BootParamsError::CmdlineWrite)?;
+    load_cmdline(
+        guest_mem,
+        GuestAddress(layout::CMDLINE_ADDR),
+        &kernel_cmdline,
+    )
+    .map_err(BootParamsError::CmdlineWrite)?;
     hdr.cmd_line_ptr = layout::CMDLINE_ADDR as u32;
     hdr.cmdline_size = cmdline.len() as u32 + 1;
 
@@ -173,10 +184,14 @@ pub fn load_kernel_and_write_boot_params<M: GuestMemoryBackend>(
         hdr.initrd_addr_max = (ram_size as u64).min(u32::MAX as u64) as u32 - 1;
     }
 
-    let mut params = boot_params { hdr, ..zeroed_boot_params() };
+    let mut params = boot_params {
+        hdr,
+        ..zeroed_boot_params()
+    };
     write_e820_map(&mut params, ram_size);
 
-    let boot_params_wrapper = LoaderBootParams::new::<boot_params>(&params, GuestAddress(layout::ZERO_PAGE_ADDR));
+    let boot_params_wrapper =
+        LoaderBootParams::new::<boot_params>(&params, GuestAddress(layout::ZERO_PAGE_ADDR));
     LinuxBootConfigurator::write_bootparams::<M>(&boot_params_wrapper, guest_mem)
         .map_err(BootParamsError::ZeroPageWrite)?;
 
@@ -206,7 +221,11 @@ fn zeroed_boot_params() -> boot_params {
 /// §3.6).
 fn write_e820_map(params: &mut boot_params, ram_size: usize) {
     let entries = [
-        boot_e820_entry { addr: 0, size: layout::LOW_MEM_RAM_START, r#type: E820_RESERVED },
+        boot_e820_entry {
+            addr: 0,
+            size: layout::LOW_MEM_RAM_START,
+            r#type: E820_RESERVED,
+        },
         boot_e820_entry {
             addr: layout::LOW_MEM_RAM_START,
             size: layout::HIMEM_START - layout::LOW_MEM_RAM_START,
@@ -240,7 +259,10 @@ mod tests {
 
     #[test]
     fn e820_map_reserves_page_zero_and_marks_the_rest_usable() {
-        let mut params = boot_params { hdr: Default::default(), ..zeroed_boot_params() };
+        let mut params = boot_params {
+            hdr: Default::default(),
+            ..zeroed_boot_params()
+        };
         write_e820_map(&mut params, layout::GUEST_RAM_SIZE);
         assert_eq!(params.e820_entries, 3);
         // `boot_e820_entry` is `#[repr(C, packed)]`, so even a copied-out local of that struct
@@ -285,15 +307,33 @@ mod tests {
         guest_mem
             .read_slice(&mut header, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR))
             .expect("read back the setup_data header");
-        assert_eq!(&header[0..8], &0u64.to_le_bytes(), "next must terminate the list (0)");
-        assert_eq!(&header[8..12], &SETUP_RNG_SEED.to_le_bytes(), "type must be SETUP_RNG_SEED (9)");
-        assert_eq!(&header[12..16], &(RNG_SEED_LEN as u32).to_le_bytes(), "len must be RNG_SEED_LEN");
+        assert_eq!(
+            &header[0..8],
+            &0u64.to_le_bytes(),
+            "next must terminate the list (0)"
+        );
+        assert_eq!(
+            &header[8..12],
+            &SETUP_RNG_SEED.to_le_bytes(),
+            "type must be SETUP_RNG_SEED (9)"
+        );
+        assert_eq!(
+            &header[12..16],
+            &(RNG_SEED_LEN as u32).to_le_bytes(),
+            "len must be RNG_SEED_LEN"
+        );
 
         let mut data = [0u8; RNG_SEED_LEN];
         guest_mem
-            .read_slice(&mut data, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR + 16))
+            .read_slice(
+                &mut data,
+                GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR + 16),
+            )
             .expect("read back the seed bytes");
-        assert_eq!(data, seed, "the seed bytes themselves must follow the header untouched");
+        assert_eq!(
+            data, seed,
+            "the seed bytes themselves must follow the header untouched"
+        );
     }
 
     #[test]
@@ -322,13 +362,17 @@ mod tests {
         // `setup_header.setup_data` sits at a fixed byte offset inside `boot_params`; rather than
         // hardcode that offset, reconstruct it the same way the real reader (the guest kernel via
         // `RSI`) would: reinterpret the raw bytes as `boot_params` and read the field.
-        let reread: boot_params = unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
+        let reread: boot_params =
+            unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
         let setup_data = reread.hdr.setup_data;
         assert_eq!(setup_data, layout::RNG_SEED_SETUP_DATA_ADDR);
 
         let mut seed_back = [0u8; RNG_SEED_LEN];
         guest_mem
-            .read_slice(&mut seed_back, GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR + 16))
+            .read_slice(
+                &mut seed_back,
+                GuestAddress(layout::RNG_SEED_SETUP_DATA_ADDR + 16),
+            )
             .expect("read back the seed the boot flow wrote");
         assert_eq!(seed_back, seed);
     }
@@ -341,16 +385,35 @@ mod tests {
             "/tests/fixtures/hello-guest/bzImage"
         ));
         let seed = [0x11u8; RNG_SEED_LEN];
-        load_kernel_and_write_boot_params(&guest_mem, kernel_path, "console=ttyS0", layout::GUEST_RAM_SIZE, &seed, None)
-            .expect("hello-guest is a valid bzImage fixture already used elsewhere in this crate");
+        load_kernel_and_write_boot_params(
+            &guest_mem,
+            kernel_path,
+            "console=ttyS0",
+            layout::GUEST_RAM_SIZE,
+            &seed,
+            None,
+        )
+        .expect("hello-guest is a valid bzImage fixture already used elsewhere in this crate");
 
         let mut zero_page = vec![0u8; std::mem::size_of::<boot_params>()];
-        guest_mem.read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR)).expect("read back the zero page");
-        let reread: boot_params = unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
-        let (ramdisk_image, ramdisk_size, loadflags) =
-            (reread.hdr.ramdisk_image, reread.hdr.ramdisk_size, reread.hdr.loadflags);
-        assert_eq!(ramdisk_image, 0, "no initramfs was passed, so ramdisk_image must stay 0");
-        assert_eq!(ramdisk_size, 0, "no initramfs was passed, so ramdisk_size must stay 0");
+        guest_mem
+            .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
+            .expect("read back the zero page");
+        let reread: boot_params =
+            unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
+        let (ramdisk_image, ramdisk_size, loadflags) = (
+            reread.hdr.ramdisk_image,
+            reread.hdr.ramdisk_size,
+            reread.hdr.loadflags,
+        );
+        assert_eq!(
+            ramdisk_image, 0,
+            "no initramfs was passed, so ramdisk_image must stay 0"
+        );
+        assert_eq!(
+            ramdisk_size, 0,
+            "no initramfs was passed, so ramdisk_size must stay 0"
+        );
         assert_eq!(
             loadflags & (LOADFLAGS_LOADED_HIGH | LOADFLAGS_CAN_USE_HEAP),
             LOADFLAGS_LOADED_HIGH | LOADFLAGS_CAN_USE_HEAP,
@@ -379,13 +442,19 @@ mod tests {
         .expect("hello-guest is a valid bzImage fixture already used elsewhere in this crate");
 
         let mut zero_page = vec![0u8; std::mem::size_of::<boot_params>()];
-        guest_mem.read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR)).expect("read back the zero page");
-        let reread: boot_params = unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
+        guest_mem
+            .read_slice(&mut zero_page, GuestAddress(layout::ZERO_PAGE_ADDR))
+            .expect("read back the zero page");
+        let reread: boot_params =
+            unsafe { std::ptr::read_unaligned(zero_page.as_ptr() as *const boot_params) };
         // `boot_params` (and its nested `hdr: setup_header`) is `#[repr(C, packed)]`, so even a
         // nested field chain must be copied to a plain local before `assert_eq!` can take a
         // reference to it (E0793) — same pattern `write_e820_map`'s own test already uses.
-        let (ramdisk_image, ramdisk_size, initrd_addr_max) =
-            (reread.hdr.ramdisk_image, reread.hdr.ramdisk_size, reread.hdr.initrd_addr_max);
+        let (ramdisk_image, ramdisk_size, initrd_addr_max) = (
+            reread.hdr.ramdisk_image,
+            reread.hdr.ramdisk_size,
+            reread.hdr.initrd_addr_max,
+        );
         assert_eq!(ramdisk_image, layout::INITRAMFS_ADDR as u32);
         assert_eq!(ramdisk_size, initramfs.len() as u32);
         assert_eq!(
@@ -399,7 +468,10 @@ mod tests {
         guest_mem
             .read_slice(&mut initramfs_back, GuestAddress(layout::INITRAMFS_ADDR))
             .expect("read back the initramfs bytes the boot flow wrote");
-        assert_eq!(initramfs_back, initramfs, "the initramfs bytes must land verbatim, no re-framing");
+        assert_eq!(
+            initramfs_back, initramfs,
+            "the initramfs bytes must land verbatim, no re-framing"
+        );
     }
 
     #[test]
@@ -426,7 +498,10 @@ mod tests {
             "random.trust_bootloader=on",
             "rdinit=/init",
         ] {
-            assert!(tokens.contains(&required), "DETERMINISTIC_CMDLINE must include {required:?}");
+            assert!(
+                tokens.contains(&required),
+                "DETERMINISTIC_CMDLINE must include {required:?}"
+            );
         }
         assert!(
             DETERMINISTIC_CMDLINE.len() < layout::CMDLINE_MAX_SIZE,

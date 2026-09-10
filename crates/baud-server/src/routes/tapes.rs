@@ -14,15 +14,15 @@
 //   POST   /tapes/:id/exec     → exec command
 //   GET    /tapes/:id/endpoint → preview URL
 
+use crate::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
+use baud_tape::types::SandboxSpec;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
-use baud_tape::types::SandboxSpec;
 
 /// Convenience alias: routes return either a JSON success or a (status, JSON error).
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -32,7 +32,10 @@ fn not_found(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
 }
 
 fn server_error(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": msg.into() })))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": msg.into() })),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -51,7 +54,6 @@ pub struct CreateTapeBody {
 fn default_backend() -> String {
     "local".to_owned()
 }
-
 
 #[derive(Debug, Deserialize)]
 pub struct ExecBody {
@@ -72,7 +74,9 @@ pub async fn create(
     // backend's authoritative identity, not a server-side placeholder.
     let backend_name = body.backend.clone();
     if backend_name != "local" {
-        return Json(json!({ "error": format!("backend {backend_name:?} is unavailable; only the configured local backend is enabled") }));
+        return Json(
+            json!({ "error": format!("backend {backend_name:?} is unavailable; only the configured local backend is enabled") }),
+        );
     }
     let spec = SandboxSpec {
         image: body.image.clone(),
@@ -131,22 +135,27 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 
     match rows {
         Ok(rows) => {
-            let tapes: Vec<Value> = rows.into_iter().map(|(id, backend, state_val, vcpus, mem, disk, stop, arch, image, url, ca, ua)| {
-                json!({
-                    "id": id,
-                    "backend": backend,
-                    "state": state_val,
-                    "vcpus": vcpus,
-                    "memory_mib": mem,
-                    "disk_mib": disk,
-                    "auto_stop_secs": stop,
-                    "auto_archive_secs": arch,
-                    "image": image,
-                    "preview_url": url,
-                    "created_at": ca,
-                    "updated_at": ua,
-                })
-            }).collect();
+            let tapes: Vec<Value> = rows
+                .into_iter()
+                .map(
+                    |(id, backend, state_val, vcpus, mem, disk, stop, arch, image, url, ca, ua)| {
+                        json!({
+                            "id": id,
+                            "backend": backend,
+                            "state": state_val,
+                            "vcpus": vcpus,
+                            "memory_mib": mem,
+                            "disk_mib": disk,
+                            "auto_stop_secs": stop,
+                            "auto_archive_secs": arch,
+                            "image": image,
+                            "preview_url": url,
+                            "created_at": ca,
+                            "updated_at": ua,
+                        })
+                    },
+                )
+                .collect();
             Json(json!({ "tapes": tapes }))
         }
         Err(e) => Json(json!({ "error": format!("db error: {e}") })),
@@ -157,10 +166,7 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 // GET /tapes/:id — status
 // ---------------------------------------------------------------------------
 
-pub async fn status(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     get_tape(&state, &id).await
 }
 
@@ -202,11 +208,12 @@ async fn get_tape(state: &AppState, id: &str) -> ApiResult {
 // POST /tapes/:id/start — start / revive from stopped
 // ---------------------------------------------------------------------------
 
-pub async fn start(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    state.tape_backend.start(&id).await.map_err(|e| server_error(format!("backend start failed: {e}")))?;
+pub async fn start(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    state
+        .tape_backend
+        .start(&id)
+        .await
+        .map_err(|e| server_error(format!("backend start failed: {e}")))?;
     update_tape_state(&state, &id, "stopped", "running").await
 }
 
@@ -214,11 +221,12 @@ pub async fn start(
 // POST /tapes/:id/stop
 // ---------------------------------------------------------------------------
 
-pub async fn stop(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    state.tape_backend.stop(&id).await.map_err(|e| server_error(format!("backend stop failed: {e}")))?;
+pub async fn stop(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    state
+        .tape_backend
+        .stop(&id)
+        .await
+        .map_err(|e| server_error(format!("backend stop failed: {e}")))?;
     update_tape_state(&state, &id, "running", "stopped").await
 }
 
@@ -226,11 +234,12 @@ pub async fn stop(
 // POST /tapes/:id/restore — revive from archived
 // ---------------------------------------------------------------------------
 
-pub async fn restore(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
-    state.tape_backend.restore(&id).await.map_err(|e| server_error(format!("backend restore failed: {e}")))?;
+pub async fn restore(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    state
+        .tape_backend
+        .restore(&id)
+        .await
+        .map_err(|e| server_error(format!("backend restore failed: {e}")))?;
     update_tape_state(&state, &id, "archived", "running").await
 }
 
@@ -238,10 +247,7 @@ pub async fn restore(
 // POST /tapes/:id/ensure — ensure running (start if stopped, restore if archived)
 // ---------------------------------------------------------------------------
 
-pub async fn ensure(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn ensure(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     // Get current state
     let current = sqlx::query_as::<_, (String,)>("SELECT state FROM tapes WHERE id = ?")
         .bind(&id)
@@ -262,7 +268,10 @@ pub async fn ensure(
                 }
             };
             if new_state != tape_state.as_str() {
-                state.tape_backend.ensure(&id).await
+                state
+                    .tape_backend
+                    .ensure(&id)
+                    .await
                     .map_err(|e| server_error(format!("backend ensure failed: {e}")))?;
                 let now = crate::state::unix_now() as i64;
                 let _ = sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ?")
@@ -279,18 +288,17 @@ pub async fn ensure(
 
 async fn update_tape_state(state: &AppState, id: &str, from: &str, to: &str) -> ApiResult {
     let now = crate::state::unix_now() as i64;
-    let result = sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ? AND state = ?")
-        .bind(to)
-        .bind(now)
-        .bind(id)
-        .bind(from)
-        .execute(&state.db)
-        .await;
+    let result =
+        sqlx::query("UPDATE tapes SET state = ?, updated_at = ? WHERE id = ? AND state = ?")
+            .bind(to)
+            .bind(now)
+            .bind(id)
+            .bind(from)
+            .execute(&state.db)
+            .await;
 
     match result {
-        Ok(r) if r.rows_affected() == 0 => {
-            Err(not_found(format!("tape {id} not found")))
-        }
+        Ok(r) if r.rows_affected() == 0 => Err(not_found(format!("tape {id} not found"))),
         Ok(_) => get_tape(state, id).await,
         Err(e) => Err(server_error(format!("db error: {e}"))),
     }
@@ -300,10 +308,7 @@ async fn update_tape_state(state: &AppState, id: &str, from: &str, to: &str) -> 
 // DELETE /tapes/:id — kill (permanent delete)
 // ---------------------------------------------------------------------------
 
-pub async fn kill(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn kill(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let now = crate::state::unix_now() as i64;
     if let Err(e) = state.tape_backend.delete(&id).await {
         return Err(server_error(format!("backend delete failed: {e}")));
@@ -315,9 +320,7 @@ pub async fn kill(
         .await;
 
     match result {
-        Ok(r) if r.rows_affected() == 0 => {
-            Err(not_found(format!("tape {id} not found")))
-        }
+        Ok(r) if r.rows_affected() == 0 => Err(not_found(format!("tape {id} not found"))),
         Ok(_) => Ok(Json(json!({ "ok": true, "id": id, "state": "deleted" }))),
         Err(e) => Err(server_error(format!("db error: {e}"))),
     }
@@ -358,7 +361,10 @@ pub async fn exec(
         ));
     }
 
-    let output = state.tape_backend.exec(&id, &cmd).await
+    let output = state
+        .tape_backend
+        .exec(&id, &cmd)
+        .await
         .map_err(|e| server_error(format!("exec failed: {e}")))?;
     Ok(Json(json!({
         "exit_code": output.exit_code,
@@ -371,10 +377,7 @@ pub async fn exec(
 // POST /tapes/:id/reconstruct — reconstruct a deleted/archived tape
 // ---------------------------------------------------------------------------
 
-pub async fn reconstruct(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn reconstruct(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     // Look up the original tape record
     let row = sqlx::query_as::<_, (String, String)>("SELECT id, state FROM tapes WHERE id = ?")
         .bind(&id)
@@ -389,7 +392,10 @@ pub async fn reconstruct(
 
     // Create a real replacement sandbox before recording it. A database row alone is not a
     // reconstruction because later exec/endpoint requests need a live backend object.
-    let new_id = state.tape_backend.create(&SandboxSpec::default()).await
+    let new_id = state
+        .tape_backend
+        .create(&SandboxSpec::default())
+        .await
         .map_err(|e| server_error(format!("failed to create reconstruction sandbox: {e}")))?;
     let now = crate::state::unix_now() as i64;
     let insert = sqlx::query(
@@ -409,7 +415,9 @@ pub async fn reconstruct(
             "state": "running",
             "note": "reconstructed from journal prefix"
         }))),
-        Err(e) => Err(server_error(format!("failed to create reconstruction tape: {e}"))),
+        Err(e) => Err(server_error(format!(
+            "failed to create reconstruction tape: {e}"
+        ))),
     }
 }
 
@@ -417,10 +425,7 @@ pub async fn reconstruct(
 // GET /tapes/:id/endpoint — preview URL
 // ---------------------------------------------------------------------------
 
-pub async fn endpoint(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn endpoint(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let row = sqlx::query_as::<_, (Option<String>,)>("SELECT preview_url FROM tapes WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -428,7 +433,10 @@ pub async fn endpoint(
 
     match row {
         Ok(Some((_url,))) => {
-            let url = state.tape_backend.endpoint(&id).await
+            let url = state
+                .tape_backend
+                .endpoint(&id)
+                .await
                 .map_err(|e| server_error(format!("backend endpoint failed: {e}")))?;
             Ok(Json(json!({ "id": id, "url": url })))
         }

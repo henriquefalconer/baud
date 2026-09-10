@@ -50,7 +50,11 @@ pub struct RdseedSite {
 /// numbering `gpr_for_index` (`baud-vcpu`) already uses for `RDRAND`'s destination.
 fn gpr_index_from_modrm(bytes: &[u8]) -> u8 {
     let modrm = bytes[bytes.len() - 1];
-    let rex_b = if (0x40..=0x4F).contains(&bytes[0]) { bytes[0] & 0x1 } else { 0 };
+    let rex_b = if (0x40..=0x4F).contains(&bytes[0]) {
+        bytes[0] & 0x1
+    } else {
+        0
+    };
     (modrm & 0x7) | (rex_b << 3)
 }
 
@@ -321,8 +325,16 @@ mod tests {
         let elf = build_minimal_elf(&[(".text", EXEC, &code)]);
         let (patched, report) = rewrite_rdseed(&elf).expect("rewrite must succeed");
 
-        assert_eq!(patched.len(), elf.len(), "length-preserving: image size must not change");
-        assert_eq!(report.count(), 2, "exactly the two rdseed sites, not the rdrand ones");
+        assert_eq!(
+            patched.len(),
+            elf.len(),
+            "length-preserving: image size must not change"
+        );
+        assert_eq!(
+            report.count(),
+            2,
+            "exactly the two rdseed sites, not the rdrand ones"
+        );
 
         // Every reported site actually starts with UD2 (0F 0B) in the patched image, padded
         // with NOP out to the original instruction length.
@@ -341,13 +353,21 @@ mod tests {
         let rdseed_ranges: Vec<(usize, usize)> = report
             .sites
             .iter()
-            .map(|s| (s.file_offset as usize, s.file_offset as usize + s.length as usize))
+            .map(|s| {
+                (
+                    s.file_offset as usize,
+                    s.file_offset as usize + s.length as usize,
+                )
+            })
             .collect();
         for i in 0..elf.len() {
             if rdseed_ranges.iter().any(|&(a, b)| i >= a && i < b) {
                 continue;
             }
-            assert_eq!(patched[i], elf[i], "byte {i} outside any rdseed site must be untouched");
+            assert_eq!(
+                patched[i], elf[i],
+                "byte {i} outside any rdseed site must be untouched"
+            );
         }
     }
 
@@ -365,7 +385,10 @@ mod tests {
         assert_eq!(report.count(), 2);
 
         let residual = scan_rdseed_opcodes(&patched).unwrap();
-        assert!(residual.is_empty(), "no rdseed opcode may survive: {residual:?}");
+        assert!(
+            residual.is_empty(),
+            "no rdseed opcode may survive: {residual:?}"
+        );
     }
 
     /// A guest whose only `rdseed` bytes live in a non-executable section (data that merely
@@ -382,8 +405,15 @@ mod tests {
             (".data", SHF_ALLOC | SHF_WRITE, &data),
         ]);
         let (patched, report) = rewrite_rdseed(&elf).unwrap();
-        assert_eq!(report.count(), 0, "no SHF_EXECINSTR section contains rdseed");
-        assert_eq!(patched, elf, "non-executable section must be byte-for-byte untouched");
+        assert_eq!(
+            report.count(),
+            0,
+            "no SHF_EXECINSTR section contains rdseed"
+        );
+        assert_eq!(
+            patched, elf,
+            "non-executable section must be byte-for-byte untouched"
+        );
     }
 
     /// A guest image containing no `rdseed` at all round-trips through the pass as a no-op
@@ -417,7 +447,10 @@ mod tests {
         assert_eq!(sites[0].gpr_index, 0, "rdseed eax -> RAX");
         assert_eq!(sites[1].gpr_index, 1, "rdseed ecx -> RCX");
         assert_eq!(sites[2].gpr_index, 8, "rdseed r8d -> R8 (REX.B-extended)");
-        assert_eq!(sites[3].gpr_index, 0, "rdseed rax -> RAX (REX.W, rm unextended)");
+        assert_eq!(
+            sites[3].gpr_index, 0,
+            "rdseed rax -> RAX (REX.W, rm unextended)"
+        );
     }
 
     /// Multiple executable sections (e.g. a kernel image's `.text` plus a userspace binary's own

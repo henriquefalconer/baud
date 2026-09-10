@@ -30,12 +30,26 @@ impl<W: Write> Y4mWriter<W> {
     ///
     /// `fps_num / fps_den` is the frame rate (e.g. 60/1 or 30/1).
     /// For deterministic replay we default to 30/1.
-    pub fn new(mut sink: W, width: u32, height: u32, fps_num: u32, fps_den: u32) -> io::Result<Self> {
+    pub fn new(
+        mut sink: W,
+        width: u32,
+        height: u32,
+        fps_num: u32,
+        fps_den: u32,
+    ) -> io::Result<Self> {
         // Y4M requires even dimensions for 4:2:0
         let w = width & !1;
         let h = height & !1;
-        write!(sink, "YUV4MPEG2 W{w} H{h} F{fps_num}:{fps_den} Ip A0:0 C420mpeg2\n")?;
-        Ok(Y4mWriter { sink, width: w, height: h, frame_count: 0 })
+        write!(
+            sink,
+            "YUV4MPEG2 W{w} H{h} F{fps_num}:{fps_den} Ip A0:0 C420mpeg2\n"
+        )?;
+        Ok(Y4mWriter {
+            sink,
+            width: w,
+            height: h,
+            frame_count: 0,
+        })
     }
 
     /// Write a single frame from RGBA8888 pixel data.

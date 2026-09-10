@@ -1,11 +1,14 @@
 // Copyright (c) 2026 Henrique Falconer. All rights reserved.
 // SPDX-License-Identifier: Proprietary
 
-use axum::{extract::{Query, State}, Json};
+use crate::AppState;
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::AppState;
 
 /// GET /server/status — `baud server status`
 pub async fn status(State(s): State<AppState>) -> Json<Value> {
@@ -36,7 +39,10 @@ pub async fn logs(State(state): State<AppState>, Query(q): Query<LogsQuery>) -> 
         .filter(|e| e.seq > q.after)
         .map(|e| json!({ "seq": e.seq, "ts": e.ts, "level": e.level, "msg": e.msg }))
         .collect();
-    let last_seq = filtered.last().and_then(|e| e.get("seq").and_then(|v| v.as_u64())).unwrap_or(q.after);
+    let last_seq = filtered
+        .last()
+        .and_then(|e| e.get("seq").and_then(|v| v.as_u64()))
+        .unwrap_or(q.after);
     Json(json!({
         "logs": filtered,
         "last_seq": last_seq,
@@ -61,7 +67,12 @@ pub fn push_log(state: &AppState, level: &str, msg: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    buf.push(LogEntry { seq, ts, level: level.to_string(), msg: msg.to_string() });
+    buf.push(LogEntry {
+        seq,
+        ts,
+        level: level.to_string(),
+        msg: msg.to_string(),
+    });
     // Keep at most 4096 entries (ring buffer behaviour)
     let len = buf.len();
     if len > 4096 {

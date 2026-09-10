@@ -41,9 +41,10 @@ pub async fn lint(Json(body): Json<SpecBody>) -> Json<Value> {
 /// POST /spec/show — parse and return the full spec
 pub async fn show(Json(body): Json<SpecBody>) -> Json<Value> {
     match baud_init::lint(&body.content) {
-        Ok(doc) => Json(serde_json::to_value(&doc).unwrap_or_else(|e| {
-            json!({ "error": format!("serialization error: {e}") })
-        })),
+        Ok(doc) => Json(
+            serde_json::to_value(&doc)
+                .unwrap_or_else(|e| json!({ "error": format!("serialization error: {e}") })),
+        ),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }

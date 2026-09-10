@@ -99,7 +99,12 @@ struct PicChip {
 
 impl Default for PicChip {
     fn default() -> Self {
-        PicChip { imr: 0xff, init: InitState::Ready, expects_icw3: false, expects_icw4: false }
+        PicChip {
+            imr: 0xff,
+            init: InitState::Ready,
+            expects_icw3: false,
+            expects_icw4: false,
+        }
     }
 }
 
@@ -141,8 +146,11 @@ impl PicChip {
                 };
             }
             InitState::ExpectIcw3 => {
-                self.init =
-                    if self.expects_icw4 { InitState::ExpectIcw4 } else { InitState::Ready };
+                self.init = if self.expects_icw4 {
+                    InitState::ExpectIcw4
+                } else {
+                    InitState::Ready
+                };
             }
             InitState::ExpectIcw4 => {
                 self.init = InitState::Ready;
@@ -174,7 +182,10 @@ pub struct Pic8259 {
 
 impl Pic8259 {
     pub(crate) fn in_range(port: u16) -> bool {
-        matches!(port, PIC_MASTER_CMD | PIC_MASTER_DATA | PIC_SLAVE_CMD | PIC_SLAVE_DATA)
+        matches!(
+            port,
+            PIC_MASTER_CMD | PIC_MASTER_DATA | PIC_SLAVE_CMD | PIC_SLAVE_DATA
+        )
     }
 
     /// The master chip's current Interrupt Mask Register -- exposed for tests/callers that want
@@ -296,9 +307,10 @@ mod tests {
         // `enable_8259A_irq(5)`'s real effect: `cached_irq_mask &= ~(1 << 5); outb(cached_irq_mask,
         // port);` -- after full init (mask-all), unmask bit 5 and confirm only that bit clears.
         let mut bus = Pic8259::default();
-        for (cmd, data, icw2, icw3) in
-            [(PIC_MASTER_CMD, PIC_MASTER_DATA, 0x20u8, 0x04u8), (PIC_SLAVE_CMD, PIC_SLAVE_DATA, 0x28, 0x02)]
-        {
+        for (cmd, data, icw2, icw3) in [
+            (PIC_MASTER_CMD, PIC_MASTER_DATA, 0x20u8, 0x04u8),
+            (PIC_SLAVE_CMD, PIC_SLAVE_DATA, 0x28, 0x02),
+        ] {
             write_u8(&mut bus, cmd, 0x11);
             write_u8(&mut bus, data, icw2);
             write_u8(&mut bus, data, icw3);
@@ -341,8 +353,8 @@ mod tests {
         let mut bus = Pic8259::default();
         write_u8(&mut bus, PIC_MASTER_DATA, 0x12); // OCW1 while already "Ready" by default
         write_u8(&mut bus, PIC_MASTER_CMD, 0x11); // ICW1 again
-        // Now back in ExpectIcw2 -- an OCW1-shaped byte here must be consumed as ICW2, not
-        // misapplied as a mask write.
+                                                  // Now back in ExpectIcw2 -- an OCW1-shaped byte here must be consumed as ICW2, not
+                                                  // misapplied as a mask write.
         write_u8(&mut bus, PIC_MASTER_DATA, 0x20);
         write_u8(&mut bus, PIC_MASTER_DATA, 0x04);
         write_u8(&mut bus, PIC_MASTER_DATA, 0x01);

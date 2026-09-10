@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Henrique Falconer. All rights reserved.
 // SPDX-License-Identifier: Proprietary
 
+use crate::{client::Client, fmt};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use crate::{client::Client, fmt};
 
 /// PID file location for the baud-server process.
 fn pid_file() -> std::path::PathBuf {
@@ -83,7 +83,10 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
                         // Check if the process is still alive
                         if process_is_alive(pid) {
                             if json {
-                                println!("{}", serde_json::json!({ "status": "already_running", "pid": pid }));
+                                println!(
+                                    "{}",
+                                    serde_json::json!({ "status": "already_running", "pid": pid })
+                                );
                             } else {
                                 println!("baud-server is already running (pid {pid})");
                             }
@@ -116,9 +119,14 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
                     let pid = child.id();
                     std::fs::write(&pid_path, pid.to_string())?;
                     if json {
-                        println!("{}", serde_json::json!({ "status": "started", "pid": pid, "pid_file": pid_path.to_string_lossy() }));
+                        println!(
+                            "{}",
+                            serde_json::json!({ "status": "started", "pid": pid, "pid_file": pid_path.to_string_lossy() })
+                        );
                     } else {
-                        println!("baud-server started (pid {pid}), listening on http://127.0.0.1:7734");
+                        println!(
+                            "baud-server started (pid {pid}), listening on http://127.0.0.1:7734"
+                        );
                     }
                 }
                 Err(e) => {
@@ -139,7 +147,10 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
             }
 
             let s = std::fs::read_to_string(&pid_path)?;
-            let pid: u32 = s.trim().parse().map_err(|_| anyhow::anyhow!("invalid pid in {:?}", pid_path))?;
+            let pid: u32 = s
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid pid in {:?}", pid_path))?;
 
             // Terminate the process (SIGTERM on Unix, taskkill /F on Windows).
             if terminate_process(pid) {
@@ -153,7 +164,10 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
                 // Process not found — remove stale pid file
                 std::fs::remove_file(&pid_path).ok();
                 if json {
-                    println!("{}", serde_json::json!({ "status": "not_running", "note": "stale pid file removed" }));
+                    println!(
+                        "{}",
+                        serde_json::json!({ "status": "not_running", "note": "stale pid file removed" })
+                    );
                 } else {
                     println!("baud-server process {pid} not found (stale pid file removed)");
                 }
@@ -168,16 +182,16 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
         ServerAction::Logs { follow } => {
             // Fetch initial batch of logs
             let v = c.get("/server/logs").await?;
-            let mut last_seq: u64 = v
-                .get("last_seq")
-                .and_then(|s| s.as_u64())
-                .unwrap_or(0);
+            let mut last_seq: u64 = v.get("last_seq").and_then(|s| s.as_u64()).unwrap_or(0);
 
             // Print initial logs
             if let Some(logs) = v.get("logs").and_then(|l| l.as_array()) {
                 for entry in logs {
                     let ts = entry.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
-                    let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("INFO");
+                    let level = entry
+                        .get("level")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("INFO");
                     let msg = entry.get("msg").and_then(|m| m.as_str()).unwrap_or("");
                     if json {
                         println!("{entry}");
@@ -207,7 +221,10 @@ pub async fn run(cmd: ServerCmd, c: &Client, json: bool) -> Result<()> {
                 if let Some(logs) = v.get("logs").and_then(|l| l.as_array()) {
                     for entry in logs {
                         let ts = entry.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
-                        let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("INFO");
+                        let level = entry
+                            .get("level")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("INFO");
                         let msg = entry.get("msg").and_then(|m| m.as_str()).unwrap_or("");
                         if json {
                             println!("{entry}");

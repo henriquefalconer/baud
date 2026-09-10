@@ -3,11 +3,11 @@
 //
 // baud image — guest-image contract checks (todo.md §4, specs/baud-packages.md §9)
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct ImageCmd {
@@ -64,9 +64,8 @@ pub enum ImageAction {
 pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
     match cmd.action {
         ImageAction::Lint { path } => {
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                anyhow::anyhow!("failed to read kernel config '{}': {}", path, e)
-            })?;
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("failed to read kernel config '{}': {}", path, e))?;
             let body = json!({ "content": content });
             let v = c.post("/image/lint", &body).await?;
             let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -92,8 +91,9 @@ pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
                 .decode(patched_base64)
                 .map_err(|e| anyhow::anyhow!("server returned invalid base64: {e}"))?;
             let out_path = output.unwrap_or_else(|| path.clone());
-            std::fs::write(&out_path, &patched)
-                .map_err(|e| anyhow::anyhow!("failed to write patched image '{}': {}", out_path, e))?;
+            std::fs::write(&out_path, &patched).map_err(|e| {
+                anyhow::anyhow!("failed to write patched image '{}': {}", out_path, e)
+            })?;
 
             // Persist the rewrite-site table as a sidecar next to the patched image (todo.md §14's
             // "RdseedRewriteReport -> boot wiring" gap): `baud-server`'s boot routes look up
@@ -106,7 +106,11 @@ pub async fn run(cmd: ImageCmd, c: &Client, json: bool) -> Result<()> {
             let sidecar_path = format!("{out_path}.rdseed-sites.json");
             let sidecar = json!({ "sites": sites });
             std::fs::write(&sidecar_path, serde_json::to_vec_pretty(&sidecar)?).map_err(|e| {
-                anyhow::anyhow!("failed to write rdseed-sites sidecar '{}': {}", sidecar_path, e)
+                anyhow::anyhow!(
+                    "failed to write rdseed-sites sidecar '{}': {}",
+                    sidecar_path,
+                    e
+                )
             })?;
 
             // Echo the server's report (sites rewritten, count) rather than the (now redundant)
@@ -162,7 +166,9 @@ fn parse_initramfs_entry(raw: &str) -> Result<serde_json::Value> {
         ),
     };
     let mode = u32::from_str_radix(mode_str, 8).map_err(|e| {
-        anyhow::anyhow!("invalid mode '{mode_str}' in --initramfs-entry '{raw}' (expected octal): {e}")
+        anyhow::anyhow!(
+            "invalid mode '{mode_str}' in --initramfs-entry '{raw}' (expected octal): {e}"
+        )
     })?;
     Ok(json!({
         "archive_path": archive_path,

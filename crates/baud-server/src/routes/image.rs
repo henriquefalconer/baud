@@ -19,15 +19,18 @@
 //                                  over HTTP, unlike `/image/rewrite-rdseed`'s single small ELF.
 
 use axum::{http::StatusCode, Json};
-use std::path::PathBuf;
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": msg.into() })))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": msg.into() })),
+    )
 }
 
 #[derive(Debug, Deserialize)]

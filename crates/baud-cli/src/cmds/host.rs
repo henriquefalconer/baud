@@ -3,10 +3,10 @@
 //
 // baud host — capability probe (specs/baud-host.md, milestone H0)
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct HostCmd {
@@ -40,8 +40,14 @@ pub enum RequiredCapability {
 /// minimum. Never treats a weaker capability as satisfying a stronger request — the whole point
 /// of recording it is to refuse overclaiming it (todo.md test-matrix row 1).
 fn capability_satisfies(probe: &Value, required: RequiredCapability) -> bool {
-    let runnable = probe.get("runnable").and_then(Value::as_bool).unwrap_or(false);
-    let enforced_capable = probe.get("enforced_capable").and_then(Value::as_bool).unwrap_or(false);
+    let runnable = probe
+        .get("runnable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let enforced_capable = probe
+        .get("enforced_capable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     match required {
         RequiredCapability::Cooperative => runnable,
         RequiredCapability::Enforced => enforced_capable,
@@ -90,11 +96,29 @@ mod tests {
         let enforced = json!({"runnable": true, "enforced_capable": true});
         let rejected = json!({"runnable": false, "enforced_capable": false});
 
-        assert!(!capability_satisfies(&cooperative_only, RequiredCapability::Enforced));
-        assert!(capability_satisfies(&enforced, RequiredCapability::Cooperative));
-        assert!(capability_satisfies(&cooperative_only, RequiredCapability::Cooperative));
-        assert!(capability_satisfies(&enforced, RequiredCapability::Enforced));
-        assert!(!capability_satisfies(&rejected, RequiredCapability::Cooperative));
-        assert!(!capability_satisfies(&rejected, RequiredCapability::Enforced));
+        assert!(!capability_satisfies(
+            &cooperative_only,
+            RequiredCapability::Enforced
+        ));
+        assert!(capability_satisfies(
+            &enforced,
+            RequiredCapability::Cooperative
+        ));
+        assert!(capability_satisfies(
+            &cooperative_only,
+            RequiredCapability::Cooperative
+        ));
+        assert!(capability_satisfies(
+            &enforced,
+            RequiredCapability::Enforced
+        ));
+        assert!(!capability_satisfies(
+            &rejected,
+            RequiredCapability::Cooperative
+        ));
+        assert!(!capability_satisfies(
+            &rejected,
+            RequiredCapability::Enforced
+        ));
     }
 }

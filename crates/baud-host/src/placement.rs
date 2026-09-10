@@ -59,15 +59,16 @@ impl Placement {
 /// Refuses outright — never partially places, never splits a sibling pair — when `n` exceeds
 /// capacity.
 pub fn place(topology: &Topology, n: usize) -> Result<Placement, PlacementError> {
-    let capacity = topology.cores.len().saturating_sub(topology.housekeeping_reserved);
-    if n > capacity {
-        return Err(PlacementError { requested: n, capacity });
-    }
-    let assigned_cores = topology
+    let capacity = topology
         .cores
-        .iter()
-        .take(n)
-        .cloned()
-        .collect();
+        .len()
+        .saturating_sub(topology.housekeeping_reserved);
+    if n > capacity {
+        return Err(PlacementError {
+            requested: n,
+            capacity,
+        });
+    }
+    let assigned_cores = topology.cores.iter().take(n).cloned().collect();
     Ok(Placement { assigned_cores })
 }

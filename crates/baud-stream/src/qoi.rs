@@ -21,18 +21,28 @@ const QOI_HEADER_SIZE: usize = 14;
 const QOI_END_MARK: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 1];
 
 const QOI_OP_INDEX: u8 = 0x00;
-const QOI_OP_DIFF:  u8 = 0x40;
-const QOI_OP_LUMA:  u8 = 0x80;
-const QOI_OP_RUN:   u8 = 0xC0;
-const QOI_OP_RGB:   u8 = 0xFE;
-const QOI_OP_RGBA:  u8 = 0xFF;
+const QOI_OP_DIFF: u8 = 0x40;
+const QOI_OP_LUMA: u8 = 0x80;
+const QOI_OP_RUN: u8 = 0xC0;
+const QOI_OP_RGB: u8 = 0xFE;
+const QOI_OP_RGBA: u8 = 0xFF;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct Pixel { r: u8, g: u8, b: u8, a: u8 }
+struct Pixel {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+}
 
 impl Pixel {
     fn from_rgba(rgba: &[u8]) -> Self {
-        Pixel { r: rgba[0], g: rgba[1], b: rgba[2], a: rgba[3] }
+        Pixel {
+            r: rgba[0],
+            g: rgba[1],
+            b: rgba[2],
+            a: rgba[3],
+        }
     }
 
     fn hash_index(self) -> usize {
@@ -51,7 +61,10 @@ impl Pixel {
 pub fn encode_qoi(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let expected = (width as usize) * (height as usize) * 4;
     if pixels.len() != expected {
-        return Err(format!("QOI: expected {expected} bytes, got {}", pixels.len()));
+        return Err(format!(
+            "QOI: expected {expected} bytes, got {}",
+            pixels.len()
+        ));
     }
 
     let mut out = Vec::with_capacity(QOI_HEADER_SIZE + pixels.len() + QOI_END_MARK.len());
@@ -64,7 +77,12 @@ pub fn encode_qoi(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
     out.push(0); // colorspace: 0 = sRGB with linear alpha
 
     let mut seen = [Pixel::default(); 64];
-    let mut prev = Pixel { r: 0, g: 0, b: 0, a: 255 };
+    let mut prev = Pixel {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
     let mut run: u8 = 0;
 
     let total = (width as usize) * (height as usize);
@@ -101,14 +119,22 @@ pub fn encode_qoi(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
                     let db = (px.b as i16) - (prev.b as i16);
 
                     if dr >= -2 && dr <= 1 && dg >= -2 && dg <= 1 && db >= -2 && db <= 1 {
-                        out.push(QOI_OP_DIFF
-                            | (((dr + 2) as u8) << 4)
-                            | (((dg + 2) as u8) << 2)
-                            | ((db + 2) as u8));
+                        out.push(
+                            QOI_OP_DIFF
+                                | (((dr + 2) as u8) << 4)
+                                | (((dg + 2) as u8) << 2)
+                                | ((db + 2) as u8),
+                        );
                     } else {
                         let dr_dg = dr - dg;
                         let db_dg = db - dg;
-                        if dg >= -32 && dg <= 31 && dr_dg >= -8 && dr_dg <= 7 && db_dg >= -8 && db_dg <= 7 {
+                        if dg >= -32
+                            && dg <= 31
+                            && dr_dg >= -8
+                            && dr_dg <= 7
+                            && db_dg >= -8
+                            && db_dg <= 7
+                        {
                             out.push(QOI_OP_LUMA | ((dg + 32) as u8));
                             out.push(((dr_dg + 8) as u8) << 4 | ((db_dg + 8) as u8));
                         } else {

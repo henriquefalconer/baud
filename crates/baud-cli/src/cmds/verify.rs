@@ -3,10 +3,10 @@
 //
 // baud verify — determinism and observation verification commands (M3)
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct VerifyCmd {
@@ -78,7 +78,12 @@ pub enum VerifyAction {
 
 pub async fn run(cmd: VerifyCmd, c: &Client, json: bool) -> Result<()> {
     match cmd.action {
-        VerifyAction::Determinism { spec, seed, times, poisoned } => {
+        VerifyAction::Determinism {
+            spec,
+            seed,
+            times,
+            poisoned,
+        } => {
             // Read spec file
             let spec_content = std::fs::read_to_string(&spec)
                 .map_err(|e| anyhow::anyhow!("failed to read spec file {spec}: {e}"))?;

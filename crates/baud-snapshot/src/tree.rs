@@ -40,7 +40,10 @@ impl Tree {
     /// root, e.g. the very first boot); `tape_offset` is how many tape bytes had been consumed
     /// when the snapshot backing this node was taken.
     pub fn insert(&mut self, parent: Option<NodeId>, tape_offset: usize) -> NodeId {
-        self.nodes.push(Node { parent, tape_offset });
+        self.nodes.push(Node {
+            parent,
+            tape_offset,
+        });
         NodeId(self.nodes.len() - 1)
     }
 
@@ -69,7 +72,11 @@ impl Tree {
     /// `shrink_reproduces_from_nearest_snapshot`: "shrinking a finding forks from the nearest
     /// snapshot (not from boot)"). Returns `None` only if every ancestor's offset already exceeds
     /// `target_offset` (nothing in this lineage is early enough to fork from).
-    pub fn nearest_ancestor_at_or_before(&self, node: NodeId, target_offset: usize) -> Option<NodeId> {
+    pub fn nearest_ancestor_at_or_before(
+        &self,
+        node: NodeId,
+        target_offset: usize,
+    ) -> Option<NodeId> {
         self.path_to_root(node)
             .into_iter()
             .filter(|&n| self.tape_offset(n) <= target_offset)
@@ -103,10 +110,26 @@ mod tests {
         let b = tree.insert(Some(a), 300);
         let c = tree.insert(Some(b), 900);
 
-        assert_eq!(tree.nearest_ancestor_at_or_before(c, 500), Some(b), "must not overshoot 500 by picking c(900)");
-        assert_eq!(tree.nearest_ancestor_at_or_before(c, 900), Some(c), "an exact match is itself the nearest");
-        assert_eq!(tree.nearest_ancestor_at_or_before(c, 50), Some(root), "falls back to root if nothing else qualifies");
-        assert_eq!(tree.nearest_ancestor_at_or_before(c, 1_000_000), Some(c), "deepest node still wins when target is far beyond it");
+        assert_eq!(
+            tree.nearest_ancestor_at_or_before(c, 500),
+            Some(b),
+            "must not overshoot 500 by picking c(900)"
+        );
+        assert_eq!(
+            tree.nearest_ancestor_at_or_before(c, 900),
+            Some(c),
+            "an exact match is itself the nearest"
+        );
+        assert_eq!(
+            tree.nearest_ancestor_at_or_before(c, 50),
+            Some(root),
+            "falls back to root if nothing else qualifies"
+        );
+        assert_eq!(
+            tree.nearest_ancestor_at_or_before(c, 1_000_000),
+            Some(c),
+            "deepest node still wins when target is far beyond it"
+        );
     }
 
     #[test]

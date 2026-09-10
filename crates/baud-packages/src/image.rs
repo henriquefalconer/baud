@@ -95,10 +95,7 @@ impl GuestImageManifest {
     /// Kconfig's own convention (an absent symbol and an explicit `# ... is not set` mean the
     /// same thing: the feature is off).
     pub fn state_of(&self, symbol: &str) -> ConfigState {
-        self.configs
-            .get(symbol)
-            .copied()
-            .unwrap_or(ConfigState::No)
+        self.configs.get(symbol).copied().unwrap_or(ConfigState::No)
     }
 
     /// True if `symbol` is built in (`y`) or built as a module (`m`) -- either way, the code is
@@ -334,10 +331,7 @@ CONFIG_NR_CPUS=1
 "#;
         let manifest = GuestImageManifest::parse_kernel_config(text);
         assert_eq!(manifest.state_of("CONFIG_64BIT"), ConfigState::Yes);
-        assert_eq!(
-            manifest.state_of(TAPE_DEVICE_CONFIG),
-            ConfigState::Yes
-        );
+        assert_eq!(manifest.state_of(TAPE_DEVICE_CONFIG), ConfigState::Yes);
         assert_eq!(manifest.state_of("CONFIG_RTC_CLASS"), ConfigState::No);
         assert_eq!(manifest.state_of("CONFIG_HPET_MMAP"), ConfigState::Module);
         // String-valued symbol: not retained (not a boolean/tristate concern).

@@ -3,8 +3,8 @@
 //
 // Closed adapter set for baud-init.
 
-use serde::{Deserialize, Serialize};
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Input adapters
@@ -148,10 +148,7 @@ pub fn parse_probe_adapter(v: &serde_yaml::Value) -> Result<ProbeAdapter> {
                     .and_then(|p| p.as_str())
                     .ok_or_else(|| anyhow::anyhow!("vfs-file requires 'path'"))?
                     .to_string();
-                let mode_str = vfs
-                    .get("mode")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("utf8");
+                let mode_str = vfs.get("mode").and_then(|m| m.as_str()).unwrap_or("utf8");
                 let mode = match mode_str {
                     "hash" => VfsMode::Hash,
                     "u64" => VfsMode::U64,
@@ -164,7 +161,9 @@ pub fn parse_probe_adapter(v: &serde_yaml::Value) -> Result<ProbeAdapter> {
                     .get("pattern")
                     .or_else(|| sc.get("sysno"))
                     .and_then(|p| p.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("syscall-counter requires 'pattern' or 'sysno'"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("syscall-counter requires 'pattern' or 'sysno'")
+                    })?
                     .to_string();
                 Ok(ProbeAdapter::SyscallCounter { pattern })
             } else if let Some(ebpf) = m.get("ebpf-counter") {
@@ -207,9 +206,9 @@ pub fn parse_display_adapter(v: &serde_yaml::Value) -> Result<DisplayAdapter> {
                     "rgba8888" => FrameFormat::Rgba8888,
                     "rgb565" => FrameFormat::Rgb565,
                     "indexed8" => FrameFormat::Indexed8,
-                    other => bail!(
-                        "unknown frame format '{other}'; valid: rgba8888, rgb565, indexed8"
-                    ),
+                    other => {
+                        bail!("unknown frame format '{other}'; valid: rgba8888, rgb565, indexed8")
+                    }
                 };
                 let transport_str = frame
                     .get("transport")
@@ -218,9 +217,7 @@ pub fn parse_display_adapter(v: &serde_yaml::Value) -> Result<DisplayAdapter> {
                 let transport = match transport_str {
                     "fifo" => FrameTransport::Fifo,
                     "vfs" => FrameTransport::Vfs,
-                    other => bail!(
-                        "unknown frame transport '{other}'; valid: fifo, vfs"
-                    ),
+                    other => bail!("unknown frame transport '{other}'; valid: fifo, vfs"),
                 };
                 Ok(DisplayAdapter::Frame(FrameAdapter {
                     width,
@@ -245,7 +242,9 @@ pub fn parse_adapters(v: &serde_yaml::Value) -> Result<Adapter> {
     let mut adapter = Adapter::default();
 
     for (k, val) in m {
-        let key = k.as_str().ok_or_else(|| anyhow::anyhow!("adapter key must be a string"))?;
+        let key = k
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("adapter key must be a string"))?;
         match key {
             "input" => {
                 adapter.input = Some(parse_input_adapter(val)?);
@@ -261,9 +260,7 @@ pub fn parse_adapters(v: &serde_yaml::Value) -> Result<Adapter> {
             "display" => {
                 adapter.display = Some(parse_display_adapter(val)?);
             }
-            other => bail!(
-                "unknown adapter key '{other}'; valid: input, probes, display"
-            ),
+            other => bail!("unknown adapter key '{other}'; valid: input, probes, display"),
         }
     }
 

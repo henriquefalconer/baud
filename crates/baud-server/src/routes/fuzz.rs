@@ -14,15 +14,18 @@
 // `generate` mode persists `Driver` state (best/reservoir/generation) across calls via
 // `baud-snapshot-store`'s `put_driver_state`/`get_driver_state`.
 
-use axum::{extract::{Path, State}, Json};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 use crate::AppState;
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use baud_driver::{Driver, StrategySpec};
 use baud_proto;
 use rand::RngCore;
-use rand_chacha::ChaCha20Rng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 // Workload dispatch: detect spec type and route to the correct simulation engine.
 //
@@ -102,49 +105,89 @@ pub struct ParseResult {
 /// needs to be adjusted by 1 bit flip) and then climbs to the crash.
 pub fn simulate_parser(bytes: &[u8]) -> ParseResult {
     if bytes.is_empty() {
-        return ParseResult { depth: 0.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 0.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     // Layer 1: first byte is ASCII printable (0x20-0x7e)
     if bytes[0] < 0x20 || bytes[0] > 0x7e {
-        return ParseResult { depth: 0.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 0.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     if bytes.len() < 2 {
-        return ParseResult { depth: 1.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 1.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     // Layer 2: second byte is ASCII printable (0x20-0x7e)
     if bytes[1] < 0x20 || bytes[1] > 0x7e {
-        return ParseResult { depth: 1.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 1.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     // Layer 3: bytes[0] XOR bytes[1] == 0x01 (differ by exactly one bit)
     // This is the "magic token" check — hard to hit by random, easy with bit-flip mutation.
     if bytes[0] ^ bytes[1] != 0x01 {
-        return ParseResult { depth: 2.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 2.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     if bytes.len() < 3 {
-        return ParseResult { depth: 3.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 3.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     // Layer 4: third byte has high nibble == 0x6 (i.e. 0x60-0x6f, lowercase letters)
     if bytes[2] >> 4 != 0x6 {
-        return ParseResult { depth: 3.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 3.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     if bytes.len() < 4 {
-        return ParseResult { depth: 4.0, crashed: false, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 4.0,
+            crashed: false,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
     // CRASH: fourth byte has bit 7 set (>= 0x80)
     // Once we've reached depth 4, the stateful-mask biases toward values near 0x80.
     if bytes[3] >= 0x80 {
-        return ParseResult { depth: 5.0, crashed: true, input_bytes: bytes.to_vec() };
+        return ParseResult {
+            depth: 5.0,
+            crashed: true,
+            input_bytes: bytes.to_vec(),
+        };
     }
 
-    ParseResult { depth: 4.0, crashed: false, input_bytes: bytes.to_vec() }
+    ParseResult {
+        depth: 4.0,
+        crashed: false,
+        input_bytes: bytes.to_vec(),
+    }
 }
 
 /// Generate input bytes using the specified tactics.
@@ -174,7 +217,11 @@ pub fn draw_parser_input(
             // Stateful mask: start from best_input, mutate each byte independently.
             // p_flip per byte ≈ 0.20 (20% chance of replacement with a fresh random byte).
             for i in 0..N {
-                let base = if i < best_input.len() { best_input[i] } else { 0u8 };
+                let base = if i < best_input.len() {
+                    best_input[i]
+                } else {
+                    0u8
+                };
                 let r = (rng.next_u32() & 0xFF) as u8;
                 let new_byte = if r < 51 {
                     // ~20%: random replacement
@@ -224,9 +271,15 @@ pub struct FuzzStartBody {
     pub planted_bug: bool,
 }
 
-fn default_tactics() -> String { "random".to_owned() }
-fn default_iterations() -> u32 { 200 }
-fn default_true() -> bool { true }
+fn default_tactics() -> String {
+    "random".to_owned()
+}
+fn default_iterations() -> u32 {
+    200
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize)]
 #[allow(dead_code)]
@@ -247,10 +300,7 @@ pub struct FuzzResult {
 // POST /runs/fuzz — start a fuzz session and run it to completion (or max_iter)
 // ---------------------------------------------------------------------------
 
-pub async fn start(
-    State(state): State<AppState>,
-    Json(body): Json<FuzzStartBody>,
-) -> Json<Value> {
+pub async fn start(State(state): State<AppState>, Json(body): Json<FuzzStartBody>) -> Json<Value> {
     // Lint the spec
     let spec_result = baud_init::lint(&body.spec);
     if let Err(e) = spec_result {
@@ -300,7 +350,15 @@ pub async fn start(
     let planted_bug = body.planted_bug;
 
     let result = tokio::task::spawn_blocking(move || {
-        run_fuzz_loop(seed, strategy, &tactics_for_closure, max_iterations, stop_on_crash, &spec, planted_bug)
+        run_fuzz_loop(
+            seed,
+            strategy,
+            &tactics_for_closure,
+            max_iterations,
+            stop_on_crash,
+            &spec,
+            planted_bug,
+        )
     })
     .await;
 
@@ -334,7 +392,11 @@ pub async fn start(
 
         if *crashed {
             // For consensus-cluster workloads: emit violation_found=1.0 (VR2-M19)
-            let violation_probe = if is_consensus { "violation_found" } else { "crashed" };
+            let violation_probe = if is_consensus {
+                "violation_found"
+            } else {
+                "crashed"
+            };
             let crash_bytes = serde_json::to_vec(&json!(1.0)).unwrap_or_default();
             let _ = sqlx::query(
                 "INSERT INTO observations (run_id, step, node, probe, value, recorded_at) VALUES (?, ?, 0, ?, ?, ?)"
@@ -350,7 +412,11 @@ pub async fn start(
     }
 
     // Update run status
-    let final_status = if fuzz_result.goal_reached { "done" } else { "done" };
+    let final_status = if fuzz_result.goal_reached {
+        "done"
+    } else {
+        "done"
+    };
     let _ = sqlx::query("UPDATE runs SET status = ?, updated_at = ? WHERE id = ?")
         .bind(final_status)
         .bind(crate::state::unix_now() as i64)
@@ -360,13 +426,18 @@ pub async fn start(
 
     // Build observations summary for response
     let depth_probe_name = fuzz_result.depth_probe.clone();
-    let obs_summary: Vec<Value> = fuzz_result.per_gen_scores.iter().enumerate()
-        .map(|(i, (depth, crashed))| json!({
-            "step": i,
-            "probe": &depth_probe_name,
-            "value": depth,
-            "crashed": crashed,
-        }))
+    let obs_summary: Vec<Value> = fuzz_result
+        .per_gen_scores
+        .iter()
+        .enumerate()
+        .map(|(i, (depth, crashed))| {
+            json!({
+                "step": i,
+                "probe": &depth_probe_name,
+                "value": depth,
+                "crashed": crashed,
+            })
+        })
         .collect();
 
     // Detect plateau: last 20 generations all same depth
@@ -508,7 +579,11 @@ fn run_consensus_fuzz_loop(
 
         // Simulate the consensus cluster on this tape (VR2-B6 core fix).
         // For gen-0 with planted bug, use budget_steps (200) to match the pre-search.
-        let sim_steps = if gen == 0 && found_violation_tape.is_some() { budget_steps } else { 300 };
+        let sim_steps = if gen == 0 && found_violation_tape.is_some() {
+            budget_steps
+        } else {
+            300
+        };
         let (probes, violation) = baud_raftlet::simulate(&tape, sim_steps, planted_bug);
 
         // Primary depth metric: op_depth (operations committed)
@@ -591,7 +666,14 @@ fn run_fuzz_loop(
     // VR2-B6: Dispatch to the correct simulation engine based on workload type.
     let kind = detect_workload_kind(spec);
     if kind == WorkloadKind::Consensus {
-        return run_consensus_fuzz_loop(seed, strategy, tactics, max_iterations, stop_on_crash, planted_bug);
+        return run_consensus_fuzz_loop(
+            seed,
+            strategy,
+            tactics,
+            max_iterations,
+            stop_on_crash,
+            planted_bug,
+        );
     }
 
     let mut driver = Driver::new(seed, strategy, baud_driver::TacticsSpec::default());
@@ -632,9 +714,7 @@ fn run_fuzz_loop(
         per_gen_scores.push((depth, crashed));
 
         // Report observations to driver
-        let mut obs = vec![
-            ("depth".to_string(), depth),
-        ];
+        let mut obs = vec![("depth".to_string(), depth)];
         if crashed {
             obs.push(("crashed".to_string(), 1.0));
         }
@@ -676,9 +756,14 @@ fn run_fuzz_loop(
 fn build_strategy(strategy_json: Option<&str>) -> StrategySpec {
     if let Some(s) = strategy_json {
         if let Ok(v) = serde_json::from_str::<Value>(s) {
-            let maximize = v.get("maximize")
+            let maximize = v
+                .get("maximize")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_else(|| vec!["depth".to_string()]);
             let goal = v.get("goal_probe").and_then(|gp| gp.as_str()).map(|probe| {
                 let goal_val = v.get("goal_value").and_then(|gv| gv.as_u64()).unwrap_or(1);
@@ -690,7 +775,10 @@ fn build_strategy(strategy_json: Option<&str>) -> StrategySpec {
             return StrategySpec {
                 maximize,
                 buckets: Vec::new(),
-                reservoir: Some(baud_proto::Reservoir { keep: 32, p_backoff: 0.1 }),
+                reservoir: Some(baud_proto::Reservoir {
+                    keep: 32,
+                    p_backoff: 0.1,
+                }),
                 goal,
             };
         }
@@ -699,7 +787,10 @@ fn build_strategy(strategy_json: Option<&str>) -> StrategySpec {
     StrategySpec {
         maximize: vec!["depth".to_string()],
         buckets: Vec::new(),
-        reservoir: Some(baud_proto::Reservoir { keep: 32, p_backoff: 0.1 }),
+        reservoir: Some(baud_proto::Reservoir {
+            keep: 32,
+            p_backoff: 0.1,
+        }),
         goal: Some(baud_proto::Predicate {
             probe: "crashed".to_string(),
             value: baud_proto::Value::U64(1),
@@ -715,14 +806,29 @@ fn detect_plateau(scores: &[(f64, bool)]) -> bool {
     // Compute best depth in the first third vs last third.
     let n = scores.len();
     let first_third = n / 3;
-    let best_early: f64 = scores[..first_third].iter().map(|(d, _)| *d).fold(0.0f64, f64::max);
-    let best_late: f64 = scores[n - first_third..].iter().map(|(d, _)| *d).fold(0.0f64, f64::max);
+    let best_early: f64 = scores[..first_third]
+        .iter()
+        .map(|(d, _)| *d)
+        .fold(0.0f64, f64::max);
+    let best_late: f64 = scores[n - first_third..]
+        .iter()
+        .map(|(d, _)| *d)
+        .fold(0.0f64, f64::max);
     // Plateau if late best <= early best (no improvement since early phase)
     best_late <= best_early + 0.01
 }
 
 fn make_id(prefix: &str) -> String {
-    format!("{}-{}", prefix, uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>())
+    format!(
+        "{}-{}",
+        prefix,
+        uuid::Uuid::new_v4()
+            .to_string()
+            .replace('-', "")
+            .chars()
+            .take(12)
+            .collect::<String>()
+    )
 }
 
 fn blake3_hex(data: &[u8]) -> String {
@@ -734,13 +840,10 @@ fn blake3_hex(data: &[u8]) -> String {
 // GET /runs/fuzz/:id — get fuzz session status
 // ---------------------------------------------------------------------------
 
-pub async fn get_session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<Value> {
+pub async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
     // For now, proxy to the run status
     let row = sqlx::query_as::<_, (String, String, String, i64, i64)>(
-        "SELECT id, status, tactics, seed, created_at FROM runs WHERE id = ?"
+        "SELECT id, status, tactics, seed, created_at FROM runs WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -768,7 +871,10 @@ mod consensus_tape_tests {
         StrategySpec {
             maximize: vec!["op_depth".to_string()],
             buckets: Vec::new(),
-            reservoir: Some(baud_proto::Reservoir { keep: 32, p_backoff: 0.1 }),
+            reservoir: Some(baud_proto::Reservoir {
+                keep: 32,
+                p_backoff: 0.1,
+            }),
             goal: None,
         }
     }
@@ -827,6 +933,9 @@ mod consensus_tape_tests {
         let tape_gen1 = draw_consensus_tape(&mut driver, 32, &mut rng);
         driver.end_run(&[("op_depth".to_string(), 0.0)]);
 
-        assert_ne!(tape_gen0, tape_gen1, "successive draws from the same rng must differ");
+        assert_ne!(
+            tape_gen0, tape_gen1,
+            "successive draws from the same rng must differ"
+        );
     }
 }

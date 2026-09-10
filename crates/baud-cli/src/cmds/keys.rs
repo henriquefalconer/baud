@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Henrique Falconer. All rights reserved.
 // SPDX-License-Identifier: Proprietary
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 /// Secrets management
 #[derive(Parser)]
@@ -44,12 +44,21 @@ pub enum KeysAction {
 
 pub async fn run(cmd: KeysCmd, c: &Client, json: bool) -> Result<()> {
     match cmd.action {
-        KeysAction::Init { age_recipient, template, output } => {
-            let v = c.post("/keys/init", &json!({
-                "age_recipient": age_recipient,
-                "template_path": template,
-                "out_path": output,
-            })).await?;
+        KeysAction::Init {
+            age_recipient,
+            template,
+            output,
+        } => {
+            let v = c
+                .post(
+                    "/keys/init",
+                    &json!({
+                        "age_recipient": age_recipient,
+                        "template_path": template,
+                        "out_path": output,
+                    }),
+                )
+                .await?;
             fmt::print(&v, json);
         }
         KeysAction::Edit => {
@@ -73,7 +82,9 @@ pub async fn run(cmd: KeysCmd, c: &Client, json: bool) -> Result<()> {
             fmt::print(&v, json);
         }
         KeysAction::Rotate { new_recipient } => {
-            let v = c.post("/keys/rotate", &json!({ "new_recipient": new_recipient })).await?;
+            let v = c
+                .post("/keys/rotate", &json!({ "new_recipient": new_recipient }))
+                .await?;
             fmt::print(&v, json);
         }
     }

@@ -89,7 +89,11 @@ impl SplitVirtqueue {
     /// starts empty. Construct a new one after every device reset (`VirtioMmioTransport`'s own
     /// `reset()` already zeroes the negotiated queue state that produces a fresh `config`).
     pub fn new(config: QueueRingConfig) -> Self {
-        SplitVirtqueue { config, next_avail_idx: 0, next_used_idx: 0 }
+        SplitVirtqueue {
+            config,
+            next_avail_idx: 0,
+            next_used_idx: 0,
+        }
     }
 
     /// The ring config this instance was constructed with — lets a caller that caches a
@@ -102,12 +106,19 @@ impl SplitVirtqueue {
 
     fn read_u16<M: GuestMemoryBackend>(&self, mem: &M, addr: u64) -> Result<u16, VirtqueueError> {
         let mut buf = [0u8; 2];
-        mem.read_slice(&mut buf, GuestAddress(addr)).map_err(VirtqueueError::GuestMemory)?;
+        mem.read_slice(&mut buf, GuestAddress(addr))
+            .map_err(VirtqueueError::GuestMemory)?;
         Ok(u16::from_le_bytes(buf))
     }
 
-    fn write_u16<M: GuestMemoryBackend>(&self, mem: &M, addr: u64, value: u16) -> Result<(), VirtqueueError> {
-        mem.write_slice(&value.to_le_bytes(), GuestAddress(addr)).map_err(VirtqueueError::GuestMemory)
+    fn write_u16<M: GuestMemoryBackend>(
+        &self,
+        mem: &M,
+        addr: u64,
+        value: u16,
+    ) -> Result<(), VirtqueueError> {
+        mem.write_slice(&value.to_le_bytes(), GuestAddress(addr))
+            .map_err(VirtqueueError::GuestMemory)
     }
 
     /// Read descriptor-table slot `index`, returning the decoded [`Descriptor`] plus `Some(next)`
@@ -122,7 +133,8 @@ impl SplitVirtqueue {
         }
         let addr = self.config.desc + u64::from(index) * DESC_SIZE;
         let mut raw = [0u8; DESC_SIZE as usize];
-        mem.read_slice(&mut raw, GuestAddress(addr)).map_err(VirtqueueError::GuestMemory)?;
+        mem.read_slice(&mut raw, GuestAddress(addr))
+            .map_err(VirtqueueError::GuestMemory)?;
         let buf_addr = u64::from_le_bytes(raw[0..8].try_into().unwrap());
         let len = u32::from_le_bytes(raw[8..12].try_into().unwrap());
         let flags = u16::from_le_bytes(raw[12..14].try_into().unwrap());
@@ -130,7 +142,11 @@ impl SplitVirtqueue {
         if flags & VIRTQ_DESC_F_INDIRECT != 0 {
             return Err(VirtqueueError::IndirectUnsupported);
         }
-        let descriptor = Descriptor { addr: buf_addr, len, write: flags & VIRTQ_DESC_F_WRITE != 0 };
+        let descriptor = Descriptor {
+            addr: buf_addr,
+            len,
+            write: flags & VIRTQ_DESC_F_WRITE != 0,
+        };
         let next_index = (flags & VIRTQ_DESC_F_NEXT != 0).then_some(next);
         Ok((descriptor, next_index))
     }
@@ -139,7 +155,11 @@ impl SplitVirtqueue {
     /// links. Bounded to at most `config.num` hops — the queue's own negotiated size is the spec's
     /// own bound on a legitimate chain's length, so a chain that hasn't terminated within that many
     /// hops is corrupt or malicious and must never be trusted further (never looped on indefinitely).
-    fn read_chain<M: GuestMemoryBackend>(&self, mem: &M, head: u16) -> Result<Vec<Descriptor>, VirtqueueError> {
+    fn read_chain<M: GuestMemoryBackend>(
+        &self,
+        mem: &M,
+        head: u16,
+    ) -> Result<Vec<Descriptor>, VirtqueueError> {
         let mut descriptors = Vec::new();
         let mut index = head;
         for _ in 0..=self.config.num {
@@ -175,7 +195,8 @@ impl SplitVirtqueue {
                 }
                 let mut buf = vec![0u8; descriptor.len as usize];
                 fill(&mut buf);
-                mem.write_slice(&buf, GuestAddress(descriptor.addr)).map_err(VirtqueueError::GuestMemory)?;
+                mem.write_slice(&buf, GuestAddress(descriptor.addr))
+                    .map_err(VirtqueueError::GuestMemory)?;
                 total_written += descriptor.len;
             }
             Ok(total_written)
@@ -211,13 +232,21 @@ impl SplitVirtqueue {
             let total_written = handle(mem, &chain)?;
 
             let used_slot = u32::from(self.next_used_idx) % self.config.num;
-            let used_elem_addr = self.config.device + USED_HEADER_LEN + u64::from(used_slot) * USED_ELEM_SIZE;
+            let used_elem_addr =
+                self.config.device + USED_HEADER_LEN + u64::from(used_slot) * USED_ELEM_SIZE;
             mem.write_slice(&u32::from(head).to_le_bytes(), GuestAddress(used_elem_addr))
                 .map_err(VirtqueueError::GuestMemory)?;
-            mem.write_slice(&total_written.to_le_bytes(), GuestAddress(used_elem_addr + 4))
-                .map_err(VirtqueueError::GuestMemory)?;
+            mem.write_slice(
+                &total_written.to_le_bytes(),
+                GuestAddress(used_elem_addr + 4),
+            )
+            .map_err(VirtqueueError::GuestMemory)?;
             self.next_used_idx = self.next_used_idx.wrapping_add(1);
-            self.write_u16(mem, self.config.device + USED_IDX_OFFSET, self.next_used_idx)?;
+            self.write_u16(
+                mem,
+                self.config.device + USED_IDX_OFFSET,
+                self.next_used_idx,
+            )?;
 
             self.next_avail_idx = self.next_avail_idx.wrapping_add(1);
             processed += 1;
@@ -245,7 +274,12 @@ mod tests {
     }
 
     fn config(num: u32) -> QueueRingConfig {
-        QueueRingConfig { num, desc: DESC_BASE, driver: AVAIL_BASE, device: USED_BASE }
+        QueueRingConfig {
+            num,
+            desc: DESC_BASE,
+            driver: AVAIL_BASE,
+            device: USED_BASE,
+        }
     }
 
     fn write_descriptor(mem: &GuestMemory, index: u16, addr: u64, len: u32, flags: u16, next: u16) {
@@ -259,7 +293,11 @@ mod tests {
     }
 
     fn set_avail(mem: &GuestMemory, idx: u16, ring: &[u16]) {
-        mem.write_slice(&idx.to_le_bytes(), GuestAddress(AVAIL_BASE + AVAIL_IDX_OFFSET)).unwrap();
+        mem.write_slice(
+            &idx.to_le_bytes(),
+            GuestAddress(AVAIL_BASE + AVAIL_IDX_OFFSET),
+        )
+        .unwrap();
         for (slot, &head) in ring.iter().enumerate() {
             mem.write_slice(
                 &head.to_le_bytes(),
@@ -271,7 +309,8 @@ mod tests {
 
     fn used_idx(mem: &GuestMemory) -> u16 {
         let mut buf = [0u8; 2];
-        mem.read_slice(&mut buf, GuestAddress(USED_BASE + USED_IDX_OFFSET)).unwrap();
+        mem.read_slice(&mut buf, GuestAddress(USED_BASE + USED_IDX_OFFSET))
+            .unwrap();
         u16::from_le_bytes(buf)
     }
 
@@ -297,7 +336,12 @@ mod tests {
     fn a_zero_size_queue_processes_nothing_without_reading_memory() {
         // desc/driver/device left at 0 (never a valid guest address in this crate's layout, see
         // layout::GUEST_RAM_START) — proves process_available never dereferences them when num==0.
-        let mut vq = SplitVirtqueue::new(QueueRingConfig { num: 0, desc: 0, driver: 0, device: 0 });
+        let mut vq = SplitVirtqueue::new(QueueRingConfig {
+            num: 0,
+            desc: 0,
+            driver: 0,
+            device: 0,
+        });
         let mem = test_guest_mem();
         assert_eq!(vq.process_available(&mem, |_| {}).unwrap(), 0);
     }
@@ -313,7 +357,8 @@ mod tests {
 
         assert_eq!(processed, 1);
         let mut written = [0u8; 32];
-        mem.read_slice(&mut written, GuestAddress(BUF_BASE)).unwrap();
+        mem.read_slice(&mut written, GuestAddress(BUF_BASE))
+            .unwrap();
         assert_eq!(written, [0xAB; 32]);
         assert_eq!(used_idx(&mem), 1);
         assert_eq!(used_elem(&mem, 0), (0, 32));
@@ -325,7 +370,8 @@ mod tests {
         // No VIRTQ_DESC_F_WRITE: a device must treat this buffer as input-only.
         write_descriptor(&mem, 0, BUF_BASE, 16, 0, 0);
         // Poison the buffer first so a wrongful write would be observable.
-        mem.write_slice(&[0x55u8; 16], GuestAddress(BUF_BASE)).unwrap();
+        mem.write_slice(&[0x55u8; 16], GuestAddress(BUF_BASE))
+            .unwrap();
         set_avail(&mem, 1, &[0]);
 
         let mut fill_calls = 0;
@@ -337,19 +383,37 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(processed, 1, "the chain is still consumed and used-ring published");
-        assert_eq!(fill_calls, 0, "fill is never called for a read-only descriptor");
+        assert_eq!(
+            processed, 1,
+            "the chain is still consumed and used-ring published"
+        );
+        assert_eq!(
+            fill_calls, 0,
+            "fill is never called for a read-only descriptor"
+        );
         let mut untouched = [0u8; 16];
-        mem.read_slice(&mut untouched, GuestAddress(BUF_BASE)).unwrap();
+        mem.read_slice(&mut untouched, GuestAddress(BUF_BASE))
+            .unwrap();
         assert_eq!(untouched, [0x55; 16]);
-        assert_eq!(used_elem(&mem, 0), (0, 0), "zero bytes written for an all-read-only chain");
+        assert_eq!(
+            used_elem(&mem, 0),
+            (0, 0),
+            "zero bytes written for an all-read-only chain"
+        );
     }
 
     #[test]
     fn chained_descriptors_are_walked_via_the_next_flag_and_summed() {
         let mem = test_guest_mem();
         // desc[0] --NEXT--> desc[1] (terminal), both writable.
-        write_descriptor(&mem, 0, BUF_BASE, 8, VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, 1);
+        write_descriptor(
+            &mem,
+            0,
+            BUF_BASE,
+            8,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+            1,
+        );
         write_descriptor(&mem, 1, BUF_BASE + 0x100, 24, VIRTQ_DESC_F_WRITE, 0);
         set_avail(&mem, 1, &[0]);
 
@@ -368,17 +432,32 @@ mod tests {
         let mut first = [0u8; 8];
         let mut second = [0u8; 24];
         mem.read_slice(&mut first, GuestAddress(BUF_BASE)).unwrap();
-        mem.read_slice(&mut second, GuestAddress(BUF_BASE + 0x100)).unwrap();
+        mem.read_slice(&mut second, GuestAddress(BUF_BASE + 0x100))
+            .unwrap();
         assert_eq!(first, [0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(second[0], 8, "the second descriptor's fill continues where the first left off");
-        assert_eq!(used_elem(&mem, 0), (0, 32), "used length sums both descriptors in the chain");
+        assert_eq!(
+            second[0], 8,
+            "the second descriptor's fill continues where the first left off"
+        );
+        assert_eq!(
+            used_elem(&mem, 0),
+            (0, 32),
+            "used length sums both descriptors in the chain"
+        );
     }
 
     #[test]
     fn multiple_available_chains_are_all_drained_in_one_call() {
         let mem = test_guest_mem();
         for i in 0..3u16 {
-            write_descriptor(&mem, i, BUF_BASE + u64::from(i) * 0x100, 4, VIRTQ_DESC_F_WRITE, 0);
+            write_descriptor(
+                &mem,
+                i,
+                BUF_BASE + u64::from(i) * 0x100,
+                4,
+                VIRTQ_DESC_F_WRITE,
+                0,
+            );
         }
         set_avail(&mem, 3, &[0, 1, 2]);
 
@@ -399,7 +478,14 @@ mod tests {
     fn a_non_terminating_chain_is_rejected_rather_than_looping_forever() {
         let mem = test_guest_mem();
         // desc[0] --NEXT--> desc[0]: an immediate self-loop, never terminates.
-        write_descriptor(&mem, 0, BUF_BASE, 4, VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT, 0);
+        write_descriptor(
+            &mem,
+            0,
+            BUF_BASE,
+            4,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+            0,
+        );
         set_avail(&mem, 1, &[0]);
 
         let mut vq = SplitVirtqueue::new(config(4));
@@ -432,7 +518,8 @@ mod tests {
         // desc[0]: read-only header --NEXT--> desc[1]: writable response.
         write_descriptor(&mem, 0, BUF_BASE, 4, VIRTQ_DESC_F_NEXT, 1);
         write_descriptor(&mem, 1, BUF_BASE + 0x100, 4, VIRTQ_DESC_F_WRITE, 0);
-        mem.write_slice(&[0xAA, 0xBB, 0xCC, 0xDD], GuestAddress(BUF_BASE)).unwrap();
+        mem.write_slice(&[0xAA, 0xBB, 0xCC, 0xDD], GuestAddress(BUF_BASE))
+            .unwrap();
         set_avail(&mem, 1, &[0]);
 
         let mut seen_header = None;
@@ -442,19 +529,30 @@ mod tests {
                 assert_eq!(chain.len(), 2);
                 assert!(!chain[0].write, "the header descriptor is read-only");
                 let mut header = [0u8; 4];
-                mem.read_slice(&mut header, GuestAddress(chain[0].addr)).unwrap();
+                mem.read_slice(&mut header, GuestAddress(chain[0].addr))
+                    .unwrap();
                 seen_header = Some(header);
-                mem.write_slice(&[1, 2, 3, 4], GuestAddress(chain[1].addr)).unwrap();
+                mem.write_slice(&[1, 2, 3, 4], GuestAddress(chain[1].addr))
+                    .unwrap();
                 Ok(chain[1].len)
             })
             .unwrap();
 
         assert_eq!(processed, 1);
-        assert_eq!(seen_header, Some([0xAA, 0xBB, 0xCC, 0xDD]), "handle can read the read-only descriptor");
+        assert_eq!(
+            seen_header,
+            Some([0xAA, 0xBB, 0xCC, 0xDD]),
+            "handle can read the read-only descriptor"
+        );
         let mut response = [0u8; 4];
-        mem.read_slice(&mut response, GuestAddress(BUF_BASE + 0x100)).unwrap();
+        mem.read_slice(&mut response, GuestAddress(BUF_BASE + 0x100))
+            .unwrap();
         assert_eq!(response, [1, 2, 3, 4]);
-        assert_eq!(used_elem(&mem, 0), (0, 4), "used length is whatever handle reports");
+        assert_eq!(
+            used_elem(&mem, 0),
+            (0, 4),
+            "used length is whatever handle reports"
+        );
     }
 
     /// End-to-end: a real `VirtioMmioTransport` walked through the actual driver enumeration
@@ -492,7 +590,8 @@ mod tests {
         let processed = vq.process_available(&mem, |buf| buf.fill(0x42)).unwrap();
         assert_eq!(processed, 1);
         let mut written = [0u8; 16];
-        mem.read_slice(&mut written, GuestAddress(BUF_BASE)).unwrap();
+        mem.read_slice(&mut written, GuestAddress(BUF_BASE))
+            .unwrap();
         assert_eq!(written, [0x42; 16]);
     }
 }

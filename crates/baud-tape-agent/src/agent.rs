@@ -22,8 +22,8 @@
 // the supervisor never generates randomness itself.
 
 use anyhow::{Context, Result};
-use baud_proto::{DrawRequest, DrawResult, Msg, Observation, Value as ProbeValue};
 use baud_multiverse::{ChannelDrawSource, Multiverse, RunManifest, TapeDrawSource};
+use baud_proto::{DrawRequest, DrawResult, Msg, Observation, Value as ProbeValue};
 
 use crate::transport::Transport;
 
@@ -38,11 +38,9 @@ pub async fn run() -> Result<()> {
     tracing::info!("baud-tape-agent starting");
 
     // Read workload spec from environment
-    let spec_yaml = std::env::var("BAUD_SPEC")
-        .context("BAUD_SPEC environment variable not set")?;
+    let spec_yaml = std::env::var("BAUD_SPEC").context("BAUD_SPEC environment variable not set")?;
 
-    let spec_doc = baud_init::lint(&spec_yaml)
-        .context("workload spec failed to lint")?;
+    let spec_doc = baud_init::lint(&spec_yaml).context("workload spec failed to lint")?;
 
     tracing::info!("spec: nix={}, nodes={}", spec_doc.nix, spec_doc.nodes.len());
 
@@ -53,7 +51,10 @@ pub async fn run() -> Result<()> {
     let mut supervisor = Multiverse::load_from_manifest(manifest)
         .context("failed to load manifest into supervisor")?;
 
-    tracing::info!("supervisor loaded ({} guests)", supervisor.manifest.guests.len());
+    tracing::info!(
+        "supervisor loaded ({} guests)",
+        supervisor.manifest.guests.len()
+    );
 
     // Determine transport mode
     let ws_url = std::env::var("BAUD_WS_URL").ok();
@@ -64,7 +65,10 @@ pub async fn run() -> Result<()> {
     )?;
     let obs_stream = run_with_relay(&mut supervisor, url, token).await?;
 
-    tracing::info!("supervisor completed: {} observations", obs_stream.observations.len());
+    tracing::info!(
+        "supervisor completed: {} observations",
+        obs_stream.observations.len()
+    );
 
     // Encode and emit observations to stdout as length-prefixed CBOR
     // (in production these go to the WebSocket transport during run_with_relay)
@@ -73,15 +77,23 @@ pub async fn run() -> Result<()> {
         if let Ok(cbor) = baud_proto::encode(&msg) {
             let _ = cbor; // In scaffold: no transport wired up
         }
-        tracing::debug!("obs: node={} probe={} step={}", obs_entry.node, obs_entry.probe, obs_entry.step);
+        tracing::debug!(
+            "obs: node={} probe={} step={}",
+            obs_entry.node,
+            obs_entry.probe,
+            obs_entry.step
+        );
     }
 
     // Emit stream hash as a Checkpoint message
     let stream_hash = obs_stream.stream_hash();
     tracing::info!("stream_hash={}", stream_hash);
 
-    tracing::info!("baud-tape-agent: run complete ({} observations, hash={})",
-        obs_stream.observations.len(), &stream_hash[..16.min(stream_hash.len())]);
+    tracing::info!(
+        "baud-tape-agent: run complete ({} observations, hash={})",
+        obs_stream.observations.len(),
+        &stream_hash[..16.min(stream_hash.len())]
+    );
     Ok(())
 }
 
@@ -136,7 +148,9 @@ async fn run_with_relay(
     let ws_url_clone = ws_url.clone();
     let token_clone = token.clone();
     let ws_task = tokio::spawn(async move {
-        if let Err(e) = crate::transport::run_ws_loop(ws_url_clone, token_clone, ws_out_rx, ws_in_tx).await {
+        if let Err(e) =
+            crate::transport::run_ws_loop(ws_url_clone, token_clone, ws_out_rx, ws_in_tx).await
+        {
             tracing::warn!("WebSocket I/O task ended: {e}");
         }
     });
@@ -157,13 +171,17 @@ async fn run_with_relay(
 
             let result = match ws_in_rx.blocking_recv() {
                 Some(Msg::DrawResult(result)) => result,
-                Some(Msg::Eof) | None => anyhow::bail!("websocket closed while waiting for DrawResult"),
+                Some(Msg::Eof) | None => {
+                    anyhow::bail!("websocket closed while waiting for DrawResult")
+                }
                 Some(other) => anyhow::bail!(
                     "unexpected {:?} while waiting for DrawResult",
                     std::mem::discriminant(&other)
                 ),
             };
-            result_tx.send(result).context("supervisor draw channel closed")?;
+            result_tx
+                .send(result)
+                .context("supervisor draw channel closed")?;
         }
         Ok(())
     });
@@ -193,14 +211,17 @@ pub fn build_manifest(spec_doc: &baud_init::SpecDoc) -> Result<RunManifest> {
     use baud_multiverse::GuestSpec;
     use std::path::PathBuf;
 
-    let guests: Vec<GuestSpec> = spec_doc.nodes.iter().enumerate().map(|(i, node)| {
-        GuestSpec {
+    let guests: Vec<GuestSpec> = spec_doc
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| GuestSpec {
             node_id: i as u32,
             binary: PathBuf::from(node.argv.first().cloned().unwrap_or_default()),
             argv: node.argv.clone(),
             binary_hash: String::new(),
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(RunManifest {
         guests,
@@ -236,9 +257,13 @@ fn json_to_probe_value(v: &serde_json::Value) -> ProbeValue {
 pub fn make_tape_from_seed(seed: u64, len: usize) -> Vec<u8> {
     let mut tape = vec![0u8; len];
     // Simple LCG to generate pseudo-random bytes from seed
-    let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    let mut state = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     for byte in tape.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *byte = (state >> 33) as u8;
     }
     tape
@@ -259,7 +284,8 @@ pub fn make_tape_from_seed(seed: u64, len: usize) -> Vec<u8> {
 #[allow(dead_code)]
 pub fn relay_draw(transport: &mut dyn Transport, req: &DrawRequest) -> Result<DrawResult> {
     // Send the draw request to the server
-    transport.send(&Msg::DrawRequest(req.clone()))
+    transport
+        .send(&Msg::DrawRequest(req.clone()))
         .context("failed to send DrawRequest")?;
 
     // Wait for the DrawResult
@@ -349,8 +375,8 @@ nodes:
             );
 
             // 3. The supervisor loads it even though none of these binaries exist here.
-            let mut supervisor =
-                Multiverse::load_from_manifest(manifest).expect("supervisor must load novel manifest");
+            let mut supervisor = Multiverse::load_from_manifest(manifest)
+                .expect("supervisor must load novel manifest");
 
             // 4. Run it through the agent's own scaffold path.
             let obs = super::run_scaffold(&mut supervisor, 7);
@@ -389,7 +415,10 @@ nodes:
 
         // The two different workloads are actually run differently (a pipeline that
         // ignored the spec would give both the same stream).
-        assert_ne!(hashes[0], hashes[1], "different workloads must produce different runs");
+        assert_ne!(
+            hashes[0], hashes[1],
+            "different workloads must produce different runs"
+        );
 
         // The adapters in the spec are the closed set the agent dispatches on.
         let doc = baud_init::lint(workloads[0]).expect("lint");
@@ -398,7 +427,11 @@ nodes:
             "input adapter must be Stdin"
         );
         assert!(
-            doc.nodes[0].adapters.probes.iter().any(|p| matches!(p, ProbeAdapter::StdoutKv { .. })),
+            doc.nodes[0]
+                .adapters
+                .probes
+                .iter()
+                .any(|p| matches!(p, ProbeAdapter::StdoutKv { .. })),
             "probe must include stdout-kv"
         );
     }
@@ -435,8 +468,8 @@ nodes:
     /// Test that the draw relay sends and receives correctly over a mock transport.
     #[test]
     fn relay_draw_sends_request_and_receives_result() {
-        use baud_proto::{DrawRequest, DrawResult, Msg};
         use crate::transport::Transport;
+        use baud_proto::{DrawRequest, DrawResult, Msg};
 
         struct MockTransport {
             sent: Vec<Msg>,
@@ -458,21 +491,31 @@ nodes:
         }
 
         let req = DrawRequest::Bits(8);
-        let expected_result = DrawResult { bytes: vec![0x42, 0x13] };
+        let expected_result = DrawResult {
+            bytes: vec![0x42, 0x13],
+        };
 
         let mut transport = MockTransport {
             sent: Vec::new(),
             to_recv: vec![Some(Msg::DrawResult(expected_result.clone()))],
         };
 
-        let result = super::relay_draw(&mut transport, &req)
-            .expect("relay_draw must succeed");
+        let result = super::relay_draw(&mut transport, &req).expect("relay_draw must succeed");
 
-        assert_eq!(result.bytes, expected_result.bytes, "draw result must match");
+        assert_eq!(
+            result.bytes, expected_result.bytes,
+            "draw result must match"
+        );
         assert_eq!(transport.sent.len(), 1, "must have sent exactly 1 message");
         match &transport.sent[0] {
-            Msg::DrawRequest(r) => assert!(matches!(r, DrawRequest::Bits(_)), "must send DrawRequest::Bits"),
-            other => panic!("expected DrawRequest, got {:?}", std::mem::discriminant(other)),
+            Msg::DrawRequest(r) => assert!(
+                matches!(r, DrawRequest::Bits(_)),
+                "must send DrawRequest::Bits"
+            ),
+            other => panic!(
+                "expected DrawRequest, got {:?}",
+                std::mem::discriminant(other)
+            ),
         }
     }
 
@@ -508,7 +551,9 @@ nodes:
                 match req_rx.recv() {
                     Ok(req) => {
                         requests.push(req);
-                        let result = DrawResult { bytes: vec![0x42u8; 8] };
+                        let result = DrawResult {
+                            bytes: vec![0x42u8; 8],
+                        };
                         result_tx.send(result).unwrap();
                     }
                     Err(_) => break,

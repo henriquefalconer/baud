@@ -31,7 +31,10 @@ fn decode_framed(data: &[u8]) -> Result<Msg> {
     }
     let payload = data.get(4..).unwrap();
     if payload.len() != declared {
-        anyhow::bail!("frame length mismatch: header declares {declared}, payload has {}", payload.len());
+        anyhow::bail!(
+            "frame length mismatch: header declares {declared}, payload has {}",
+            payload.len()
+        );
     }
     baud_proto::decode(payload).map_err(|e| anyhow::anyhow!("invalid framed CBOR message: {e}"))
 }
@@ -140,14 +143,20 @@ impl WebSocketTransport {
     fn connect_blocking(&mut self) -> Result<()> {
         // Validate URL scheme
         if !self.url.starts_with("ws://") && !self.url.starts_with("wss://") {
-            anyhow::bail!("WebSocket URL must start with ws:// or wss://: {}", self.url);
+            anyhow::bail!(
+                "WebSocket URL must start with ws:// or wss://: {}",
+                self.url
+            );
         }
         // Connection is managed by the tokio runtime in the agent; here we
         // mark ourselves as connected for the synchronous shim path.
         // In the production async agent (agent.rs run() with tokio), the real
         // tokio-tungstenite connect_async() is used directly.
         self.connected = true;
-        tracing::info!("WebSocketTransport: will connect to {} on first async use", self.url);
+        tracing::info!(
+            "WebSocketTransport: will connect to {} on first async use",
+            self.url
+        );
         Ok(())
     }
 
@@ -172,7 +181,10 @@ impl Transport for WebSocketTransport {
 
         // Queue for async delivery (in production the async run loop drains this)
         self.send_queue.push_back(framed);
-        tracing::trace!("WebSocketTransport: queued {} byte message for delivery", bytes.len());
+        tracing::trace!(
+            "WebSocketTransport: queued {} byte message for delivery",
+            bytes.len()
+        );
         Ok(())
     }
 
@@ -201,9 +213,9 @@ pub async fn run_ws_loop(
     mut out_rx: tokio::sync::mpsc::Receiver<Msg>,
     in_tx: tokio::sync::mpsc::Sender<Msg>,
 ) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
-    use futures_util::{SinkExt, StreamExt};
 
     // Build the connection request with auth header
     let request = {
@@ -217,7 +229,8 @@ pub async fn run_ws_loop(
     };
 
     tracing::info!("WebSocket: connecting to {}", url);
-    let (ws_stream, _) = connect_async(request).await
+    let (ws_stream, _) = connect_async(request)
+        .await
         .map_err(|e| anyhow::anyhow!("WebSocket connect failed: {e}"))?;
 
     tracing::info!("WebSocket: connected");
@@ -277,7 +290,11 @@ mod tests {
 
     #[test]
     fn framed_decoder_requires_exact_declared_length() {
-        let payload = baud_proto::encode(&Msg::Log { bytes: b"ok".to_vec(), step: 1 }).unwrap();
+        let payload = baud_proto::encode(&Msg::Log {
+            bytes: b"ok".to_vec(),
+            step: 1,
+        })
+        .unwrap();
         let mut frame = Vec::new();
         frame.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
         frame.extend_from_slice(&payload);

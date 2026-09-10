@@ -3,10 +3,10 @@
 //
 // baud spec — spec management commands
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct SpecCmd {

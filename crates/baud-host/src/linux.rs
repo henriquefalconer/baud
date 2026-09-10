@@ -48,7 +48,9 @@ impl CapabilityChecks for LinuxChecks {
     /// accepts it.
     fn cpuid_control_ok(&self) -> bool {
         with_vcpu(|kvm, vcpu| {
-            let mut cpuid = kvm.get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES).ok()?;
+            let mut cpuid = kvm
+                .get_supported_cpuid(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+                .ok()?;
             for entry in cpuid.as_mut_slice().iter_mut() {
                 if entry.function == 1 {
                     entry.ecx &= !(1 << 30); // clear RDRAND
@@ -65,11 +67,15 @@ impl CapabilityChecks for LinuxChecks {
     }
 
     fn msr_filter_ok(&self) -> bool {
-        Kvm::new().map(|kvm| kvm.check_extension(Cap::X86MsrFilter)).unwrap_or(false)
+        Kvm::new()
+            .map(|kvm| kvm.check_extension(Cap::X86MsrFilter))
+            .unwrap_or(false)
     }
 
     fn singlestep_ok(&self) -> bool {
-        Kvm::new().map(|kvm| kvm.check_extension(Cap::SetGuestDebug)).unwrap_or(false)
+        Kvm::new()
+            .map(|kvm| kvm.check_extension(Cap::SetGuestDebug))
+            .unwrap_or(false)
     }
 
     /// A fixed userspace loop's retired-conditional-branch count must be identical across two
@@ -92,8 +98,13 @@ impl CapabilityChecks for LinuxChecks {
     /// is genuinely unstable (all three would disagree), while no longer flagging a working host
     /// on the strength of one transient miscount.
     fn rcb_deterministic(&self) -> bool {
-        let trials: Vec<u64> = (0..3).filter_map(|_| measure_fixed_loop_branches()).collect();
-        trials.len() == 3 && trials.iter().any(|a| trials.iter().filter(|b| *b == a).count() >= 2)
+        let trials: Vec<u64> = (0..3)
+            .filter_map(|_| measure_fixed_loop_branches())
+            .collect();
+        trials.len() == 3
+            && trials
+                .iter()
+                .any(|a| trials.iter().filter(|b| *b == a).count() >= 2)
     }
 
     fn nested_virt(&self) -> bool {
@@ -152,7 +163,11 @@ fn enforced_handlers_in(kallsyms: &str) -> bool {
         "handle_baud_ud2_exit",
     ]
     .iter()
-    .all(|symbol| kallsyms.lines().any(|line| line.split_whitespace().last() == Some(symbol)))
+    .all(|symbol| {
+        kallsyms
+            .lines()
+            .any(|line| line.split_whitespace().last() == Some(symbol))
+    })
 }
 
 fn cpuinfo_flag(flag: &str) -> bool {
@@ -220,17 +235,22 @@ fn measure_fixed_loop_branches() -> Option<u64> {
 /// [`crate::placement::place`] can never split a pair (specs/baud-host.md §5).
 fn read_topology() -> Topology {
     let cpu_dir = std::path::Path::new("/sys/devices/system/cpu");
-    let mut by_min_sibling: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+    let mut by_min_sibling: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
 
     if let Ok(entries) = fs::read_dir(cpu_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let Some(idx_str) = name.strip_prefix("cpu") else { continue };
+            let Some(idx_str) = name.strip_prefix("cpu") else {
+                continue;
+            };
             if idx_str.is_empty() || !idx_str.chars().all(|c| c.is_ascii_digit()) {
                 continue;
             }
-            let Ok(logical_id) = idx_str.parse::<usize>() else { continue };
+            let Ok(logical_id) = idx_str.parse::<usize>() else {
+                continue;
+            };
 
             let siblings_path = cpu_dir.join(&*name).join("topology/thread_siblings_list");
             let siblings = fs::read_to_string(&siblings_path)
@@ -239,15 +259,34 @@ fn read_topology() -> Topology {
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| vec![logical_id]);
 
-            let key = *siblings.iter().min().unwrap_or(&logical_id);
-            by_min_sibling.entry(key).or_insert(siblings);
+            // A process may inherit a cpuset from its service manager or parent shell. Never
+            // advertise a sibling pair that this process cannot actually use: pinning such a
+            // pair later would fail with EINVAL, and silently dropping the inherited mask would
+            // let a fleet escape its operator's CPU reservation.
+            let usable_siblings = process_affinity()
+                .map(|allowed| {
+                    siblings
+                        .iter()
+                        .copied()
+                        .filter(|cpu| allowed.contains(cpu))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or(siblings);
+            if usable_siblings.is_empty() {
+                continue;
+            }
+            let key = *usable_siblings.iter().min().unwrap_or(&logical_id);
+            by_min_sibling.entry(key).or_insert(usable_siblings);
         }
     }
 
     let cores: Vec<CoreTopology> = by_min_sibling
         .into_values()
         .enumerate()
-        .map(|(i, sibling_threads)| CoreTopology { physical_id: i, sibling_threads })
+        .map(|(i, sibling_threads)| CoreTopology {
+            physical_id: i,
+            sibling_threads,
+        })
         .collect();
 
     // 2 cores/socket held back for host bookkeeping/RCU/IRQ (specs/baud-host.md §5), scaled down
@@ -260,10 +299,34 @@ fn read_topology() -> Topology {
         0
     };
 
-    Topology { cores, housekeeping_reserved }
+    Topology {
+        cores,
+        housekeeping_reserved,
+    }
 }
 
 /// Parse a Linux `*_siblings_list` / `*_cpus_list` value: comma-separated ids and `a-b` ranges.
+fn process_affinity() -> Option<std::collections::HashSet<usize>> {
+    let mut set = std::mem::MaybeUninit::<libc::cpu_set_t>::zeroed();
+    // SAFETY: sched_getaffinity initializes the cpu_set_t when it succeeds.
+    let rc = unsafe {
+        libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), set.as_mut_ptr())
+    };
+    if rc != 0 {
+        return None;
+    }
+    // SAFETY: the previous call succeeded and initialized `set`.
+    let set = unsafe { set.assume_init() };
+    let mut allowed = std::collections::HashSet::new();
+    for cpu in 0..libc::CPU_SETSIZE as usize {
+        // SAFETY: cpu is bounded by CPU_SETSIZE for this cpu_set_t.
+        if unsafe { libc::CPU_ISSET(cpu, &set) } {
+            allowed.insert(cpu);
+        }
+    }
+    Some(allowed)
+}
+
 fn parse_cpu_list(s: &str) -> Vec<usize> {
     let mut out = Vec::new();
     for part in s.split(',') {
@@ -294,6 +357,12 @@ mod tests {
         assert_eq!(parse_cpu_list("0-3"), vec![0, 1, 2, 3]);
         assert_eq!(parse_cpu_list("4"), vec![4]);
         assert_eq!(parse_cpu_list(""), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn process_affinity_is_a_real_set_when_kernel_reports_one() {
+        let affinity = process_affinity().expect("sched_getaffinity should work on Linux");
+        assert!(!affinity.is_empty());
     }
 
     #[test]

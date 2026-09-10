@@ -1,10 +1,10 @@
 // Copyright (c) 2026 Henrique Falconer. All rights reserved.
 // SPDX-License-Identifier: Proprietary
 
+use crate::AppState;
 use axum::{extract::State, Json};
 use baud_keys;
 use serde_json::{json, Value};
-use crate::AppState;
 
 /// Check whether the local backend VM (lima/colima) is available.
 ///

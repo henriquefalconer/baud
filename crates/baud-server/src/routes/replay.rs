@@ -7,11 +7,14 @@
 //   POST /replay/:id         → replay a run (from stored tape/journal)
 //   POST /replay/:id/to-step → replay up to a given step
 
-use axum::{extract::{Path, State}, Json};
+use crate::AppState;
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use baud_proto::{Observation, Value as ProbeValue};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
-use baud_proto::{Observation, Value as ProbeValue};
 
 #[derive(Debug, Deserialize)]
 pub struct ReplayBody {
@@ -28,7 +31,10 @@ pub async fn replay(
     Path(run_id): Path<String>,
     Json(body): Json<Option<ReplayBody>>,
 ) -> Json<Value> {
-    let body = body.unwrap_or(ReplayBody { tape_bytes: None, to_step: None });
+    let body = body.unwrap_or(ReplayBody {
+        tape_bytes: None,
+        to_step: None,
+    });
 
     // 1. Look up the run
     let row = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String, Option<String>)>(
@@ -38,7 +44,8 @@ pub async fn replay(
     .fetch_optional(&state.db)
     .await;
 
-    let (id, spec_content, spec_hash, closure_hash, seed, status, original_stored_hash) = match row {
+    let (id, spec_content, spec_hash, closure_hash, seed, status, original_stored_hash) = match row
+    {
         Ok(Some(r)) => r,
         Ok(None) => return Json(json!({ "error": format!("run {run_id} not found") })),
         Err(e) => return Json(json!({ "error": format!("db error: {e}") })),
@@ -59,7 +66,15 @@ pub async fn replay(
     };
 
     // 3. Create a replay run record
-    let replay_run_id = format!("replay-{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(8).collect::<String>());
+    let replay_run_id = format!(
+        "replay-{}",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .replace('-', "")
+            .chars()
+            .take(8)
+            .collect::<String>()
+    );
     let now = crate::state::unix_now() as i64;
     let replay_spec_hash = spec_hash.clone();
 
@@ -82,7 +97,7 @@ pub async fn replay(
     let original_rows = sqlx::query_as::<_, (i64, i64, String, Vec<u8>, i64)>(
         "SELECT step, node, probe, value, recorded_at FROM observations
          WHERE run_id = ?
-         ORDER BY step ASC"
+         ORDER BY step ASC",
     )
     .bind(&run_id)
     .fetch_all(&state.db)
@@ -97,27 +112,30 @@ pub async fn replay(
     // silently replay a different input stream, which is especially easy to miss when the
     // guest consumes only a prefix. The legacy seed path remains for pre-KVM rows that have no
     // persisted tape metadata.
-    let stored_tape = sqlx::query_as::<_, (String,)>(
-        "SELECT tape_hex FROM kvm_run_meta WHERE run_id = ?",
-    )
-    .bind(&run_id)
-    .fetch_optional(&state.db)
-    .await;
+    let stored_tape =
+        sqlx::query_as::<_, (String,)>("SELECT tape_hex FROM kvm_run_meta WHERE run_id = ?")
+            .bind(&run_id)
+            .fetch_optional(&state.db)
+            .await;
     let replay_tape = match stored_tape {
         Ok(Some((tape_hex,))) => match decode_hex_tape(&tape_hex) {
             Some(tape) => Some(tape),
-            None => return Json(json!({
-                "ok": false,
-                "verified": false,
-                "error": "stored KVM tape is malformed"
-            })),
+            None => {
+                return Json(json!({
+                    "ok": false,
+                    "verified": false,
+                    "error": "stored KVM tape is malformed"
+                }))
+            }
         },
         Ok(None) => body.tape_bytes.filter(|tape| !tape.is_empty()),
-        Err(e) => return Json(json!({
-            "ok": false,
-            "verified": false,
-            "error": format!("db error fetching replay tape: {e}")
-        })),
+        Err(e) => {
+            return Json(json!({
+                "ok": false,
+                "verified": false,
+                "error": format!("db error fetching replay tape: {e}")
+            }))
+        }
     };
     let replay_obs = match replay_real_or_legacy(
         &state,
@@ -126,15 +144,19 @@ pub async fn replay(
         seed as u64,
         &spec_hash,
         &spec_doc,
-    ).await {
+    )
+    .await
+    {
         Ok(observations) => observations,
-        Err(error) => return Json(json!({
-            "ok": false,
-            "verified": false,
-            "original_run_id": id,
-            "error": error,
-            "message": "replay failed before an observation stream was produced"
-        })),
+        Err(error) => {
+            return Json(json!({
+                "ok": false,
+                "verified": false,
+                "original_run_id": id,
+                "error": error,
+                "message": "replay failed before an observation stream was produced"
+            }))
+        }
     };
 
     let to_step = body.to_step;
@@ -143,10 +165,12 @@ pub async fn replay(
 
     for obs in &replay_obs {
         if let Some(max) = to_step {
-            if obs.step > max { break; }
+            if obs.step > max {
+                break;
+            }
         }
-        let obs_cbor = baud_proto::encode(&baud_proto::Msg::Observe(obs.clone()))
-            .unwrap_or_default();
+        let obs_cbor =
+            baud_proto::encode(&baud_proto::Msg::Observe(obs.clone())).unwrap_or_default();
         replay_hash.update(&obs_cbor);
         replayed.push(obs.clone());
     }
@@ -160,7 +184,7 @@ pub async fn replay(
         let value_bytes = serde_json::to_vec(&obs.value).unwrap_or_default();
         let _ = sqlx::query(
             "INSERT INTO observations (run_id, step, node, probe, value, recorded_at)
-             VALUES (?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&replay_run_id)
         .bind(obs.step as i64)
@@ -176,7 +200,8 @@ pub async fn replay(
     //
     // Use the stored stream_hash from the original run if available (set during verify/determinism).
     // Fall back to counting observations (old behavior) if the column is missing.
-    let orig_obs_count = original_obs.iter()
+    let orig_obs_count = original_obs
+        .iter()
         .filter(|(step, ..)| to_step.map_or(true, |max| *step as u64 <= max))
         .count();
 
@@ -250,33 +275,72 @@ async fn replay_real_or_legacy(
     .await
     .map_err(|e| format!("db error fetching real replay metadata: {e}"))?;
 
-    let Some((kernel, cmdline, initramfs_path, period, timer_vector, max_ticks, rng_seed,
-              rng_vector, rng_max_exits, acpi, blk_path, blk_vector, blk_max_exits)) = meta else {
+    let Some((
+        kernel,
+        cmdline,
+        initramfs_path,
+        period,
+        timer_vector,
+        max_ticks,
+        rng_seed,
+        rng_vector,
+        rng_max_exits,
+        acpi,
+        blk_path,
+        blk_vector,
+        blk_max_exits,
+    )) = meta
+    else {
         return generate_replay_observations(tape, seed, spec_hash, spec_doc);
     };
-    let tape = tape.ok_or_else(|| "real replay input tape is unavailable".to_owned())?.to_vec();
-    let initramfs = initramfs_path.as_deref().map(crate::routes::run_kvm::read_initramfs)
+    let tape = tape
+        .ok_or_else(|| "real replay input tape is unavailable".to_owned())?
+        .to_vec();
+    let initramfs = initramfs_path
+        .as_deref()
+        .map(crate::routes::run_kvm::read_initramfs)
         .transpose()?;
-    let periodic = period.zip(timer_vector).zip(max_ticks)
+    let periodic = period
+        .zip(timer_vector)
+        .zip(max_ticks)
         .map(|((period, vector), max)| (period as u64, vector as u8, max as u32));
-    let rng = rng_seed.zip(rng_vector).zip(rng_max_exits)
+    let rng = rng_seed
+        .zip(rng_vector)
+        .zip(rng_max_exits)
         .map(|((seed, vector), max)| (seed as u64, vector as u8, max as u32));
     let blk = match (blk_path, blk_vector, blk_max_exits) {
         (Some(path), Some(vector), Some(max)) => Some((
-            crate::routes::run_kvm::open_virtio_blk_image(&path, crate::routes::run_kvm::virtio_blk_image_size_limit())?,
+            crate::routes::run_kvm::open_virtio_blk_image(
+                &path,
+                crate::routes::run_kvm::virtio_blk_image_size_limit(),
+            )?,
             vector as u8,
             max as u32,
         )),
         (None, None, None) => None,
         _ => return Err("real replay metadata has an incomplete virtio-blk configuration".into()),
     };
-    let records = tokio::task::spawn_blocking(move || crate::routes::run_kvm::replay_real_records(
-        std::path::Path::new(&kernel), &cmdline, tape, initramfs.as_deref(), periodic, rng, blk, acpi,
-    )).await.map_err(|e| format!("real replay task failed: {e}"))??;
-    Ok(records.into_iter().filter_map(|record| match record {
-        baud_proto::Msg::Observe(observation) => Some(observation),
-        _ => None,
-    }).collect())
+    let records = tokio::task::spawn_blocking(move || {
+        crate::routes::run_kvm::replay_real_records(
+            std::path::Path::new(&kernel),
+            &cmdline,
+            tape,
+            initramfs.as_deref(),
+            periodic,
+            rng,
+            blk,
+            acpi,
+        )
+    })
+    .await
+    .map_err(|e| format!("real replay task failed: {e}"))??;
+    Ok(records
+        .into_iter()
+        .filter_map(|record| match record {
+            baud_proto::Msg::Observe(observation) => Some(observation),
+            _ => None,
+        })
+        .collect())
 }
 
 /// Replay a spec through the legacy deterministic engine using the stored tape.
@@ -287,9 +351,9 @@ fn generate_replay_observations(
     _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
 ) -> Result<Vec<Observation>, String> {
-    use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
-    use rand_chacha::ChaCha20Rng;
+    use baud_multiverse::{GuestSpec, Multiverse, RunManifest, TapeDrawSource};
     use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
 
     // Old rows did not persist their tape, so retain their deterministic seed-derived replay.
     // Real KVM rows and explicit replay requests take the exact bytes supplied by the caller.
@@ -304,13 +368,22 @@ fn generate_replay_observations(
     };
 
     let manifest = RunManifest {
-        guests: spec_doc.nodes.iter().enumerate().map(|(i, n)| GuestSpec {
-            node_id: i as u32,
-            binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
-            argv: n.argv.clone(),
-            binary_hash: String::new(),
-        }).collect(),
-        env_override: spec_doc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        guests: spec_doc
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| GuestSpec {
+                node_id: i as u32,
+                binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
+                argv: n.argv.clone(),
+                binary_hash: String::new(),
+            })
+            .collect(),
+        env_override: spec_doc
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         ..RunManifest::default()
     };
 
@@ -323,12 +396,16 @@ fn generate_replay_observations(
 
     // run() is infallible (spec §5): errors surface as Crash observations
     let stream = mv.run(&mut tape_source);
-    Ok(stream.observations.iter().map(|e| Observation {
-        probe: e.probe.clone(),
-        node: e.node as u16,
-        value: ProbeValue::Utf8(e.value.to_string()),
-        step: e.step,
-    }).collect())
+    Ok(stream
+        .observations
+        .iter()
+        .map(|e| Observation {
+            probe: e.probe.clone(),
+            node: e.node as u16,
+            value: ProbeValue::Utf8(e.value.to_string()),
+            step: e.step,
+        })
+        .collect())
 }
 
 fn hash_observation_prefix(
@@ -340,9 +417,8 @@ fn hash_observation_prefix(
         if to_step.is_some_and(|limit| *step as u64 > limit) {
             break;
         }
-        let typed_value = serde_json::from_slice(value).unwrap_or_else(|_| {
-            ProbeValue::Utf8(String::from_utf8_lossy(value).into_owned())
-        });
+        let typed_value = serde_json::from_slice(value)
+            .unwrap_or_else(|_| ProbeValue::Utf8(String::from_utf8_lossy(value).into_owned()));
         let observation = Observation {
             probe: probe.clone(),
             node: *node as u16,
@@ -377,8 +453,20 @@ mod tests {
     #[test]
     fn prefix_hash_matches_the_protocol_observation_encoding() {
         let rows = vec![
-            (0, 2, "banner".to_owned(), serde_json::to_vec(&ProbeValue::Utf8("ready".into())).unwrap(), 0),
-            (1, 2, "score".to_owned(), serde_json::to_vec(&ProbeValue::U64(7)).unwrap(), 0),
+            (
+                0,
+                2,
+                "banner".to_owned(),
+                serde_json::to_vec(&ProbeValue::Utf8("ready".into())).unwrap(),
+                0,
+            ),
+            (
+                1,
+                2,
+                "score".to_owned(),
+                serde_json::to_vec(&ProbeValue::U64(7)).unwrap(),
+                0,
+            ),
         ];
         let mut expected = blake3::Hasher::new();
         for (step, node, probe, value, _) in &rows {
@@ -390,8 +478,14 @@ mod tests {
             };
             expected.update(&baud_proto::encode(&baud_proto::Msg::Observe(observation)).unwrap());
         }
-        assert_eq!(hash_observation_prefix(&rows, None), hex_encode(expected.finalize().as_bytes()));
-        assert_ne!(hash_observation_prefix(&rows, Some(0)), hash_observation_prefix(&rows, None));
+        assert_eq!(
+            hash_observation_prefix(&rows, None),
+            hex_encode(expected.finalize().as_bytes())
+        );
+        assert_ne!(
+            hash_observation_prefix(&rows, Some(0)),
+            hash_observation_prefix(&rows, None)
+        );
     }
 
     #[test]

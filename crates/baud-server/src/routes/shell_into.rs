@@ -55,7 +55,12 @@ pub async fn shell_into(
     ws.on_upgrade(move |socket| handle_socket(socket, store, run_id, node_id))
 }
 
-async fn handle_socket(socket: WebSocket, store: Arc<SnapshotStore>, run_id: String, node_id: String) {
+async fn handle_socket(
+    socket: WebSocket,
+    store: Arc<SnapshotStore>,
+    run_id: String,
+    node_id: String,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -113,7 +118,10 @@ async fn handle_socket(socket: WebSocket, store: Arc<SnapshotStore>, run_id: Str
         let _ = guest_task.await;
     }
     let mut send_task = send_task;
-    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut send_task).await.is_err() {
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut send_task)
+        .await
+        .is_err()
+    {
         send_task.abort();
         let _ = send_task.await;
     }
@@ -198,7 +206,7 @@ fn drive_shell_session(
         if disconnected {
             settle = match settle {
                 _ if drained_any => Some(POST_DISCONNECT_SETTLE_EXITS), // fresh input — full grace window again
-                None => Some(POST_DISCONNECT_SETTLE_EXITS),             // first time noticing the disconnect
+                None => Some(POST_DISCONNECT_SETTLE_EXITS), // first time noticing the disconnect
                 Some(0) => return Ok(()), // grace window elapsed, nothing new ever arrived
                 Some(n) => Some(n - 1),
             };
@@ -216,7 +224,8 @@ fn drive_shell_session(
             Err(baud_vcpu::RunLoopError::Cancelled) => return Ok(()),
             Err(e) => {
                 flush_new_output(mv, &mut last_len, &output_tx);
-                let _ = output_tx.send(format!("\r\n[shell-into: determinism hole: {e}]\r\n").into_bytes());
+                let _ = output_tx
+                    .send(format!("\r\n[shell-into: determinism hole: {e}]\r\n").into_bytes());
                 return Err(e.to_string());
             }
         }
@@ -224,7 +233,11 @@ fn drive_shell_session(
     }
 }
 
-fn flush_new_output(mv: &Multiverse, last_len: &mut usize, output_tx: &mpsc::UnboundedSender<Vec<u8>>) {
+fn flush_new_output(
+    mv: &Multiverse,
+    last_len: &mut usize,
+    output_tx: &mpsc::UnboundedSender<Vec<u8>>,
+) {
     let out = mv.console_output();
     if out.len() > *last_len {
         let _ = output_tx.send(out[*last_len..].to_vec());
@@ -247,13 +260,21 @@ mod tests {
         let (output_tx, _output_rx) = mpsc::unbounded_channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let mut mv = Multiverse::boot(&kernel, "console=ttyS0", 0, WORK_CLOCK_K, vec![], None).unwrap();
+            let mut mv =
+                Multiverse::boot(&kernel, "console=ttyS0", 0, WORK_CLOCK_K, vec![], None).unwrap();
             mv.set_cancel_flag(worker_cancel);
-            done_tx.send(drive_shell_session(&mut mv, input_rx, output_tx)).unwrap();
+            done_tx
+                .send(drive_shell_session(&mut mv, input_rx, output_tx))
+                .unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(200));
         cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), Ok(()));
+        assert_eq!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            Ok(())
+        );
         worker.join().unwrap();
     }
 
@@ -264,11 +285,26 @@ mod tests {
         let identity = baud_keys::generate_identity_file();
         let recipient = baud_keys::parse_public_key(&identity).unwrap();
         std::fs::write(&identity_path, identity).unwrap();
-        let store = SnapshotStore::open_with_keys(dir.path(), recipient.clone(), Some(identity_path.clone()));
-        let mut mv = Multiverse::boot(&shell_guest_kernel_path(), "console=ttyS0", 0, WORK_CLOCK_K, vec![], None).unwrap();
+        let store = SnapshotStore::open_with_keys(
+            dir.path(),
+            recipient.clone(),
+            Some(identity_path.clone()),
+        );
+        let mut mv = Multiverse::boot(
+            &shell_guest_kernel_path(),
+            "console=ttyS0",
+            0,
+            WORK_CLOCK_K,
+            vec![],
+            None,
+        )
+        .unwrap();
         mv.run_until_console_len(2, 100_000).unwrap();
-        let universe = mv.snapshot(&mut baud_snapshot::PageStore::default()).unwrap();
-        let (run, node) = super::super::run_kvm::persist_universe(&store, "shell-proof", &universe).unwrap();
+        let universe = mv
+            .snapshot(&mut baud_snapshot::PageStore::default())
+            .unwrap();
+        let (run, node) =
+            super::super::run_kvm::persist_universe(&store, "shell-proof", &universe).unwrap();
         drop(mv);
         drop(universe);
         drop(store);
@@ -277,15 +313,25 @@ mod tests {
         let (output_tx, mut output_rx) = mpsc::unbounded_channel();
         input_tx.send(b"hi\r".to_vec()).unwrap();
         drop(input_tx);
-        run_shell_session(&store, &run, &node, input_rx, output_tx,
-            Arc::new(std::sync::atomic::AtomicBool::new(false))).unwrap();
+        run_shell_session(
+            &store,
+            &run,
+            &node,
+            input_rx,
+            output_tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
         let mut output = Vec::new();
-        while let Ok(bytes) = output_rx.try_recv() { output.extend(bytes); }
+        while let Ok(bytes) = output_rx.try_recv() {
+            output.extend(bytes);
+        }
         assert_eq!(output, b"$ hi\n$ ");
     }
 
     fn shell_guest_kernel_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../baud-multiverse/tests/fixtures/shell-guest/bzImage")
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../baud-multiverse/tests/fixtures/shell-guest/bzImage")
     }
 
     /// `drive_shell_session` against a freshly booted (never persisted/restored — the store-facing
@@ -311,7 +357,9 @@ mod tests {
         let target = b"$ hi\n$ ";
         let mut collected = Vec::new();
         while collected.len() < target.len() {
-            let chunk = output_rx.blocking_recv().expect("session ended before echoing the queued input");
+            let chunk = output_rx
+                .blocking_recv()
+                .expect("session ended before echoing the queued input");
             collected.extend_from_slice(&chunk);
         }
         assert_eq!(
@@ -323,7 +371,11 @@ mod tests {
         // its `ws_rx` loop ends) — the session must notice and return, not spin forever.
         drop(input_tx);
         let result = handle.join().expect("session thread panicked");
-        assert_eq!(result, Ok(()), "session must end cleanly once the input sender is dropped");
+        assert_eq!(
+            result,
+            Ok(()),
+            "session must end cleanly once the input sender is dropped"
+        );
     }
 
     /// Regression test for a real bug found via manual interactive-mode testing: a client that
@@ -368,6 +420,10 @@ mod tests {
         );
 
         let result = handle.join().expect("session thread panicked");
-        assert_eq!(result, Ok(()), "session must still end cleanly once fully settled");
+        assert_eq!(
+            result,
+            Ok(()),
+            "session must still end cleanly once fully settled"
+        );
     }
 }

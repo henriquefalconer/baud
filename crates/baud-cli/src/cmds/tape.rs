@@ -3,11 +3,11 @@
 //
 // baud tape — tape (sandbox) lifecycle subcommand
 
+use crate::client::Client;
+use crate::fmt::print_value;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::client::Client;
-use crate::fmt::print_value;
 
 #[derive(Parser)]
 pub struct TapeCmd {
@@ -82,7 +82,10 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
                     if tapes.is_empty() {
                         println!("No tapes.");
                     } else {
-                        println!("{:<30}  {:<8}  {:<10}  {}", "ID", "BACKEND", "STATE", "CREATED");
+                        println!(
+                            "{:<30}  {:<8}  {:<10}  {}",
+                            "ID", "BACKEND", "STATE", "CREATED"
+                        );
                         for t in tapes {
                             let id = t["id"].as_str().unwrap_or("-");
                             let backend = t["backend"].as_str().unwrap_or("-");
@@ -109,14 +112,18 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
             print_value(&v, json);
         }
         TapeAction::Reconstruct { id } => {
-            let v = c.post(&format!("/tapes/{id}/reconstruct"), &json!({})).await?;
+            let v = c
+                .post(&format!("/tapes/{id}/reconstruct"), &json!({}))
+                .await?;
             print_value(&v, json);
         }
         TapeAction::Exec { id, cmd } => {
             if cmd.is_empty() {
                 anyhow::bail!("exec: no command specified");
             }
-            let v = c.post(&format!("/tapes/{id}/exec"), &json!({ "cmd": cmd })).await?;
+            let v = c
+                .post(&format!("/tapes/{id}/exec"), &json!({ "cmd": cmd }))
+                .await?;
             if json {
                 print_value(&v, true);
             } else {

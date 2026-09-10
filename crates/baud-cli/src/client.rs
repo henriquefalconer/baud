@@ -23,19 +23,28 @@ impl Client {
     /// unchanged. Used by `baud shell-into` (`cmds/shell_into.rs`), the first command in this
     /// crate to speak WebSocket instead of one-shot REST.
     pub fn ws_url(&self, path: &str) -> String {
-        let ws_base =
-            if let Some(rest) = self.base.strip_prefix("https://") { format!("wss://{rest}") }
-            else if let Some(rest) = self.base.strip_prefix("http://") { format!("ws://{rest}") }
-            else { self.base.clone() };
+        let ws_base = if let Some(rest) = self.base.strip_prefix("https://") {
+            format!("wss://{rest}")
+        } else if let Some(rest) = self.base.strip_prefix("http://") {
+            format!("ws://{rest}")
+        } else {
+            self.base.clone()
+        };
         format!("{ws_base}{path}")
     }
 
     pub async fn get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self.http.get(&url).send().await
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
             .with_context(|| format!("GET {url}: could not connect to baud-server"))?;
         let status = resp.status();
-        let body: Value = resp.json().await
+        let body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("GET {url}: invalid JSON response"))?;
         if !status.is_success() {
             anyhow::bail!("GET {url} returned {status}: {body}");
@@ -45,10 +54,16 @@ impl Client {
 
     pub async fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self.http.delete(&url).send().await
+        let resp = self
+            .http
+            .delete(&url)
+            .send()
+            .await
             .with_context(|| format!("DELETE {url}: could not connect to baud-server"))?;
         let status = resp.status();
-        let body: Value = resp.json().await
+        let body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("DELETE {url}: invalid JSON response"))?;
         if !status.is_success() {
             anyhow::bail!("DELETE {url} returned {status}: {body}");
@@ -58,10 +73,17 @@ impl Client {
 
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self.http.post(&url).json(body).send().await
+        let resp = self
+            .http
+            .post(&url)
+            .json(body)
+            .send()
+            .await
             .with_context(|| format!("POST {url}: could not connect to baud-server"))?;
         let status = resp.status();
-        let resp_body: Value = resp.json().await
+        let resp_body: Value = resp
+            .json()
+            .await
             .with_context(|| format!("POST {url}: invalid JSON response"))?;
         if !status.is_success() {
             anyhow::bail!("POST {url} returned {status}: {resp_body}");
@@ -74,7 +96,12 @@ impl Client {
     /// degrading to a one-shot JSON snapshot.
     pub async fn stream_get(&self, path: &str) -> Result<()> {
         let url = format!("{}{}", self.base, path);
-        let resp = self.http.get(&url).header("accept", "text/event-stream").send().await
+        let resp = self
+            .http
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .send()
+            .await
             .with_context(|| format!("GET {url}: could not connect to baud-server"))?;
         let status = resp.status();
         if !status.is_success() {
@@ -82,7 +109,11 @@ impl Client {
             anyhow::bail!("GET {url} returned {status}: {body}");
         }
         let mut resp = resp;
-        while let Some(chunk) = resp.chunk().await.with_context(|| format!("GET {url}: stream read failed"))? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .with_context(|| format!("GET {url}: stream read failed"))?
+        {
             use std::io::Write;
             std::io::stdout().write_all(&chunk)?;
             std::io::stdout().flush()?;

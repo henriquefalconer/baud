@@ -3,9 +3,9 @@
 //
 // baud obs — observation access commands
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct ObsCmd {
@@ -17,20 +17,28 @@ pub struct ObsCmd {
 pub enum ObsAction {
     /// List observations for a run
     Ls {
-        #[arg(long)] run: String,
-        #[arg(long)] probe: Option<String>,
-        #[arg(long)] node: Option<u16>,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        probe: Option<String>,
+        #[arg(long)]
+        node: Option<u16>,
     },
     /// Get a specific observation
     Get {
-        #[arg(long)] run: String,
-        #[arg(long)] probe: Option<String>,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        probe: Option<String>,
     },
     /// Tail observations (streaming)
     Tail {
-        #[arg(long)] run: String,
-        #[arg(long)] probe: Option<String>,
-        #[arg(long)] node: Option<u16>,
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        probe: Option<String>,
+        #[arg(long)]
+        node: Option<u16>,
     },
 }
 
@@ -39,24 +47,40 @@ pub async fn run(cmd: ObsCmd, c: &Client, json: bool) -> Result<()> {
         ObsAction::Ls { run, probe, node } => {
             let mut url = format!("/runs/{run}/obs");
             let mut params = Vec::new();
-            if let Some(p) = probe { params.push(format!("probe={p}")); }
-            if let Some(n) = node { params.push(format!("node={n}")); }
-            if !params.is_empty() { url.push('?'); url.push_str(&params.join("&")); }
+            if let Some(p) = probe {
+                params.push(format!("probe={p}"));
+            }
+            if let Some(n) = node {
+                params.push(format!("node={n}"));
+            }
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
+            }
             let v = c.get(&url).await?;
             fmt::print(&v, json);
         }
         ObsAction::Get { run, probe } => {
             let mut url = format!("/runs/{run}/obs");
-            if let Some(p) = probe { url.push_str(&format!("?probe={p}")); }
+            if let Some(p) = probe {
+                url.push_str(&format!("?probe={p}"));
+            }
             let v = c.get(&url).await?;
             fmt::print(&v, json);
         }
         ObsAction::Tail { run, probe, node } => {
             let mut url = format!("/runs/{run}/obs/tail");
             let mut params = Vec::new();
-            if let Some(p) = probe { params.push(format!("probe={p}")); }
-            if let Some(n) = node { params.push(format!("node={n}")); }
-            if !params.is_empty() { url.push('?'); url.push_str(&params.join("&")); }
+            if let Some(p) = probe {
+                params.push(format!("probe={p}"));
+            }
+            if let Some(n) = node {
+                params.push(format!("node={n}"));
+            }
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
+            }
             if json {
                 anyhow::bail!("obs tail is an SSE stream; omit --json to consume it")
             }

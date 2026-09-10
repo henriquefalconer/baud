@@ -44,7 +44,9 @@ use std::sync::Arc;
 /// borrow conflict — each such loop clones the (cheap, usually `None`) `Option<Arc<_>>` into a
 /// local once on entry and tests that instead.
 fn flag_is_set(cancel: &Option<Arc<AtomicBool>>) -> bool {
-    cancel.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst))
+    cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::SeqCst))
 }
 
 /// All general-purpose registers in [`ExecPoint::gp_regs`]'s fixed order (RAX..R15). A free
@@ -113,8 +115,20 @@ pub struct LinuxPmuStepper<'vcpu, 'io> {
 }
 
 impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
-    pub fn new(vcpu: &'vcpu mut VcpuFd, bus: &'io mut dyn Bus, time: &'io mut dyn TimeSource) -> Self {
-        LinuxPmuStepper { vcpu, bus, time, poll_target: 0, halted: false, cancel: None, timed_out: None }
+    pub fn new(
+        vcpu: &'vcpu mut VcpuFd,
+        bus: &'io mut dyn Bus,
+        time: &'io mut dyn TimeSource,
+    ) -> Self {
+        LinuxPmuStepper {
+            vcpu,
+            bus,
+            time,
+            poll_target: 0,
+            halted: false,
+            cancel: None,
+            timed_out: None,
+        }
     }
 
     /// Install the supervisor's cancellation flag on this stepper (builder style, so the five-odd
@@ -149,7 +163,13 @@ impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
     fn read_point(&mut self) -> io::Result<ExecPoint> {
         let regs = self.vcpu.get_regs().map_err(io::Error::from)?;
         let rcb = self.current_rcb();
-        Ok(ExecPoint { rip: regs.rip, gp_regs: gp_regs_from_kvm(&regs), rcb, rcx: None, stack_checksum: None })
+        Ok(ExecPoint {
+            rip: regs.rip,
+            gp_regs: gp_regs_from_kvm(&regs),
+            rcb,
+            rcx: None,
+            stack_checksum: None,
+        })
     }
 }
 
@@ -193,9 +213,10 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                 // this match, so this fresh `get_regs()` is not competing with any live borrow —
                 // see `ConvertedExit`'s doc for why the same fetch cannot happen one level down,
                 // inside `run_and_convert` itself.
-                Ok(ConvertedExit::RdseedTrapNeedsRip) => {
-                    self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
-                }
+                Ok(ConvertedExit::RdseedTrapNeedsRip) => self
+                    .vcpu
+                    .get_regs()
+                    .map(|regs| Exit::RdseedEnforced { rip: regs.rip }),
                 Err(e) => Err(e),
             };
             match exit {
@@ -243,7 +264,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                 // rather than retrying the very ioctl that kick was sent to escape (and never as a
                 // determinism hole, which an abandoned or timed-out run is not). Unreachable unless
                 // a flag was installed *and* set.
-                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => return Err(cancelled_error()),
+                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => {
+                    return Err(cancelled_error())
+                }
                 Err(e) if e.errno() == libc::EINTR => continue,
                 Err(e) => return Err(e.into()),
             }
@@ -257,7 +280,13 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
         // just reads the caller's `TimeSource`, no fd of its own to fail) rather than panicking a
         // determinism-critical loop. `step`/`arm_overflow` surface real I/O errors.
         let rcb = self.current_rcb();
-        self.read_point().unwrap_or(ExecPoint { rip: 0, gp_regs: [0; 16], rcb, rcx: None, stack_checksum: None })
+        self.read_point().unwrap_or(ExecPoint {
+            rip: 0,
+            gp_regs: [0; 16],
+            rcb,
+            rcx: None,
+            stack_checksum: None,
+        })
     }
 
     /// Retire exactly one guest instruction under `KVM_GUESTDBG_SINGLESTEP | BLOCKIRQ`
@@ -299,9 +328,10 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
         let result = loop {
             let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
                 Ok(ConvertedExit::Exit(exit)) => Ok(exit),
-                Ok(ConvertedExit::RdseedTrapNeedsRip) => {
-                    self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
-                }
+                Ok(ConvertedExit::RdseedTrapNeedsRip) => self
+                    .vcpu
+                    .get_regs()
+                    .map(|regs| Exit::RdseedEnforced { rip: regs.rip }),
                 Err(e) => Err(e),
             };
             match exit {
@@ -347,7 +377,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                 // See `run_until_exit`'s identical arm. `break` (not `return`) so this method's own
                 // `set_singlestep(false)` still runs on the way out — a cancelled or timed-out run
                 // must leave the vCPU in the same state every other exit path leaves it in.
-                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => break Err(cancelled_error()),
+                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => {
+                    break Err(cancelled_error())
+                }
                 Err(e) if e.errno() == libc::EINTR => continue,
                 Err(e) => break Err(e.into()),
             }
@@ -382,9 +414,10 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
             }
             let exit = match run_and_convert_rcb_bracketed(self.vcpu, self.time) {
                 Ok(ConvertedExit::Exit(exit)) => Ok(exit),
-                Ok(ConvertedExit::RdseedTrapNeedsRip) => {
-                    self.vcpu.get_regs().map(|regs| Exit::RdseedEnforced { rip: regs.rip })
-                }
+                Ok(ConvertedExit::RdseedTrapNeedsRip) => self
+                    .vcpu
+                    .get_regs()
+                    .map(|regs| Exit::RdseedEnforced { rip: regs.rip }),
                 Err(e) => Err(e),
             };
             match exit {
@@ -442,7 +475,9 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
                     Err(hole) => return Err(io::Error::other(hole.to_string())),
                 },
                 // See `run_until_exit`'s identical arm.
-                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => return Err(cancelled_error()),
+                Err(_) if flag_is_set(&cancel) || flag_is_set(&timed_out) => {
+                    return Err(cancelled_error())
+                }
                 Err(e) if e.errno() == libc::EINTR => continue,
                 Err(e) => return Err(e.into()),
             }

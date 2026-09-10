@@ -10,11 +10,11 @@
 // - Tokens held as SecretString, never bare String
 // - The server is the sole trust root
 
-use std::time::{SystemTime, UNIX_EPOCH};
 use baud_secret::SecretString;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const TOKEN_TTL_SECS: u64 = 600; // 10 minutes
 pub const RENEW_BEFORE_EXPIRY_SECS: u64 = 60; // renew 1 minute before expiry
@@ -65,12 +65,12 @@ pub struct RootKey {
 impl RootKey {
     /// Create a new root key from a base64-encoded 32-byte ed25519 seed.
     pub fn from_seed_b64(seed_b64: &str) -> Result<Self, IdentityError> {
-        let bytes = decode_b64(seed_b64)
-            .map_err(|e| IdentityError::InvalidSigningKey(e))?;
+        let bytes = decode_b64(seed_b64).map_err(|e| IdentityError::InvalidSigningKey(e))?;
         if bytes.len() != 32 {
-            return Err(IdentityError::InvalidSigningKey(
-                format!("expected 32 bytes, got {}", bytes.len()),
-            ));
+            return Err(IdentityError::InvalidSigningKey(format!(
+                "expected 32 bytes, got {}",
+                bytes.len()
+            )));
         }
         let seed: [u8; 32] = bytes.try_into().unwrap();
         let signing_key = SigningKey::from_bytes(&seed);
@@ -128,7 +128,12 @@ impl RootKey {
         exp: u64,
         node: Option<u16>,
     ) -> Result<SecretString, IdentityError> {
-        let claims = Claims { sub, iat, exp, node };
+        let claims = Claims {
+            sub,
+            iat,
+            exp,
+            node,
+        };
         self.mint_claims(claims)
     }
 
@@ -148,7 +153,8 @@ impl RootKey {
         // Reconstruct signing key from stored bytes
         let bytes = decode_b64(self.signing_key_bytes.expose())
             .map_err(|e| IdentityError::InvalidSigningKey(e))?;
-        let seed: [u8; 32] = bytes.try_into()
+        let seed: [u8; 32] = bytes
+            .try_into()
             .map_err(|_| IdentityError::InvalidSigningKey("bad length".into()))?;
         let signing_key = SigningKey::from_bytes(&seed);
         let pk_bytes = signing_key.verifying_key().to_bytes();
@@ -233,7 +239,6 @@ fn der_from_ed25519_pkcs8(seed: &[u8; 32], _pk: &[u8; 32]) -> Vec<u8> {
     der_tlv(0x30, &body)
 }
 
-
 /// Build a DER TLV (tag, length, value).
 fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     let mut out = vec![tag];
@@ -286,14 +291,22 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i + 3 < bytes.len() {
-        let a = *TABLE.get(bytes[i] as usize).filter(|&&x| x != 255)
+        let a = *TABLE
+            .get(bytes[i] as usize)
+            .filter(|&&x| x != 255)
             .ok_or_else(|| format!("invalid char at {i}"))? as u32;
-        let b = *TABLE.get(bytes[i+1] as usize).filter(|&&x| x != 255)
-            .ok_or_else(|| format!("invalid char at {}", i+1))? as u32;
-        let c = *TABLE.get(bytes[i+2] as usize).filter(|&&x| x != 255)
-            .ok_or_else(|| format!("invalid char at {}", i+2))? as u32;
-        let d = *TABLE.get(bytes[i+3] as usize).filter(|&&x| x != 255)
-            .ok_or_else(|| format!("invalid char at {}", i+3))? as u32;
+        let b = *TABLE
+            .get(bytes[i + 1] as usize)
+            .filter(|&&x| x != 255)
+            .ok_or_else(|| format!("invalid char at {}", i + 1))? as u32;
+        let c = *TABLE
+            .get(bytes[i + 2] as usize)
+            .filter(|&&x| x != 255)
+            .ok_or_else(|| format!("invalid char at {}", i + 2))? as u32;
+        let d = *TABLE
+            .get(bytes[i + 3] as usize)
+            .filter(|&&x| x != 255)
+            .ok_or_else(|| format!("invalid char at {}", i + 3))? as u32;
         out.push(((a << 2) | (b >> 4)) as u8);
         out.push(((b << 4) | (c >> 2)) as u8);
         out.push(((c << 6) | d) as u8);
@@ -301,17 +314,27 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     }
     let rem = bytes.len() - i;
     if rem == 2 {
-        let a = *TABLE.get(bytes[i] as usize).filter(|&&x| x != 255)
+        let a = *TABLE
+            .get(bytes[i] as usize)
+            .filter(|&&x| x != 255)
             .ok_or("invalid char")? as u32;
-        let b = *TABLE.get(bytes[i+1] as usize).filter(|&&x| x != 255)
+        let b = *TABLE
+            .get(bytes[i + 1] as usize)
+            .filter(|&&x| x != 255)
             .ok_or("invalid char")? as u32;
         out.push(((a << 2) | (b >> 4)) as u8);
     } else if rem == 3 {
-        let a = *TABLE.get(bytes[i] as usize).filter(|&&x| x != 255)
+        let a = *TABLE
+            .get(bytes[i] as usize)
+            .filter(|&&x| x != 255)
             .ok_or("invalid char")? as u32;
-        let b = *TABLE.get(bytes[i+1] as usize).filter(|&&x| x != 255)
+        let b = *TABLE
+            .get(bytes[i + 1] as usize)
+            .filter(|&&x| x != 255)
             .ok_or("invalid char")? as u32;
-        let c = *TABLE.get(bytes[i+2] as usize).filter(|&&x| x != 255)
+        let c = *TABLE
+            .get(bytes[i + 2] as usize)
+            .filter(|&&x| x != 255)
             .ok_or("invalid char")? as u32;
         out.push(((a << 2) | (b >> 4)) as u8);
         out.push(((b << 4) | (c >> 2)) as u8);
@@ -325,8 +348,8 @@ fn encode_b64(bytes: &[u8]) -> String {
     let mut i = 0;
     while i + 2 < bytes.len() {
         let a = bytes[i] as u32;
-        let b = bytes[i+1] as u32;
-        let c = bytes[i+2] as u32;
+        let b = bytes[i + 1] as u32;
+        let c = bytes[i + 2] as u32;
         out.push(CHARS[((a >> 2) & 0x3F) as usize] as char);
         out.push(CHARS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
         out.push(CHARS[(((b & 0xF) << 2) | (c >> 6)) as usize] as char);
@@ -337,16 +360,16 @@ fn encode_b64(bytes: &[u8]) -> String {
         1 => {
             let a = bytes[i] as u32;
             out.push(CHARS[((a >> 2) & 0x3F) as usize] as char);
-            out.push(CHARS[(((a & 3) << 4)) as usize] as char);
+            out.push(CHARS[((a & 3) << 4) as usize] as char);
             out.push('=');
             out.push('=');
         }
         2 => {
             let a = bytes[i] as u32;
-            let b = bytes[i+1] as u32;
+            let b = bytes[i + 1] as u32;
             out.push(CHARS[((a >> 2) & 0x3F) as usize] as char);
             out.push(CHARS[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-            out.push(CHARS[(((b & 0xF) << 2)) as usize] as char);
+            out.push(CHARS[((b & 0xF) << 2) as usize] as char);
             out.push('=');
         }
         _ => {}
@@ -414,14 +437,14 @@ mod tests {
         // Mint a token with iat=0, exp=660 (11 minutes from epoch — expired since 2026)
         let iat = 0u64;
         let exp = 660u64; // 11 minutes in seconds, which is in 1970 — definitely expired
-        let token = root.mint_with_timestamps(
-            "baud://tape/sb-1/run/r-1".into(),
-            iat,
-            exp,
-            None,
-        ).expect("mint");
+        let token = root
+            .mint_with_timestamps("baud://tape/sb-1/run/r-1".into(), iat, exp, None)
+            .expect("mint");
         let result = root.verify(token.expose());
-        assert!(result.is_err(), "expired_token_is_refused: verify must return Err for expired token");
+        assert!(
+            result.is_err(),
+            "expired_token_is_refused: verify must return Err for expired token"
+        );
     }
 
     /// wrong_root_key_is_refused: a token minted by one root key must be rejected by a
@@ -433,7 +456,10 @@ mod tests {
         // Mint with root_a, verify with root_b
         let token = root_a.mint_tape_token("sb-1", "run-1").expect("mint");
         let result = root_b.verify(token.expose());
-        assert!(result.is_err(), "wrong_root_key_is_refused: root_b must reject token minted by root_a");
+        assert!(
+            result.is_err(),
+            "wrong_root_key_is_refused: root_b must reject token minted by root_a"
+        );
     }
 
     #[test]

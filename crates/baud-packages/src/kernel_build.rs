@@ -52,11 +52,19 @@ fn run_make(kernel_src: &Path, cc: &str, args: &[&str]) -> Result<()> {
     for (key, value) in deterministic_build_env() {
         cmd.env(key, value);
     }
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to spawn `make CC={cc} {}` in {}", args.join(" "), kernel_src.display()))?;
+    let status = cmd.status().with_context(|| {
+        format!(
+            "failed to spawn `make CC={cc} {}` in {}",
+            args.join(" "),
+            kernel_src.display()
+        )
+    })?;
     if !status.success() {
-        bail!("`make CC={cc} {}` failed with {status} in {}", args.join(" "), kernel_src.display());
+        bail!(
+            "`make CC={cc} {}` failed with {status} in {}",
+            args.join(" "),
+            kernel_src.display()
+        );
     }
     Ok(())
 }
@@ -72,7 +80,10 @@ pub fn build_bzimage(cfg: &KernelBuildConfig) -> Result<PathBuf> {
         );
     }
     let config_fragment = cfg.config_fragment.canonicalize().with_context(|| {
-        format!("config fragment {} not found", cfg.config_fragment.display())
+        format!(
+            "config fragment {} not found",
+            cfg.config_fragment.display()
+        )
     })?;
 
     run_make(cfg.kernel_src, cfg.cc, &["mrproper"])?;
@@ -96,9 +107,11 @@ pub fn build_bzimage(cfg: &KernelBuildConfig) -> Result<PathBuf> {
 
     run_make(cfg.kernel_src, cfg.cc, &["olddefconfig"])?;
 
-    let jobs = cfg
-        .jobs
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let jobs = cfg.jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
     let jobs_flag = format!("-j{jobs}");
     run_make(cfg.kernel_src, cfg.cc, &[jobs_flag.as_str(), "bzImage"])?;
 
@@ -126,7 +139,11 @@ mod tests {
             jobs: Some(1),
         };
         let err = build_bzimage(&cfg).unwrap_err();
-        assert!(err.to_string().contains("does not look like a kernel source tree"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("does not look like a kernel source tree"),
+            "{err}"
+        );
     }
 
     /// Real-hardware reproducibility test (todo.md §4.5's spec-named `image_build_is_reproducible`
@@ -150,7 +167,12 @@ mod tests {
             );
             return;
         }
-        if Command::new("gcc-13").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        if Command::new("gcc-13")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
             eprintln!("Skipping image_build_is_reproducible: gcc-13 not found on PATH");
             return;
         }
@@ -167,7 +189,12 @@ mod tests {
                 .arg(scratch)
                 .status()
                 .expect("failed to spawn cp -a");
-            assert!(status.success(), "cp -a {} -> {} failed", kernel_src.display(), scratch.display());
+            assert!(
+                status.success(),
+                "cp -a {} -> {} failed",
+                kernel_src.display(),
+                scratch.display()
+            );
         }
 
         let bz_a = build_bzimage(&KernelBuildConfig {

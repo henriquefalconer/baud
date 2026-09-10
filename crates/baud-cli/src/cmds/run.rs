@@ -3,10 +3,10 @@
 //
 // baud run — run management commands
 
+use crate::{client::Client, fmt};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use crate::{client::Client, fmt};
 
 #[derive(Parser)]
 pub struct RunCmd {
@@ -354,15 +354,24 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
             fmt::print(&v, json);
         }
         RunAction::Watch { run: id } => {
-            // Stub: poll status (SSE in M3+)
-            let v = c.get(&format!("/runs/{id}")).await?;
-            fmt::print(&v, json);
+            if json {
+                anyhow::bail!("run watch is an SSE stream; omit --json to consume it");
+            }
+            c.stream_get(&format!("/runs/{id}/obs/tail")).await?;
         }
         RunAction::Pause { run: id } => {
-            eprintln!("run pause {id}: not yet implemented (M4+)");
+            let v = c.post(&format!("/runs/{id}/pause"), &json!({})).await?;
+            fmt::print(&v, json);
+            if v.get("error").is_some() {
+                std::process::exit(1);
+            }
         }
         RunAction::Resume { run: id } => {
-            eprintln!("run resume {id}: not yet implemented (M4+)");
+            let v = c.post(&format!("/runs/{id}/resume"), &json!({})).await?;
+            fmt::print(&v, json);
+            if v.get("error").is_some() {
+                std::process::exit(1);
+            }
         }
         RunAction::Kvm {
             kernel,
@@ -473,7 +482,11 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                 if !frame_run_ids.is_empty() {
                     body["frame_run_ids"] = json!(frame_run_ids
                         .iter()
-                        .map(|s| if s.is_empty() { serde_json::Value::Null } else { json!(s) })
+                        .map(|s| if s.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            json!(s)
+                        })
                         .collect::<Vec<_>>());
                 }
             }
@@ -531,7 +544,11 @@ pub async fn run(cmd: RunCmd, c: &Client, json: bool) -> Result<()> {
                 if !frame_run_ids.is_empty() {
                     body["frame_run_ids"] = json!(frame_run_ids
                         .iter()
-                        .map(|s| if s.is_empty() { serde_json::Value::Null } else { json!(s) })
+                        .map(|s| if s.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            json!(s)
+                        })
                         .collect::<Vec<_>>());
                 }
             }

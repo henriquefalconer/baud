@@ -20,8 +20,8 @@ use anyhow::Result;
 pub mod adapter;
 pub mod parse;
 
-pub use adapter::{InputAdapter, ProbeAdapter, DisplayAdapter, Adapter};
-pub use parse::{SpecDoc, NodeSpec, FilesEntry};
+pub use adapter::{Adapter, DisplayAdapter, InputAdapter, ProbeAdapter};
+pub use parse::{FilesEntry, NodeSpec, SpecDoc};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -52,7 +52,10 @@ mod tests {
 bogus: 1
 nix: "./flake.nix#hello"
 "#;
-        assert!(lint(yaml).is_err(), "unknown directive must be a hard error");
+        assert!(
+            lint(yaml).is_err(),
+            "unknown directive must be a hard error"
+        );
     }
 
     #[test]
@@ -214,7 +217,11 @@ nodes:
 "#;
         let doc = lint(yaml).expect("top-level adapters directive must lint ok");
         let top = doc.adapters.expect("top-level adapters must be Some(...)");
-        assert_eq!(top.probes.len(), 1, "top-level probes must have exactly one entry");
+        assert_eq!(
+            top.probes.len(),
+            1,
+            "top-level probes must have exactly one entry"
+        );
         assert!(
             matches!(top.probes[0], ProbeAdapter::StdoutKv { .. }),
             "top-level probe 'stdout-kv' must be parsed as StdoutKv"

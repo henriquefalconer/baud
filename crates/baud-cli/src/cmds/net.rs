@@ -3,9 +3,9 @@
 //
 // baud net — network weather timeline commands (M5)
 
+use crate::client::Client;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use crate::client::Client;
 
 #[derive(Parser)]
 pub struct NetCmd {

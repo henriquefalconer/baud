@@ -8,15 +8,15 @@
 //   - Knows byte surfaces, dimensions, and formats — never what is depicted
 //   - Soft budget ≤ 1,200 LOC
 
+pub mod frame;
 pub mod qoi;
 pub mod y4m;
-pub mod frame;
 
 /// Maximum raw frame payload accepted from a guest. Conversion to RGBA can allocate four times
 /// the input, so reject unreasonable geometry before hashing or rendering it.
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 
-pub use frame::{FrameProcessor, FrameError, ProcessedFrame};
+pub use frame::{FrameError, FrameProcessor, ProcessedFrame};
 pub use qoi::encode_qoi;
 pub use y4m::Y4mWriter;
 
@@ -33,10 +33,17 @@ pub fn fingerprint(
     format: &PixFmt,
 ) -> Result<baud_proto::Hash, FrameError> {
     let expected = checked_expected_size(width, height, format).ok_or_else(|| {
-        FrameError::GeometryOverflow { width, height, format: format.clone() }
+        FrameError::GeometryOverflow {
+            width,
+            height,
+            format: format.clone(),
+        }
     })?;
     if expected > MAX_FRAME_BYTES {
-        return Err(FrameError::GeometryTooLarge { limit: MAX_FRAME_BYTES, got: expected });
+        return Err(FrameError::GeometryTooLarge {
+            limit: MAX_FRAME_BYTES,
+            got: expected,
+        });
     }
     if buf.len() != expected {
         return Err(FrameError::SizeMismatch {
@@ -72,24 +79,26 @@ pub fn indexed8_to_rgba(buf: &[u8]) -> Vec<u8> {
 
 /// Convert an Rgb565 frame to RGBA8888.
 pub fn rgb565_to_rgba(buf: &[u8]) -> Vec<u8> {
-    buf.chunks_exact(2).flat_map(|pair| {
-        let word = u16::from_le_bytes([pair[0], pair[1]]);
-        let r = ((word >> 11) & 0x1f) as u8;
-        let g = ((word >> 5) & 0x3f) as u8;
-        let b = (word & 0x1f) as u8;
-        // Scale to 8-bit
-        let r8 = (r << 3) | (r >> 2);
-        let g8 = (g << 2) | (g >> 4);
-        let b8 = (b << 3) | (b >> 2);
-        [r8, g8, b8, 255u8]
-    }).collect()
+    buf.chunks_exact(2)
+        .flat_map(|pair| {
+            let word = u16::from_le_bytes([pair[0], pair[1]]);
+            let r = ((word >> 11) & 0x1f) as u8;
+            let g = ((word >> 5) & 0x3f) as u8;
+            let b = (word & 0x1f) as u8;
+            // Scale to 8-bit
+            let r8 = (r << 3) | (r >> 2);
+            let g8 = (g << 2) | (g >> 4);
+            let b8 = (b << 3) | (b >> 2);
+            [r8, g8, b8, 255u8]
+        })
+        .collect()
 }
 
 /// Produce RGBA8888 bytes regardless of input format.
 pub fn to_rgba(buf: &[u8], format: &PixFmt) -> Vec<u8> {
     match format {
         PixFmt::Rgba8888 => buf.to_vec(),
-        PixFmt::Rgb565   => rgb565_to_rgba(buf),
+        PixFmt::Rgb565 => rgb565_to_rgba(buf),
         PixFmt::Indexed8 => indexed8_to_rgba(buf),
     }
 }
@@ -112,10 +121,14 @@ pub fn ingest(
         node: Some(node),
         invariant: None,
         signal: None,
-        detail: format!("frame-format: expected {}x{}x{:?} ({} bytes), got {} bytes",
-            width, height, format,
+        detail: format!(
+            "frame-format: expected {}x{}x{:?} ({} bytes), got {} bytes",
+            width,
+            height,
+            format,
             expected_size(width, height, format),
-            buf.len()),
+            buf.len()
+        ),
     })
 }
 
@@ -177,7 +190,10 @@ mod tests {
     #[test]
     fn fingerprint_rejects_geometry_overflow() {
         let err = fingerprint(&[], u32::MAX, u32::MAX, &PixFmt::Rgba8888).unwrap_err();
-        assert!(matches!(err, FrameError::GeometryTooLarge { .. } | FrameError::GeometryOverflow { .. }));
+        assert!(matches!(
+            err,
+            FrameError::GeometryTooLarge { .. } | FrameError::GeometryOverflow { .. }
+        ));
     }
 
     #[test]
@@ -240,7 +256,10 @@ mod tests {
         let buf = vec![42u8; 64]; // 8x8 indexed8
         let h1 = fingerprint(&buf, 8, 8, &PixFmt::Indexed8).unwrap();
         let h2 = fingerprint(&buf, 8, 8, &PixFmt::Indexed8).unwrap();
-        assert_eq!(h1, h2, "frame_hashes_double_run_identical: same pixel data must hash identically");
+        assert_eq!(
+            h1, h2,
+            "frame_hashes_double_run_identical: same pixel data must hash identically"
+        );
 
         // Also verify via FrameProcessor (accumulating path)
         let mut p1 = FrameProcessor::new(0, 8, 8, PixFmt::Indexed8);
@@ -249,7 +268,10 @@ mod tests {
         p2.ingest(0, &buf, true).unwrap();
         let hashes1 = p1.frame_hashes();
         let hashes2 = p2.frame_hashes();
-        assert_eq!(hashes1, hashes2, "frame_hashes_double_run_identical: FrameProcessor must agree");
+        assert_eq!(
+            hashes1, hashes2,
+            "frame_hashes_double_run_identical: FrameProcessor must agree"
+        );
     }
 
     /// render_is_byte_identical: rendering (to_rgba) of the same frame buffer must
@@ -259,13 +281,19 @@ mod tests {
         let buf = vec![0xABu8; 8]; // 2x2 rgb565
         let rgba1 = to_rgba(&buf, &PixFmt::Rgb565);
         let rgba2 = to_rgba(&buf, &PixFmt::Rgb565);
-        assert_eq!(rgba1, rgba2, "render_is_byte_identical: pixel conversion must be deterministic");
+        assert_eq!(
+            rgba1, rgba2,
+            "render_is_byte_identical: pixel conversion must be deterministic"
+        );
 
         // Also check indexed8
         let ibuf = vec![128u8; 16]; // 4x4 indexed8
         let r1 = to_rgba(&ibuf, &PixFmt::Indexed8);
         let r2 = to_rgba(&ibuf, &PixFmt::Indexed8);
-        assert_eq!(r1, r2, "render_is_byte_identical: indexed8 conversion must be deterministic");
+        assert_eq!(
+            r1, r2,
+            "render_is_byte_identical: indexed8 conversion must be deterministic"
+        );
     }
 
     /// bad_geometry_is_a_crash: ingesting a buffer shorter than the declared geometry
@@ -275,14 +303,21 @@ mod tests {
         // 1x1 RGBA8888 requires 4 bytes; provide only 3
         let short_buf = vec![0u8; 3];
         let result = ingest(0, 1, 1, 1, &PixFmt::Rgba8888, &short_buf);
-        assert!(result.is_err(), "bad_geometry_is_a_crash: wrong-size buffer must return Err");
+        assert!(
+            result.is_err(),
+            "bad_geometry_is_a_crash: wrong-size buffer must return Err"
+        );
         match result.unwrap_err() {
             Outcome::Crash { detail, node, .. } => {
                 assert!(
                     detail.contains("frame-format"),
                     "bad_geometry_is_a_crash: Crash detail must contain 'frame-format', got: {detail}"
                 );
-                assert_eq!(node, Some(0), "bad_geometry_is_a_crash: Crash must carry node id");
+                assert_eq!(
+                    node,
+                    Some(0),
+                    "bad_geometry_is_a_crash: Crash must carry node id"
+                );
             }
             other => panic!("bad_geometry_is_a_crash: expected Outcome::Crash, got {other:?}"),
         }

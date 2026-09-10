@@ -7,14 +7,14 @@
 //   GET  /runs/:id/net/weather          → weather timeline (partition/delay events)
 //   POST /runs/:id/net/weather          → append a weather event (from agent)
 
+use crate::state::unix_now;
+use crate::AppState;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
-use crate::state::unix_now;
 
 // ---------------------------------------------------------------------------
 // POST /runs/:id/net/weather — record a net event
@@ -62,15 +62,22 @@ pub async fn append_event(
 // GET /runs/:id/net/weather — return the recorded partition/delay timeline
 // ---------------------------------------------------------------------------
 
-pub async fn weather(
-    State(state): State<AppState>,
-    Path(run_id): Path<String>,
-) -> Json<Value> {
-    let rows = sqlx::query_as::<_, (i64, String, Option<i64>, Option<i64>, Option<i64>, Option<f64>)>(
+pub async fn weather(State(state): State<AppState>, Path(run_id): Path<String>) -> Json<Value> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<f64>,
+        ),
+    >(
         "SELECT step, kind, from_node, to_node, delay_ticks, drop_prob
          FROM net_events
          WHERE run_id = ?
-         ORDER BY step ASC"
+         ORDER BY step ASC",
     )
     .bind(&run_id)
     .fetch_all(&state.db)
@@ -78,16 +85,19 @@ pub async fn weather(
 
     match rows {
         Ok(rows) => {
-            let events: Vec<Value> = rows.into_iter().map(|(step, kind, from_node, to_node, delay_ticks, drop_prob)| {
-                json!({
-                    "step": step,
-                    "kind": kind,
-                    "from_node": from_node,
-                    "to_node": to_node,
-                    "delay_ticks": delay_ticks,
-                    "drop_prob": drop_prob,
+            let events: Vec<Value> = rows
+                .into_iter()
+                .map(|(step, kind, from_node, to_node, delay_ticks, drop_prob)| {
+                    json!({
+                        "step": step,
+                        "kind": kind,
+                        "from_node": from_node,
+                        "to_node": to_node,
+                        "delay_ticks": delay_ticks,
+                        "drop_prob": drop_prob,
+                    })
                 })
-            }).collect();
+                .collect();
             Json(json!({ "run_id": run_id, "weather": events }))
         }
         Err(e) => Json(json!({ "error": format!("db error: {e}") })),
@@ -106,7 +116,14 @@ pub async fn simulate_weather(
     let now = unix_now() as i64;
     // Generate a Markov partition sequence: on at step 10, off at step 30
     let events = vec![
-        (10i64, "partition_on", None::<i64>, None::<i64>, None::<i64>, None::<f64>),
+        (
+            10i64,
+            "partition_on",
+            None::<i64>,
+            None::<i64>,
+            None::<i64>,
+            None::<f64>,
+        ),
         (30i64, "partition_off", None, None, None, None),
         (50i64, "delay", Some(0), Some(1), Some(5i64), None),
         (70i64, "delay", Some(1), Some(2), Some(3i64), None),
@@ -136,7 +153,9 @@ pub async fn simulate_weather(
         .bind(now)
         .execute(&state.db)
         .await;
-        if r.is_ok() { count += 1; }
+        if r.is_ok() {
+            count += 1;
+        }
     }
 
     Json(json!({ "ok": true, "run_id": run_id, "events_generated": count }))

@@ -283,14 +283,13 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
     let pde_page_count = two_mb_pages_needed.div_ceil(PAGE_TABLE_ENTRY_COUNT).max(1);
 
     let mut pde_pages = Vec::with_capacity(pde_page_count + 1); // +1 for the virtio-mmio-window page below
-    // `pde_page_index` is used for its own arithmetic value (the PDPTE-entry address offset and
-    // the leaf-GPA calculation below), not just to index `pdpte` — `enumerate()` wouldn't remove
-    // any of that arithmetic, only rename the index.
+                                                                // `pde_page_index` is used for its own arithmetic value (the PDPTE-entry address offset and
+                                                                // the leaf-GPA calculation below), not just to index `pdpte` — `enumerate()` wouldn't remove
+                                                                // any of that arithmetic, only rename the index.
     #[allow(clippy::needless_range_loop)]
     for pde_page_index in 0..pde_page_count {
-        pdpte[pde_page_index] = (PDE_ADDR + (pde_page_index as u64) * 0x1000)
-            | PTE_PRESENT
-            | PTE_WRITABLE;
+        pdpte[pde_page_index] =
+            (PDE_ADDR + (pde_page_index as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE;
 
         let mut pde = [0u64; PAGE_TABLE_ENTRY_COUNT];
         for (entry_index, entry) in pde.iter_mut().enumerate() {
@@ -326,7 +325,8 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
         "the virtio-mmio window's PDPTE entry must not collide with a RAM-covering one"
     );
     let mut mmio_pde = [0u64; PAGE_TABLE_ENTRY_COUNT];
-    mmio_pde[mmio_pde_index] = VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
+    mmio_pde[mmio_pde_index] =
+        VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
 
     // The LAPIC MMIO window ([`LAPIC_MMIO_BASE`], `crate::lapic`) shares this same 1 GiB PDPTE
     // region with the virtio-mmio window (`_STATIC_LAYOUT_INVARIANTS` above asserts this), so its
@@ -335,7 +335,10 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
     // would take a genuine `#PF` reaching it, exactly the bug this same treatment already fixed
     // for the virtio-mmio window (`virtio-rng-guest`'s first boot attempt).
     let lapic_pde_index = ((LAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
-    assert!(lapic_pde_index != mmio_pde_index, "the two device windows must not alias one leaf");
+    assert!(
+        lapic_pde_index != mmio_pde_index,
+        "the two device windows must not alias one leaf"
+    );
     mmio_pde[lapic_pde_index] = LAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
 
     let mmio_pde_page_index = pde_pages.len();
@@ -343,7 +346,11 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
         (PDE_ADDR + (mmio_pde_page_index as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE;
     pde_pages.push(mmio_pde);
 
-    IdentityPageTables { pml4, pdpte, pde_pages }
+    IdentityPageTables {
+        pml4,
+        pdpte,
+        pde_pages,
+    }
 }
 
 #[cfg(test)]
@@ -351,7 +358,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initramfs_load_addr_is_unchanged_for_any_kernel_small_enough_to_fit_under_the_old_constant() {
+    fn initramfs_load_addr_is_unchanged_for_any_kernel_small_enough_to_fit_under_the_old_constant()
+    {
         // Every fixture kernel in this workspace (todo.md §4.1's no-modules minimal config) has an
         // init_size far under `INITRAMFS_ADDR - KERNEL_LOAD_ADDR` (30 MiB) -- confirm the new
         // dynamic placement is a no-op for them, so no existing boot's placement changes.
@@ -376,7 +384,10 @@ mod tests {
             addr >= KERNEL_LOAD_ADDR + u64::from(UBUNTU_INIT_SIZE),
             "initramfs must load at or after the kernel's own decompression scratch space ends"
         );
-        assert!(addr > INITRAMFS_ADDR, "this kernel's footprint exceeds the old fixed constant");
+        assert!(
+            addr > INITRAMFS_ADDR,
+            "this kernel's footprint exceeds the old fixed constant"
+        );
         assert_eq!(addr % 0x1000, 0, "must stay 4 KiB-aligned");
     }
 
@@ -384,7 +395,10 @@ mod tests {
     fn pml4_entry_zero_points_at_pdpte_present_and_writable() {
         let tables = build_identity_page_tables(GUEST_RAM_SIZE);
         assert_eq!(tables.pml4[0], PDPTE_ADDR | PTE_PRESENT | PTE_WRITABLE);
-        assert!(tables.pml4[1..].iter().all(|&e| e == 0), "only entry 0 is used below 512 GiB");
+        assert!(
+            tables.pml4[1..].iter().all(|&e| e == 0),
+            "only entry 0 is used below 512 GiB"
+        );
     }
 
     #[test]
@@ -394,7 +408,10 @@ mod tests {
         // contiguous PDPTE index) -- only the RAM-covering pages before it are contiguous.
         let ram_pde_pages = tables.pde_pages.len() - 1;
         for i in 0..ram_pde_pages {
-            assert_eq!(tables.pdpte[i], (PDE_ADDR + (i as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE);
+            assert_eq!(
+                tables.pdpte[i],
+                (PDE_ADDR + (i as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE
+            );
             assert!(!tables.pde_pages[i].is_empty());
         }
     }
@@ -403,16 +420,30 @@ mod tests {
     fn every_2mb_of_ram_is_identity_mapped_present_writable_2mb_page() {
         let ram = 256 * 1024 * 1024; // 256 MiB -> 128 leaf entries, all in one PDE page
         let tables = build_identity_page_tables(ram);
-        assert_eq!(tables.pde_pages.len(), 2, "one RAM page plus the dedicated virtio-mmio-window page");
+        assert_eq!(
+            tables.pde_pages.len(),
+            2,
+            "one RAM page plus the dedicated virtio-mmio-window page"
+        );
         let pde = &tables.pde_pages[0];
         let mapped_count = ram / (PDE_PAGE_SIZE_BYTES as usize);
         for (i, &entry) in pde.iter().enumerate() {
             if i < mapped_count {
                 let expected_gpa = (i as u64) * PDE_PAGE_SIZE_BYTES;
-                assert_eq!(entry, expected_gpa | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB);
-                assert_eq!(entry & !0xFFF, expected_gpa, "identity map: virtual == physical");
+                assert_eq!(
+                    entry,
+                    expected_gpa | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
+                );
+                assert_eq!(
+                    entry & !0xFFF,
+                    expected_gpa,
+                    "identity map: virtual == physical"
+                );
             } else {
-                assert_eq!(entry, 0, "past RAM must be not-present, never a fabricated mapping");
+                assert_eq!(
+                    entry, 0,
+                    "past RAM must be not-present, never a fabricated mapping"
+                );
             }
         }
     }
@@ -421,7 +452,11 @@ mod tests {
     fn ram_larger_than_one_gib_spans_multiple_pde_pages() {
         let ram = 1536 * 1024 * 1024; // 1.5 GiB -> needs 2 RAM PDE pages (768 leaf entries)
         let tables = build_identity_page_tables(ram);
-        assert_eq!(tables.pde_pages.len(), 3, "2 RAM pages plus the dedicated virtio-mmio-window page");
+        assert_eq!(
+            tables.pde_pages.len(),
+            3,
+            "2 RAM pages plus the dedicated virtio-mmio-window page"
+        );
         // Last mapped leaf entry (index 767, in the second RAM PDE page at offset 255).
         let last_mapped = &tables.pde_pages[1][255];
         assert_eq!(*last_mapped & !0xFFF, 767 * PDE_PAGE_SIZE_BYTES);
@@ -441,10 +476,17 @@ mod tests {
         let mmio_pdpte_index = (VIRTIO_MMIO_RNG_BASE / (1u64 << 30)) as usize;
         let mmio_pde_index = ((VIRTIO_MMIO_RNG_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
 
-        assert_ne!(mmio_pdpte_index, 0, "must not collide with RAM's own PDPTE entry 0");
-        let mmio_pde_page = tables.pde_pages.last().expect("at least one PDE page always exists");
-        let expected_pdpte_entry =
-            (PDE_ADDR + ((tables.pde_pages.len() - 1) as u64) * 0x1000) | PTE_PRESENT | PTE_WRITABLE;
+        assert_ne!(
+            mmio_pdpte_index, 0,
+            "must not collide with RAM's own PDPTE entry 0"
+        );
+        let mmio_pde_page = tables
+            .pde_pages
+            .last()
+            .expect("at least one PDE page always exists");
+        let expected_pdpte_entry = (PDE_ADDR + ((tables.pde_pages.len() - 1) as u64) * 0x1000)
+            | PTE_PRESENT
+            | PTE_WRITABLE;
         assert_eq!(tables.pdpte[mmio_pdpte_index], expected_pdpte_entry);
 
         assert_eq!(
@@ -456,7 +498,10 @@ mod tests {
         let lapic_pde_index = ((LAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
         for (i, &entry) in mmio_pde_page.iter().enumerate() {
             if i != mmio_pde_index && i != lapic_pde_index {
-                assert_eq!(entry, 0, "no fabricated mapping outside the two device windows");
+                assert_eq!(
+                    entry, 0,
+                    "no fabricated mapping outside the two device windows"
+                );
             }
         }
     }
@@ -475,7 +520,10 @@ mod tests {
             (VIRTIO_MMIO_RNG_BASE / (1u64 << 30)) as usize,
             "both device windows share one PDPTE entry"
         );
-        let mmio_pde_page = tables.pde_pages.last().expect("at least one PDE page always exists");
+        let mmio_pde_page = tables
+            .pde_pages
+            .last()
+            .expect("at least one PDE page always exists");
         assert_eq!(
             mmio_pde_page[lapic_pde_index],
             LAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
@@ -484,7 +532,10 @@ mod tests {
 
     #[test]
     fn identity_map_is_a_pure_function_of_ram_size() {
-        assert_eq!(build_identity_page_tables(GUEST_RAM_SIZE), build_identity_page_tables(GUEST_RAM_SIZE));
+        assert_eq!(
+            build_identity_page_tables(GUEST_RAM_SIZE),
+            build_identity_page_tables(GUEST_RAM_SIZE)
+        );
     }
 
     /// `build_flat_gdt`'s three entries decoded by hand against the Intel SDM's segment-descriptor
@@ -499,15 +550,35 @@ mod tests {
         let code = gdt[1].to_le_bytes();
         assert_eq!(code[5] & 0x80, 0x80, "code segment must be present");
         assert_eq!(code[5] & 0x60, 0, "code segment DPL must be 0 (ring 0)");
-        assert_eq!(code[5] & 0x10, 0x10, "code segment must be S=1 (code/data, not system)");
-        assert_eq!(code[5] & 0x0F, 0x0A, "code segment type must be execute/read (0xA)");
-        assert_eq!(code[6] & 0x20, 0x20, "code segment must be L=1 (64-bit long mode)");
-        assert_eq!(code[6] & 0x40, 0, "a 64-bit (L=1) code segment must have D=0");
+        assert_eq!(
+            code[5] & 0x10,
+            0x10,
+            "code segment must be S=1 (code/data, not system)"
+        );
+        assert_eq!(
+            code[5] & 0x0F,
+            0x0A,
+            "code segment type must be execute/read (0xA)"
+        );
+        assert_eq!(
+            code[6] & 0x20,
+            0x20,
+            "code segment must be L=1 (64-bit long mode)"
+        );
+        assert_eq!(
+            code[6] & 0x40,
+            0,
+            "a 64-bit (L=1) code segment must have D=0"
+        );
 
         let data = gdt[2].to_le_bytes();
         assert_eq!(data[5] & 0x80, 0x80, "data segment must be present");
         assert_eq!(data[5] & 0x10, 0x10, "data segment must be S=1");
-        assert_eq!(data[5] & 0x0F, 0x02, "data segment type must be read/write (0x2)");
+        assert_eq!(
+            data[5] & 0x0F,
+            0x02,
+            "data segment type must be read/write (0x2)"
+        );
         assert_eq!(data[6] & 0x20, 0, "data segment must have L=0");
     }
 
@@ -527,7 +598,11 @@ mod tests {
             ("gdt", GDT_ADDR, 0x1000),
             // The 5 ACPI tables (RSDP..MADT) are packed one page apart, so one combined region
             // spanning all of them is enough to confirm they don't collide with anything above.
-            ("acpi_tables", ACPI_RSDP_ADDR, ACPI_MADT_ADDR + 0x1000 - ACPI_RSDP_ADDR),
+            (
+                "acpi_tables",
+                ACPI_RSDP_ADDR,
+                ACPI_MADT_ADDR + 0x1000 - ACPI_RSDP_ADDR,
+            ),
         ];
         for (i, &(name_a, start_a, len_a)) in regions.iter().enumerate() {
             for &(name_b, start_b, len_b) in &regions[i + 1..] {

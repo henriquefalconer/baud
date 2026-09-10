@@ -330,7 +330,10 @@ mod tests {
     }
     impl BranchCounter for ScriptedCounter {
         fn read(&mut self) -> u64 {
-            let v = *self.sequence.get(self.pos).unwrap_or_else(|| self.sequence.last().unwrap_or(&0));
+            let v = *self
+                .sequence
+                .get(self.pos)
+                .unwrap_or_else(|| self.sequence.last().unwrap_or(&0));
             self.pos += 1;
             v
         }
@@ -358,8 +361,14 @@ mod tests {
         let mut clock_b = WorkClock::new(1_000, 3, ScriptedCounter::new(rcb_sequence.clone()));
         let reads_b: Vec<u64> = rcb_sequence.iter().map(|_| clock_b.virtual_tsc()).collect();
 
-        assert_eq!(reads_a, reads_b, "same base/k/rcb-sequence must yield an identical read sequence");
-        assert!(reads_a.windows(2).all(|w| w[0] <= w[1]), "virtual TSC must be non-decreasing: {reads_a:?}");
+        assert_eq!(
+            reads_a, reads_b,
+            "same base/k/rcb-sequence must yield an identical read sequence"
+        );
+        assert!(
+            reads_a.windows(2).all(|w| w[0] <= w[1]),
+            "virtual TSC must be non-decreasing: {reads_a:?}"
+        );
         // Sanity: the formula is actually being applied, not a constant.
         assert_eq!(reads_a[0], 1_000, "rcb=0 must read back exactly base");
         assert_eq!(reads_a[3], 1_000 + 3 * 12);
@@ -372,7 +381,10 @@ mod tests {
         let mut clock_b = WorkClock::new(0, 2, ScriptedCounter::new(rcb_sequence.clone()));
         let reads_a: Vec<u64> = rcb_sequence.iter().map(|_| clock_a.virtual_tsc()).collect();
         let reads_b: Vec<u64> = rcb_sequence.iter().map(|_| clock_b.virtual_tsc()).collect();
-        assert_ne!(reads_a, reads_b, "a different k must produce a different observed sequence");
+        assert_ne!(
+            reads_a, reads_b,
+            "a different k must produce a different observed sequence"
+        );
     }
 
     #[test]
@@ -412,7 +424,10 @@ mod tests {
             0,
             ConstantCounter(0),
         );
-        assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC), original.serve_rdmsr(MSR_IA32_TSC));
+        assert_eq!(
+            restored.serve_rdmsr(MSR_IA32_TSC),
+            original.serve_rdmsr(MSR_IA32_TSC)
+        );
         assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC_DEADLINE), 0xABCD);
         assert_eq!(restored.serve_rdmsr(MSR_IA32_TSC_AUX), 42);
     }
@@ -431,8 +446,15 @@ mod tests {
 
         // The restored side's counter is a fresh fd: its own raw reads start small again, exactly
         // like a real `LinuxBranchCounter::new()` would after `Multiverse::restore`.
-        let mut restored =
-            WorkClock::restore(original.base(), 1, anchor, 0, 0, 0, ScriptedCounter::new(vec![7]));
+        let mut restored = WorkClock::restore(
+            original.base(),
+            1,
+            anchor,
+            0,
+            0,
+            0,
+            ScriptedCounter::new(vec![7]),
+        );
         assert_eq!(
             restored.current_rcb(),
             50_007,
@@ -447,7 +469,10 @@ mod tests {
     #[test]
     fn serve_enforced_rdtsc_matches_the_tsc_msr_at_the_same_rcb() {
         let mut clock = WorkClock::new(1_000, 3, ConstantCounter(12));
-        assert_eq!(clock.serve_enforced_rdtsc(), clock.serve_rdmsr(MSR_IA32_TSC));
+        assert_eq!(
+            clock.serve_enforced_rdtsc(),
+            clock.serve_rdmsr(MSR_IA32_TSC)
+        );
         assert_eq!(clock.serve_enforced_rdtsc(), 1_000 + 3 * 12);
     }
 
@@ -459,7 +484,10 @@ mod tests {
         let mut clock = WorkClock::new(0, 1, ConstantCounter(0));
         clock.absorb_wrmsr(MSR_IA32_TSC_AUX, 0xFFFF_FFFF_0000_002A);
         assert_eq!(clock.serve_enforced_tsc_aux(), 0x0000_002A);
-        assert_eq!(clock.serve_enforced_tsc_aux() as u64, clock.serve_rdmsr(MSR_IA32_TSC_AUX) as u32 as u64);
+        assert_eq!(
+            clock.serve_enforced_tsc_aux() as u64,
+            clock.serve_rdmsr(MSR_IA32_TSC_AUX) as u32 as u64
+        );
     }
 
     #[test]
@@ -486,12 +514,21 @@ mod tests {
         let mut clock_b = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xC0FF_EE);
         let draws_a: Vec<u64> = (0..5).map(|_| clock_a.serve_enforced_rdrand()).collect();
         let draws_b: Vec<u64> = (0..5).map(|_| clock_b.serve_enforced_rdrand()).collect();
-        assert_eq!(draws_a, draws_b, "the same seed must produce the identical draw sequence");
-        assert!(draws_a.windows(2).all(|w| w[0] != w[1]), "a real PRNG must not repeat consecutive draws");
+        assert_eq!(
+            draws_a, draws_b,
+            "the same seed must produce the identical draw sequence"
+        );
+        assert!(
+            draws_a.windows(2).all(|w| w[0] != w[1]),
+            "a real PRNG must not repeat consecutive draws"
+        );
 
         let mut clock_c = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xDEAD_BEEF);
         let draws_c: Vec<u64> = (0..5).map(|_| clock_c.serve_enforced_rdrand()).collect();
-        assert_ne!(draws_a, draws_c, "a different seed must diverge the draw sequence");
+        assert_ne!(
+            draws_a, draws_c,
+            "a different seed must diverge the draw sequence"
+        );
     }
 
     /// The RDRAND counterpart to `restore_continues_the_rcb_sequence_instead_of_resetting_it`: a
@@ -503,11 +540,13 @@ mod tests {
         let mut original = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(42);
         let first_three: Vec<u64> = (0..3).map(|_| original.serve_enforced_rdrand()).collect();
         let captured_entropy_state = original.entropy_state();
-        let next_from_original: Vec<u64> = (0..3).map(|_| original.serve_enforced_rdrand()).collect();
+        let next_from_original: Vec<u64> =
+            (0..3).map(|_| original.serve_enforced_rdrand()).collect();
 
         let mut restored =
             WorkClock::restore(0, 1, 0, 0, 0, captured_entropy_state, ConstantCounter(0));
-        let next_from_restored: Vec<u64> = (0..3).map(|_| restored.serve_enforced_rdrand()).collect();
+        let next_from_restored: Vec<u64> =
+            (0..3).map(|_| restored.serve_enforced_rdrand()).collect();
 
         assert_eq!(
             next_from_restored, next_from_original,
@@ -522,16 +561,24 @@ mod tests {
     /// whatever RDRAND has already drawn -- they share one SplitMix64 stream by design).
     #[test]
     fn known_rdseed_site_resolves_and_serves_from_the_shared_entropy_stream() {
-        let site = EnforcedRdseedSite { gpr_index: 7, length: 4 };
+        let site = EnforcedRdseedSite {
+            gpr_index: 7,
+            length: 4,
+        };
         let mut clock = WorkClock::new(0, 1, ConstantCounter(0))
             .with_entropy_seed(0xC0FF_EE)
             .with_rdseed_sites([(0x1000, site)]);
 
         assert_eq!(clock.resolve_rdseed_site(0x1000), Some(site));
-        assert_eq!(clock.resolve_rdseed_site(0x2000), None, "an unregistered rip must resolve to None");
+        assert_eq!(
+            clock.resolve_rdseed_site(0x2000),
+            None,
+            "an unregistered rip must resolve to None"
+        );
 
         let rdrand_first = {
-            let mut reference = WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xC0FF_EE);
+            let mut reference =
+                WorkClock::new(0, 1, ConstantCounter(0)).with_entropy_seed(0xC0FF_EE);
             reference.serve_enforced_rdrand()
         };
         assert_eq!(

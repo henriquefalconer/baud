@@ -7,11 +7,11 @@
 //   POST /verify/determinism   → run spec twice, compare observation stream hashes
 //   GET  /verify/observation   → (stub, M7) cross-check syscall log vs eBPF
 
+use crate::AppState;
 use axum::{extract::State, Json};
+use baud_proto::{Observation, Value as ProbeValue};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::AppState;
-use baud_proto::{Observation, Value as ProbeValue};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -29,7 +29,9 @@ pub struct VerifyDeterminismBody {
     pub times: u32,
 }
 
-fn default_times() -> u32 { 2 }
+fn default_times() -> u32 {
+    2
+}
 
 // ---------------------------------------------------------------------------
 // POST /verify/determinism
@@ -55,12 +57,39 @@ pub async fn determinism(
 
     for i in 0..times {
         // Create a run record for each execution
-        let run_id = format!("verify-{}-{i}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(8).collect::<String>());
+        let run_id = format!(
+            "verify-{}-{i}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .replace('-', "")
+                .chars()
+                .take(8)
+                .collect::<String>()
+        );
         let now = crate::state::unix_now() as i64;
-        let spec_hash = format!("blake3:{}", hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes()));
-        let closure_hash = format!("blake3:{}", hex_encode(blake3::hash(
-            format!("{}:{}", spec_doc.nix, spec_doc.nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(",")).as_bytes()
-        ).as_bytes()));
+        let spec_hash = format!(
+            "blake3:{}",
+            hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes())
+        );
+        let closure_hash = format!(
+            "blake3:{}",
+            hex_encode(
+                blake3::hash(
+                    format!(
+                        "{}:{}",
+                        spec_doc.nix,
+                        spec_doc
+                            .nodes
+                            .iter()
+                            .map(|n| n.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                    .as_bytes()
+                )
+                .as_bytes()
+            )
+        );
 
         let _ = sqlx::query(
             "INSERT INTO runs (id, spec_content, spec_hash, nix_ref, closure_hash, strategy, tactics, seed, budget_minutes, tape_id, status, created_at, updated_at)
@@ -82,11 +111,12 @@ pub async fn determinism(
         let observations = match run_spec_through_multiverse(seed, &spec_hash, &spec_doc) {
             Ok(observations) => observations,
             Err(error) => {
-                let _ = sqlx::query("UPDATE runs SET status = 'error', updated_at = ? WHERE id = ?")
-                    .bind(crate::state::unix_now() as i64)
-                    .bind(&run_id)
-                    .execute(&state.db)
-                    .await;
+                let _ =
+                    sqlx::query("UPDATE runs SET status = 'error', updated_at = ? WHERE id = ?")
+                        .bind(crate::state::unix_now() as i64)
+                        .bind(&run_id)
+                        .execute(&state.db)
+                        .await;
                 return Json(json!({
                     "ok": false,
                     "verified": false,
@@ -106,13 +136,13 @@ pub async fn determinism(
             let value_bytes = serde_json::to_vec(&obs.value).unwrap_or_default();
 
             // Feed into stream hash (over the serialized observation)
-            let obs_cbor = baud_proto::encode(&baud_proto::Msg::Observe(obs.clone()))
-                .unwrap_or_default();
+            let obs_cbor =
+                baud_proto::encode(&baud_proto::Msg::Observe(obs.clone())).unwrap_or_default();
             journal_hasher.update(&obs_cbor);
 
             let _ = sqlx::query(
                 "INSERT INTO observations (run_id, step, node, probe, value, recorded_at)
-                 VALUES (?, ?, ?, ?, ?, ?)"
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(&run_id)
             .bind(obs.step as i64)
@@ -124,7 +154,9 @@ pub async fn determinism(
             .await;
         }
 
-        if i == 0 { first_obs_count = observations.len(); }
+        if i == 0 {
+            first_obs_count = observations.len();
+        }
 
         let stream_hash = hex_encode(journal_hasher.finalize().as_bytes());
 
@@ -175,11 +207,12 @@ pub async fn determinism(
         // Mark all runs from this divergent verification as 'divergent' so they
         // are excluded from replay/shrink/reconstruct (spec baud-journal §5 / VR2-M15).
         for rid in &run_ids {
-            let _ = sqlx::query("UPDATE runs SET status = 'divergent', updated_at = ? WHERE id = ?")
-                .bind(crate::state::unix_now() as i64)
-                .bind(rid)
-                .execute(&state.db)
-                .await;
+            let _ =
+                sqlx::query("UPDATE runs SET status = 'divergent', updated_at = ? WHERE id = ?")
+                    .bind(crate::state::unix_now() as i64)
+                    .bind(rid)
+                    .execute(&state.db)
+                    .await;
         }
         Json(json!({
             "ok": false,
@@ -208,16 +241,30 @@ pub async fn determinism_poisoned(
 
     let times = body.times.max(2);
     let seed = body.seed;
-    let spec_hash = format!("blake3:{}", hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes()));
+    let spec_hash = format!(
+        "blake3:{}",
+        hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes())
+    );
     let mut run_hashes: Vec<String> = Vec::new();
     let mut run_ids: Vec<String> = Vec::new();
     // Collect all observation streams for step-by-step comparison
     let mut all_run_observations: Vec<Vec<Observation>> = Vec::new();
 
     for i in 0..times {
-        let run_id = format!("poisoned-{}-{i}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(8).collect::<String>());
+        let run_id = format!(
+            "poisoned-{}-{i}",
+            uuid::Uuid::new_v4()
+                .to_string()
+                .replace('-', "")
+                .chars()
+                .take(8)
+                .collect::<String>()
+        );
         let now = crate::state::unix_now() as i64;
-        let closure_hash = format!("blake3:{}", hex_encode(blake3::hash(spec_doc.nix.as_bytes()).as_bytes()));
+        let closure_hash = format!(
+            "blake3:{}",
+            hex_encode(blake3::hash(spec_doc.nix.as_bytes()).as_bytes())
+        );
 
         let _ = sqlx::query(
             "INSERT INTO runs (id, spec_content, spec_hash, nix_ref, closure_hash, seed, budget_minutes, status, created_at, updated_at)
@@ -238,11 +285,12 @@ pub async fn determinism_poisoned(
         let base_obs = match run_spec_through_multiverse(seed, &spec_hash, &spec_doc) {
             Ok(observations) => observations,
             Err(error) => {
-                let _ = sqlx::query("UPDATE runs SET status = 'error', updated_at = ? WHERE id = ?")
-                    .bind(crate::state::unix_now() as i64)
-                    .bind(&run_id)
-                    .execute(&state.db)
-                    .await;
+                let _ =
+                    sqlx::query("UPDATE runs SET status = 'error', updated_at = ? WHERE id = ?")
+                        .bind(crate::state::unix_now() as i64)
+                        .bind(&run_id)
+                        .execute(&state.db)
+                        .await;
                 return Json(json!({
                     "ok": false,
                     "verified": false,
@@ -266,8 +314,8 @@ pub async fn determinism_poisoned(
         full_obs.push(poison_obs);
 
         for obs in &full_obs {
-            let obs_cbor = baud_proto::encode(&baud_proto::Msg::Observe(obs.clone()))
-                .unwrap_or_default();
+            let obs_cbor =
+                baud_proto::encode(&baud_proto::Msg::Observe(obs.clone())).unwrap_or_default();
             journal_hasher.update(&obs_cbor);
         }
 
@@ -293,8 +341,10 @@ pub async fn determinism_poisoned(
         let min_len = run0.len().min(run1.len());
         let mut found: Option<DivergenceInfo> = None;
         for idx in 0..min_len {
-            let o0_cbor = baud_proto::encode(&baud_proto::Msg::Observe(run0[idx].clone())).unwrap_or_default();
-            let o1_cbor = baud_proto::encode(&baud_proto::Msg::Observe(run1[idx].clone())).unwrap_or_default();
+            let o0_cbor = baud_proto::encode(&baud_proto::Msg::Observe(run0[idx].clone()))
+                .unwrap_or_default();
+            let o1_cbor = baud_proto::encode(&baud_proto::Msg::Observe(run1[idx].clone()))
+                .unwrap_or_default();
             if o0_cbor != o1_cbor {
                 found = Some(DivergenceInfo {
                     step: run0[idx].step,
@@ -316,7 +366,11 @@ pub async fn determinism_poisoned(
                 step,
                 node: None,
                 probe: None,
-                detail: format!("runs produced different observation counts ({} vs {})", run0.len(), run1.len()),
+                detail: format!(
+                    "runs produced different observation counts ({} vs {})",
+                    run0.len(),
+                    run1.len()
+                ),
             });
         }
         found
@@ -367,31 +421,34 @@ pub async fn observation(
     // Fetch plane-1: syscall records from supervisor (untyped)
     let syscall_rows: Vec<(i64, i64, Vec<u8>, i64, i64)> = sqlx::query_as(
         "SELECT node, sysno, args_digest, ret, vtime FROM syscall_records
-         WHERE run_id = ? ORDER BY vtime ASC"
+         WHERE run_id = ? ORDER BY vtime ASC",
     )
     .bind(&run_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
-    let syscall_records: Vec<baud_proto::SyscallRecord> = syscall_rows.iter().map(|(node, sysno, args_digest, ret, vtime)| {
-        let mut digest = [0u8; 32];
-        let b = args_digest;
-        let len = b.len().min(32);
-        digest[..len].copy_from_slice(&b[..len]);
-        baud_proto::SyscallRecord {
-            node: *node as u16,
-            sysno: *sysno as u32,
-            args_digest: baud_proto::Hash(digest),
-            ret: *ret,
-            vtime: *vtime as u64,
-        }
-    }).collect();
+    let syscall_records: Vec<baud_proto::SyscallRecord> = syscall_rows
+        .iter()
+        .map(|(node, sysno, args_digest, ret, vtime)| {
+            let mut digest = [0u8; 32];
+            let b = args_digest;
+            let len = b.len().min(32);
+            digest[..len].copy_from_slice(&b[..len]);
+            baud_proto::SyscallRecord {
+                node: *node as u16,
+                sysno: *sysno as u32,
+                args_digest: baud_proto::Hash(digest),
+                ret: *ret,
+                vtime: *vtime as u64,
+            }
+        })
+        .collect();
 
     // Fetch plane-2: eBPF records (untyped)
     let ebpf_rows: Vec<(i64, String, i64, i64, String)> = sqlx::query_as(
         "SELECT node, event, value, vtime, source FROM ebpf_records
-         WHERE run_id = ? ORDER BY vtime ASC"
+         WHERE run_id = ? ORDER BY vtime ASC",
     )
     .bind(&run_id)
     .fetch_all(&state.db)
@@ -423,7 +480,11 @@ pub async fn observation(
     let now = crate::state::unix_now() as i64;
     let passed_i = if result.passed { 1i64 } else { 0i64 };
     let div_node = result.divergent_node.map(|n| n as i64);
-    let p2_source_str = if matches!(result.plane2_source, baud_proto::Source::Native) { "native" } else { "fallback" };
+    let p2_source_str = if matches!(result.plane2_source, baud_proto::Source::Native) {
+        "native"
+    } else {
+        "fallback"
+    };
     let _ = sqlx::query(
         "INSERT INTO observation_checks (run_id, passed, divergent_node, plane2_source, message, checked_at)
          VALUES (?, ?, ?, ?, ?, ?)"
@@ -437,10 +498,14 @@ pub async fn observation(
     .execute(&state.db)
     .await;
 
-    let plane1_map: serde_json::Map<String, Value> = result.plane1_counts.iter()
+    let plane1_map: serde_json::Map<String, Value> = result
+        .plane1_counts
+        .iter()
         .map(|(k, v)| (k.to_string(), json!(v)))
         .collect();
-    let plane2_map: serde_json::Map<String, Value> = result.plane2_counts.iter()
+    let plane2_map: serde_json::Map<String, Value> = result
+        .plane2_counts
+        .iter()
         .map(|(k, v)| (k.to_string(), json!(v)))
         .collect();
 
@@ -476,17 +541,26 @@ fn run_spec_through_multiverse(
     _spec_hash: &str,
     spec_doc: &baud_init::parse::SpecDoc,
 ) -> Result<Vec<Observation>, String> {
-    use baud_multiverse::{Multiverse, RunManifest, GuestSpec, TapeDrawSource};
+    use baud_multiverse::{GuestSpec, Multiverse, RunManifest, TapeDrawSource};
 
     // Build the run manifest from the spec doc.
     let manifest = RunManifest {
-        guests: spec_doc.nodes.iter().enumerate().map(|(i, n)| GuestSpec {
-            node_id: i as u32,
-            binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
-            argv: n.argv.clone(),
-            binary_hash: String::new(),
-        }).collect(),
-        env_override: spec_doc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        guests: spec_doc
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| GuestSpec {
+                node_id: i as u32,
+                binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
+                argv: n.argv.clone(),
+                binary_hash: String::new(),
+            })
+            .collect(),
+        env_override: spec_doc
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         ..RunManifest::default()
     };
 
@@ -503,18 +577,22 @@ fn run_spec_through_multiverse(
 
     // run() is now infallible (returns ObservationStream directly, spec §5)
     let stream = mv.run(&mut tape_source);
-    Ok(stream.observations.iter().map(|e| Observation {
-        probe: e.probe.clone(),
-        node: e.node as u16,
-        value: ProbeValue::Utf8(e.value.to_string()),
-        step: e.step,
-    }).collect())
+    Ok(stream
+        .observations
+        .iter()
+        .map(|e| Observation {
+            probe: e.probe.clone(),
+            node: e.node as u16,
+            value: ProbeValue::Utf8(e.value.to_string()),
+            step: e.step,
+        })
+        .collect())
 }
 
 /// Generate a deterministic tape from a seed (using ChaCha PRNG).
 fn generate_tape_from_seed(seed: u64, len: usize) -> Vec<u8> {
-    use rand_chacha::ChaCha20Rng;
     use rand::{RngCore, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
 
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let mut tape = vec![0u8; len];
