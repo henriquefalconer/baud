@@ -64,19 +64,19 @@ pub struct ExecBody {
 // POST /tapes — create a tape
 // ---------------------------------------------------------------------------
 
-pub async fn create(
-    State(state): State<AppState>,
-    Json(body): Json<CreateTapeBody>,
-) -> Json<Value> {
+pub async fn create(State(state): State<AppState>, Json(body): Json<CreateTapeBody>) -> ApiResult {
     let now = crate::state::unix_now() as i64;
 
     // Allocate through the one backend instance owned by AppState. The returned ID is the
     // backend's authoritative identity, not a server-side placeholder.
     let backend_name = body.backend.clone();
     if backend_name != "local" {
-        return Json(
-            json!({ "error": format!("backend {backend_name:?} is unavailable; only the configured local backend is enabled") }),
-        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({ "error": format!("backend {backend_name:?} is unavailable; only the configured local backend is enabled") }),
+            ),
+        ));
     }
     let spec = SandboxSpec {
         image: body.image.clone(),
@@ -84,7 +84,7 @@ pub async fn create(
     };
     let tape_id = match state.tape_backend.create(&spec).await {
         Ok(id) => id,
-        Err(e) => return Json(json!({ "error": format!("failed to create local sandbox: {e}") })),
+        Err(e) => return Err(server_error(format!("failed to create local sandbox: {e}"))),
     };
 
     // Record in SQLite
@@ -101,7 +101,7 @@ pub async fn create(
     .await;
 
     match result {
-        Ok(_) => Json(json!({
+        Ok(_) => Ok(Json(json!({
             "id": tape_id,
             "backend": backend_name,
             "state": "running",
@@ -114,10 +114,10 @@ pub async fn create(
             "preview_url": null,
             "created_at": now,
             "updated_at": now,
-        })),
+        }))),
         Err(e) => {
             let _ = state.tape_backend.delete(&tape_id).await;
-            Json(json!({ "error": format!("db error: {e}") }))
+            Err(server_error(format!("db error: {e}")))
         }
     }
 }
@@ -126,7 +126,7 @@ pub async fn create(
 // GET /tapes — list tapes
 // ---------------------------------------------------------------------------
 
-pub async fn list(State(state): State<AppState>) -> Json<Value> {
+pub async fn list(State(state): State<AppState>) -> ApiResult {
     let rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64, i64, i64, Option<String>, Option<String>, i64, i64)>(
         "SELECT id, backend, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, preview_url, created_at, updated_at FROM tapes WHERE state != 'deleted' ORDER BY created_at DESC"
     )
@@ -156,9 +156,9 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
                     },
                 )
                 .collect();
-            Json(json!({ "tapes": tapes }))
+            Ok(Json(json!({ "tapes": tapes })))
         }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Err(e) => Err(server_error(format!("db error: {e}"))),
     }
 }
 
@@ -378,30 +378,54 @@ pub async fn exec(
 // ---------------------------------------------------------------------------
 
 pub async fn reconstruct(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    // Look up the original tape record
-    let row = sqlx::query_as::<_, (String, String)>("SELECT id, state FROM tapes WHERE id = ?")
-        .bind(&id)
-        .fetch_optional(&state.db)
-        .await;
+    // Read the complete durable specification before creating the replacement. Reconstructing
+    // with `SandboxSpec::default()` loses image, resource, and timeout identity, so a later
+    // exec/endpoint request would run in a different sandbox while claiming success.
+    let row = sqlx::query_as::<_, (String, String, u32, u32, u32, u32, u32, Option<String>)>(
+        "SELECT id, backend, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image
+         FROM tapes WHERE id = ? AND state != 'deleted'",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await;
 
-    match row {
-        Err(e) => return Err(server_error(format!("db error: {e}"))),
-        Ok(None) => return Err(not_found(format!("tape {id} not found"))),
-        Ok(Some(_)) => {}
+    let (_, backend, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image) =
+        match row {
+            Err(e) => return Err(server_error(format!("db error: {e}"))),
+            Ok(None) => return Err(not_found(format!("tape {id} not found"))),
+            Ok(Some(row)) => row,
+        };
+    if backend != "local" {
+        return Err(server_error(format!(
+            "cannot reconstruct tape {id}: backend {backend:?} is unavailable"
+        )));
     }
 
-    // Create a real replacement sandbox before recording it. A database row alone is not a
-    // reconstruction because later exec/endpoint requests need a live backend object.
+    let spec = sandbox_spec_from_row(
+        vcpus,
+        memory_mib,
+        disk_mib,
+        auto_stop_secs,
+        auto_archive_secs,
+        image.clone(),
+    );
     let new_id = state
         .tape_backend
-        .create(&SandboxSpec::default())
+        .create(&spec)
         .await
         .map_err(|e| server_error(format!("failed to create reconstruction sandbox: {e}")))?;
     let now = crate::state::unix_now() as i64;
     let insert = sqlx::query(
-        "INSERT INTO tapes (id, state, backend, created_at, updated_at) VALUES (?, 'running', 'local', ?, ?)"
+        "INSERT INTO tapes (id, state, backend, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, preview_url, created_at, updated_at)
+         VALUES (?, 'running', 'local', ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
     )
     .bind(&new_id)
+    .bind(vcpus)
+    .bind(memory_mib)
+    .bind(disk_mib)
+    .bind(auto_stop_secs)
+    .bind(auto_archive_secs)
+    .bind(&image)
     .bind(now)
     .bind(now)
     .execute(&state.db)
@@ -413,11 +437,56 @@ pub async fn reconstruct(State(state): State<AppState>, Path(id): Path<String>) 
             "original_id": id,
             "new_tape_id": new_id,
             "state": "running",
-            "note": "reconstructed from journal prefix"
+            "backend": "local",
+            "vcpus": vcpus,
+            "memory_mib": memory_mib,
+            "disk_mib": disk_mib,
+            "auto_stop_secs": auto_stop_secs,
+            "auto_archive_secs": auto_archive_secs,
+            "image": image,
+            "note": "reconstructed from the durable tape specification"
         }))),
-        Err(e) => Err(server_error(format!(
-            "failed to create reconstruction tape: {e}"
-        ))),
+        Err(e) => {
+            let _ = state.tape_backend.delete(&new_id).await;
+            Err(server_error(format!(
+                "failed to create reconstruction tape: {e}"
+            )))
+        }
+    }
+}
+
+fn sandbox_spec_from_row(
+    vcpus: u32,
+    memory_mib: u32,
+    disk_mib: u32,
+    auto_stop_secs: u32,
+    auto_archive_secs: u32,
+    image: Option<String>,
+) -> SandboxSpec {
+    SandboxSpec {
+        vcpus,
+        memory_mib,
+        disk_mib,
+        auto_stop_secs,
+        auto_archive_secs,
+        image,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sandbox_spec_from_row;
+
+    #[test]
+    fn reconstruction_preserves_the_persisted_sandbox_spec() {
+        let spec = sandbox_spec_from_row(2, 1536, 4096, 17, 29, Some("image:v2".to_owned()));
+        assert_eq!(spec.vcpus, 2);
+        assert_eq!(spec.memory_mib, 1536);
+        assert_eq!(spec.disk_mib, 4096);
+        assert_eq!(spec.auto_stop_secs, 17);
+        assert_eq!(spec.auto_archive_secs, 29);
+        assert_eq!(spec.image.as_deref(), Some("image:v2"));
     }
 }
 

@@ -2338,3 +2338,73 @@ Dynamic-link passes in isolation, so that gate failure was load contention. Runn
 Gate is green at 25 passed, 0 failed, 1 skipped; H6 and dynamic-link failures both passed in isolation. The eventfd serial wake slice is complete, while the remaining nine selected contracts still have documented implementation gaps and remain open.
 
 Push completed; confirming remote main matches local and the working tree is clean without rerunning validation.
+
+## 2026-09-10T17:13:29 UTC (41min) - Session usage — ralph-13 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2745 (summed from 6 session transcripts: main $0.1677 · subagents $0.1068)
+- tokens input 602,685 · cache-read 6,258,688 · cache-write 0 · output 24,001 · reasoning 5,630
+- context 155,866 tok peak of 272K (57%) across 54 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2745 (in 602,685 / out 29,631 / cache-read 6,258,688)
+- subagents (5) pi process x5
+  - delegate-cc8496b20613edc26fa72e9b347bc24c: gpt-5.6-luna $0.0269, 6 inference calls
+  - delegate-173f2192519b922784e80a8f6f2e4295: gpt-5.6-luna $0.0246, 5 inference calls
+  - delegate-4c349154984d57b2d2c19d9b37f2f6ee: gpt-5.6-luna $0.0277, 6 inference calls
+  - delegate-8bcd293665dc5512b6c10628b75fbd0f: gpt-5.6-luna $0.0233, 6 inference calls
+  - 01a08c2d-0599-744e-ba31-dd1317ab5ca2: gpt-5.6-luna $0.0043, 3 inference calls
+- transcript: ralph/.run/20260910T073659Z/017-ralph-13.json
+- transcript: ralph/.run/20260910T073659Z/018-ralph-13.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 14 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications and repository paths first, then implementing and validating the selected batch end to end.
+
+Resetting the required perf-event setting before repository work.
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract, G8 relocate distributed validation images — they are all 10 pending entries.
+
+Reading the durable plan, specifications index, and implementation/test inventory before touching code.
+
+Fixed tape reconstruction to preserve the durable sandbox specification and clean up failed inserts; checking route tests and compile impact next.
+
+The spec audit confirms the remaining nine gaps are genuine; I completed two concrete public-path fixes: spec-preserving tape reconstruction and terminal-aware SSE tails. Running formatting and targeted server tests now.
+
+Server tests passed 50/50 after the route fixes; adding a focused terminal-status property test and waiting for the single gate worker while reviewing the final diff.
+
+The focused test command exposed a Cargo filter syntax error, not a code failure; rerunning the two filters separately as required.
+
+The focused compile caught a private-helper import omission in the new stream test; importing the helper and rerunning both focused tests.
+
+The public tape-create route also returned backend and database failures as HTTP 200; converting those failures to 400/500 responses so the CLI cannot mistake them for success.
+
+Extended the same non-success contract to tape listing database failures; checking compilation while the full validation worker continues.
+
+Resuming the locked iteration after the backlog study notification; preserving the ten-entry contract and checking the required gate worker before further changes.
+
+The implementation search confirms the remaining gaps are real rather than undiscovered code; keeping the batch bound and checking validation progress.
+
+Stopping the stalled validation worker and rerunning the exact required gate in the foreground as requested.
+
+Foreground gate is green: 25 passed, 0 failed, 1 skipped; preparing the required progress block before committing the verified route changes.
+
+## 2026-09-10T17:33:11 UTC - Changes committed.
+
+- What was implemented
+
+- Files changed
+
+- **Brief description of changes:**
+
+  - Tape reconstruction now preserves the persisted sandbox specification and cleans up failed replacement inserts.
+
+  - Tape create/list failures now use non-success HTTP responses instead of returning HTTP 200 error payloads.
+
+  - Frame SSE tails now emit terminal status and close after runs finish, with focused status coverage.
+
+  - Full foreground gate passed: 25 passed, 0 failed, 1 skipped.
+
+---

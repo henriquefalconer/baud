@@ -7,7 +7,7 @@
 //   GET  /runs/:id/frames         → list frame hashes
 //   POST /runs/:id/frames         → append a frame record (from agent)
 //   POST /runs/:id/stream/render  → replay with capture, materialise frames (Y4M or QOI-seq)
-//   GET  /runs/:id/stream/tail    → SSE-like frame stream (returns list for now)
+//   GET  /runs/:id/stream/tail    → live SSE frame stream with terminal completion
 
 use crate::state::unix_now;
 use crate::AppState;
@@ -653,13 +653,16 @@ pub async fn tail(
             .bind(node)
             .bind(last_step)
             .fetch_all(&state.db)
-            .await {
+            .await
+            {
                 Ok(rows) => rows,
                 Err(error) => {
                     let event = Event::default()
                         .event("error")
                         .json_data(json!({"error": format!("frame stream query failed: {error}")}))
-                        .unwrap_or_else(|_| Event::default().data("{\"error\":\"frame stream query failed\"}"));
+                        .unwrap_or_else(|_| {
+                            Event::default().data("{\"error\":\"frame stream query failed\"}")
+                        });
                     return Some((Ok(event), (state, run_id, node, last_step, true)));
                 }
             };
@@ -669,8 +672,39 @@ pub async fn tail(
                 .max()
                 .unwrap_or(last_step);
             if rows.is_empty() {
-                let event = Event::default().event("heartbeat").data("{}");
-                Some((Ok(event), (state, run_id, node, last_step, false)))
+                // A tail must not leave clients polling forever after a run has reached a
+                // terminal state. Heartbeats keep a live run observable, while `done` closes
+                // the SSE stream once the durable run status says no more frames can arrive.
+                let status =
+                    sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+                        .bind(&run_id)
+                        .fetch_optional(&state.db)
+                        .await;
+                match status {
+                    Ok(Some(status)) if is_terminal_run_status(&status) => {
+                        let event = Event::default()
+                            .event("done")
+                            .json_data(json!({
+                                "run_id": run_id,
+                                "status": status,
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("{}"));
+                        Some((Ok(event), (state, run_id, node, last_step, true)))
+                    }
+                    Ok(None) => {
+                        let event = Event::default()
+                            .event("error")
+                            .json_data(json!({
+                                "error": format!("run {} not found", run_id),
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("{}"));
+                        Some((Ok(event), (state, run_id, node, last_step, true)))
+                    }
+                    Ok(Some(_)) | Err(_) => {
+                        let event = Event::default().event("heartbeat").data("{}");
+                        Some((Ok(event), (state, run_id, node, last_step, false)))
+                    }
+                }
             } else {
                 let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash)| {
                 if hashes_only {
@@ -695,6 +729,13 @@ pub async fn tail(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn is_terminal_run_status(status: &str) -> bool {
+    matches!(
+        status,
+        "done" | "failed" | "aborted" | "divergent" | "error"
+    )
+}
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -745,8 +786,21 @@ mod hex {
 
 #[cfg(test)]
 mod tests {
-    use super::hex::decode_hash;
+    use super::{hex::decode_hash, is_terminal_run_status};
     use base64::Engine;
+
+    #[test]
+    fn terminal_run_statuses_close_tail_and_nonterminal_statuses_keep_it_open() {
+        for status in ["done", "failed", "aborted", "divergent", "error"] {
+            assert!(is_terminal_run_status(status), "{status} must close a tail");
+        }
+        for status in ["pending", "provisioning", "running"] {
+            assert!(
+                !is_terminal_run_status(status),
+                "{status} must keep a tail live"
+            );
+        }
+    }
 
     #[test]
     fn frame_hash_decoder_requires_32_bytes() {
