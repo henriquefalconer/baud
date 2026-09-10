@@ -215,9 +215,14 @@ async fn require_configured_token(request: Request, next: Next) -> Response {
 }
 
 fn authorization_matches(header: Option<&str>, expected: &str) -> bool {
+    // Treat an empty configured token as invalid configuration, never as a credential. Without
+    // this guard, `BAUD_AUTH_TOKEN=` would let a client authenticate with `Authorization: Bearer `.
+    if expected.is_empty() {
+        return false;
+    }
     header
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected)
+        .is_some_and(|token| !token.is_empty() && token == expected)
 }
 
 #[cfg(test)]
@@ -233,6 +238,8 @@ mod auth_tests {
             "secret"
         ));
         assert!(!authorization_matches(None, "secret"));
+        assert!(!authorization_matches(Some("Bearer "), ""));
+        assert!(!authorization_matches(Some("Bearer "), "secret"));
     }
 }
 

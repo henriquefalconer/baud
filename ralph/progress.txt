@@ -2649,3 +2649,59 @@ The repeated exact foreground gate is green: 25 passed, 0 failed, 1 skipped. Re-
 Appending the verified progress block before committing all changes and pushing the main tip.
 
 Commit is created with the foreground gate result recorded; pushing main and checking the remote tip and clean worktree now.
+
+## 2026-09-10T21:11:13 UTC (37min) - Session usage — ralph-17 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2856515, receipt ralph/.run/20260910T073659Z/024-ralph-17.json.processes/receipt.json)
+- cost $0.3143 (summed from 5 session transcripts: main $0.2266 · subagents $0.0877)
+- tokens input 647,900 · cache-read 7,731,712 · cache-write 0 · output 25,058 · reasoning 6,364
+- context 143,299 tok peak of 272K (53%) across 70 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.3143 (in 647,900 / out 31,422 / cache-read 7,731,712)
+- subagents (4) pi process x4
+  - delegate-072add4e834053a20aa88be5c7e94b13: gpt-5.6-luna $0.0299, 8 inference calls
+  - delegate-b50f49969799a8d66ee6ccbccd72793e: gpt-5.6-luna $0.0278, 7 inference calls
+  - delegate-4cead085c18980a1ccb1a42be36c6391: gpt-5.6-luna $0.0217, 4 inference calls
+  - 01a08d09-0bb8-75ad-bf8b-cb8ae303e828: gpt-5.6-luna $0.0084, 8 inference calls
+- transcript: ralph/.run/20260910T073659Z/024-ralph-17.json
+- transcript: ralph/.run/20260910T073659Z/025-ralph-17.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 18 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each item through its real implementation and verification path.
+
+2026-09-10T21:11:29 Started iteration 18 study and selection.
+
+Chose these 8 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof — they are all 8 pending implementation items in todo-build.md.
+
+Starting G2 reproducible image pipeline. Reading project layout, specs index, and current package/image code.
+
+G2 image pipeline is already wired through baud-packages, server, and CLI; I am now validating its fast orchestration tests and checking the real-image acceptance gap before changing it.
+
+Found and fixed an authentication edge case: an empty BAUD_AUTH_TOKEN or empty bearer header now fails closed, with unit coverage. Continuing validation while the specification audits run.
+
+The audits confirm the eight queue entries are genuinely open, not stale labels: the missing pieces are real Linux image/harness integration, live UFFD RAM, lifecycle-wide ownership, Ubuntu boot, and FCEUX. I am running the workspace unit/integration suite now to expose any concrete regressions before the larger implementation work.
+
+Workspace tests are green: 236 multiverse, 56 server, 44 snapshot, 47 packages, and the remaining crates passed. The result also confirms the queue is acceptance-driven: unit tests pass while the real-image, UFFD, Ubuntu, and Mario paths remain open.
+
+Running the workspace clippy pass after the authentication hardening; this is the last independent validation before deciding the repository state.
+
+## 2026-09-10T21:17:07 UTC - Changes committed.
+
+- Hardened configured bearer authentication against empty credentials and added regression coverage.
+
+- Files changed: crates/baud-server/src/main.rs, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Empty BAUD_AUTH_TOKEN now fails closed.
+
+  - Empty bearer headers are rejected.
+
+  - Workspace tests and clippy pass.
+
+---
