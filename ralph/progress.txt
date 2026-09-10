@@ -1517,3 +1517,105 @@ The specification review confirms the remaining locked work is real integration,
 Focused clippy and snapshot tests are green after the UFFD fail-closed checks; workspace tests remain green. The selected queue still has unresolved real-image, virtio-serial, UFFD integration, EventFd, auth/ownership/SSE, and Ubuntu acceptance work, so no DONE markers or closure claim are justified yet.
 
 Checkpointing the verified boundary, host-capability, driver-grid, and UFFD hardening now; the locked batch remains open because its real end-to-end acceptance paths are not all implemented.
+
+## 2026-09-10T08:43:51 UTC (43min) - Session usage — ralph-2 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3411 (summed from 5 session transcripts: main $0.2673 · subagents $0.0738)
+- tokens input 524,849 · cache-read 10,420,992 · cache-write 0 · output 23,085 · reasoning 6,382
+- context 184,782 tok peak of 272K (68%) across 74 inference calls, monotonic
+- models gpt-5.6-luna $0.3411 (in 524,849 / out 29,467 / cache-read 10,420,992)
+- subagents (4) pi process x4
+  - delegate-d5d6f91c0f0c90c644c56a02634b1357: gpt-5.6-luna $0.0269, 7 inference calls
+  - delegate-52d56e8473f54243b1b025c9a5e86bfb: gpt-5.6-luna $0.0235, 6 inference calls
+  - delegate-1dcd696f9e6c5939248442e32b5f1f3d: gpt-5.6-luna $0.0177, 8 inference calls
+  - 01a08a56-1808-7751-8487-6bf26f9c597e: gpt-5.6-luna $0.0057, 4 inference calls
+- transcript: ralph/.run/20260910T073659Z/002-ralph-2.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 3 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and then implementing and verifying the selected batch.
+
+Chose these 10 items: G1, G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G4 complete deterministic driver tactics and scheduling, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are the ten highest-priority pending entries of twelve.
+
+Starting G1 specification and repository study with parallel read-only agents.
+
+Reading current code and prior progress while specification searches run.
+
+Inspecting queue history and implementation markers before applying the study findings.
+
+Checking prior commit diff to see what this iteration inherits and where the locked items remain genuinely open.
+
+Inspecting advertised route and CLI stubs that must be replaced on the locked API item.
+
+Checking image and tape implementations against their real acceptance paths before deciding which locked entries can be closed.
+
+Waiting briefly for the parallel specification and verification searches while continuing the implementation audit.
+
+Implemented the missing configured BurstDelay/CrashRestart tactics and hold-shortening shrink pass; running the driver tests now.
+
+Fixed the empty BurstDelay neutral-path match and rerunning baud-driver tests.
+
+Replaced the frame-tail JSON snapshot with a real SSE stream that emits new frames and heartbeats; compiling the server now.
+
+Driver and server focused tests are green, including the new tactic path and SSE compilation; preparing the mandated full gate.
+
+The full gate passed all completed phases through H6 and cancellation, then timed out in the known long pkg-build-cli phase without a failure; rerunning the exact gate from warmed artifacts.
+
+The second gate again passed every reported unit but exhausted the call budget during phase 3 fan-out after H5; isolating the remaining package build drive to diagnose its prerequisite and runtime.
+
+The isolated package drive exposed a stale baud-server from the timed gate holding port 7734, not an image failure; cleaning only that stale process and rerunning the drive.
+
+The real image drive reached the kernel compilation itself and exceeded ten minutes, confirming the pipeline is live rather than fixture-fallback; recording the long-build evidence and checking cleanup.
+
+Converted observation tail to the same live SSE contract and updated the CLI stream consumer; running focused server and CLI checks.
+
+Focused server and CLI tests are green after the SSE client/server integration; running targeted clippy before the final gate attempt.
+
+Clippy found and I fixed an unrelated malformed doc-list continuation in baud-secret; rerunning the targeted lint.
+
+Strict targeted clippy exposed pre-existing identity/multiverse warnings under -D warnings; the project gate uses standard clippy, so checking that exact non-deny mode next.
+
+The exact gate’s completed phases remain green; its only unfinished work is the long real-image phase. Running the gate’s documented no-h5-first, skip-cargo mode now to drain remaining drives and reach the package phase.
+
+Added direct regression coverage for BurstDelay and CrashRestart deterministic schedules; running the driver tests while the real image build continues.
+
+The driver regression suite is green with 21 tests; checking the locked queue before deciding what remains genuinely open.
+
+While the long real-image build continues, checking formatting and whitespace for the changed Rust paths.
+
+The background image attempt hit the same stale 7734 listener left by the timed gate; killing the exact target/debug server and restarting the real drive once more.
+
+The live-tail paths and driver tactics are implemented and focused tests are green; the image acceptance drive is now running without a port collision, so I am holding final validation until its real result.
+
+The real image build remains active after the clean restart; no code changes are being made against its input paths.
+
+Kernel compilation is still progressing through the real source tree; continuing to preserve the acceptance run rather than restarting it.
+
+The image drive has now run beyond the gate’s nominal estimate but is still compiling without an error; preserving the single real acceptance attempt.
+
+## 2026-09-10T10:01:32 UTC - Changes committed.
+
+- Implemented configured BurstDelay and CrashRestart weather tactics, hold-shortening shrinking, and deterministic regression coverage in baud-driver.
+
+- Replaced frame and observation tail snapshots with live SSE streams and added CLI streaming consumption.
+
+- Fixed an unrelated baud-secret documentation lint error.
+
+- Real image build CLI acceptance completed green after an 11-minute kernel compile; earlier gate phases and focused server/CLI/driver tests were green.
+
+- Files changed: crates/baud-driver/src/lib.rs, crates/baud-server/src/routes/stream.rs, crates/baud-server/src/routes/obs.rs, crates/baud-cli/src/client.rs, crates/baud-cli/src/cmds/obs.rs, crates/baud-secret/src/lib.rs, todo-build.md, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Weather tactic variants now affect recorded deterministic draws.
+
+  - Streaming routes emit new records and heartbeats instead of one-shot lists.
+
+  - The CLI forwards SSE bytes until disconnect.
+
+---

@@ -126,6 +126,7 @@ pub struct MissingSecret {
 /// 1. Check `{VAR}_FILE`: read that path, strip one trailing newline.
 ///    If the path is set but unreadable → returns `Err(SecretEnvError::FileReadError)`.
 /// 2. Fall back to `{VAR}`.
+///
 /// Returns `Ok(None)` if neither is set.
 pub fn load_secret_env(var: &str) -> Result<Option<SecretString>, SecretEnvError> {
     let file_var = format!("{}_FILE", var);

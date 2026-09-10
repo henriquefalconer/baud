@@ -483,25 +483,43 @@ impl Driver {
     ///
     /// The transition draw is recorded on the tape, making weather reproducible via replay.
     pub fn draw_weather(&mut self, p_start: f64, p_stop: f64) -> u8 {
-        let (p_start, p_stop) = match self.tactics.weather.first() {
-            Some(WeatherTactic::MarkovPartition { p_start, p_stop }) => (*p_start, *p_stop),
-            _ => (p_start, p_stop),
-        };
-        let p_start = p_start.clamp(0.0, 1.0);
-        let p_stop = p_stop.clamp(0.0, 1.0);
-        let u = self.draw_f64();
-        if self.partition_state {
-            // Currently ON: transition to OFF with p_stop
-            if u < p_stop {
-                self.partition_state = false;
+        match self.tactics.weather.first().cloned() {
+            Some(WeatherTactic::BurstDelay { regimes }) if !regimes.is_empty() => {
+                // Each regime is (active_ticks, quiet_ticks). Consume one recorded draw per
+                // tick so live execution and replay keep identical tape alignment.
+                let u = self.draw_f64();
+                let index = (u * regimes.len() as f64).floor() as usize % regimes.len();
+                let (active, quiet) = regimes[index];
+                let period = active.saturating_add(quiet).max(1);
+                ((self.run_cursor as u64).saturating_sub(1) % period < active) as u8
             }
-        } else {
-            // Currently OFF: transition to ON with p_start
-            if u < p_start {
-                self.partition_state = true;
+            Some(WeatherTactic::CrashRestart { p, min_up_ticks }) => {
+                let u = self.draw_f64();
+                self.crash_up_ticks = self.crash_up_ticks.saturating_add(1);
+                if self.crash_up_ticks > min_up_ticks && u < p.clamp(0.0, 1.0) {
+                    self.crash_up_ticks = 0;
+                    0
+                } else {
+                    1
+                }
+            }
+            Some(WeatherTactic::MarkovPartition { p_start, p_stop }) => {
+                self.draw_markov_weather(p_start, p_stop)
+            }
+            Some(WeatherTactic::BurstDelay { .. }) | None => {
+                self.draw_markov_weather(p_start, p_stop)
             }
         }
-        if self.partition_state { 1 } else { 0 }
+    }
+
+    fn draw_markov_weather(&mut self, p_start: f64, p_stop: f64) -> u8 {
+        let u = self.draw_f64();
+        if self.partition_state {
+            if u < p_stop.clamp(0.0, 1.0) { self.partition_state = false; }
+        } else if u < p_start.clamp(0.0, 1.0) {
+            self.partition_state = true;
+        }
+        self.partition_state as u8
     }
 
     /// Reset the weather partition state (call at the start of a new run).
@@ -551,6 +569,23 @@ impl Driver {
             if let Some(s) = oracle(&t) {
                 if s >= self.best_score {
                     current = t;
+                }
+            }
+        }
+
+        // Hold-shortening pass: remove trailing bytes from each choice. This preserves choice
+        // boundaries while shrinking geometric hold payloads, which deletion cannot do.
+        for i in 0..current.choices.len() {
+            let original_len = current.choices[i].len();
+            for new_len in (0..original_len).rev() {
+                let mut candidate = current.choices.clone();
+                candidate[i].truncate(new_len);
+                let t = Tape { seed: current.seed, choices: candidate };
+                if let Some(s) = oracle(&t) {
+                    if s >= self.best_score {
+                        current = t;
+                        break;
+                    }
                 }
             }
         }
@@ -1066,6 +1101,20 @@ mod tests {
         assert_ne!(first, expected);
         assert_eq!(expected, b.draw_bits(8));
         assert_eq!(expected_weather, b.draw_weather(0.0, 0.0));
+    }
+
+    #[test]
+    fn configured_weather_tactics_have_deterministic_neutral_paths() {
+        let burst = TacticsSpec { weather: vec![WeatherTactic::BurstDelay { regimes: vec![(2, 1)] }], ..Default::default() };
+        let crash = TacticsSpec { weather: vec![WeatherTactic::CrashRestart { p: 1.0, min_up_ticks: 2 }], ..Default::default() };
+        let mut a = Driver::new(99, StrategySpec::default(), burst);
+        let mut b = Driver::new(99, StrategySpec::default(), crash);
+        a.begin_run();
+        b.begin_run();
+        let burst_values: Vec<_> = (0..6).map(|_| a.draw_weather(0.0, 0.0)).collect();
+        let crash_values: Vec<_> = (0..6).map(|_| b.draw_weather(0.0, 0.0)).collect();
+        assert_eq!(burst_values, vec![1, 1, 0, 1, 1, 0]);
+        assert_eq!(crash_values, vec![1, 1, 0, 1, 1, 0]);
     }
 
     #[test]

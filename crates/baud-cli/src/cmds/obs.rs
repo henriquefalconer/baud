@@ -51,10 +51,16 @@ pub async fn run(cmd: ObsCmd, c: &Client, json: bool) -> Result<()> {
             let v = c.get(&url).await?;
             fmt::print(&v, json);
         }
-        ObsAction::Tail { run, probe: _, node: _ } => {
-            // Stub: returns current observations (SSE in M3+)
-            let v = c.get(&format!("/runs/{run}/obs/tail")).await?;
-            fmt::print(&v, json);
+        ObsAction::Tail { run, probe, node } => {
+            let mut url = format!("/runs/{run}/obs/tail");
+            let mut params = Vec::new();
+            if let Some(p) = probe { params.push(format!("probe={p}")); }
+            if let Some(n) = node { params.push(format!("node={n}")); }
+            if !params.is_empty() { url.push('?'); url.push_str(&params.join("&")); }
+            if json {
+                anyhow::bail!("obs tail is an SSE stream; omit --json to consume it")
+            }
+            c.stream_get(&url).await?;
         }
     }
     Ok(())

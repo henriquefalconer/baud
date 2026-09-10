@@ -11,11 +11,12 @@
 
 use axum::{
     extract::{Path, Query, State},
+    response::sse::{Event, Sse},
     Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::{convert::Infallible, path::PathBuf, time::Duration};
 use crate::AppState;
 use crate::state::unix_now;
 use baud_stream::Y4mWriter;
@@ -575,7 +576,7 @@ async fn render_frames_from_real_restore(_params: RealRestoreParams) -> Result<V
 }
 
 // ---------------------------------------------------------------------------
-// GET /runs/:id/stream/tail — live frames (returns stored list for now)
+// GET /runs/:id/stream/tail — live frames
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -588,40 +589,38 @@ pub async fn tail(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Query(q): Query<TailQuery>,
-) -> Json<Value> {
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let hashes_only = q.hashes_only.unwrap_or(false);
-
-    let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
-        "SELECT node, step, width, height, format, hash
-         FROM frame_records
-         WHERE run_id = ? AND (? IS NULL OR node = ?)
-         ORDER BY step ASC"
-    )
-    .bind(&run_id)
-    .bind(q.node).bind(q.node)
-    .fetch_all(&state.db)
-    .await;
-
-    match rows {
-        Ok(rows) => {
-            let frames: Vec<Value> = rows.into_iter().map(|(node, step, w, h, fmt, hash)| {
+    let node = q.node;
+    let stream = futures_util::stream::unfold((state, run_id, node, 0_i64), move |(state, run_id, node, last_step)| async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
+            "SELECT node, step, width, height, format, hash
+             FROM frame_records
+             WHERE run_id = ? AND (? IS NULL OR node = ?) AND step > ?
+             ORDER BY step ASC"
+        )
+        .bind(&run_id)
+        .bind(node).bind(node).bind(last_step)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        let next_step = rows.iter().map(|(_, step, _, _, _, _)| *step).max().unwrap_or(last_step);
+        if rows.is_empty() {
+            let event = Event::default().event("heartbeat").data("{}");
+            Some((Ok(event), (state, run_id, node, last_step)))
+        } else {
+            let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash)| {
                 if hashes_only {
-                    json!({ "node": node, "step": step, "hash": hex_encode(&hash) })
+                    json!({ "run_id": run_id, "node": n, "step": step, "hash": hex_encode(&hash) })
                 } else {
-                    json!({
-                        "node": node,
-                        "step": step,
-                        "width": w,
-                        "height": h,
-                        "format": fmt,
-                        "hash": hex_encode(&hash),
-                    })
+                    json!({ "run_id": run_id, "node": n, "step": step, "width": w, "height": h, "format": fmt, "hash": hex_encode(&hash) })
                 }
             }).collect();
-            Json(json!({ "run_id": run_id, "frames": frames }))
+            Some((Ok(Event::default().event("frame").json_data(data).unwrap_or_else(|_| Event::default().data("{}"))), (state, run_id, node, next_step)))
         }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
-    }
+    });
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 // ---------------------------------------------------------------------------

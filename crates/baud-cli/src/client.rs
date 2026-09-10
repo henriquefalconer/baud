@@ -68,4 +68,25 @@ impl Client {
         }
         Ok(resp_body)
     }
+
+    /// Copy an SSE response to stdout until the server or caller closes it. Keeping this in the
+    /// client makes `obs tail` and frame tailing genuine streaming commands instead of silently
+    /// degrading to a one-shot JSON snapshot.
+    pub async fn stream_get(&self, path: &str) -> Result<()> {
+        let url = format!("{}{}", self.base, path);
+        let resp = self.http.get(&url).header("accept", "text/event-stream").send().await
+            .with_context(|| format!("GET {url}: could not connect to baud-server"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("GET {url} returned {status}: {body}");
+        }
+        let mut resp = resp;
+        while let Some(chunk) = resp.chunk().await.with_context(|| format!("GET {url}: stream read failed"))? {
+            use std::io::Write;
+            std::io::stdout().write_all(&chunk)?;
+            std::io::stdout().flush()?;
+        }
+        Ok(())
+    }
 }
