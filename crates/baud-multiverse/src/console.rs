@@ -30,6 +30,10 @@ use crate::virtio_pci::VirtioPciTransport;
 use baud_vcpu::{Bus, OpenBusFallback, OPEN_BUS_BYTE};
 use std::cell::Cell;
 use std::convert::Infallible;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use vm_superio::serial::NoEvents;
 use vm_superio::{Serial, Trigger};
 
@@ -52,6 +56,8 @@ pub const COM1_LEN: u16 = 8;
 #[derive(Debug, Default)]
 pub struct NoIrqTrigger {
     fired: Cell<u64>,
+    #[cfg(target_os = "linux")]
+    event_fd: Option<Arc<OwnedFd>>,
 }
 
 impl NoIrqTrigger {
@@ -59,12 +65,34 @@ impl NoIrqTrigger {
     pub fn fired_count(&self) -> u64 {
         self.fired.get()
     }
+
+    #[cfg(target_os = "linux")]
+    fn with_event_fd(event_fd: Arc<OwnedFd>) -> Self {
+        Self {
+            fired: Cell::new(0),
+            event_fd: Some(event_fd),
+        }
+    }
 }
 
 impl Trigger for NoIrqTrigger {
     type E = Infallible;
     fn trigger(&self) -> Result<(), Self::E> {
         self.fired.set(self.fired.get() + 1);
+        #[cfg(target_os = "linux")]
+        if let Some(event_fd) = &self.event_fd {
+            let value: u64 = 1;
+            // eventfd writes are atomic for the fixed eight-byte counter payload. A full
+            // counter is not a guest-visible success condition, so keep the UART trigger
+            // infallible and let the consumer drain it before the next wake.
+            let _ = unsafe {
+                libc::write(
+                    event_fd.as_raw_fd(),
+                    (&value as *const u64).cast(),
+                    std::mem::size_of::<u64>(),
+                )
+            };
+        }
         Ok(())
     }
 }
@@ -96,6 +124,25 @@ impl Console {
         }
     }
 
+    /// Construct a console whose UART IRQ4 requests are also published on an eventfd. The VMM's
+    /// interrupt loop owns the read end and can turn each counter increment into a guest wake;
+    /// the plain constructor remains useful for platforms without eventfd.
+    #[cfg(target_os = "linux")]
+    pub fn with_eventfd() -> std::io::Result<(Self, Arc<OwnedFd>)> {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
+        let trigger = NoIrqTrigger::with_event_fd(Arc::clone(&fd));
+        Ok((
+            Console {
+                serial: Serial::new(trigger, Vec::new()),
+            },
+            fd,
+        ))
+    }
+
     /// Bytes the guest has written to the UART's transmit register so far, in order.
     pub fn output(&self) -> &[u8] {
         self.serial.writer()
@@ -114,7 +161,14 @@ impl Console {
     /// erroring — a full 16550 RX FIFO drops bytes on real hardware too; a caller that cares can
     /// compare the returned count against `bytes.len()`.
     pub fn enqueue_input(&mut self, bytes: &[u8]) -> usize {
-        self.serial.enqueue_raw_bytes(bytes).unwrap_or(0)
+        let accepted = self.serial.enqueue_raw_bytes(bytes).unwrap_or(0);
+        if accepted != 0 {
+            // `enqueue_raw_bytes` fills the UART FIFO directly and therefore does not pass
+            // through Serial's receive-interrupt path. Raise the same IRQ4 trigger explicitly so
+            // a guest blocked in the line discipline is woken as well as a polling guest.
+            let _ = self.serial.interrupt_evt().trigger();
+        }
+        accepted
     }
 
     /// `port`'s offset within the COM1 register window, or `None` if `port` is outside it.
@@ -658,6 +712,26 @@ impl Bus for DeviceBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn eventfd_trigger_publishes_uart_input_wake() {
+        let (mut console, event_fd) = Console::with_eventfd().expect("eventfd available");
+        assert_eq!(console.enqueue_input(b"x"), 1);
+        let mut value = 0u64;
+        let read = unsafe {
+            libc::read(
+                event_fd.as_raw_fd(),
+                (&mut value as *mut u64).cast(),
+                std::mem::size_of::<u64>(),
+            )
+        };
+        assert_eq!(read, std::mem::size_of::<u64>() as isize);
+        assert_eq!(value, 1);
+        let mut byte = [0u8];
+        console.pio_read(COM1_BASE, &mut byte);
+        assert_eq!(byte, [b'x']);
+    }
 
     #[test]
     fn a_byte_written_to_the_data_register_appears_in_output() {

@@ -11,7 +11,7 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 use crate::{client::Client, fmt};
 
@@ -44,7 +44,19 @@ pub struct ShellIntoArgs {
 
 pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
     let url = c.ws_url(&format!("/shell-into/{}/{}", args.run_id, args.node_id));
-    let (ws, _resp) = match tokio_tungstenite::connect_async(&url).await {
+    let mut request = url
+        .clone()
+        .into_client_request()
+        .context("build shell-into websocket request")?;
+    if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .context("invalid auth token")?,
+        );
+    }
+    let (ws, _resp) = match tokio_tungstenite::connect_async(request).await {
         Ok(connection) => connection,
         Err(error) if json && args.input_hex.is_some() => {
             let message = format!("shell-into websocket error: {error}");

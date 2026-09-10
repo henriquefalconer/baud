@@ -16,7 +16,14 @@ mod routes;
 mod state;
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{
+    extract::Request,
+    http::{header::AUTHORIZATION, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use std::net::SocketAddr;
 use tracing::info;
 
@@ -174,7 +181,58 @@ fn build_router(state: AppState) -> Router {
         // Shrink (M9)
         .route("/runs/{id}/shrink", post(routes::shrink::shrink))
         .route("/runs/{id}/shrink", get(routes::shrink::get_shrink));
-    add_run_kvm_route(router).with_state(state)
+    add_run_kvm_route(router)
+        .layer(middleware::from_fn(require_configured_token))
+        .with_state(state)
+}
+
+/// Protect the daemon when `BAUD_AUTH_TOKEN` is configured. Local development keeps the historical
+/// unauthenticated mode when the variable is absent, while deployed and end-to-end authenticated
+/// runs get one check covering REST, SSE, and WebSocket routes alike.
+async fn require_configured_token(request: Request, next: Next) -> Response {
+    let Some(expected) = std::env::var_os("BAUD_AUTH_TOKEN") else {
+        return next.run(request).await;
+    };
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+    let expected = expected.to_string_lossy();
+    let supplied = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if authorization_matches(supplied, expected.as_ref()) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [("content-type", "application/json")],
+            r#"{"error":"authentication required"}"#,
+        )
+            .into_response()
+    }
+}
+
+fn authorization_matches(header: Option<&str>, expected: &str) -> bool {
+    header
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected)
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::authorization_matches;
+
+    #[test]
+    fn bearer_auth_requires_exact_token() {
+        assert!(authorization_matches(Some("Bearer secret"), "secret"));
+        assert!(!authorization_matches(Some("Basic secret"), "secret"));
+        assert!(!authorization_matches(
+            Some("Bearer secret-extra"),
+            "secret"
+        ));
+        assert!(!authorization_matches(None, "secret"));
+    }
 }
 
 // Run/kvm — boot a guest on the real post-pivot KVM Multiverse (H0-H6, todo.md §14's "every

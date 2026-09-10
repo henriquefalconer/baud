@@ -35,9 +35,11 @@ impl Client {
 
     pub async fn get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .get(&url)
+        let mut request = self.http.get(&url);
+        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+            request = request.bearer_auth(token);
+        }
+        let resp = request
             .send()
             .await
             .with_context(|| format!("GET {url}: could not connect to baud-server"))?;
@@ -54,9 +56,11 @@ impl Client {
 
     pub async fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .delete(&url)
+        let mut request = self.http.delete(&url);
+        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+            request = request.bearer_auth(token);
+        }
+        let resp = request
             .send()
             .await
             .with_context(|| format!("DELETE {url}: could not connect to baud-server"))?;
@@ -73,10 +77,11 @@ impl Client {
 
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .post(&url)
-            .json(body)
+        let mut request = self.http.post(&url).json(body);
+        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+            request = request.bearer_auth(token);
+        }
+        let resp = request
             .send()
             .await
             .with_context(|| format!("POST {url}: could not connect to baud-server"))?;
@@ -96,10 +101,11 @@ impl Client {
     /// degrading to a one-shot JSON snapshot.
     pub async fn stream_get(&self, path: &str) -> Result<()> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .get(&url)
-            .header("accept", "text/event-stream")
+        let mut request = self.http.get(&url).header("accept", "text/event-stream");
+        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+            request = request.bearer_auth(token);
+        }
+        let resp = request
             .send()
             .await
             .with_context(|| format!("GET {url}: could not connect to baud-server"))?;

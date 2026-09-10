@@ -1922,3 +1922,79 @@ The failing watchdog test passes in isolation in 2 seconds, so the gate failure 
 Workspace tests are fully green, including the previously failing burst-watchdog unit. Re-running the exact gate once more so the required pre-push protocol has a terminal green result rather than an isolated-test inference.
 
 The final repository gate is green: 25 units passed and one package build was correctly skipped by its unchanged-input stamp. The locked batch is still open because the specifications require substantial paths not covered by this verified host/CLI increment; preserving the green increment and continuing root-cause implementation rather than collapsing open work.
+
+## 2026-09-10T13:31:14 UTC (43min) - Session usage — ralph-7 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3151 (summed from 5 session transcripts: main $0.2368 · subagents $0.0783)
+- tokens input 626,355 · cache-read 8,126,464 · cache-write 0 · output 22,765 · reasoning 6,738
+- context 148,115 tok peak of 272K (54%) across 80 inference calls, 1 drop(s), final 148,115
+- models gpt-5.6-luna $0.3151 (in 626,355 / out 29,503 / cache-read 8,126,464)
+- subagents (4) pi process x4
+  - delegate-fc1e72516270713c903a3e06bf62138e: gpt-5.6-luna $0.0229, 5 inference calls
+  - delegate-f4e66a81a38fe3a8b5d51c1eaf1d63c6: gpt-5.6-luna $0.0257, 7 inference calls
+  - delegate-d803691f30ae31fb697b88097740c877: gpt-5.6-luna $0.0247, 6 inference calls
+  - 01a08b5f-efc8-72a3-a738-56254c53eb27: gpt-5.6-luna $0.0051, 3 inference calls
+- transcript: ralph/.run/20260910T073659Z/008-ralph-7.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 8 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address by studying the specifications, build queue, and existing implementation.
+
+perf_event_paranoid reset before this task
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract — they are the first 10 actionable pending items in priority order; G8 image relocation remains for the next step.
+
+Starting repository-wide implementation search while the specification audits run.
+
+Implemented opt-in bearer authentication across REST, SSE, and shell WebSocket paths, with the CLI forwarding BAUD_AUTH_TOKEN. Running formatting and focused compilation next.
+
+The authenticated transport layer now covers ordinary HTTP, SSE, and shell WebSocket traffic, with an exact-token regression test and matching server documentation. The remaining selected gaps are genuine guest-image, IRQ, UFFD, Ubuntu, and Mario integration work; I am preserving them rather than mislabeling this transport increment.
+
+Focused subagent verification is still running; auditing the required full gate and current queue in parallel.
+
+Focused verification passed: baud-server 48 tests and baud-cli 1 test, including the new exact bearer-auth test. Starting the repository-defined full gate now; any failure will drive further root-cause work.
+
+Full gate exposed a real regression in the new shell WebSocket request: constructing a bare HTTP request omitted the tungstenite handshake key. Switched to IntoClientRequest so handshake headers remain intact, then isolating M10 before rerunning the gate.
+
+M10 now passes end to end over the real server and WebSocket after preserving the generated handshake headers. Isolating H6 next; its gate failure had no diagnostic tail and may be the documented load-sensitive fleet test.
+
+The two gate failures were diagnosed and resolved: M10 was a real handshake regression and now passes; H6 passed in isolation with real fleet execution, so it was a load flake. Re-running the exact full gate for a green terminal result.
+
+The corrected full gate passed every reported unit through M9 and M10, but the 600-second command limit interrupted before the gate printed its final table. Re-running the same gate now to obtain the required terminal result.
+
+The gate again passed all reported units but exceeded the single-call limit before its final table. Launching the exact unchanged gate as a tracked background validation so it can finish without truncation.
+
+Added an EventFd-backed UART trigger and explicit input-wake emission when host bytes enter the RX FIFO, with a Linux regression test proving the counter and byte order. The full gate is still running against the current tree.
+
+While the required gate runs, the working tree contains only the auth transport, WebSocket handshake repair, UART EventFd trigger, spec note, and progress log. No queue item is being relabeled from a partial implementation.
+
+The new EventFd console path passes its focused test and preserves all existing console tests. The gate has completed warm-up and is in the uncontended H5 phase; no additional changes are being made while validation owns the tree.
+
+The tracked gate remains active after the H5 long pole. The selected queue is still intentionally open because the real image/runtime, UFFD branch wiring, ownership registry, Ubuntu boot, and FCEUX closure are not yet complete.
+
+H5 passed in the tracked gate and drive fan-out has begun. I am not changing replay or route behavior while the required validation run is in flight.
+
+The tracked gate has H5, clippy, and the first drive units green. Continuing to hold the tree stable until the final gate table is available.
+
+The full gate continues cleanly through M9 and the H-series after the WebSocket and UART fixes; M10/M13 and the exclusive fleet phase remain.
+
+All parallel drive units are green in the tracked gate, including the repaired M10 and M13. Waiting for the exclusive H6 and cancellation checks plus the final table.
+
+The remaining long parallel package branch unit has not printed its completion yet; the tracked gate is still the source of truth.
+
+The gate is still running its concurrently launched workspace tests and the last package drive. No failure has been reported; keeping the required validation alive.
+
+Required pre-push validation is green: 25 passed, 0 failed, 1 skipped. The locked batch is not closed: ten queue entries still lack their full real image/runtime/UFFD/ownership/Ubuntu/Mario acceptance paths, so I am recording this verified transport and serial increment without relabeling them DONE.
+
+2026-09-10T14:17:20 UTC - Changes committed.
+
+- Added opt-in bearer authentication across REST, SSE, and shell WebSocket traffic, with CLI forwarding and documentation.
+
+- Repaired shell WebSocket handshake construction and added an EventFd-backed UART input wake path with a regression test.
+
+- Focused tests passed; full gate passed: 25 passed, 0 failed, 1 skipped.

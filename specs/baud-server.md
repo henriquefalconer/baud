@@ -90,6 +90,7 @@ interpreting workload semantics.
 - REST for commands and queries; SSE for live tails (`run watch`, `obs tail`, `syscalls tail`, `tracing tail`,
   `stream tail`).
 - Agent connection is authenticated by a minted identity token (baud-identity); nothing unauthenticated.
+- Deployments set `BAUD_AUTH_TOKEN`; every REST, SSE, and shell WebSocket request except `/health` must carry `Authorization: Bearer <token>`. The CLI forwards the same token from its environment. Leaving it unset preserves the loopback-only development mode.
 
 ---
 
