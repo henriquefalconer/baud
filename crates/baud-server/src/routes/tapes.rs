@@ -513,3 +513,35 @@ pub async fn endpoint(State(state): State<AppState>, Path(id): Path<String>) -> 
         Err(e) => Err(server_error(format!("db error: {e}"))),
     }
 }
+
+/// GET /tapes/:id/probe-caps — return live backend capabilities for a tape.
+pub async fn probe_caps(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let row =
+        sqlx::query_as::<_, (String, String)>("SELECT backend, state FROM tapes WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await;
+    let (backend, tape_state) = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err(not_found(format!("tape {id} not found"))),
+        Err(error) => return Err(server_error(format!("db error: {error}"))),
+    };
+    let endpoint = state
+        .tape_backend
+        .endpoint(&id)
+        .await
+        .map_err(|error| server_error(format!("backend capability probe failed: {error}")))?;
+    Ok(Json(json!({
+        "id": id,
+        "backend": backend,
+        "state": tape_state,
+        "capabilities": {
+            "exec": true,
+            "put": true,
+            "get": true,
+            "lifecycle": true,
+            "endpoint": endpoint.is_some(),
+        },
+        "endpoint": endpoint,
+    })))
+}

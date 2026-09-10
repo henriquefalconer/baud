@@ -76,6 +76,15 @@ pub enum VerifyAction {
         /// Path to a raw read-only virtio-blk image on the server host; writes use a memory overlay.
         #[arg(long)]
         virtio_blk_image: Option<String>,
+        /// Work-clock period between injected scheduler timer ticks.
+        #[arg(long)]
+        periodic_timer_period_rcb: Option<u64>,
+        /// Interrupt vector for periodic timer ticks, defaulting to Linux's Ubuntu vector 0xee.
+        #[arg(long, default_value_t = 0xee)]
+        periodic_timer_vector: u8,
+        /// Maximum periodic timer ticks before the fingerprint fails closed.
+        #[arg(long, default_value_t = 20_000)]
+        periodic_timer_max_ticks: u32,
     },
 }
 
@@ -144,6 +153,9 @@ pub async fn run(cmd: VerifyCmd, c: &Client, json: bool) -> Result<()> {
             times,
             initramfs,
             virtio_blk_image,
+            periodic_timer_period_rcb,
+            periodic_timer_vector,
+            periodic_timer_max_ticks,
         } => {
             let mut body = json!({
                 "kernel_path": kernel,
@@ -163,6 +175,13 @@ pub async fn run(cmd: VerifyCmd, c: &Client, json: bool) -> Result<()> {
             }
             if let Some(path) = virtio_blk_image {
                 body["virtio_blk_image_path"] = json!(path);
+            }
+            if let Some(period_rcb) = periodic_timer_period_rcb {
+                body["periodic_timer"] = json!({
+                    "period_rcb": period_rcb,
+                    "vector": periodic_timer_vector,
+                    "max_ticks": periodic_timer_max_ticks,
+                });
             }
 
             let v = c.post("/verify/fingerprint", &body).await?;

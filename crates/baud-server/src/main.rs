@@ -122,7 +122,7 @@ fn build_router(state: AppState) -> Router {
         .route("/tapes/{id}", delete(routes::tapes::kill))
         .route("/tapes/{id}/exec", post(routes::tapes::exec))
         .route("/tapes/{id}/endpoint", get(routes::tapes::endpoint))
-        .route("/tapes/{id}/probe-caps", get(routes::tapes::endpoint))
+        .route("/tapes/{id}/probe-caps", get(routes::tapes::probe_caps))
         .route("/tapes/{id}/reconstruct", post(routes::tapes::reconstruct))
         // Spec (M2)
         .route("/spec/lint", post(routes::spec::lint))

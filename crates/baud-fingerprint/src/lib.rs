@@ -174,7 +174,42 @@ mod linux {
         banner_tail_len: usize,
         expected_banner: Option<&[u8]>,
     ) -> Result<Fingerprint, FpError> {
-        let raw = vm.capture_fingerprint(target_rcb)?;
+        capture_with_periodic_timer(
+            vm,
+            label,
+            target_rcb,
+            banner_tail_len,
+            expected_banner,
+            None,
+        )
+    }
+
+    /// Capture after delivering periodic timer interrupts on the way to the target. `None`
+    /// preserves the exact-boundary capture used by fixture guests.
+    pub fn capture_with_periodic_timer(
+        vm: &mut Multiverse,
+        label: &str,
+        target_rcb: u64,
+        banner_tail_len: usize,
+        expected_banner: Option<&[u8]>,
+        periodic_timer: Option<(u64, u8, u32)>,
+    ) -> Result<Fingerprint, FpError> {
+        let raw = match (periodic_timer, expected_banner) {
+            (Some((period, vector, max_ticks)), Some(pattern)) => vm
+                .capture_fingerprint_until_console_pattern(
+                    period,
+                    vector,
+                    Some(0x3b),
+                    pattern,
+                    max_ticks,
+                    200_000,
+                    banner_tail_len,
+                )?,
+            (Some((period, vector, max_ticks)), None) => {
+                vm.capture_fingerprint_with_periodic_timer(target_rcb, period, vector, max_ticks)?
+            }
+            (None, _) => vm.capture_fingerprint(target_rcb)?,
+        };
         let tail_start = raw.console_output.len().saturating_sub(banner_tail_len);
         let banner = raw.console_output[tail_start..].to_vec();
         if let Some(expected) = expected_banner {
@@ -257,7 +292,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::capture;
+pub use linux::{capture, capture_with_periodic_timer};
 
 #[cfg(test)]
 mod tests {

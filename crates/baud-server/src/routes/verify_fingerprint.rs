@@ -17,6 +17,7 @@
 // not wired to any route) — that piece, and the real Ubuntu 18.04.1 cloud image, remain open.
 // Linux-only, like every route calling into `baud_multiverse::linux`/`baud_fingerprint::capture`.
 
+use super::run_kvm::PeriodicTimerSpec;
 use axum::Json;
 use baud_fingerprint::Fingerprint;
 use baud_multiverse::linux::Multiverse;
@@ -62,6 +63,9 @@ pub struct VerifyFingerprintBody {
     /// Read-only raw disk image for a real distro boot; guest writes use the in-memory overlay.
     #[serde(default)]
     pub virtio_blk_image_path: Option<String>,
+    /// Optional periodic timer needed by real Linux distributions during boot.
+    #[serde(default)]
+    pub periodic_timer: Option<PeriodicTimerSpec>,
 }
 
 fn default_cmdline() -> String {
@@ -123,6 +127,9 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
     let cmdline = body.cmdline.clone();
     let target_rcb = body.target_rcb;
     let banner_tail_len = body.banner_tail_len;
+    let periodic_timer = body
+        .periodic_timer
+        .map(|timer| (timer.period_rcb, timer.vector, timer.max_ticks));
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor, same convention
     // as `/run/kvm`.
@@ -136,6 +143,7 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
             target_rcb,
             banner_tail_len,
             expected_banner.as_deref(),
+            periodic_timer,
             times,
         )
     })
@@ -198,6 +206,7 @@ fn boot_and_compare_fingerprints(
     target_rcb: u64,
     banner_tail_len: usize,
     expected_banner: Option<&[u8]>,
+    periodic_timer: Option<(u64, u8, u32)>,
     times: u32,
 ) -> Result<(Vec<Fingerprint>, Option<baud_fingerprint::Divergence>), String> {
     let rdseed_sites = crate::rdseed_sites::load_rdseed_sites(kernel_path)?;
@@ -221,12 +230,13 @@ fn boot_and_compare_fingerprints(
             vm.write_acpi_tables()
                 .map_err(|e| format!("vm{i} ACPI setup failed: {e}"))?;
         }
-        let f = baud_fingerprint::capture(
+        let f = baud_fingerprint::capture_with_periodic_timer(
             &mut vm,
             &format!("vm{i}"),
             target_rcb,
             banner_tail_len,
             expected_banner,
+            periodic_timer,
         )
         .map_err(|e| format!("vm{i} capture failed: {e}"))?;
         fingerprints.push(f);
@@ -284,6 +294,7 @@ mod tests {
             100_000,
             64,
             None,
+            None,
             2,
         )
         .expect("boot_and_compare_fingerprints failed");
@@ -311,6 +322,7 @@ mod tests {
             100_000,
             64,
             None,
+            None,
             1,
         )
         .expect("boot_and_compare_fingerprints failed");
@@ -334,6 +346,7 @@ mod tests {
             100_000,
             64,
             Some(b"a banner timer-guest never prints"),
+            None,
             2,
         )
         .expect_err("timer-guest's console never contains this banner");

@@ -2897,3 +2897,47 @@ The gate ran through all parallel checks but timed out at 600s after H9 failed i
 Root-cause debugging confirms the Ubuntu VM reaches a deterministic kernel loop with an empty serial tail under both the hardened and legacy command lines; H9 therefore fails correctly rather than falsely passing. The login-banner boot path remains open, so no queue item is marked DONE.
 
 Recording the validation result and preserving the fail-closed changes in git; the queue remains open for the next forward step.
+
+## 2026-09-10T22:27:26 UTC (20min) - Session usage — ralph-21 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3214 (summed from 5 session transcripts: main $0.2333 · subagents $0.0881)
+- tokens input 541,770 · cache-read 9,163,776 · cache-write 0 · output 24,780 · reasoning 6,454
+- context 154,691 tok peak of 272K (57%) across 77 inference calls, monotonic
+- models gpt-5.6-luna $0.3214 (in 541,770 / out 31,234 / cache-read 9,163,776)
+- subagents (4) pi process x4
+  - delegate-00bd75e12f0b814126c714474cf597e5: gpt-5.6-luna $0.0286, 6 inference calls
+  - delegate-bb1efefc50ee63764e91c75a4b516899: gpt-5.6-luna $0.0260, 6 inference calls
+  - delegate-ad8b1630b21104a3dff8f23a68e17c42: gpt-5.6-luna $0.0296, 6 inference calls
+  - 01a08d5d-74c4-7245-8675-f31164bad858: gpt-5.6-luna $0.0039, 2 inference calls
+- transcript: ralph/.run/20260910T073659Z/030-ralph-21.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 22 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 pending items in todo-build.md.
+
+The repository already contains substantial implementations for all seven selected paths, including image composition, tape bus, memfd COW, auth middleware, ownership registry, SSE routes, and H9 fail-closed tooling; I am now checking integration failures rather than assuming the queue text is current.
+
+Added a live tape capability probe and wired periodic timer delivery into fingerprint capture so the Ubuntu path can service Linux scheduler ticks before exact-boundary capture; running focused compilation/tests next.
+
+Focused package, VMM, fingerprint, server, and CLI tests are green after the new timer and capability plumbing. The remaining verification is the repository gate, which is the acceptance protocol before any queue collapse.
+
+The gate exercised real H0-H7 and package/CLI paths successfully; H9 failed before boot because its pinned Ubuntu artifacts are absent in this environment, and the overall gate call hit the 600-second wall. Inspecting the exact H9 diagnostic and updating the real artifact preparation path.
+
+H9 now passes the Ubuntu-specific periodic timer vector and bounded tick settings through the real CLI/server fingerprint path, matching the documented Linux 4.15 interrupt vector instead of silently using the default fixture vector.
+
+H9 diagnostics showed the original 100,000-event target was below the first real Ubuntu PMU boundary, so the guest never emitted a banner; the drive now uses a boot-scale 100,000,000 target while retaining the exact 100,000,001 negative control.
+
+H9 now boots the real Ubuntu kernel through initrd release, but the login banner remains absent, so the route correctly fails closed with the preserved console tail; continuing with formatting and full gate diagnostics rather than calling H9 complete.
+
+Applied rustfmt to the new fingerprint timer and capability-route code; the formatter had no semantic complaints, only layout changes.
+
+Changed real-distro fingerprint capture to drive the combined periodic-timer and virtio-blk loop until the expected console banner, then capture the exact reached event point; fixture fingerprints retain the fixed-target path.
+
+H9 now reaches 17 KB of real Ubuntu console output and enters the combined timer/virtio-blk loop, but stalls before login during systemd boot; the preserved watchdog path still fails closed. The other selected acceptance paths remain open, so no queue item is being relabeled DONE.

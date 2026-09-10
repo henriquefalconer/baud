@@ -123,16 +123,19 @@ pass "H9.1: host probe runnable='$RUNNABLE' (real KVM present)"
 # ---------------------------------------------------------------------------
 # H9.2 — two independent boots must produce matching fingerprints
 # ---------------------------------------------------------------------------
-log "baud verify fingerprint --kernel $KERNEL --target-rcb 100000 --times 2 ..."
+log "baud verify fingerprint --kernel $KERNEL --target-rcb 100000000 --times 2 ..."
 FP_JSON="$("$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
-    --target-rcb 100000 \
+    --target-rcb 100000000 \
+    --periodic-timer-period-rcb 500000 \
+    --periodic-timer-vector 238 \
+    --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 2 \
-    --json)" || fail "H9.2: 'baud verify fingerprint' FAILED to run"
+    --json 2>&1)" || { echo "$FP_JSON"; fail "H9.2: 'baud verify fingerprint' FAILED to run"; }
 echo "$FP_JSON"
 
 OK="$(echo "$FP_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))")"
@@ -150,7 +153,7 @@ BAD_FP_JSON="$("$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
-    --target-rcb 100000 \
+    --target-rcb 100000000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "a banner Ubuntu never prints" \
     --times 2 \
@@ -213,7 +216,7 @@ VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
-    --target-rcb 100000 \
+    --target-rcb 100000000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 1 \
@@ -236,7 +239,7 @@ VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
-    --target-rcb 100000 \
+    --target-rcb 100000000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 1 \
@@ -269,7 +272,7 @@ VM1_ALT_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
-    --target-rcb 100001 \
+    --target-rcb 100000001 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 1 \

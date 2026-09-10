@@ -2897,6 +2897,70 @@ impl Multiverse {
             console_output: self.bus.console.output().to_vec(),
         })
     }
+
+    /// Capture a timed fingerprint while servicing a guest scheduler timer on the way to the
+    /// requested absolute event count. This is the real-distro variant of
+    /// [`capture_fingerprint`]. Timer delivery stops before the target, then the exact-boundary
+    /// capture path takes over, so the reported event count remains precise.
+    pub fn capture_fingerprint_with_periodic_timer(
+        &mut self,
+        target_rcb: u64,
+        period_rcb: u64,
+        vector: u8,
+        max_ticks: u32,
+    ) -> Result<TimedExitFingerprint, DeterminismHole> {
+        if period_rcb == 0 {
+            return Err(DeterminismHole(
+                "periodic timer period must be non-zero".to_owned(),
+            ));
+        }
+        for _ in 0..max_ticks {
+            let now = self.time.current_rcb();
+            if now.saturating_add(period_rcb) >= target_rcb {
+                break;
+            }
+            self.inject_timer_tick(period_rcb, vector)
+                .map_err(|error| DeterminismHole(error.to_string()))?;
+        }
+        if self.time.current_rcb().saturating_add(period_rcb) < target_rcb {
+            return Err(DeterminismHole(format!(
+                "periodic timer did not reach fingerprint target within {max_ticks} ticks"
+            )));
+        }
+        self.capture_fingerprint(target_rcb)
+    }
+
+    /// Boot-oriented fingerprint capture. A real Linux guest may need timer interrupts to reach
+    /// its login prompt, so drive the combined timer and virtio-blk loop until the requested
+    /// console pattern appears, then capture at the exact event count reached there.
+    pub fn capture_fingerprint_until_console_pattern(
+        &mut self,
+        period_rcb: u64,
+        timer_vector: u8,
+        block_vector: Option<u8>,
+        pattern: &[u8],
+        max_ticks: u32,
+        max_exits_per_burst: u32,
+        banner_tail_len: usize,
+    ) -> Result<TimedExitFingerprint, DeterminismHole> {
+        self.run_until_console_pattern_with_periodic_timer_and_devices(
+            period_rcb,
+            timer_vector,
+            None,
+            block_vector,
+            pattern,
+            max_ticks,
+            max_exits_per_burst,
+        )
+        .map_err(|error| DeterminismHole(error.to_string()))?;
+        let target = self.time.current_rcb();
+        let raw = self.capture_fingerprint(target)?;
+        let tail_start = raw.console_output.len().saturating_sub(banner_tail_len);
+        Ok(TimedExitFingerprint {
+            console_output: raw.console_output[tail_start..].to_vec(),
+            ..raw
+        })
+    }
 }
 
 /// The four-field timed-exit fingerprint plus the console output observed alongside it
