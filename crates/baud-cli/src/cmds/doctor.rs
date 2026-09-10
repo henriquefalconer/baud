@@ -16,6 +16,10 @@ pub async fn run(c: &Client, json: bool) -> Result<()> {
         && v.get("age")
             .and_then(|s| s.get("ok"))
             .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        && v.get("host")
+            .and_then(|host| host.get("runnable"))
+            .and_then(|value| value.as_bool())
             .unwrap_or(false);
     if !all_ok {
         std::process::exit(1);

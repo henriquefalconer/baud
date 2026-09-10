@@ -32,6 +32,7 @@ pub async fn probe(_state: State<AppState>) -> Json<Value> {
         "enforced_module_present": host.enforced_module_present,
         "runnable": host.is_runnable(),
         "enforced_capable": host.is_enforced_capable(),
+        "regime": host.regime(),
         "reason": host.reason,
         "capacity": host.capacity(),
     }))

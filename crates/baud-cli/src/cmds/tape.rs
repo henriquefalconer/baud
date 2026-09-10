@@ -33,6 +33,16 @@ pub enum TapeAction {
         /// Tape ID
         id: String,
     },
+    /// Start a stopped tape
+    Start {
+        /// Tape ID
+        id: String,
+    },
+    /// Stop a running tape
+    Stop {
+        /// Tape ID
+        id: String,
+    },
     /// Ensure tape is running (start if stopped, restore if archived)
     Ensure {
         /// Tape ID
@@ -43,7 +53,7 @@ pub enum TapeAction {
         /// Tape ID
         id: String,
     },
-    /// Reconstruct a tape from journal (stub — M6)
+    /// Reconstruct a tape from its recorded lifecycle
     Reconstruct {
         /// Tape ID
         id: String,
@@ -101,6 +111,14 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
         }
         TapeAction::Status { id } => {
             let v = c.get(&format!("/tapes/{id}")).await?;
+            print_value(&v, json);
+        }
+        TapeAction::Start { id } => {
+            let v = c.post(&format!("/tapes/{id}/start"), &json!({})).await?;
+            print_value(&v, json);
+        }
+        TapeAction::Stop { id } => {
+            let v = c.post(&format!("/tapes/{id}/stop"), &json!({})).await?;
             print_value(&v, json);
         }
         TapeAction::Ensure { id } => {

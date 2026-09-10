@@ -101,7 +101,11 @@ pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
             out,
             hashes_only,
         } => {
-            let mut url = format!("/runs/{run}/stream/tail");
+            if out.is_some() {
+                anyhow::bail!("stream tail --out is not supported for a live SSE stream; use stream render --out for replayed pixels");
+            }
+            let endpoint = if json { "frames" } else { "stream/tail" };
+            let mut url = format!("/runs/{run}/{endpoint}");
             let mut params = Vec::new();
             if let Some(n) = node {
                 params.push(format!("node={n}"));
@@ -112,31 +116,12 @@ pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
             if !params.is_empty() {
                 url = format!("{url}?{}", params.join("&"));
             }
-            let resp: serde_json::Value = c.get(&url).await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            } else {
-                let frames = resp["frames"].as_array().cloned().unwrap_or_default();
-                println!("stream tail — run={run} ({} frames)", frames.len());
-                if let Some(o) = out {
-                    println!("  (would write Y4M to {o} — replay not yet implemented)");
-                }
-                for f in &frames {
-                    let step = f["step"].as_i64().unwrap_or(0);
-                    let hash = f["hash"].as_str().unwrap_or("?");
-                    if hashes_only {
-                        println!("  step={step} hash={}", &hash[..16.min(hash.len())]);
-                    } else {
-                        let w = f["width"].as_i64().unwrap_or(0);
-                        let h = f["height"].as_i64().unwrap_or(0);
-                        let fmt = f["format"].as_str().unwrap_or("?");
-                        println!(
-                            "  step={step} {w}x{h} {fmt} hash={}",
-                            &hash[..16.min(hash.len())]
-                        );
-                    }
-                }
+            if !json {
+                c.stream_get(&url).await?;
+                return Ok(());
             }
+            let resp: serde_json::Value = c.get(&url).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
         }
 
         StreamAction::Render {

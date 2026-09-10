@@ -1866,3 +1866,59 @@ The foreground gate timed out during the fan-out phase after H5, clippy, H2-H4, 
 The foreground gate has now been rerun three ways. All completed units passed, but the 600-second limit repeatedly expires on long real KVM/package work, first at pkg-build-cli and then at m9. The required unit package CLI is green in isolation; the ten-item batch is still not complete and no unresolved item is being marked DONE.
 
 Saving the verified host-contract work and G1 queue collapse so the repository remains coherent while the remaining nine locked items continue in the next iteration.
+
+## 2026-09-10T12:48:07 UTC (1h25min) - Session usage — ralph-6 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1696300, receipt ralph/.run/20260910T073659Z/006-ralph-6.json.processes/receipt.json)
+- cost $0.3252 (summed from 4 session transcripts: main $0.2494 · subagents $0.0758)
+- tokens input 512,949 · cache-read 9,675,776 · cache-write 0 · output 24,258 · reasoning 7,942
+- context 165,461 tok peak of 272K (61%) across 83 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.3252 (in 512,949 / out 32,200 / cache-read 9,675,776)
+- subagents (3) pi process x3
+  - delegate-2a5f6dce47e3e2a3fc2da7c032ede0e8: gpt-5.6-luna $0.0267, 5 inference calls
+  - delegate-404e388956af7611a18585c94b4a21f9: gpt-5.6-luna $0.0244, 5 inference calls
+  - delegate-6560e405c2fa4bef1dbe677c9a3a86e8: gpt-5.6-luna $0.0248, 6 inference calls
+- transcript: ralph/.run/20260910T073659Z/006-ralph-6.json
+- transcript: ralph/.run/20260910T073659Z/007-ralph-6.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 7 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and then implementing the full batch through the real verification path.
+
+Starting the iteration by reading the build queue and repository shape.
+
+Studying the specifications and current implementations in parallel before locking the batch.
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract — they are the first 10 pending implementation entries in the queue; G8 relocate distributed validation images remains for the next step.
+Selection locked. Searching each selected path for real implementations and tests now.
+
+Reading the current queue-backed implementation notes and the exact code paths before choosing concrete fixes.
+
+Found two concrete contract gaps in the selected CLI and host paths: stream tail was still a one-shot placeholder, and host JSON lacked the canonical regime. Implementing both with regression coverage before the build checks.
+
+The targeted implementation is complete locally; the dedicated build/test worker is checking host, CLI, and server compilation now.
+
+Host regime JSON and CLI lifecycle/SSE routing are now wired and formatted. Waiting for the dedicated targeted verification before extending the same fixes into the acceptance gate.
+
+Doctor now reports the measured host regime and refuses a green CLI result when KVM is not runnable, closing the silent host-capability gap in the selected G8 contract.
+
+The targeted worker passed host, CLI, and server checks. Re-running the affected crates after the doctor-route addition, then starting the exact gate required by the queue.
+
+Affected-crate verification is green. Running the repository-defined full gate now, including build, clippy, workspace tests, and maintained drives.
+
+The full gate timed out after all completed phases through m9 passed, with no reported failure. Re-running the exact gate as the required long-running background validation so its terminal result can be recorded.
+
+The rerun is active. The code diff is whitespace-clean; continuing a final audit of the locked entries without relabeling any unresolved dependency as DONE.
+
+The full gate found one failure only: baud-multiverse burst_watchdog_does_not_fire_on_normal_resume_past_halt, with guest RIP 0x200038 and no console tail. Re-running that named unit in isolation now to distinguish load flake from regression.
+
+The failing watchdog test passes in isolation in 2 seconds, so the gate failure is load-sensitive rather than a reproducible source regression. Running the workspace test phase alone before repeating the full gate.
+
+Workspace tests are fully green, including the previously failing burst-watchdog unit. Re-running the exact gate once more so the required pre-push protocol has a terminal green result rather than an isolated-test inference.
+
+The final repository gate is green: 25 units passed and one package build was correctly skipped by its unchanged-input stamp. The locked batch is still open because the specifications require substantial paths not covered by this verified host/CLI increment; preserving the green increment and continuing root-cause implementation rather than collapsing open work.

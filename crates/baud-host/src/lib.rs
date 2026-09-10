@@ -34,6 +34,15 @@ pub enum Vendor {
     Other,
 }
 
+/// The strongest determinism contract the probed host can actually provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Regime {
+    Cooperative,
+    Enforced,
+    Rejected,
+}
+
 /// The result of probing one host's capabilities (specs/baud-host.md §3).
 ///
 /// Every field is a real, independently-observed check — never inferred from another field or
@@ -89,6 +98,17 @@ impl Probe {
     /// (specs/baud-host.md §4's "enforced" case).
     pub fn is_enforced_capable(&self) -> bool {
         self.is_runnable() && self.vendor == Vendor::Intel && self.enforced_module_present
+    }
+
+    /// Return the canonical regime name used by the HTTP and CLI contracts.
+    pub fn regime(&self) -> Regime {
+        if self.is_enforced_capable() {
+            Regime::Enforced
+        } else if self.is_runnable() {
+            Regime::Cooperative
+        } else {
+            Regime::Rejected
+        }
     }
 }
 
@@ -203,6 +223,7 @@ mod tests {
         assert!(host.kvm && host.vmx && host.rcb_deterministic);
         assert!(host.is_runnable());
         assert!(host.reason.is_none() || !host.is_enforced_capable());
+        assert_eq!(host.regime(), Regime::Enforced);
     }
 
     /// specs/baud-host.md §6 `rejected_host_names_the_failing_check` — a missing `/dev/kvm`
@@ -246,6 +267,7 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("enforced KVM module unavailable")));
+        assert_eq!(host.regime(), Regime::Cooperative);
     }
 
     #[test]
@@ -269,6 +291,7 @@ mod tests {
             assert!(v.get(key).is_some(), "missing field {key} in Probe JSON");
         }
         assert_eq!(v["enforced_module_present"], false);
+        assert_eq!(host.regime(), Regime::Cooperative);
         assert!(host.is_runnable());
         assert!(!host.is_enforced_capable());
     }

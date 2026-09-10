@@ -41,6 +41,9 @@ fn check_local_backend_vm() -> bool {
 /// GET /doctor — `baud doctor`
 pub async fn doctor(_state: State<AppState>) -> Json<Value> {
     let report = baud_keys::doctor();
+    let host = tokio::task::spawn_blocking(baud_host::Host::probe)
+        .await
+        .expect("host doctor task panicked");
 
     Json(json!({
         "sops": {
@@ -64,5 +67,12 @@ pub async fn doctor(_state: State<AppState>) -> Json<Value> {
         // local_backend_vm_ok: on macOS the supervisor needs a lima/colima VM (Linux kernel).
         // Check whether limactl is installed and a baud VM instance is available.
         "local_backend_vm_ok": check_local_backend_vm(),
+        "host": {
+            "regime": host.regime(),
+            "runnable": host.is_runnable(),
+            "enforced_capable": host.is_enforced_capable(),
+            "reason": host.reason,
+            "capacity": host.capacity(),
+        },
     }))
 }
