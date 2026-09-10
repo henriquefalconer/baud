@@ -82,6 +82,10 @@ pub enum MultiverseError {
     ContractViolation { sysno: Option<u32>, reason: String },
     #[error("guest binary not found: {0}")]
     BinaryNotFound(PathBuf),
+    #[error("guest image count mismatch: manifest has {expected}, supplied {actual}")]
+    ImageCountMismatch { expected: usize, actual: usize },
+    #[error("guest image checksum mismatch for node {node}: expected {expected}, got {actual}")]
+    BinaryChecksum { node: u32, expected: String, actual: String },
     #[error("manifest parse error: {0}")]
     ManifestError(String),
     #[error("supervisor setup failed: {0}")]
@@ -288,6 +292,9 @@ pub struct GuestSpec {
     pub binary: PathBuf,
     /// Argument override (empty = use binary's own argv).
     pub argv: Vec<String>,
+    /// Optional blake3 checksum for the exact image supplied to [`Multiverse::load`].
+    #[serde(default)]
+    pub binary_hash: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -648,14 +655,26 @@ impl Multiverse {
     /// # Spec §5
     /// `fn load(manifest: RunManifest, guests: Vec<GuestImage>) -> Result<Self>`
     pub fn load(manifest: RunManifest, guests: Vec<GuestImage>) -> Result<Self, MultiverseError> {
-        // Validate binary checksums
-        for (i, (spec, img)) in manifest.guests.iter().zip(guests.iter()).enumerate() {
+        // An explicitly supplied image list is authoritative. Do not silently zip away a
+        // missing guest or ignore an extra image, because either mistake would execute a
+        // different workload than the manifest describes.
+        if !guests.is_empty() && guests.len() != manifest.guests.len() {
+            return Err(MultiverseError::ImageCountMismatch {
+                expected: manifest.guests.len(),
+                actual: guests.len(),
+            });
+        }
+        for (spec, img) in manifest.guests.iter().zip(guests.iter()) {
             if !spec.binary.as_os_str().is_empty() && !spec.binary.exists() {
                 return Err(MultiverseError::BinaryNotFound(spec.binary.clone()));
             }
-            // If the spec carries a binary_hash, verify the supplied image matches.
-            // (GuestSpec currently uses a PathBuf for the binary; checksum is advisory.)
-            let _ = (i, img); // future: compare img.checksum against spec.binary_hash
+            if !spec.binary_hash.is_empty() && img.checksum != spec.binary_hash {
+                return Err(MultiverseError::BinaryChecksum {
+                    node: spec.node_id,
+                    expected: spec.binary_hash.clone(),
+                    actual: img.checksum.clone(),
+                });
+            }
         }
 
         info!(
@@ -1019,6 +1038,7 @@ mod tests {
             node_id: i as u32,
             binary: PathBuf::from(""), // empty = no real binary (simulation mode)
             argv: Vec::new(),
+            binary_hash: String::new(),
         }).collect();
         RunManifest { guests, ..Default::default() }
     }
@@ -1026,6 +1046,40 @@ mod tests {
     /// VR1-B3 test 1: two runs with the same tape produce byte-identical observation stream hashes.
     ///
     /// This is the core determinism claim: execution is a pure function of (manifest, tape).
+    #[test]
+    fn load_rejects_image_count_mismatch() {
+        let mut manifest = make_manifest(2);
+        manifest.guests[0].binary = PathBuf::new();
+        manifest.guests[1].binary = PathBuf::new();
+        let image = GuestImage::from_bytes(vec![1, 2, 3]);
+        let error = match Multiverse::load(manifest, vec![image]) {
+            Ok(_) => panic!("an incomplete image list must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MultiverseError::ImageCountMismatch { expected: 2, actual: 1 }));
+    }
+
+    #[test]
+    fn load_rejects_a_mismatched_declared_image_checksum() {
+        let mut manifest = make_manifest(1);
+        manifest.guests[0].binary_hash = blake3_hex(b"different");
+        let image = GuestImage::from_bytes(vec![1, 2, 3]);
+        let error = match Multiverse::load(manifest, vec![image]) {
+            Ok(_) => panic!("a mismatched image checksum must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MultiverseError::BinaryChecksum { node: 0, .. }));
+    }
+
+    #[test]
+    fn load_accepts_the_declared_image_checksum() {
+        let bytes = vec![1, 2, 3];
+        let image = GuestImage::from_bytes(bytes);
+        let mut manifest = make_manifest(1);
+        manifest.guests[0].binary_hash = image.checksum.clone();
+        assert!(Multiverse::load(manifest, vec![image]).is_ok());
+    }
+
     #[test]
     fn double_run_is_bit_identical() {
         let tape_bytes: Vec<u8> = (0..64).map(|i: u8| i.wrapping_mul(31).wrapping_add(7)).collect();

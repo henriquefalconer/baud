@@ -113,7 +113,7 @@ pass "M10.1: persist-only /run/kvm/branch persisted node_id=$NODE_ID under run_i
 log "--- M10.2: baud shell-into --input-hex — scripted round trip ---"
 # "hi\r" hex-encoded: 68 69 0d
 #
-# --first-byte-timeout-ms 15000 (vs the CLI's 10000ms default): `baud shell-into --input-hex`
+# --first-byte-timeout-ms 60000 (vs the CLI's 10000ms default): `baud shell-into --input-hex`
 # used to collect guest output until one shared --idle-timeout-ms passed with *nothing at all*
 # received, so that one number doubled as a first-byte deadline too. Restoring the universe and
 # stepping the guest far enough to emit its "$ " prompt takes well under 2s on an idle box, but
@@ -125,13 +125,15 @@ log "--- M10.2: baud shell-into --input-hex — scripted round trip ---"
 # under load", used only while output is still empty) and --idle-timeout-ms ("guest stopped
 # talking", used once output has started and left at its fast 2000ms default here). 15000 keeps
 # headroom beyond the measured 8000ms if drive/gate.sh is ever run wider, since the needed margin
-# scales with how many guests are booting at once.
+# scales with how many guests are booting at once. The full gate can also overlap the expensive
+# kernel/image build phase, so use a full minute rather than turning a busy host into a false
+# shell failure.
 #
 # Raising this is close to free: it only lengthens how long we are willing to WAIT for the first
 # byte. The assertion below is still an exact, byte-for-byte transcript match, so a genuinely
 # broken shell-into still fails — it just fails later. The only thing a generous value can hide is
 # a latency regression in shell-into itself.
-SHELL1=$("$BAUD" shell-into "$RUN_ID" "$NODE_ID" --input-hex 68690d --first-byte-timeout-ms 15000 --json)
+SHELL1=$("$BAUD" shell-into "$RUN_ID" "$NODE_ID" --input-hex 68690d --first-byte-timeout-ms 60000 --json)
 SHELL1_OK=$(echo "$SHELL1" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))")
 [[ "$SHELL1_OK" == "True" ]] || fail "M10.2: baud shell-into returned ok!=true: $SHELL1"
 SHELL1_HEX=$(echo "$SHELL1" | python3 -c "import sys,json; print(json.load(sys.stdin)['output_hex'])")
@@ -144,7 +146,7 @@ pass "M10.2: shell-into echoed queued input and re-prompted (transcript: \$ hi<L
 # M10.3 — a second, independent shell-into call against the same node reproduces byte-identically
 # ---------------------------------------------------------------------------
 log "--- M10.3: a second independent shell-into call reproduces byte-identically ---"
-SHELL2=$("$BAUD" shell-into "$RUN_ID" "$NODE_ID" --input-hex 68690d --first-byte-timeout-ms 15000 --json)
+SHELL2=$("$BAUD" shell-into "$RUN_ID" "$NODE_ID" --input-hex 68690d --first-byte-timeout-ms 60000 --json)
 SHELL2_HEX=$(echo "$SHELL2" | python3 -c "import sys,json; print(json.load(sys.stdin)['output_hex'])")
 [[ "$SHELL2_HEX" == "$SHELL1_HEX" ]] || fail "M10.3: second shell-into call diverged: $SHELL2_HEX != $SHELL1_HEX"
 pass "M10.3: restoring the same persisted node twice produces byte-identical transcripts"

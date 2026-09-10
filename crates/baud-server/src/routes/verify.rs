@@ -484,6 +484,7 @@ fn run_spec_through_multiverse(
             node_id: i as u32,
             binary: std::path::PathBuf::from(&n.argv.first().cloned().unwrap_or_default()),
             argv: n.argv.clone(),
+            binary_hash: String::new(),
         }).collect(),
         env_override: spec_doc.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         ..RunManifest::default()

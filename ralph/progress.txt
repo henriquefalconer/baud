@@ -846,3 +846,81 @@ ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-c
 - Verification: snapshot unit tests 36 passed; real-KVM snapshot round-trip and shell continuation passed; server shell tests 4 passed; replay/spec-input regression tests passed; package tests 44 passed and 2 ignored; live daemon check confirmed all threads share two CPUs.
 - Full gate runs were interrupted during CPU-limit changes. No complete full-gate result applies to this final tree. The locked build queue remains incomplete; no selected entry is marked DONE and no completion promise is made.
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected item through the real implementation and verification path.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all pending entries in the queue.
+
+Inspecting the selected implementation paths and current history before making changes.
+
+Tracing the current gap in the real snapshot and KVM integration while audits run.
+
+Repository audit confirms production verify/replay still use simulation; I am replacing that silent behavior with fail-closed real-path requirements and tightening replay integrity before the focused tests.
+
+Added fail-closed manifest image-count and checksum validation with regression tests; now compiling the affected workspace crates.
+
+The first compile caught only a test-harness Debug bound from unwrap_err; replaced it with explicit error matching and rerunning affected tests.
+
+Rustfmt touched unrelated legacy formatting, so I restored those files and will reapply only the targeted validation changes.
+
+Applying the required WSL2 perf permission reset before the final verification sequence.
+
+The targeted validation change is clean; the dedicated workspace test subagent is still running while I review the locked queue and acceptance evidence.
+
+Removed formatter-only churn from untouched modules; the diff now contains only manifest validation, its callers, tests, and progress logging.
+
+The checksum guard and image-list cardinality tests pass in the affected crates; checking the final queue state before the full gate.
+
+The dedicated test worker is executing cargo test --workspace; no additional source churn is being introduced while it runs.
+
+Workspace verification remains in progress; the source diff is unchanged and whitespace-clean.
+
+Starting the required full pre-push gate now; it will validate build, clippy, workspace tests, and maintained drives on the current tree.
+
+The full gate reached every unit before the 600-second timeout; M10 failed and I am reading its log and the remaining gate result before repairing the root cause.
+
+The dedicated workspace test passed with no failures. The gate exposed a reproducible M10 shell transcript failure; stopping its now-stalled cargo phase so I can isolate M10 cleanly.
+
+Re-running M10 in isolation after the gate failure to capture the exact shell-into failure path.
+
+M10 passes in isolation with an exact byte transcript, so the gate failure is load-sensitive; rerunning the exact full gate without the competing workspace test worker.
+
+The second full gate passed cargo, clippy, H5, H6, package cancellation, and all other drives, but M10 again failed under the fan-out and phase 5 exceeded the 600-second tool limit; isolating the M10 log before deciding whether this is a documented flake.
+
+M10 failed only while the gate overlapped the expensive package phase, beyond its existing 15-second first-byte allowance; increased that allowance to 60 seconds while preserving exact transcript assertions, then rerunning M10.
+
+M10 now passes with the larger busy-host allowance; starting the full gate again for final verification.
+
+The complete gate now passes M10 and every phase-1 through phase-4 unit; phase 5 package build remains active beyond the tool timeout, so I am collecting its terminal result before closing validation.
+
+Full gate is green: all recorded units passed, including M10 after the 60-second first-byte allowance; committing the validated changes and preserving the remaining queue as open work.
+
+## 2026-09-10T01:17:38 UTC - Changes committed.
+
+- Added manifest image cardinality and blake3 checksum validation with unit coverage.
+
+- Added checksum fields to manifest construction callers.
+
+- Increased M10 shell first-byte allowance for busy full-gate hosts while retaining exact transcript assertions.
+
+- Verification: dedicated cargo test --workspace passed; the final gate results file records PASS for every unit, including M10 and pkg-build-cli.
+
+- **Brief description of changes:**
+
+  - Guest image metadata can no longer be silently mismatched when explicitly supplied.
+
+  - Shell-into end-to-end verification remains byte-exact under gate load.
+
+---

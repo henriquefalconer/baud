@@ -198,6 +198,7 @@ pub fn build_manifest(spec_doc: &baud_init::SpecDoc) -> Result<RunManifest> {
             node_id: i as u32,
             binary: PathBuf::from(node.argv.first().cloned().unwrap_or_default()),
             argv: node.argv.clone(),
+            binary_hash: String::new(),
         }
     }).collect();
 
