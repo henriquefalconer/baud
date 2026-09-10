@@ -36,7 +36,7 @@ guarantee and the test that proves it.
 
 - **G3 write-set-scaled branching.** Connect `crates/baud-snapshot/src/userfaultfd.rs` to shared memfd-backed guest RAM in `crates/baud-multiverse`, with minor-fault continuation, write protection, per-branch isolation, and an explicit full-restore fallback. Prove unchanged-page sharing and private dirty pages with `thousand_branches_are_independent_and_deterministic`, write-set memory measurements, and `drive/h/h5.sh`; unsupported UFFD or memfd negotiation must select the documented fallback and never claim scaling.
 
-- **G3 serial wake for shell continuation.** Add an EventFd-backed serial trigger through `crates/baud-multiverse/src/console.rs` and the guest interrupt path, then extend `crates/baud-server/src/routes/shell_into.rs`, `crates/baud-cli/src/cmds/shell_into.rs`, and M10/H5 coverage to wake a guest blocked on IRQ4 while preserving ordered bidirectional output and cancellation. Restore, disconnect, blocked-run, and determinism-hole failures must remain explicit errors.
+- **G3 serial wake for shell continuation.** DONE. Eventfd-backed UART receive wakes are drained into direct IRQ4 injection, and the WebSocket shell-into path preserves ordered output, cancellation, restore, disconnect, blocked-run, and determinism-hole errors.
 
 - **G4 complete deterministic driver tactics and scheduling.** DONE. Configured input/weather tactics, deterministic grid buckets, replay/resume state, bounded reservoir growth, hold-shortening shrinking, neutral malformed-parameter paths, and focused tests now run through the driver and M3 acceptance path.
 

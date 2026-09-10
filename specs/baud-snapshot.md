@@ -137,17 +137,12 @@ instead of silently rewinding it.
   `Multiverse::{console_output, enqueue_console_input, step_exit, run_until_console_len}`
   (`crates/baud-multiverse/src/linux/mod.rs`) give a caller the building blocks to drive a
   restored guest indefinitely (never `run_to_first_halt`, which by design stops at `Hlt`) while
-  feeding it live input. The UART still uses `NoIrqTrigger` (no in-kernel LAPIC exists in this
-  workspace — §3's interrupt-injection engine delivers directly via `KVM_INTERRUPT`, bypassing
-  IRQ4 entirely), so an interactive guest must poll the Line Status Register rather than block on
-  an interrupt; `vm_superio::Serial::enqueue_raw_bytes` sets the LSR "data ready" bit directly
-  regardless, so polling observes queued input correctly with no interrupt-delivery machinery
-  needed (`crates/baud-multiverse/tests/fixtures/shell-guest/BUILD.md` — a hand-assembled fixture
-  that prints a `$ ` prompt and echoes polled input — has the exact rationale). A real
-  `EventFd`-backed `Trigger` (replacing `NoIrqTrigger`) for a guest that blocks on IRQ4 instead of
-  polling remains future work, as does the actual `baud shell-into <universe>` CLI/server surface
-  (`baud-server` has never called into `linux::Multiverse` at all — this would be its first route
-  to do so, needing new bidirectional-streaming infrastructure this codebase does not have yet).
+  feeding it live input. On Linux, the UART receive trigger writes an eventfd and the next VMM
+  step drains that counter and stages ISA IRQ4 through direct `KVM_INTERRUPT` injection; the
+  explicit pending flag remains the fail-closed fallback for non-Linux builds. Polling guests still
+  observe the UART LSR data-ready bit directly. The `baud shell-into` WebSocket route and CLI
+  bridge this restored Multiverse to ordered bidirectional input/output with cancellation and
+  bounded disconnect settling.
 - **Real-hardware finding (fixed, §10): `Multiverse::snapshot` could capture a stale,
   not-yet-retired `RIP`.** None of this crate's ports are in-kernel-emulated, so every `IN`/`OUT`
   round-trips to userspace; KVM defers that instruction's retirement (including the `RIP` advance)

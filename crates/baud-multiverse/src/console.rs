@@ -129,6 +129,11 @@ impl Console {
     /// the plain constructor remains useful for platforms without eventfd.
     #[cfg(target_os = "linux")]
     pub fn with_eventfd() -> std::io::Result<(Self, Arc<OwnedFd>)> {
+        Self::with_eventfd_output(Vec::new())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn with_eventfd_output(output: Vec<u8>) -> std::io::Result<(Self, Arc<OwnedFd>)> {
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
@@ -137,7 +142,7 @@ impl Console {
         let trigger = NoIrqTrigger::with_event_fd(Arc::clone(&fd));
         Ok((
             Console {
-                serial: Serial::new(trigger, Vec::new()),
+                serial: Serial::new(trigger, output),
             },
             fd,
         ))
@@ -152,6 +157,35 @@ impl Console {
     /// a future integration can assert IRQ4 was actually requested once real injection lands.
     pub fn irq_requests(&self) -> u64 {
         self.serial.interrupt_evt().fired_count()
+    }
+
+    /// Drain the eventfd counter raised by the UART receive trigger. A nonzero result means the
+    /// guest interrupt path has a real wake request to stage. Keeping this read at the device/VMM
+    /// boundary prevents a signal from being lost between host input and the next KVM entry.
+    #[cfg(target_os = "linux")]
+    pub fn drain_irq_requests(&self) -> std::io::Result<u64> {
+        let Some(event_fd) = self.serial.interrupt_evt().event_fd.as_ref() else {
+            return Ok(0);
+        };
+        let mut value = 0u64;
+        let n = unsafe {
+            libc::read(
+                event_fd.as_raw_fd(),
+                (&mut value as *mut u64).cast(),
+                std::mem::size_of::<u64>(),
+            )
+        };
+        if n == std::mem::size_of::<u64>() as isize {
+            return Ok(value);
+        }
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(0);
+            }
+            return Err(error);
+        }
+        Ok(0)
     }
 
     /// Push host-supplied bytes into the UART's receive FIFO — the guest's next `IN` on the DATA
@@ -367,10 +401,24 @@ impl DeviceBus {
     /// module (struct-update syntax like `DeviceBus { tape, ..Default::default() }` cannot be used
     /// from outside `console.rs`).
     pub fn with_tape(tape: Vec<u8>) -> Self {
+        #[cfg(target_os = "linux")]
+        let console = Console::with_eventfd()
+            .map(|(console, _)| console)
+            .unwrap_or_default();
+        #[cfg(not(target_os = "linux"))]
+        let console = Console::default();
         DeviceBus {
+            console,
             tape: TapeBus::new(tape),
             ..Default::default()
         }
+    }
+
+    /// Drain UART receive wake notifications from the eventfd-backed console. Platforms without
+    /// eventfd return zero, leaving the existing explicit pending flag as the fallback.
+    #[cfg(target_os = "linux")]
+    pub fn drain_console_irq_requests(&self) -> std::io::Result<u64> {
+        self.console.drain_irq_requests()
     }
 
     /// The dual-8259 PIC's current bookkeeping state — exposed so a caller/test can confirm a
@@ -579,8 +627,14 @@ impl DeviceBus {
     pub fn restore(tape: Vec<u8>, tape_cursor: u64, console_output: Vec<u8>) -> Self {
         let mut tape_bus = TapeBus::new(tape);
         tape_bus.device_mut().restore_cursor(tape_cursor);
+        #[cfg(target_os = "linux")]
+        let console = Console::with_eventfd_output(console_output.clone())
+            .map(|(console, _)| console)
+            .unwrap_or_else(|_| Console::with_output(console_output.clone()));
+        #[cfg(not(target_os = "linux"))]
+        let console = Console::with_output(console_output);
         DeviceBus {
-            console: Console::with_output(console_output),
+            console,
             tape: tape_bus,
             cmos: Cmos,
             pic: Pic8259::default(),
@@ -730,6 +784,18 @@ mod tests {
         assert_eq!(value, 1);
         let mut byte = [0u8];
         console.pio_read(COM1_BASE, &mut byte);
+        assert_eq!(byte, [b'x']);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn device_bus_drains_eventfd_wake_without_losing_input() {
+        let mut bus = DeviceBus::with_tape(Vec::new());
+        assert_eq!(bus.console.enqueue_input(b"x"), 1);
+        assert_eq!(bus.drain_console_irq_requests().unwrap(), 1);
+        assert_eq!(bus.drain_console_irq_requests().unwrap(), 0);
+        let mut byte = [0u8];
+        bus.console.pio_read(COM1_BASE, &mut byte);
         assert_eq!(byte, [b'x']);
     }
 

@@ -2283,3 +2283,56 @@ Required pre-push validation is green on the current tip: 25 passed, 0 failed, 1
   - The locked ten contracts remain open because their required real end-to-end paths are not complete.
 
 ---
+
+## 2026-09-10T16:32:17 UTC (14min) - Session usage — ralph-12 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2319 (summed from 6 session transcripts: main $0.1395 · subagents $0.0925)
+- tokens input 473,866 · cache-read 5,527,040 · cache-write 0 · output 22,188 · reasoning 7,314
+- context 93,894 tok peak of 272K (35%) across 73 inference calls, monotonic
+- models gpt-5.6-luna $0.2319 (in 473,866 / out 29,502 / cache-read 5,527,040)
+- subagents (5) pi process x5
+  - delegate-558ae9f6b916d208ad71406dfb9814c6: gpt-5.6-luna $0.0172, 3 inference calls
+  - delegate-2d659c3494a6e868cfb5eea3b181d261: gpt-5.6-luna $0.0247, 5 inference calls
+  - delegate-d1e9dbdb7d2a8c4c75d0554ba7c8e45f: gpt-5.6-luna $0.0232, 5 inference calls
+  - 01a08c1d-8a0a-7787-961b-1934f45a0f21: gpt-5.6-luna $0.0064, 4 inference calls
+  - 01a08c1f-b37e-710a-a01b-e896d3d614a8: gpt-5.6-luna $0.0210, 7 inference calls
+- transcript: ralph/.run/20260910T073659Z/016-ralph-12.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 13 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and then implementing and validating the selected batch end to end.
+
+Chose these 10 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G3 serial wake for shell continuation, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof, G8 production host safety contract — they are the first 10 of 11 pending entries.
+
+Starting G2 reproducible image pipeline after recording the binding contract; inspecting repository state and verification protocol.
+
+Reading the selected implementation paths and existing tests before changing code.
+
+Tracing the remaining G3 gaps in the real multiverse and snapshot paths, then I will implement the smallest complete seam with tests.
+
+The real serial wake seam already stages IRQ4 at KVM entry; the unresolved G3 gap is UFFD branch ownership, so I am checking its capability and fallback contract before changing it.
+
+Integrated the eventfd-backed UART trigger into the Multiverse step path; compiling and testing console plus multiverse now.
+
+Serial wake is now end to end at the VMM boundary and documented; auditing host placement next for a possible complete closure rather than carrying stale open status.
+
+Specification study confirms nine selected contracts remain genuinely open: Buildroot/Nix and virtio tape, UFFD ownership, unified lifecycle, Ubuntu, Mario, and NUMA placement are not present. I will preserve those gaps and validate the completed serial slice without relabeling them.
+
+Focused multiverse, server, and CLI verification is green with 29 console tests; running the exact repository gate now before committing the eventfd integration.
+
+The full gate found one H6 failure after all other units passed; its log shows the server sees only two usable physical cores under the gate mask, so I am rerunning H6 in isolation to distinguish capacity contention from a regression.
+
+H6 passes in isolation with real KVM fleet placement; the gate failure was load contention. Re-running the exact full gate for required green evidence.
+
+The second gate again reached every drive green but hit the 600-second wrapper before its summary; no failure was reported. Re-running once more to obtain a terminal gate result, as required.
+
+The next gate exposed a different package dynamic-link failure; reading its log and rerunning that unit alone before classifying it.
+
+Dynamic-link passes in isolation, so that gate failure was load contention. Running the exact full gate again for final evidence.
+
+Gate is green at 25 passed, 0 failed, 1 skipped; H6 and dynamic-link failures both passed in isolation. The eventfd serial wake slice is complete, while the remaining nine selected contracts still have documented implementation gaps and remain open.

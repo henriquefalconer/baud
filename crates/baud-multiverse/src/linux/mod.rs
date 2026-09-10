@@ -1399,6 +1399,15 @@ impl Multiverse {
 
     /// Stage a queued COM1 receive interrupt for the next KVM entry.
     fn stage_pending_console_irq(&mut self) -> Result<(), RunLoopError> {
+        #[cfg(target_os = "linux")]
+        if self
+            .bus
+            .drain_console_irq_requests()
+            .map_err(|e| DeterminismHole(format!("serial IRQ eventfd read failed: {e}")))?
+            != 0
+        {
+            self.console_irq_pending = true;
+        }
         if !self.console_irq_pending || !self.bus.pic().irq_unmasked(4) {
             return Ok(());
         }
