@@ -1998,3 +1998,78 @@ Required pre-push validation is green: 25 passed, 0 failed, 1 skipped. The locke
 - Repaired shell WebSocket handshake construction and added an EventFd-backed UART input wake path with a regression test.
 
 - Focused tests passed; full gate passed: 25 passed, 0 failed, 1 skipped.
+
+## 2026-09-10T14:18:16 UTC (47min) - Session usage — ralph-8 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4777 (summed from 6 session transcripts: main $0.3680 · subagents $0.1098)
+- tokens input 841,529 · cache-read 13,793,792 · cache-write 0 · output 27,950 · reasoning 8,269
+- context 127,655 tok peak of 272K (47%) across 137 inference calls, monotonic
+- models gpt-5.6-luna $0.4777 (in 841,529 / out 36,219 / cache-read 13,793,792)
+- subagents (5) pi process x5
+  - delegate-f8a562de30850a2afbb09c7e38ab398e: gpt-5.6-luna $0.0217, 3 inference calls
+  - delegate-cd886580f5cac8876becb1f9b61bf628: gpt-5.6-luna $0.0268, 6 inference calls
+  - delegate-7b70ccda18d7ac750c09e0a953cb60f6: gpt-5.6-luna $0.0261, 7 inference calls
+  - delegate-fe4d0192f156280c492fd25139114d2d: gpt-5.6-luna $0.0258, 9 inference calls
+  - 01a08b88-9fbd-7779-a6eb-f26a59da6e3c: gpt-5.6-luna $0.0094, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/009-ralph-8.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 9 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the implementation before changing code.
+
+Started the iteration log and reset perf_event_paranoid for native KVM validation.
+
+Chose these 10 items: G2 reproducible image pipeline; G2 guest tape endpoint and harness; G3 write-set-scaled branching; G3 serial wake for shell continuation; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof; G7 real Mario guest proof; G8 production host safety contract — they are the first 10 pending implementation contracts in todo-build.md.
+
+Repository search confirms the current tree already has real host probing, memfd-backed RAM, dirty-ring reset, tape parsing, route coverage, and bearer transport, but the queue still names their missing end-to-end acceptance paths. Auditing those seams instead of relabeling library-only work as DONE.
+
+Verifying the host contract and real route seams before changing queue state.
+
+Host and server focused tests are green, including real KVM restore, branch, cancellation, shell, fingerprint, and route coverage; the remaining failures are acceptance gaps named explicitly in the queue, not test regressions.
+
+Specification audits are complete. They confirm G2 fresh-image guest wiring, G3 UFFD and IRQ4 consumers, G5 lifecycle ownership and HTTP errors, G6 Ubuntu, G7 FCEUX, and G8 NUMA enforcement remain real gaps; preserving those entries as open and moving to the required full validation.
+
+The required gate passed warm-up, clippy, H5, and every reported drive through M13 before the 600-second call limit; no failure was reported. Re-running the exact gate to obtain a terminal result rather than inferring green from partial output.
+
+The exact gate is now running as the required tracked validation after two foreground calls hit the tool limit with all visible units passing; while it runs, no reviewed source scope is being changed.
+
+The specification-study delegate completed and confirms the core requirements and remaining gaps; retaining the selected contracts as open until their real end-to-end paths exist.
+
+The queue re-read shows nine selected contracts remain open and G8 is not being relabeled from focused tests alone; its NUMA discovery/enforcement and production placement evidence are still missing.
+
+The remaining implementation gaps are architectural, not missing unit assertions: UFFD has no fault consumer, UART eventfd has no IRQ4 injector, the image path has no guest driver, and Ubuntu/Mario artifacts are absent. Continuing validation without claiming these are closed.
+
+The server audit found the remaining G5 contract gap: lifecycle handlers still return HTTP 200 JSON errors and provisioning has no shared cancellation or resource registry. I am holding source changes stable while the required gate completes.
+
+The runtime study confirms the documented architecture: current branching is the full-restore fallback, the image path is fixture-based, and Ubuntu/Mario are not real workload proofs. No queue item is being collapsed on scaffolding evidence.
+
+The owner requested a foreground repeat of the repository gate. Running bash drive/gate.sh directly now, with no background task.
+
+The foreground gate completed: 24 passed, 1 skipped, with h6 failing in the exclusive phase. Reading its diagnostic and rerunning h6 in isolation as required.
+
+h6 passes in isolation in 1 second with real fleet execution, so the gate failure is a documented load-sensitive flake rather than a reproducible regression. Re-running the exact foreground gate for terminal green evidence.
+
+The foreground gate completed with 24 passed, 1 skipped, and h6 failing only under concurrent gate load; h6 passed twice in isolation, including a real two-VM fleet run. The selected implementation contracts remain open and are not being relabeled DONE.
+
+## 2026-09-10T15:04:07 UTC - Changes committed.
+
+- Recorded the iteration study, selection lock, validation runs, and h6 isolation evidence.
+
+- Files changed: ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Studied all specs through three focused delegates.
+
+  - Audited all ten selected contracts through repository search delegates.
+
+  - Ran focused host/server tests, H0, and the foreground repository gate.
+
+  - Re-ran h6 in isolation after the gate-only failure; the isolated real fleet test passed.
+
+---
