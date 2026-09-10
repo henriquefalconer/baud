@@ -87,22 +87,21 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
 
     let mut entries = Vec::with_capacity(cfg.initramfs_entries.len());
     for entry in cfg.initramfs_entries {
-        let contents = fs::read(&entry.source_path).with_context(|| {
+        let mut contents = fs::read(&entry.source_path).with_context(|| {
             format!(
                 "failed to read initramfs entry source '{}' (archive path '{}')",
                 entry.source_path.display(),
                 entry.archive_path
             )
         })?;
-        // Do not silently replace userspace RDSEED with UD2. The VMM needs relocated site
-        // metadata and an active trap handler to execute those instructions safely.
+        // Rewrite every decoded userspace RDSEED before archiving the image. Keeping this in the
+        // image builder matters because entries are the last boundary before bytes become an
+        // opaque initramfs. A raw instruction must never reach a cooperative stock-KVM guest.
         if contents.starts_with(b"\x7fELF") {
-            let sites = crate::rdseed::scan_rdseed_opcodes(&contents).with_context(|| {
-                format!("failed to scan rdseed in initramfs entry '{}'", entry.archive_path)
+            let (rewritten, _report) = crate::rdseed::rewrite_rdseed(&contents).with_context(|| {
+                format!("failed to rewrite rdseed in initramfs entry '{}'", entry.archive_path)
             })?;
-            anyhow::ensure!(sites.is_empty(),
-                "initramfs entry '{}' contains {} RDSEED instructions; userspace rewrite-site relocation and trap handling are required",
-                entry.archive_path, sites.len());
+            contents = rewritten;
         }
         entries.push(InitramfsEntry::regular(entry.archive_path.clone(), entry.mode, contents));
     }
@@ -119,6 +118,13 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
 
     let (bzimage_sha256, initramfs_sha256, image_hash) =
         hash_image(&bzimage_bytes, &initramfs_bytes);
+    // Keep the emitted artifact identity beside the bytes. Consumers can verify an image without
+    // reconstructing builder state, and the file contains no host-specific absolute paths.
+    let metadata = format!(
+        "{{\"format\":\"baud-guest-image-v1\",\"bzImage\":\"bzImage\",\"initramfs\":\"initramfs.cpio.gz\",\"bzimage_sha256\":\"{bzimage_sha256}\",\"initramfs_sha256\":\"{initramfs_sha256}\",\"image_hash\":\"{image_hash}\"}}\n"
+    );
+    fs::write(cfg.output_dir.join("metadata.json"), metadata)
+        .with_context(|| format!("failed to write {}/metadata.json", cfg.output_dir.display()))?;
 
     Ok(GuestImageBuildResult {
         bzimage_path,
@@ -324,6 +330,9 @@ mod tests {
         // 2. The built bzImage was copied out verbatim.
         assert_eq!(result.bzimage_path, output_dir.join("bzImage"));
         assert_eq!(fs::read(&result.bzimage_path).unwrap(), b"stub-bzImage-bytes");
+        let metadata = fs::read_to_string(output_dir.join("metadata.json")).unwrap();
+        assert!(metadata.contains("\"format\":\"baud-guest-image-v1\""));
+        assert!(metadata.contains(&format!("\"image_hash\":\"{}\"", result.image_hash)));
 
         // 3. A real initramfs came out of the real flate2 path -- gzip magic on disk, and both
         //    entries present in the decompressed newc cpio stream.

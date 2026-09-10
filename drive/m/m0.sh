@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Ensure the workspace is built
 echo "==> Building workspace..."
@@ -35,10 +35,24 @@ trap cleanup EXIT
 
 # Start the server
 echo "==> Starting baud-server..."
-pkill -f "baud-server" 2>/dev/null || true; sleep 0.2
+# Never kill unrelated daemon processes. Track this invocation and wait for its real health
+# endpoint, because migrations and snapshot-store initialization are asynchronous.
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" "$BAUD_SERVER_BIN" &
 SERVER_PID=$!
-sleep 1  # Give it a moment to start
+for _ in $(seq 1 120); do
+    if curl -sf http://127.0.0.1:7734/health >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "baud-server exited before becoming healthy" >&2
+        exit 1
+    fi
+    sleep 0.25
+done
+curl -sf http://127.0.0.1:7734/health >/dev/null 2>&1 || {
+    echo "baud-server did not become healthy" >&2
+    exit 1
+}
 
 echo "==> baud server status"
 "$BAUD" server status --json

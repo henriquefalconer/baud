@@ -84,7 +84,19 @@ log "Starting baud-server..."
 # kills this script's own tracked $SERVER_PID, which is all that was ever needed.
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" "$BAUD_SERVER_BIN" &
 SERVER_PID=$!
-sleep 1
+# Server startup includes migrations and first-use snapshot-store identity creation. A fixed
+# sleep races that work and reports a misleading CLI transport failure, so wait on the actual
+# health endpoint while keeping the test bounded.
+for _ in $(seq 1 120); do
+    if curl -sf http://127.0.0.1:7734/health >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        fail "baud-server exited before becoming healthy"
+    fi
+    sleep 0.25
+done
+curl -sf http://127.0.0.1:7734/health >/dev/null 2>&1 || fail "baud-server did not become healthy"
 
 log "baud image build (real kernel build, ~4-5 min)..."
 BUILD_JSON="$("$BAUD" image build \

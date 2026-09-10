@@ -1028,3 +1028,86 @@ The documented --no-h5-first gate completed green: 25 passed, 1 cached skip, 0 f
   - Real KVM memory comments now describe the existing memfd backing and explicit full-restore fallback.
   - The repository gate passed with all runnable units green.
 ---
+
+## 2026-09-10T03:06:59 UTC (1h45min) - Session usage — ralph-2 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 417187, receipt ralph/.run/20260910T003437Z/003-ralph-2.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 417186, receipt ralph/.run/20260910T003437Z/003-ralph-2.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 417185, receipt ralph/.run/20260910T003437Z/003-ralph-2.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 418171, receipt ralph/.run/20260910T003437Z/003-ralph-2.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 419450, receipt ralph/.run/20260910T003437Z/003-ralph-2.json.processes/receipt.json)
+- cost $0.5470 (summed from 7 session transcripts: main $0.4087 · subagents $0.1382)
+- tokens input 1,041,072 · cache-read 15,217,408 · cache-write 0 · output 28,682 · reasoning 6,993
+- context 209,941 tok peak of 272K (77%) across 105 inference calls, monotonic
+- models gpt-5.6-luna $0.5470 (in 1,041,072 / out 35,675 / cache-read 15,217,408)
+- subagents (6) pi process x6
+  - delegate-add31f5c43e6e71a462e77a5a6a5849c: gpt-5.6-luna $0.0227, 6 inference calls
+  - delegate-7f24f0b1ecff2afb2ceaee6e237c568d: gpt-5.6-luna $0.0233, 4 inference calls
+  - delegate-538a9e7a951d14b9edeaef48b07ee608: gpt-5.6-luna $0.0238, 4 inference calls
+  - delegate-fc47ab84a5d65b578e6647f6ea48a92c: gpt-5.6-luna $0.0242, 5 inference calls
+  - delegate-9ca2ef160d32578396a93f01571ac2ed: gpt-5.6-luna $0.0272, 5 inference calls
+  - delegate-870a104b0edda2e76fe2beadd0249656: gpt-5.6-luna $0.0169, 6 inference calls
+- transcript: ralph/.run/20260910T003437Z/003-ralph-2.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 3 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each acceptance path before implementing the batch.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, and G7 real Mario guest proof — they are all 8 pending items in todo-build.md.
+
+Studying the specifications and current queue evidence before touching implementation.
+
+Searching every selected path for remaining stubs, simulation fallbacks, and unintegrated callers.
+
+Reading the current implementation seams exposed by the audit search, then I will close concrete production gaps rather than relabel fixtures.
+
+Closed the first concrete G5 gap by journaling a tape reservation with each run and removing the fake provisioning sleep; compiling that path now.
+
+The package builder now rewrites decoded RDSEED instructions in initramfs ELF entries and emits stable artifact metadata; focused tests are running in the delegated verifier while I audit remaining acceptance gaps.
+
+Focused package and server tests are green. The lifecycle change now journals a tape and transitions run/tape atomically, while image builds rewrite decoded RDSEED and publish verifiable metadata. I am moving to the repository gate and will repair any regressions.
+
+The gate passed every unit through H6 and workspace tests, then reached the required real package build at the 600-second command ceiling. Running that phase directly to completion before the final gate pass.
+
+The direct package phase hit a stale baud-server left by the timed gate, not a code failure; I removed the orphan and am rerunning from a clean port.
+
+Root-caused the package CLI failure as a fixed one-second server-start race: the server had not finished migrations and snapshot-store initialization. The drive now waits on /health with a bounded loop, then I will rerun it.
+
+The real package build now passes end to end with a fresh kernel and initramfs, including the new metadata path; the only prior failure was the startup race. Rerunning the exact gate with that evidence cached.
+
+The final gate exposed two real regressions under concurrent load, workspace tests and H6, before the cached package phase. Reading both logs now and repairing their root causes.
+
+The workspace failure is the documented high-bit RDTSC load flake; rerunning that named test in isolation as required. H6 stopped before its assertion output, so I will rerun H6 alone after this evidence.
+
+The isolated RDTSC test passed, satisfying the documented flake protocol. Running H6 alone now to expose its independent failure without gate fan-out.
+
+H6 passes in isolation and the RDTSC high-bit test passes in isolation, satisfying both required rerun protocols. Launching the full gate again; the package kernel is warm and should now finish inside the limit.
+
+The direct real package build passed after the health-wait fix; recorded its exact gate fingerprint so the repository gate reuses that completed phase instead of rebuilding the same kernel after each 600-second tool ceiling.
+
+The repository gate is green: 25 passed, 0 failed, 1 cached package skip, with isolated evidence for the documented RDTSC load flake. I am checking the lifecycle drive directly after the atomic tape-journal change before recording final status.
+
+An unrelated M0 drive bug surfaced: it resolved the repository as drive/ and killed every baud-server by pattern. Fixed its root path, process ownership, and startup health wait before rerunning.
+
+## 2026-09-10T04:14:48 UTC - Changes committed.
+
+- Hardened run ownership and package image production paths.
+
+- Files changed: crates/baud-packages/src/guest_build.rs, crates/baud-server/src/routes/runs.rs, drive/m/m0.sh, drive/pkg/pkg-build-cli.sh, drive/pkg/pkg-build-cli.stamp, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Run creation journals a tape reservation with the run in one transaction and abort stops its tape.
+
+  - Initramfs ELF entries receive decoder-based RDSEED rewriting and stable artifact metadata.
+
+  - Package and M0 drives wait for server health instead of racing fixed sleeps, and M0 no longer kills unrelated servers.
+
+  - Focused tests and the repository gate passed; the isolated RDTSC rerun and H6 rerun passed after load-induced failures.
+
+---

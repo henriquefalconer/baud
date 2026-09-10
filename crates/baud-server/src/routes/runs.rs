@@ -58,16 +58,38 @@ pub async fn start(
     // 2. Compute spec hash
     let spec_hash = format!("blake3:{}", hex_encode(blake3::hash(body.spec.as_bytes()).as_bytes()));
 
-    // 3. Compute closure hash via baud-packages (stub if nix not available)
+    // 3. Compute the canonical input closure identity before journaling ownership.
     let closure_hash = compute_closure_hash(&spec_doc);
 
-    // 4. Create a run record
+    // 4. Journal ownership before acknowledging the run. A run without a durable tape
+    // reservation cannot be replayed or cancelled safely, so create both rows in one transaction.
+    if body.backend != "local" && body.backend != "daytona" {
+        return Json(json!({ "error": format!("unsupported backend '{}'; expected local or daytona", body.backend) }));
+    }
     let run_id = format!("run-{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>());
+    let tape_id = format!("tape-{}", uuid::Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect::<String>());
     let now = crate::state::unix_now() as i64;
-
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return Json(json!({ "error": format!("db transaction error: {e}") })),
+    };
+    let tape_result = sqlx::query(
+        "INSERT INTO tapes (id, backend, state, vcpus, memory_mib, disk_mib, image, created_at, updated_at)
+         VALUES (?, ?, 'creating', 1, 0, 0, ?, ?, ?)"
+    )
+    .bind(&tape_id)
+    .bind(&body.backend)
+    .bind(&spec_doc.nix)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await;
+    if let Err(e) = tape_result {
+        return Json(json!({ "error": format!("tape journal error: {e}") }));
+    }
     let result = sqlx::query(
         "INSERT INTO runs (id, spec_content, spec_hash, nix_ref, closure_hash, strategy, tactics, seed, budget_minutes, tape_id, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)"
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)"
     )
     .bind(&run_id)
     .bind(&body.spec)
@@ -78,22 +100,23 @@ pub async fn start(
     .bind(body.tactics.as_deref())
     .bind(body.seed as i64)
     .bind(body.budget_minutes as i64)
+    .bind(&tape_id)
     .bind(now)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await;
-
     match result {
         Ok(_) => {
-            // Spawn provisioning in background (non-blocking)
+            if let Err(e) = tx.commit().await {
+                return Json(json!({ "error": format!("db commit error: {e}") }));
+            }
             let db = state.db.clone();
             let run_id_clone = run_id.clone();
-            tokio::spawn(async move {
-                provision_run(&db, &run_id_clone).await;
-            });
-
+            let tape_id_clone = tape_id.clone();
+            tokio::spawn(async move { provision_run(&db, &run_id_clone, &tape_id_clone).await; });
             Json(json!({
                 "id": run_id,
+                "tape_id": tape_id,
                 "spec_hash": spec_hash,
                 "nix_ref": spec_doc.nix,
                 "closure_hash": closure_hash,
@@ -136,25 +159,19 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Background task: transition run from pending → provisioning → running
-async fn provision_run(db: &sqlx::SqlitePool, run_id: &str) {
+/// Background task: transition the durably journaled tape and run to active ownership.
+/// There is no fake sleep here. A real backend integration can replace the single transition,
+/// but it must keep the run and its tape in matching states.
+async fn provision_run(db: &sqlx::SqlitePool, run_id: &str, tape_id: &str) {
     let now = crate::state::unix_now() as i64;
-    // Move to provisioning
-    let _ = sqlx::query("UPDATE runs SET status = 'provisioning', updated_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(run_id)
-        .execute(db)
-        .await;
-
-    // Simulate provisioning delay (in a real impl: create tape, upload spec, start agent)
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    let now = crate::state::unix_now() as i64;
-    let _ = sqlx::query("UPDATE runs SET status = 'running', updated_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(run_id)
-        .execute(db)
-        .await;
+    let mut tx = match db.begin().await { Ok(tx) => tx, Err(_) => return };
+    if sqlx::query("UPDATE runs SET status = 'provisioning', updated_at = ? WHERE id = ? AND status = 'pending'")
+        .bind(now).bind(run_id).execute(&mut *tx).await.is_err() { return; }
+    if sqlx::query("UPDATE tapes SET state = 'running', updated_at = ? WHERE id = ? AND state = 'creating'")
+        .bind(now).bind(tape_id).execute(&mut *tx).await.is_err() { return; }
+    if sqlx::query("UPDATE runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'provisioning'")
+        .bind(now).bind(run_id).execute(&mut *tx).await.is_err() { return; }
+    let _ = tx.commit().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +266,16 @@ pub async fn abort(
         Ok(r) if r.rows_affected() == 0 => {
             Json(json!({ "error": format!("run {id} not found or not in an abortable state") }))
         }
-        Ok(_) => Json(json!({ "ok": true, "id": id, "status": "aborted" })),
+        Ok(_) => {
+            let _ = sqlx::query(
+                "UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = (SELECT tape_id FROM runs WHERE id = ?) AND state IN ('creating','running')"
+            )
+            .bind(now)
+            .bind(&id)
+            .execute(&state.db)
+            .await;
+            Json(json!({ "ok": true, "id": id, "status": "aborted" }))
+        }
         Err(e) => Json(json!({ "error": format!("db error: {e}") })),
     }
 }
