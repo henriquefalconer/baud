@@ -2941,3 +2941,7 @@ Applied rustfmt to the new fingerprint timer and capability-route code; the form
 Changed real-distro fingerprint capture to drive the combined periodic-timer and virtio-blk loop until the expected console banner, then capture the exact reached event point; fixture fingerprints retain the fixed-target path.
 
 H9 now reaches 17 KB of real Ubuntu console output and enters the combined timer/virtio-blk loop, but stalls before login during systemd boot; the preserved watchdog path still fails closed. The other selected acceptance paths remain open, so no queue item is being relabeled DONE.
+
+Repeating the repository gate in the foreground as requested, with no background task, then recording the verification result against the selected batch.
+
+The foreground gate again passed warm-up, clippy, workspace tests, H5, and all completed drive units before the 600-second command limit; it did not reach a green final tally. The selected queue entries remain open, so no DONE markers or completion block are being fabricated.
