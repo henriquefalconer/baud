@@ -1187,3 +1187,21 @@ The final gate is running with the complete 1200-second allowance; I am doing no
 The final gate completed all required checks with 24 PASS, zero regressions, and the documented rdtsc load flake passing in isolation; applying the repository rule that this sole flake counts as green, then removing formatting-only churn before commit.
 
 The selected queue remains open because the repository audit still finds simulation-only production callers, absent userfaultfd branching, incomplete real guest transport, incomplete authenticated replay, the Ubuntu stall, and no real FCEUX Mario proof; those cannot honestly be collapsed to DONE by this focused hardening change.
+
+Repeating the exact pre-push gate in the foreground as requested, then recording its terminal result before closing the iteration.
+
+## 2026-09-10T05:55:20 UTC - Changes committed.
+
+- Hardened encrypted snapshot record decoding with total payload, per-record, and record-count limits.
+
+- Files changed: crates/baud-snapshot-store/src/store.rs, crates/baud-snapshot-store/src/tests.rs, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Reject oversized record lengths before decode or allocation.
+
+  - Added an authenticated regression test for oversized record prefixes.
+
+  - Foreground gate: 24 passed, 0 regressions, one documented rdtsc load flake passed in isolation; package build skipped as unchanged.
+
+---
