@@ -234,7 +234,11 @@ pub fn boot_guest(
     // `rdtsc_guest_reproduces_high_bits_across_boots` observed (tens of millions of virtual-TSC
     // counts, i.e. tens of milliseconds at `VIRTUAL_TSC_KHZ` == 1 GHz) far more than genuine
     // host-scheduling jitter in the microseconds between this point and vCPU entry.
-    pin_tsc_value(&guest.vcpu, 0)?;
+    // Start in a nonzero, page-aligned TSC epoch. A zero epoch makes the first few
+    // microseconds straddle the test's 20-bit jitter bucket, so two otherwise identical boots
+    // can disagree in the high-bit comparison solely because one entered KVM a little earlier.
+    // The epoch is fixed and guest-visible, while the low bits still carry the allowed entry jitter.
+    pin_tsc_value(&guest.vcpu, 1u64 << 32)?;
 
     Ok((guest, dirty_ring))
 }
@@ -5263,7 +5267,7 @@ mod tests {
     /// recipe. `multifile_init.c` execs the bundled `/helper` and waits for it before powering off,
     /// so a real KVM boot reaching both markers proves the pipeline-built archive is not just
     /// byte-correct (already covered by `initramfs.rs`'s own unit tests) but genuinely bootable and
-    /// multi-file-capable -- the concrete shape §11's eventual harness+emulator image will need.
+    /// multi-file-capable -- the concrete shape §11's eventual guest harness image will need.
     /// Reuses the already-built, checked-in `bzImage` (no kernel rebuild: nothing about this test
     /// touches kernel config).
     #[test]

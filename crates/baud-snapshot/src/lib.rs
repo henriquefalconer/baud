@@ -78,6 +78,9 @@ pub mod wire;
 pub mod linux;
 
 #[cfg(target_os = "linux")]
+pub mod userfaultfd;
+
+#[cfg(target_os = "linux")]
 mod xsave;
 
 pub use dirty_ring::{harvest, RawDirtyGfn, DIRTY_BIT, RESET_BIT};

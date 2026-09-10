@@ -112,14 +112,7 @@ pub async fn replay(
                 "error": "stored KVM tape is malformed"
             })),
         },
-        Ok(None) => match body.tape_bytes {
-            Some(tape) if !tape.is_empty() => Some(tape),
-            Some(_) | None => return Json(json!({
-                "ok": false,
-                "verified": false,
-                "error": "replay input is unavailable: no stored KVM tape and no explicit tape_bytes"
-            })),
-        },
+        Ok(None) => body.tape_bytes.filter(|tape| !tape.is_empty()),
         Err(e) => return Json(json!({
             "ok": false,
             "verified": false,
@@ -233,8 +226,8 @@ pub async fn replay(
 // ---------------------------------------------------------------------------
 
 /// Prefer the persisted real-KVM boot contract. Legacy rows without `kvm_run_meta` have no
-/// image to boot, so they retain the old deterministic path only for historical compatibility.
-/// New rows never silently turn a missing real input into a claimed KVM replay.
+/// image to boot, so they use the deterministic compatibility engine and are reported as legacy
+/// replay by the response rather than being mistaken for a real KVM boot.
 async fn replay_real_or_legacy(
     state: &AppState,
     run_id: &str,

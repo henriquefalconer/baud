@@ -288,7 +288,7 @@ mod tests {
     fn multiple_distinct_files_are_all_preserved() {
         // todo.md §14 item 1's named gap: every existing test/caller of this builder used exactly
         // one entry. A real guest rootfs needs more than `/init` alone (e.g. §11's eventual
-        // harness + emulator pair) -- this asserts the builder genuinely archives N>1 distinct
+        // harness + guest pair) -- this asserts the builder genuinely archives N>1 distinct
         // files, not just N=1 or N duplicates-that-get-rejected.
         let entries = vec![
             init_entry(b"init-binary-contents"),

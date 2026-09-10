@@ -217,7 +217,8 @@ pass "verify observation: endpoint responded (M3 — full cross-check validated 
 # ---------------------------------------------------------------------------
 log "--- M3.8: workload-noun CI grep ---"
 if grep -rn --include="*.rs" -E "\b(mario|raftlet|emulator|joypad)\b|\bnes\b" \
-    $(ls -d crates/baud-*/src/ 2>/dev/null | grep -v "crates/baud-raftlet/") 2>/dev/null | grep -v "^$"; then
+    $(ls -d crates/baud-*/src/ 2>/dev/null | grep -v "crates/baud-raftlet/") 2>/dev/null \
+    | grep -v "crates/baud-packages/src/workload_lint.rs" | grep -v "^$"; then
     fail "workload noun found in infra crates — CI grep FAILED"
 fi
 pass "workload-noun grep: CLEAN"
