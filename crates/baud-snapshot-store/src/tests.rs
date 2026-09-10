@@ -278,6 +278,30 @@ fn records_roundtrip_through_baud_proto_encoding() {
 }
 
 #[test]
+fn oversized_record_length_is_rejected_before_decode() {
+    let (root, _identity_dir, store) = open_test_store();
+    let run = RunId::new("run-record-limit");
+    let node = store.put_universe(&run, None, 0, (0, 0), b"body").unwrap();
+    let mut plaintext = Vec::new();
+    plaintext.extend_from_slice(&(16_u32 * 1024 * 1024 + 1).to_le_bytes());
+    let encrypted = baud_keys::age_encrypt(TEST_RECIPIENT, &plaintext).unwrap();
+    let path = root
+        .path()
+        .join("runs")
+        .join("run-record-limit")
+        .join("records")
+        .join(format!("{}.age", node.to_hex()));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, encrypted).unwrap();
+
+    let error = store.get_records(&run, node).unwrap_err();
+    assert!(
+        error.to_string().contains("record exceeds"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn driver_state_roundtrips_and_is_ciphertext_on_disk() {
     let (root, _identity_dir, store) = open_test_store();
     let run = RunId::new("run-n");

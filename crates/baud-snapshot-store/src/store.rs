@@ -366,7 +366,16 @@ impl SnapshotStore {
     }
 
     pub fn get_records(&self, run: &RunId, node: NodeId) -> Result<Vec<baud_proto::Msg>, StoreError> {
+        const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+        const MAX_RECORD_COUNT: usize = 1_000_000;
+        const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
         let plaintext = self.read_and_decrypt(&self.records_path(run, node))?;
+        if plaintext.len() > MAX_TOTAL_BYTES {
+            return Err(StoreError::BadHash(format!(
+                "records payload exceeds {} byte limit",
+                MAX_TOTAL_BYTES
+            )));
+        }
         let mut records = Vec::new();
         let mut offset = 0usize;
         while offset < plaintext.len() {
@@ -379,6 +388,18 @@ impl SnapshotStore {
                 .try_into()
                 .expect("a four-byte slice has the requested length");
             let len = u32::from_le_bytes(len_bytes) as usize;
+            if len > MAX_RECORD_BYTES {
+                return Err(StoreError::BadHash(format!(
+                    "record exceeds {} byte limit",
+                    MAX_RECORD_BYTES
+                )));
+            }
+            if records.len() >= MAX_RECORD_COUNT {
+                return Err(StoreError::BadHash(format!(
+                    "record count exceeds {} item limit",
+                    MAX_RECORD_COUNT
+                )));
+            }
             offset = end_of_prefix;
             let end_of_record = offset.checked_add(len).ok_or_else(|| {
                 StoreError::BadHash("records length overflow".into())

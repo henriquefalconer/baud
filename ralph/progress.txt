@@ -1111,3 +1111,79 @@ An unrelated M0 drive bug surfaced: it resolved the repository as drive/ and kil
   - Focused tests and the repository gate passed; the isolated RDTSC rerun and H6 rerun passed after load-induced failures.
 
 ---
+
+## 2026-09-10T04:15:24 UTC (1h08min) - Session usage — ralph-3 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3130 (summed from 5 session transcripts: main $0.2393 · subagents $0.0737)
+- tokens input 515,474 · cache-read 8,858,624 · cache-write 0 · output 27,280 · reasoning 8,174
+- context 172,476 tok peak of 272K (63%) across 75 inference calls, monotonic
+- models gpt-5.6-luna $0.3130 (in 515,474 / out 35,454 / cache-read 8,858,624)
+- subagents (4) pi process x4
+  - delegate-6836e1c9f011eb6c989f7d3614b2f8cf: gpt-5.6-luna $0.0197, 4 inference calls
+  - delegate-2eab6f92d3136206c7c87ed956c42925: gpt-5.6-luna $0.0235, 4 inference calls
+  - delegate-a28dd2ec60f833a1196b4e9aa46fdeab: gpt-5.6-luna $0.0226, 7 inference calls
+  - 01a0894c-823f-7126-b576-633c660ed498: gpt-5.6-luna $0.0078, 5 inference calls
+- transcript: ralph/.run/20260910T003437Z/004-ralph-3.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications and build list, then implementing and validating the selected batch.
+
+Starting repository and specification study before selecting the binding batch.
+
+Chose these 8 items: G1 stock-KVM run integration, G3 shared-memory branching and live shell proof, G2 real image pipeline and tape endpoint, G3 snapshot integrity and live shell, G4 independent proof and frame pipeline, G5 authenticated lifecycle and real replay surface, G6 real Ubuntu H9 blocker and proof, G7 real Mario guest proof — they are all 8 pending entries in todo-build.md.
+
+Starting G1 stock-KVM run integration after specification and implementation searches.
+
+The live implementation search found the main remaining blockers: snapshot branching still uses full restore, package tests still exercise stub trees, and the legacy fuzz route still simulates workloads. Continuing against the real paths rather than relabeling these gaps.
+
+Reviewing the specification contracts for capture, image identity, and fail-closed execution while the verification worker exercises the repository.
+
+Hardened snapshot-store record reads with total, per-record, and count bounds so malformed encrypted streams fail closed before allocation or decode; now validating the change with the repository worker.
+
+The verification worker is still running the workspace gate; source review confirms the remaining queue is architectural rather than a single compile fix, so I am keeping the new bounds fail-closed and checking the exact gate result before further edits.
+
+The single verification worker has not produced a test result yet; keeping the session alive while its workspace cargo run completes.
+
+Added a regression test that writes an authenticated oversized record prefix and confirms get_records rejects it before decoding; continuing to wait for the required workspace verification.
+
+Workspace tests advanced to the mandated drive/gate.sh; no source failures have been reported yet, and the new store test is included in the working tree for the final gate.
+
+The gate has reached the real KVM branching proof, including the selected snapshot work; leaving it undisturbed while it completes rather than rerunning or splitting the protocol.
+
+The gate is still in the thousand-branch KVM proof after more than a minute; that is the required real acceptance path, not a substitute test, so I am allowing the configured timeout to finish.
+
+The current gate log shows warmup, clippy, H5, H7, M11, and package drives passing, including the modified snapshot-store crate; waiting for the remaining mandated units.
+
+All listed drive phases are green; the gate is now finishing the full workspace test phase, which remains required before any commit.
+
+The verification worker timed out at its 600-second wrapper after the recorded unit and drive logs reached PASS; rerunning the exact gate in the main session to obtain its terminal result rather than treating a timeout as green.
+
+The full gate exposed only the known rdtsc high-bit proof in both H3 and workspace tests; per AGENTS, rerunning that unit in isolation is required before classifying it as the documented load flake.
+
+The isolated rdtsc proof passed in 1.6 seconds, satisfying the repository flake protocol; rerunning the full gate now that the package-build inputs are warm.
+
+The second full gate passed rdtsc, workspace tests, every phase-3 drive, H6, and block-cancel; the wrapper timed out only after phase-4 had already recorded PASS, while phase-5 package build was still running. Running that required package check separately before the final gate attempt.
+
+The standalone package image build passed with a real bzImage, deterministic initramfs, and combined hash; launching the final exact gate attempt after warming that expensive phase.
+
+The final gate again passed every unit, drive, H6, and cancellation phase; its six-hundred-second foreground ceiling expires during the real kernel image build, so I am moving the unchanged exact gate to the permitted background runner with a longer wall timeout.
+
+The working tree audit caught cargo fmt --all reformatted unrelated pre-existing files. I will restore those files after the unchanged background gate completes, retaining only the snapshot-store bounds, its regression test, and progress log.
+
+Stopped the orphaned foreground gate left behind by the wrapper timeout; it was competing with the single background gate and package build.
+
+The long gate finished with 25 PASS and one empty-log pkg-dynamic-link failure after heavy KVM load. Re-running that exact unit in isolation before treating it as a regression.
+
+The isolated dynamically-linked guest proof passed in 2.66 seconds, confirming the gate failure was load-related. Starting one final exact gate run now that no orphaned gate remains and all expensive artifacts are warm.
+
+The final gate is running with the complete 1200-second allowance; I am doing no source mutation until its terminal result is available.
+
+The final gate completed all required checks with 24 PASS, zero regressions, and the documented rdtsc load flake passing in isolation; applying the repository rule that this sole flake counts as green, then removing formatting-only churn before commit.
+
+The selected queue remains open because the repository audit still finds simulation-only production callers, absent userfaultfd branching, incomplete real guest transport, incomplete authenticated replay, the Ubuntu stall, and no real FCEUX Mario proof; those cannot honestly be collapsed to DONE by this focused hardening change.
