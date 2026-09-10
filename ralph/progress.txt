@@ -1367,3 +1367,37 @@ Reverted an accidental workspace-wide rustfmt sweep, restored only the iteration
 - ralph ended COMPLETE
 - total cost $2.6131 (summed from session usage)
 ---
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-plan.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+═══════════════════════════════════════════════════════
+  Ralph (Plan Mode)
+═══════════════════════════════════════════════════════
+
+Analysing baud and auditing every standing group, then reconciling the build queue, validating the markdown, and pushing the complete planning pass.
+
+Step 1: pruning todo-build.md after reading all 8 DONE bullets; preserving the queue header and procedure prose, then proving no DONE item markers remain.
+
+Every spec’s reasoning behind implementation re-derived. Auditing 8 groups: G1 deterministic machine core, G2 real Linux boot and image pipeline, G3 snapshot/branching/live continuation, G4 tape/observations/exploration/proof, G5 server and command surface, G6 full distro validation, G7 generic interactive target, G8 host/packaging/security/release operations.
+
+Step 1 proof: todo-build.md changed from 45 to 29 lines; remaining case-insensitive DONE hits:
+
+Audits are running in parallel. The initial prune removed 8 DONE item markers; the queue currently contains only its explanatory header until complete proposals are reconciled.
+
+Audit reconciliation complete: 13 complete proposals accepted, 0 duplicate proposals, 0 unsupported proposals rejected. Reviewing every queue bullet for paths, dependencies, acceptance drive, and failure behavior.
+
+Queue review: 13 new bullets are actionable complete outcomes in G1-to-G8 order. G3 preserves built capture/restore while queueing only UFFD scaling and IRQ wake; G6 and G7 retain measured blockers; G8 keeps deferred garbage collection, remote storage, and CPU templates out of the queue.
+
+Plan validation: all 8 standing groups remain in todo-plan.md; queue coverage, affected paths, dependencies, acceptance tests/drives, and failure behavior were checked. No source or tests were changed.
+
+Final prune: no additional task items were marked DONE after reconciliation. Rechecked all case-insensitive DONE hits in todo-build.md: line 25 is queue procedure prose, and line 45 is the lowercase word in a failure clause, not an item marker. SETTLED, NOT A GAP, SUPERSEDED, and BLOCKED decisions were not removed.
+
+## 2026-09-10T07:36:09 UTC - Plan pass committed.
+- Step 1 pruned 8 DONE items from 45 lines to 29 lines; step 2 audited 8 groups; briefs filed: G1 1, G2 2, G3 4 records with 2 open proposals, G4 1, G5 3, G6 1, G7 1, G8 2, for 13 complete proposals accepted; step 5 accepted 13, merged 0, rejected 0; step 6 reviewed 13 bullets; step 7 pruned 0 additional items from the final 55-line queue and confirmed 0 DONE item markers, with 2 remaining DONE prose hits reviewed.
+- Plan validation was green for markdown reconciliation. The implementation gate was not run because this was plan mode; no source or test files changed.
+- **Most severe findings:**
+  - The exact-boundary interrupt identity and enforced-module capability probe remain partly built, and real hardware evidence is incomplete.
+  - The real Buildroot/Nix image and guest tape endpoint remain incomplete, while Ubuntu H9 and Mario are blocked by their measured boot and runtime dependency failures.
+---
+
