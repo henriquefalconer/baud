@@ -2477,3 +2477,21 @@ The long gate exposed a tooling bug in the new relocation guard: rg is only avai
 The corrected full gate is green: 26 passed, 0 failed, 0 skipped in 18m22s, including the 675-second real image-build CLI phase. Re-reading the locked queue confirms G8 relocation is DONE; the other selected contracts remain open because their real end-to-end paths are not yet complete, so I am not collapsing them to false DONE lines.
 
 Committing the verified changes now. The gate is green and the relocated-image item is closed; the remaining locked items stay open in todo-build.md with their real implementation paths intact for the next continuation.
+
+Repeating the full repository gate in the foreground as requested, then verifying the pushed tip and closing this iteration.
+
+## 2026-09-10T19:35:23 UTC - Changes committed.
+
+- Repeated the full foreground repository gate after the pushed changes.
+
+- Files changed
+
+- **Brief description of changes:**
+
+  - Foreground gate passed: 25 passed, 0 failed, 1 skipped in 8m14s.
+
+  - Workspace tests and clippy passed.
+
+  - Remote main remains the verified commit tip.
+
+---
