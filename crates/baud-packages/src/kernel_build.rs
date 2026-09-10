@@ -107,6 +107,24 @@ pub fn build_bzimage(cfg: &KernelBuildConfig) -> Result<PathBuf> {
 
     run_make(cfg.kernel_src, cfg.cc, &["olddefconfig"])?;
 
+    // Lint the resolved configuration, not only the fragment. Kconfig can disable or
+    // re-enable symbols while resolving dependencies, so checking the fragment alone can
+    // produce an image that violates the tape/timer contract.
+    let resolved_config =
+        std::fs::read_to_string(cfg.kernel_src.join(".config")).with_context(|| {
+            format!(
+                "failed to read resolved kernel config in {}",
+                cfg.kernel_src.display()
+            )
+        })?;
+    let report = crate::image::lint_kernel_config(&resolved_config);
+    if !report.ok() {
+        bail!(
+            "resolved guest kernel config violates the image contract: {:?}",
+            report.violations
+        );
+    }
+
     let jobs = cfg.jobs.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())

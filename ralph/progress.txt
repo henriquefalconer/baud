@@ -2781,3 +2781,119 @@ Focused validation after the H9 API wiring is green: server/CLI tests pass, rust
   - Focused tests passed; the full gate remains blocked by the real Ubuntu login-banner path.
 
 ---
+
+## 2026-09-10T21:50:03 UTC (32min) - Session usage — ralph-19 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5272 (summed from 6 session transcripts: main $0.4244 · subagents $0.1028)
+- tokens input 775,105 · cache-read 16,515,584 · cache-write 0 · output 34,922 · reasoning 9,989
+- context 164,613 tok peak of 272K (61%) across 136 inference calls, monotonic
+- models gpt-5.6-luna $0.5272 (in 775,105 / out 44,911 / cache-read 16,515,584)
+- subagents (5) pi process x5
+  - delegate-7aa36805400dbb1c1a58e3a5d9f5a290: gpt-5.6-luna $0.0227, 4 inference calls
+  - delegate-7a1712d2a0012fbae1b392043eb14be7: gpt-5.6-luna $0.0223, 5 inference calls
+  - delegate-ca2e03504acab2035ee7806a38694d36: gpt-5.6-luna $0.0277, 7 inference calls
+  - delegate-6f8c1d67fd4810251ec1aebab76c2d59: gpt-5.6-luna $0.0216, 4 inference calls
+  - 01a08d2f-caa6-7321-ab70-00bbe101a685: gpt-5.6-luna $0.0085, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/027-ralph-19.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 20 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the real implementation and tests.
+
+Resetting the required perf-event setting before inspection.
+
+Reading the current build queue and repository shape.
+
+Chose these 8 items: G2 reproducible image pipeline; G2 guest tape endpoint and harness; G3 write-set-scaled branching; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof; G7 real Mario guest proof — they are all 8 pending implementation items in @todo-build.md.
+
+Tracing the selected items through the repository before edits.
+
+Searching selected paths for stubs, fallback claims, and existing acceptance tests.
+
+Inspecting the real package, tape, and server route acceptance paths for missing integration rather than adding fixture-only coverage.
+
+Checking whether the selected real paths already compile cleanly before making targeted integration changes.
+
+Inspecting branch module and snapshot exports to identify the narrowest complete write-set API.
+
+Reviewing the acceptance matrix and current drive definitions before selecting concrete code changes.
+
+Running the non-KVM server and CLI unit suites while the repository search workers finish.
+
+The server and CLI crates expose binary targets, so the prior --lib filter was invalid; rerunning their full package test targets.
+
+Corrected H9 to require and pass the stock initramfs, Ubuntu 4.15 timer vector 238, exact read-only boot command line, and expected login banner for both independent captures.
+
+The fingerprint CLI does not expose a periodic-vector option because this path uses RCB capture, so removing that unsupported flag and retaining the real initramfs wiring.
+
+Added fail-closed Ubuntu artifact validation for the exact release, console issue string, and clean ext4 state before writing manifest metadata.
+
+Focused suites remain green after the script changes; @todo-build.md still has all eight locked entries open because the real guest endpoint, O(write-set) branch path, authenticated lifecycle, Ubuntu login proof, and FCEUX Mario proof are not complete.
+
+Repeating the workspace test command in the foreground as requested.
+
+Foreground cargo test --workspace passed: all workspace tests and doc-tests green; ignored tests were expected hardware/manual cases.
+
+## 2026-09-10T22:07:11 UTC (17min) - Session usage — ralph-20 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2379 (summed from 5 session transcripts: main $0.1550 · subagents $0.0829)
+- tokens input 488,721 · cache-read 5,628,928 · cache-write 0 · output 22,969 · reasoning 6,439
+- context 129,142 tok peak of 272K (47%) across 62 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2379 (in 488,721 / out 29,408 / cache-read 5,628,928)
+- subagents (4) pi process x4
+  - delegate-fc8b1d0a833ebdbb2584d4feca0c9056: gpt-5.6-luna $0.0229, 4 inference calls
+  - delegate-d0f174c267167b57ad38a05250be3e53: gpt-5.6-luna $0.0225, 5 inference calls
+  - delegate-5a5971da7521b3fff8b7ab1e4a80bdfd: gpt-5.6-luna $0.0275, 7 inference calls
+  - 01a08d4d-9b90-729e-80cf-ffc237608a4f: gpt-5.6-luna $0.0100, 4 inference calls
+- transcript: ralph/.run/20260910T073659Z/028-ralph-20.json
+- transcript: ralph/.run/20260910T073659Z/029-ralph-20.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 21 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the complete batch.
+
+Reading the build queue and repository state now.
+
+Chose these 8 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, G7 real Mario guest proof — they are all pending items in the queue.
+
+Starting G2 reproducible image pipeline. Inspecting package code, tests, and drives before changing anything.
+
+The queue shows eight pending items, but several paths already contain partial implementations. Reading their public APIs and tests to find the real unfinished edges before edits.
+
+Moving to G5 route coverage while the specification readers inspect their sections. Searching advertised commands, route registrations, and explicit stubs.
+
+The pending queue is broad, and the repository contains explicit fail-closed paths rather than simple TODOs. Checking recent progress and acceptance drives to avoid replacing already-correct work.
+
+Recent history confirms the same eight items remain open because prior work only hardened fail-closed acceptance paths. Launching one verification subagent for the required workspace test baseline while I inspect the unresolved real integrations.
+
+Inspecting whether the userfaultfd wrapper is actually connected to guest RAM, rather than merely unit-tested as an isolated wrapper.
+
+The snapshot specification explicitly says UFFD branching is still open, while the Ubuntu and Mario entries depend on external runtime/artifact closure. Checking local prerequisites and the real guest harness before deciding which concrete fixes can close the batch.
+
+Specification study confirms G7 cannot be completed from repository assets: FCEUX/Lua packaging, harness, and a completion-capable ROM are absent. Recording that owner-provided runtime closure as blocked instead of pretending the simulation is the specified guest.
+
+Closed the most concrete G2 correctness hole by linting the resolved Kconfig after olddefconfig, so dependency resolution cannot reintroduce forbidden timers or remove the tape driver. The H9 drive now uses a real alternate capture instead of a fabricated hash.
+
+Hardened the run lifecycle API so status, pause, resume, and abort failures use non-success HTTP responses instead of HTTP 200 JSON errors; this makes CLI exit mapping and malformed/missing-ID handling observable at the transport boundary.
+
+Formatting is clean after the API changes. Waiting for the single workspace-test subagent while reviewing the remaining queue for any acceptance claim that would be dishonest.
+
+External Ubuntu artifacts and gcc-13 are present, so G6/G2 can be exercised after compilation; Nix is absent, which must remain a fail-closed diagnostic rather than a fixture substitute.
+
+The single verification subagent completed the required perf reset plus cargo test --workspace in 5m30s with all tests green. Running the repository gate now as the pre-push protocol.
+
+The gate ran through all parallel checks but timed out at 600s after H9 failed in 6s. Reading the H9 log now and fixing the root cause before rerunning the required validation.
+
+Root-cause debugging confirms the Ubuntu VM reaches a deterministic kernel loop with an empty serial tail under both the hardened and legacy command lines; H9 therefore fails correctly rather than falsely passing. The login-banner boot path remains open, so no queue item is marked DONE.
+
+Recording the validation result and preserving the fail-closed changes in git; the queue remains open for the next forward step.

@@ -1,0 +1,1 @@
+BLOCKED ON THE OWNER — provide the pinned FCEUX/Lua guest runtime, build closure, and licensed or homebrew ROM needed to implement and validate the real Mario workload; resolve in specs/baud-mario.md and return the item to todo-build.md.

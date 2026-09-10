@@ -354,7 +354,10 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
 // GET /runs/:id — run status
 // ---------------------------------------------------------------------------
 
-pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+pub async fn status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, i64, i64, String, i64, i64)>(
         "SELECT id, spec_hash, nix_ref, closure_hash, tape_id, seed, budget_minutes, status, created_at, updated_at FROM runs WHERE id = ?"
     )
@@ -379,7 +382,7 @@ pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> Js
             // baud-cli.md §4). An active run is not a successful completion: returning zero here
             // made polling scripts treat pending/provisioning/running as finished.
             let exit_code = exit_code_for_status(&status);
-            Json(json!({
+            Ok(Json(json!({
                 "id": id,
                 "spec_hash": spec_hash,
                 "nix_ref": nix_ref,
@@ -391,10 +394,13 @@ pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> Js
                 "exit_code": exit_code,
                 "created_at": ca,
                 "updated_at": ua,
-            }))
+            })))
         }
-        Ok(None) => Json(json!({ "error": format!("run {id} not found") })),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("run {id} not found") })),
+        )),
+        Err(e) => Err(internal_error(format!("db error: {e}"))),
     }
 }
 
@@ -402,11 +408,17 @@ pub async fn status(State(state): State<AppState>, Path(id): Path<String>) -> Js
 // POST /runs/:id/pause and /runs/:id/resume — lifecycle controls
 // ---------------------------------------------------------------------------
 
-pub async fn pause(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+pub async fn pause(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     transition_status(&state, &id, "paused", &["running", "provisioning"]).await
 }
 
-pub async fn resume(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+pub async fn resume(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     transition_status(&state, &id, "running", &["paused"]).await
 }
 
@@ -415,7 +427,7 @@ async fn transition_status(
     id: &str,
     target: &str,
     allowed: &[&str],
-) -> Json<Value> {
+) -> Result<Json<Value>, ApiError> {
     let now = crate::state::unix_now() as i64;
     let placeholders = std::iter::repeat("?")
         .take(allowed.len())
@@ -430,12 +442,15 @@ async fn transition_status(
     }
     match query.execute(&state.db).await {
         Ok(result) if result.rows_affected() == 1 => {
-            Json(json!({ "ok": true, "id": id, "status": target }))
+            Ok(Json(json!({ "ok": true, "id": id, "status": target })))
         }
-        Ok(_) => Json(
-            json!({ "error": format!("run {id} not found or not in a {target} transition state") }),
-        ),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(_) => Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({ "error": format!("run {id} not found or not in a {target} transition state") }),
+            ),
+        )),
+        Err(e) => Err(internal_error(format!("db error: {e}"))),
     }
 }
 
@@ -443,7 +458,10 @@ async fn transition_status(
 // POST /runs/:id/abort — abort a run
 // ---------------------------------------------------------------------------
 
-pub async fn abort(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+pub async fn abort(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
     let now = crate::state::unix_now() as i64;
     let result = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status IN ('pending','provisioning','running')")
         .bind(now)
@@ -452,9 +470,10 @@ pub async fn abort(State(state): State<AppState>, Path(id): Path<String>) -> Jso
         .await;
 
     match result {
-        Ok(r) if r.rows_affected() == 0 => {
-            Json(json!({ "error": format!("run {id} not found or not in an abortable state") }))
-        }
+        Ok(r) if r.rows_affected() == 0 => Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("run {id} not found or not in an abortable state") })),
+        )),
         Ok(_) => {
             // Signal the worker before returning the durable aborted state. The worker may be
             // inside KVM or a backend call, but it now has the same cancellation token that was
@@ -467,8 +486,8 @@ pub async fn abort(State(state): State<AppState>, Path(id): Path<String>) -> Jso
             .bind(&id)
             .execute(&state.db)
             .await;
-            Json(json!({ "ok": true, "id": id, "status": "aborted" }))
+            Ok(Json(json!({ "ok": true, "id": id, "status": "aborted" })))
         }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Err(e) => Err(internal_error(format!("db error: {e}"))),
     }
 }

@@ -36,8 +36,9 @@ BAUD="$REPO_ROOT/target/debug/baud"
 UBUNTU_OUT="${BAUD_UBUNTU_OUT:-$HOME/.baud-tmp/ubuntu-1804}"
 KERNEL="${BAUD_UBUNTU_KERNEL:-$UBUNTU_OUT/vmlinuz-generic}"
 ROOTFS="${BAUD_UBUNTU_ROOTFS:-$UBUNTU_OUT/rootfs.raw}"
+INITRAMFS="${BAUD_UBUNTU_INITRAMFS:-$UBUNTU_OUT/initrd-generic}"
 EXPECTED_BANNER="Ubuntu 18.04.1 LTS ubuntu ttyS0"
-UBUNTU_CMDLINE="console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable no-kvmclock no_timer_check acpi=on root=/dev/vda rw"
+UBUNTU_CMDLINE="console=ttyS0 nokaslr nosmp maxcpus=1 clocksource=tsc tsc=reliable no-kvmclock no_timer_check acpi=on root=/dev/vda1 ro rootwait net.ifnames=0 biosdevname=0 scsi_mod.scan=sync udev.children_max=1 fsck.mode=skip cloud-init=disabled systemd.unit=multi-user.target systemd.mask=systemd-timesyncd.service i8042.noaux i8042.nomux i8042.nopnp 8250.nr_uarts=1"
 DB_FILE="$(mktemp -u -t baud-h9-XXXXXX.sqlite)"
 SNAP_ROOT="$(mktemp -d -t baud-h9-snap-XXXXXX)"
 SERVER_PID=""
@@ -54,6 +55,7 @@ VM1_PID=""
 
 [[ -f "$KERNEL" ]] || fail "real Ubuntu kernel missing: $KERNEL (run examples/ubuntu/fetch.sh or set BAUD_UBUNTU_OUT/BAUD_UBUNTU_KERNEL)"
 [[ -f "$ROOTFS" ]] || fail "real Ubuntu rootfs missing: $ROOTFS (run examples/ubuntu/fetch.sh or set BAUD_UBUNTU_OUT/BAUD_UBUNTU_ROOTFS)"
+[[ -f "$INITRAMFS" ]] || fail "real Ubuntu initramfs missing: $INITRAMFS (run examples/ubuntu/fetch.sh or set BAUD_UBUNTU_OUT/BAUD_UBUNTU_INITRAMFS)"
 
 # Own port + own snapshot store, so this script can run concurrently with any other drive script.
 BAUD_PORT="${BAUD_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));p=s.getsockname()[1];s.close();print(p)')}"
@@ -125,6 +127,7 @@ log "baud verify fingerprint --kernel $KERNEL --target-rcb 100000 --times 2 ..."
 FP_JSON="$("$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
+    --initramfs "$INITRAMFS" \
     --target-rcb 100000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
@@ -146,6 +149,7 @@ set +e
 BAD_FP_JSON="$("$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
+    --initramfs "$INITRAMFS" \
     --target-rcb 100000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "a banner Ubuntu never prints" \
@@ -208,8 +212,10 @@ log "vm0 - timed exit: capturing single fingerprint (--times 1) at target_rcb=10
 VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
+    --initramfs "$INITRAMFS" \
     --target-rcb 100000 \
     --virtio-blk-image "$ROOTFS" \
+    --expected-banner "$EXPECTED_BANNER" \
     --times 1 \
     --json)" || fail "H9.4: vm0 'baud verify fingerprint --times 1' FAILED to run"
 VM0_EVENTS="$(fp_field "$VM0_FP_JSON" events)"
@@ -229,8 +235,10 @@ log "vm1 - timed exit: capturing single fingerprint (--times 1) at target_rcb=10
 VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
+    --initramfs "$INITRAMFS" \
     --target-rcb 100000 \
     --virtio-blk-image "$ROOTFS" \
+    --expected-banner "$EXPECTED_BANNER" \
     --times 1 \
     --json)" || fail "H9.4: vm1 'baud verify fingerprint --times 1' FAILED to run"
 VM1_EVENTS="$(fp_field "$VM1_FP_JSON" events)"
@@ -254,21 +262,25 @@ echo ""
 [[ "$VM0_BANNER" == "$VM1_BANNER" ]] || fail "H9.4: console banner diverged across processes: vm0=$VM0_BANNER vm1=$VM1_BANNER"
 pass "H9.4: two separate baud-server OS processes ($([[ ${#TASKSET0[@]} -gt 0 ]] && echo "pinned to distinct cores" || echo "unpinned, taskset unavailable")) produced a byte-identical fingerprint, compared in this script — never inside one Rust process"
 
-log "H9.5: comparator sanity — a corrupted copy of vm1's hash must be caught as a divergence..."
-# The guest's steady-state loop retires exactly one conditional branch per iteration, always at
-# the same instruction, and never writes guest RAM — so RIP/mem_hash are identical across the
-# entire 100..200000 target_rcb range (confirmed empirically), making "capture at a different
-# target_rcb" useless as a real-divergence source for this fixture. Instead, corrupt a COPY of
-# vm1's own hash (flip its last hex digit) and confirm this script's own `[[ == ]]` equality check
-# — the same one H9.4 relies on — actually reports a mismatch, not `true == true` by construction.
-LAST_CHAR="${VM1_HASH: -1}"
-if [[ "$LAST_CHAR" == "0" ]]; then FLIPPED="1"; else FLIPPED="0"; fi
-CORRUPTED_HASH="${VM1_HASH:0:-1}${FLIPPED}"
-[[ "$CORRUPTED_HASH" != "$VM1_HASH" ]] || fail "H9.5: corruption produced an unchanged string — test setup bug"
-if [[ "$VM0_HASH" == "$CORRUPTED_HASH" ]]; then
-    fail "H9.5: comparator did not detect a divergence against a deliberately corrupted hash — H9.4's equality check would be vacuous"
+log "H9.5: comparator sanity — a second real capture at a different target_rcb must diverge..."
+# Exercise the same public path at a distinct retired-branch target. Comparing a fabricated hash
+# would only test bash string inequality, not the fingerprint comparator's real inputs.
+VM1_ALT_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
+    --kernel "$KERNEL" \
+    --cmdline "$UBUNTU_CMDLINE" \
+    --initramfs "$INITRAMFS" \
+    --target-rcb 100001 \
+    --virtio-blk-image "$ROOTFS" \
+    --expected-banner "$EXPECTED_BANNER" \
+    --times 1 \
+    --json)" || fail "H9.5: alternate target_rcb capture FAILED"
+VM1_ALT_EVENTS="$(fp_field "$VM1_ALT_JSON" events)"
+VM1_ALT_RIP="$(fp_field "$VM1_ALT_JSON" rip)"
+VM1_ALT_GPA="$(fp_field "$VM1_ALT_JSON" gpa)"
+if [[ "$VM1_ALT_EVENTS" == "$VM1_EVENTS" && "$VM1_ALT_RIP" == "$VM1_RIP" && "$VM1_ALT_GPA" == "$VM1_GPA" ]]; then
+    fail "H9.5: changing target_rcb did not change any compared execution field"
 fi
-pass "H9.5: a deliberately corrupted hash IS detected as diverging by this script's own comparison — H9.4's equality check is not vacuous"
+pass "H9.5: a second real capture at target_rcb=100001 diverged from target_rcb=100000"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -290,8 +302,8 @@ echo "    pinned to distinct CPU cores via taskset when available) each capture 
 echo "    (--times 1) and this script — not any single Rust process — proves them byte-identical,"
 echo "    closing the true cross-process/cross-core orchestration gap todo.md §14 items 9/10 named"
 echo "    as still open"
-echo "  - H9.5: this script's own equality check IS proven to catch a real inequality (a corrupted"
-echo "    hash), so H9.4's PASS is not vacuous"
+echo "  - H9.5: a second real fingerprint capture at a different target_rcb diverges, so H9.4's"
+echo "    equality comparison is not vacuous"
 echo ""
 echo "The drive requires the verified Ubuntu kernel/rootfs artifacts and fails closed when the"
 echo "real boot path cannot reach the exact login banner."

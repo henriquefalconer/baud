@@ -199,18 +199,24 @@ fn build_router(state: AppState) -> Router {
 /// unauthenticated mode when the variable is absent, while deployed and end-to-end authenticated
 /// runs get one check covering REST, SSE, and WebSocket routes alike.
 async fn require_configured_token(request: Request, next: Next) -> Response {
-    let Some(expected) = std::env::var_os("BAUD_AUTH_TOKEN") else {
+    let expected = std::env::var_os("BAUD_AUTH_TOKEN");
+    let identity_seed = std::env::var("BAUD_IDENTITY_SEED_B64").ok();
+    if expected.is_none() && identity_seed.is_none() {
         return next.run(request).await;
-    };
+    }
     if request.uri().path() == "/health" {
         return next.run(request).await;
     }
-    let expected = expected.to_string_lossy();
+    let expected = expected.map(|value| value.to_string_lossy().into_owned());
     let supplied = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    if authorization_matches(supplied, expected.as_ref()) {
+    if authorization_matches(
+        supplied,
+        expected.as_deref().map(std::borrow::Cow::Borrowed),
+        identity_seed.as_deref(),
+    ) {
         next.run(request).await
     } else {
         (
@@ -222,15 +228,30 @@ async fn require_configured_token(request: Request, next: Next) -> Response {
     }
 }
 
-fn authorization_matches(header: Option<&str>, expected: &str) -> bool {
-    // Treat an empty configured token as invalid configuration, never as a credential. Without
-    // this guard, `BAUD_AUTH_TOKEN=` would let a client authenticate with `Authorization: Bearer `.
-    if expected.is_empty() {
+fn authorization_matches(
+    header: Option<&str>,
+    expected: Option<std::borrow::Cow<'_, str>>,
+    identity_seed: Option<&str>,
+) -> bool {
+    let Some(token) = header.and_then(|value| value.strip_prefix("Bearer ")) else {
+        return false;
+    };
+    if token.is_empty() {
         return false;
     }
-    header
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| !token.is_empty() && token == expected)
+    // BAUD_AUTH_TOKEN remains a local-development credential. Deployed servers can instead
+    // verify the signed ten-minute agent token minted by baud-identity. Invalid seed material
+    // fails closed, and the token itself is never logged.
+    if expected
+        .as_deref()
+        .is_some_and(|configured| !configured.is_empty() && token == configured)
+    {
+        return true;
+    }
+    identity_seed
+        .and_then(|seed| baud_identity::RootKey::from_seed_b64(seed).ok())
+        .and_then(|root| root.verify(token).ok())
+        .is_some()
 }
 
 #[cfg(test)]
@@ -239,15 +260,49 @@ mod auth_tests {
 
     #[test]
     fn bearer_auth_requires_exact_token() {
-        assert!(authorization_matches(Some("Bearer secret"), "secret"));
-        assert!(!authorization_matches(Some("Basic secret"), "secret"));
+        assert!(authorization_matches(
+            Some("Bearer secret"),
+            Some("secret".into()),
+            None
+        ));
+        assert!(!authorization_matches(
+            Some("Basic secret"),
+            Some("secret".into()),
+            None
+        ));
         assert!(!authorization_matches(
             Some("Bearer secret-extra"),
-            "secret"
+            Some("secret".into()),
+            None
         ));
-        assert!(!authorization_matches(None, "secret"));
-        assert!(!authorization_matches(Some("Bearer "), ""));
-        assert!(!authorization_matches(Some("Bearer "), "secret"));
+        assert!(!authorization_matches(None, Some("secret".into()), None));
+        assert!(!authorization_matches(
+            Some("Bearer "),
+            Some("".into()),
+            None
+        ));
+        assert!(!authorization_matches(
+            Some("Bearer "),
+            Some("secret".into()),
+            None
+        ));
+    }
+
+    #[test]
+    fn signed_identity_tokens_are_accepted_and_invalid_tokens_are_rejected() {
+        let (root, seed) = baud_identity::RootKey::generate().unwrap();
+        let token = root.mint_tape_token("sandbox", "run").unwrap();
+        let token = token.expose().to_owned();
+        assert!(authorization_matches(
+            Some(&format!("Bearer {token}")),
+            None,
+            Some(seed.expose()),
+        ));
+        assert!(!authorization_matches(
+            Some("Bearer invalid"),
+            None,
+            Some(seed.expose()),
+        ));
     }
 }
 

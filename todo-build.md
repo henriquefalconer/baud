@@ -48,7 +48,6 @@ guarantee and the test that proves it.
 
 - **G6 Ubuntu H9 proof.** Finish `examples/ubuntu`, `crates/baud-multiverse`, `crates/baud-fingerprint`, CLI wiring, and `drive/h/h9.sh` by resolving the stalled boot from preserved symbol/RIP/console/watchdog evidence, validating exact artifact/filesystem metadata, and comparing two independently spawned VMs on separate cores at the login banner. Pass `ubuntu_boots_to_login`, `timed_exit_fingerprint_is_stable`, and `cross_vm_fingerprint_matches`; timeout or missing banner must preserve event count, RIP, GPA, console tail, phase timing, and classification and must never count as success.
 
-- **G7 real Mario guest proof.** Replace simulation in `examples/mario` with a pinned FCEUX/Lua runtime and dependency closure, tape-driven harness/probes/controller/frame channels, ROM validation, deterministic startup, and the complete `drive/mario.sh` covering image build/lint, repeated probe/frame equality, negative control, goal search, reconstruction, shrinking, replay, live output, and the harder-ROM run. Missing runtime, ROM, harness, or image inputs and every goal/replay/determinism failure must fail closed with no synthetic frames or skipped validation; this is blocked until the graphical/runtime closure is available.
 
 - **G8 production host safety contract.** DONE. Linux probing, regime reporting, sibling-safe placement, inherited affinity selection, housekeeping reservations, doctor diagnostics, and real H0/H6 capacity/fleet checks now pass without silent downgrade.
 

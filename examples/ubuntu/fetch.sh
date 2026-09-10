@@ -99,6 +99,29 @@ if [[ ! -f rootfs.raw ]] || [[ "ubuntu-18.04-server-cloudimg-amd64.img" -nt root
     trap - EXIT
 fi
 
+# Validate the prepared filesystem, not just the download hashes. A cloud image with the wrong
+# point release or a dirty journal can still have perfectly valid SHA256 values and then boot a
+# different userspace than H9 claims to prove.
+log "validating Ubuntu release metadata and clean filesystem state"
+LOOP_VALIDATE="$(sudo losetup -fP --show rootfs.raw)"
+MOUNT_VALIDATE="$(mktemp -d)"
+cleanup_validate() {
+    sudo umount "$MOUNT_VALIDATE" 2>/dev/null || true
+    sudo losetup -d "$LOOP_VALIDATE" 2>/dev/null || true
+    rmdir "$MOUNT_VALIDATE" 2>/dev/null || true
+}
+trap cleanup_validate EXIT
+sudo mount -o ro "${LOOP_VALIDATE}p1" "$MOUNT_VALIDATE"
+grep -Fx 'PRETTY_NAME="Ubuntu 18.04.1 LTS"' "$MOUNT_VALIDATE/etc/os-release" >/dev/null \
+    || { echo "rootfs is not Ubuntu 18.04.1 LTS" >&2; exit 1; }
+grep -F 'Ubuntu 18.04.1 LTS' "$MOUNT_VALIDATE/etc/issue" >/dev/null \
+    || { echo "rootfs /etc/issue does not identify Ubuntu 18.04.1 LTS" >&2; exit 1; }
+sudo umount "$MOUNT_VALIDATE"
+sudo tune2fs -l "${LOOP_VALIDATE}p1" | grep -E 'Filesystem state:[[:space:]]+clean' >/dev/null \
+    || { echo "rootfs filesystem is not clean" >&2; exit 1; }
+cleanup_validate
+trap - EXIT
+
 # Keep a machine-readable identity beside the external artifacts. H9 compares this exact build
 # across VM boots, so a directory with a silently replaced rootfs must never look ready.
 python3 - "$OUT_DIR" "$BUILD" <<'PY'
