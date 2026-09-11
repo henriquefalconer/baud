@@ -318,7 +318,7 @@ async fn provision_run(
 // GET /runs — list runs
 // ---------------------------------------------------------------------------
 
-pub async fn list(State(state): State<AppState>) -> Json<Value> {
+pub async fn list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let rows = sqlx::query_as::<_, (String, String, String, Option<String>, i64, String, i64, i64)>(
         "SELECT id, spec_hash, nix_ref, closure_hash, seed, status, created_at, updated_at FROM runs ORDER BY created_at DESC"
     )
@@ -344,9 +344,9 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
                     },
                 )
                 .collect();
-            Json(json!({ "runs": runs }))
+            Ok(Json(json!({ "runs": runs })))
         }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Err(e) => Err(internal_error(format!("db error: {e}"))),
     }
 }
 

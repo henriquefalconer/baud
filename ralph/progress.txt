@@ -2999,3 +2999,50 @@ Focused foreground verification is green: baud-packages 45 passed, baud-server 5
   - Cursor live frame SSE tails by durable frame row ID so frames sharing a step are not skipped.
   - Recorded focused foreground verification and the full-gate H9 limitation.
 ---
+
+## 2026-09-10T23:43:33 UTC (25min) - Session usage — ralph-23 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2737 (summed from 5 session transcripts: main $0.1861 · subagents $0.0876)
+- tokens input 611,768 · cache-read 6,385,664 · cache-write 0 · output 19,672 · reasoning 5,757
+- context 131,468 tok peak of 272K (48%) across 68 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2737 (in 611,768 / out 25,429 / cache-read 6,385,664)
+- subagents (4) pi process x4
+  - delegate-8cf2daececeeec56995aaebb6ec8bdc6: gpt-5.6-luna $0.0288, 5 inference calls
+  - delegate-43f1affe08f0c0c7dd4e17fc65c2750c: gpt-5.6-luna $0.0260, 5 inference calls
+  - delegate-02bf8e0d268dcec3080c9557cd85f1ca: gpt-5.6-luna $0.0254, 4 inference calls
+  - 01a08da0-aad0-731f-b1a6-6e04aec19db7: gpt-5.6-luna $0.0073, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/033-ralph-23.json
+- transcript: ralph/.run/20260910T073659Z/034-ralph-23.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 24 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in @todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+Chose these 8 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — these are all 8 pending implementation items in @todo-build.md.
+
+Inspecting the selected batch and existing implementation paths before editing.
+
+The initial scan found deliberate fixture-only image paths and route placeholders; tracing their real acceptance paths now.
+
+Closed a concrete G5 API hole in replay: journal failures now fail the request, replay mismatches become non-2xx, and terminal status is durable; correcting H9 diagnostics next.
+
+Formatting exposed and fixed replay error-return delimiters; compiling baud-server now to catch integration issues before adding tests.
+
+Focused server compilation is green after converting replay and run-list failures to structured non-2xx responses; the real remaining blockers are the guest image/tape contract, UFFD branch path, and Ubuntu login boot.
+
+The focused suite passed in the foreground; starting the repository gate required by @todo-build.md, with H9 expected to provide the remaining Ubuntu boot evidence rather than being bypassed.
+
+The gate passed warm-up, clippy, H0-H5, H7, and multiple package/server drives before the 600-second wall; collecting the exact remaining phase result and continuing root-cause work.
+
+H9 evidence shows each Ubuntu timer tick taking 1 to 7 seconds, so the apparent boot stall is a host performance-regime issue to correct first; resetting the required perf-event setting before the next real attempt.
+
+Stale gate workers are cleaned up and perf_event_paranoid is now -1; rerunning H9 directly to test whether the tick-cost root cause is fixed.
+
+The single verification worker independently passed cargo test -p baud-server: 57 passed, 0 failed; H9 still stalls in the real Ubuntu path after ~200 ticks, so the selected G2/G3/G6 acceptance work is not complete.
+
+The selected batch remains open because the real guest endpoint, write-set-scaled branches, and Ubuntu login proof still fail their acceptance paths; committing only the verified API hardening and diagnostic corrections so the work is durable for the next pass.

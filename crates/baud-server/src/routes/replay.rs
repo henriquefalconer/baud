@@ -10,6 +10,7 @@
 use crate::AppState;
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Json,
 };
 use baud_proto::{Observation, Value as ProbeValue};
@@ -26,11 +27,17 @@ pub struct ReplayBody {
 }
 
 /// POST /replay/:id — replay a run
+type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "error": message.into() })))
+}
+
 pub async fn replay(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Json(body): Json<Option<ReplayBody>>,
-) -> Json<Value> {
+) -> ApiResult {
     let body = body.unwrap_or(ReplayBody {
         tape_bytes: None,
         to_step: None,
@@ -47,22 +54,40 @@ pub async fn replay(
     let (id, spec_content, spec_hash, closure_hash, seed, status, original_stored_hash) = match row
     {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(json!({ "error": format!("run {run_id} not found") })),
-        Err(e) => return Json(json!({ "error": format!("db error: {e}") })),
+        Ok(None) => {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                format!("run {run_id} not found"),
+            ))
+        }
+        Err(e) => {
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {e}"),
+            ))
+        }
     };
 
     // Guard: divergent runs are excluded from replay (spec baud-journal §5 / VR2-M15).
     if status == "divergent" {
-        return Json(json!({
-            "error": format!("run {run_id} is marked divergent and cannot be replayed"),
-            "status": "divergent",
-        }));
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": format!("run {run_id} is marked divergent and cannot be replayed"),
+                "status": "divergent",
+            })),
+        ));
     }
 
     // 2. Parse spec to understand topology
     let spec_doc = match baud_init::lint(&spec_content) {
         Ok(doc) => doc,
-        Err(e) => return Json(json!({ "error": format!("spec parse error: {e}") })),
+        Err(e) => {
+            return Err(api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("spec parse error: {e}"),
+            ))
+        }
     };
 
     // 3. Create a replay run record
@@ -78,9 +103,9 @@ pub async fn replay(
     let now = crate::state::unix_now() as i64;
     let replay_spec_hash = spec_hash.clone();
 
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO runs (id, spec_content, spec_hash, nix_ref, closure_hash, strategy, tactics, seed, budget_minutes, tape_id, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, 5, NULL, 'done', ?, ?)"
+         VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, 5, NULL, 'running', ?, ?)"
     )
     .bind(&replay_run_id)
     .bind(&spec_content)
@@ -91,7 +116,8 @@ pub async fn replay(
     .bind(now)
     .bind(now)
     .execute(&state.db)
-    .await;
+    .await
+    .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("replay journal error: {e}")))?;
 
     // 4. Fetch original observations from the run being replayed
     let original_rows = sqlx::query_as::<_, (i64, i64, String, Vec<u8>, i64)>(
@@ -105,7 +131,12 @@ pub async fn replay(
 
     let original_obs = match original_rows {
         Ok(r) => r,
-        Err(e) => return Json(json!({ "error": format!("db error fetching observations: {e}") })),
+        Err(e) => {
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error fetching observations: {e}"),
+            ))
+        }
     };
 
     // 5. Prefer the exact tape recorded by a real KVM run. Re-seeding a PRNG here would
@@ -121,20 +152,22 @@ pub async fn replay(
         Ok(Some((tape_hex,))) => match decode_hex_tape(&tape_hex) {
             Some(tape) => Some(tape),
             None => {
-                return Json(json!({
-                    "ok": false,
-                    "verified": false,
-                    "error": "stored KVM tape is malformed"
-                }))
+                return Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({
+                        "ok": false,
+                        "verified": false,
+                        "error": "stored KVM tape is malformed"
+                    })),
+                ))
             }
         },
         Ok(None) => body.tape_bytes.filter(|tape| !tape.is_empty()),
         Err(e) => {
-            return Json(json!({
-                "ok": false,
-                "verified": false,
-                "error": format!("db error fetching replay tape: {e}")
-            }))
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error fetching replay tape: {e}"),
+            ))
         }
     };
     let replay_obs = match replay_real_or_legacy(
@@ -149,13 +182,27 @@ pub async fn replay(
     {
         Ok(observations) => observations,
         Err(error) => {
-            return Json(json!({
-                "ok": false,
-                "verified": false,
-                "original_run_id": id,
-                "error": error,
-                "message": "replay failed before an observation stream was produced"
-            }))
+            sqlx::query("UPDATE runs SET status = 'failed', updated_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(&replay_run_id)
+                .execute(&state.db)
+                .await
+                .map_err(|e| {
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("replay failure journal error: {e}"),
+                    )
+                })?;
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "ok": false,
+                    "verified": false,
+                    "original_run_id": id,
+                    "error": error,
+                    "message": "replay failed before an observation stream was produced"
+                })),
+            ));
         }
     };
 
@@ -181,8 +228,13 @@ pub async fn replay(
     // Keep the diagnostic response, but never let it become a verified replay.
     // 7. Insert replayed observations into SQLite under replay_run_id
     for obs in &replayed {
-        let value_bytes = serde_json::to_vec(&obs.value).unwrap_or_default();
-        let _ = sqlx::query(
+        let value_bytes = serde_json::to_vec(&obs.value).map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("observation encoding error: {e}"),
+            )
+        })?;
+        sqlx::query(
             "INSERT INTO observations (run_id, step, node, probe, value, recorded_at)
              VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -193,7 +245,13 @@ pub async fn replay(
         .bind(&value_bytes)
         .bind(now)
         .execute(&state.db)
-        .await;
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("replay observation journal error: {e}"),
+            )
+        })?;
     }
 
     // 8. Verify observation-stream-hash equality (spec: "verify observation-stream-hash prefix equality")
@@ -227,8 +285,38 @@ pub async fn replay(
         (expected_hash, v)
     };
 
-    Json(json!({
-        "ok": verified,
+    let terminal_status = if verified { "done" } else { "failed" };
+    sqlx::query("UPDATE runs SET status = ?, updated_at = ? WHERE id = ?")
+        .bind(terminal_status)
+        .bind(now)
+        .bind(&replay_run_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("replay completion journal error: {e}"),
+            )
+        })?;
+    if !verified {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "ok": false,
+                "original_run_id": id,
+                "replay_run_id": replay_run_id,
+                "verified": false,
+                "replayed_steps": replayed.len(),
+                "original_obs_count": orig_obs_count,
+                "original_stream_hash": original_stream_hash,
+                "replay_stream_hash": replay_stream_hash,
+                "message": "replay: observation stream hashes differ"
+            })),
+        ));
+    }
+
+    Ok(Json(json!({
+        "ok": true,
         "original_run_id": id,
         "replay_run_id": replay_run_id,
         "seed": seed,
@@ -244,7 +332,7 @@ pub async fn replay(
         } else {
             "replay: MISMATCH — observation stream hashes differ"
         },
-    }))
+    })))
 }
 
 // ---------------------------------------------------------------------------

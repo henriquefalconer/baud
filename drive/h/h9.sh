@@ -211,7 +211,7 @@ for SRV_URL in "$VM0_SRV" "$VM1_SRV"; do
 done
 pass "H9.4: vm0 (pid $VM0_PID) and vm1 (pid $VM1_PID) are two separate baud-server processes, each with its own port/DB/snapshot store"
 
-log "vm0 - timed exit: capturing single fingerprint (--times 1) at target_rcb=100000..."
+log "vm0 - timed exit: capturing single fingerprint (--times 1) at target_rcb=100000000..."
 VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
@@ -234,7 +234,7 @@ echo "guest RIP = $VM0_RIP (-> guest physical = $VM0_GPA)"
 echo "guest memory hash = $VM0_HASH"
 echo "vm0: done"
 
-log "vm1 - timed exit: capturing single fingerprint (--times 1) at target_rcb=100000 (own OS process, own port)..."
+log "vm1 - timed exit: capturing single fingerprint (--times 1) at target_rcb=100000000 (own OS process, own port)..."
 VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --kernel "$KERNEL" \
     --cmdline "$UBUNTU_CMDLINE" \
