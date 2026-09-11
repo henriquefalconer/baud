@@ -38,7 +38,8 @@ KERNEL="${BAUD_UBUNTU_KERNEL:-$UBUNTU_OUT/vmlinuz-generic}"
 ROOTFS="${BAUD_UBUNTU_ROOTFS:-$UBUNTU_OUT/rootfs.raw}"
 INITRAMFS="${BAUD_UBUNTU_INITRAMFS:-$UBUNTU_OUT/initrd-generic}"
 EXPECTED_BANNER=$'Ubuntu 18.04.1 LTS ubuntu ttyS0\n\nubuntu login: '
-UBUNTU_CMDLINE="systemd.unit=multi-user.target cloud-init=disabled console=ttyS0 root=/dev/vda1 ro rootwait nokaslr nosmp maxcpus=1 net.ifnames=0 biosdevname=0 clocksource=tsc tsc=reliable no-kvmclock no_timer_check pci=conf1 pci=assign-busses acpi=on scsi_mod.scan=sync udev.children_max=1 fsck.mode=skip systemd.mask=systemd-timesyncd.service systemd.mask=systemd-time-wait-sync.service systemd.mask=systemd-random-seed.service systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd-wait-online.service systemd.mask=systemd-resolved.service systemd.mask=cloud-init-local.service systemd.mask=cloud-init.service systemd.mask=cloud-config.service systemd.mask=cloud-final.service systemd.mask=apt-daily.timer systemd.mask=apt-daily-upgrade.timer systemd.mask=motd-news.timer systemd.mask=man-db.timer systemd.mask=fstrim.timer systemd.mask=systemd-tmpfiles-clean.timer systemd.mask=snapd.service systemd.mask=snapd.socket systemd.mask=snapd.seeded.service i8042.noaux i8042.nomux i8042.nopnp 8250.nr_uarts=1"
+H9_MAX_TICKS="${BAUD_H9_MAX_TICKS:-100000}"
+UBUNTU_CMDLINE="systemd.unit=multi-user.target cloud-init=disabled console=ttyS0 root=/dev/vda1 ro rootwait nokaslr nosmp maxcpus=1 net.ifnames=0 biosdevname=0 clocksource=tsc tsc=reliable no-kvmclock no_timer_check pci=conf1 pci=assign-busses pci=assign-resources acpi=on scsi_mod.scan=sync udev.children_max=1 fsck.mode=skip systemd.mask=systemd-timesyncd.service systemd.mask=systemd-time-wait-sync.service systemd.mask=systemd-random-seed.service systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd-wait-online.service systemd.mask=systemd-resolved.service systemd.mask=cloud-init-local.service systemd.mask=cloud-init.service systemd.mask=cloud-config.service systemd.mask=cloud-final.service systemd.mask=apt-daily.timer systemd.mask=apt-daily-upgrade.timer systemd.mask=motd-news.timer systemd.mask=man-db.timer systemd.mask=fstrim.timer systemd.mask=systemd-tmpfiles-clean.timer systemd.mask=snapd.service systemd.mask=snapd.socket systemd.mask=snapd.seeded.service i8042.noaux i8042.nomux i8042.nopnp 8250.nr_uarts=1"
 DB_FILE="$(mktemp -u -t baud-h9-XXXXXX.sqlite)"
 SNAP_ROOT="$(mktemp -d -t baud-h9-snap-XXXXXX)"
 SERVER_PID=""
@@ -98,7 +99,7 @@ fi
 
 log "Starting baud-server on $SRV..."
 BAUD_DB="sqlite://${DB_FILE}?mode=rwc" BAUD_ADDR="127.0.0.1:$BAUD_PORT" \
-    BAUD_SNAPSHOT_STORE="$SNAP_ROOT" BAUD_LOG=warn "$BAUD_SERVER_BIN" &
+    BAUD_SNAPSHOT_STORE="$SNAP_ROOT" BAUD_LOG="${BAUD_LOG:-warn}" "$BAUD_SERVER_BIN" &
 SERVER_PID=$!
 
 for _ in $(seq 1 60); do
@@ -130,8 +131,8 @@ FP_JSON="$("$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 236 \
-    --periodic-timer-max-ticks 20000 \
+    --periodic-timer-vector 238 \
+    --periodic-timer-max-ticks "$H9_MAX_TICKS" \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 2 \
@@ -192,12 +193,12 @@ fi
 
 log "Starting vm0 baud-server on $VM0_SRV (own process)..."
 BAUD_DB="sqlite://${VM0_DB_FILE}?mode=rwc" BAUD_ADDR="127.0.0.1:$VM0_PORT" \
-    BAUD_SNAPSHOT_STORE="$VM0_SNAP_ROOT" BAUD_LOG=warn "${TASKSET0[@]}" "$BAUD_SERVER_BIN" &
+    BAUD_SNAPSHOT_STORE="$VM0_SNAP_ROOT" BAUD_LOG="${BAUD_LOG:-warn}" "${TASKSET0[@]}" "$BAUD_SERVER_BIN" &
 VM0_PID=$!
 
 log "Starting vm1 baud-server on $VM1_SRV (own process)..."
 BAUD_DB="sqlite://${VM1_DB_FILE}?mode=rwc" BAUD_ADDR="127.0.0.1:$VM1_PORT" \
-    BAUD_SNAPSHOT_STORE="$VM1_SNAP_ROOT" BAUD_LOG=warn "${TASKSET1[@]}" "$BAUD_SERVER_BIN" &
+    BAUD_SNAPSHOT_STORE="$VM1_SNAP_ROOT" BAUD_LOG="${BAUD_LOG:-warn}" "${TASKSET1[@]}" "$BAUD_SERVER_BIN" &
 VM1_PID=$!
 
 for SRV_URL in "$VM0_SRV" "$VM1_SRV"; do
@@ -218,8 +219,8 @@ VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 236 \
-    --periodic-timer-max-ticks 20000 \
+    --periodic-timer-vector 238 \
+    --periodic-timer-max-ticks "$H9_MAX_TICKS" \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 1 \
@@ -244,8 +245,8 @@ VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 236 \
-    --periodic-timer-max-ticks 20000 \
+    --periodic-timer-vector 238 \
+    --periodic-timer-max-ticks "$H9_MAX_TICKS" \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 1 \
@@ -280,8 +281,8 @@ VM1_ALT_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000001 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 236 \
-    --periodic-timer-max-ticks 20000 \
+    --periodic-timer-vector 238 \
+    --periodic-timer-max-ticks "$H9_MAX_TICKS" \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
     --times 1 \

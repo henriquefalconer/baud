@@ -199,6 +199,7 @@ mod linux {
                 .capture_fingerprint_until_console_pattern(
                     period,
                     vector,
+                    Some(0x3a),
                     Some(0x3b),
                     pattern,
                     max_ticks,

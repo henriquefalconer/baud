@@ -3577,3 +3577,230 @@ The 0xec timer path reaches the real Ubuntu kernel through Freeing unused kernel
 Recording the unresolved H9 root cause in the queue and committing all validated lifecycle, image, snapshot, CLI, and timer-path work without claiming the batch is closed.
 
 Pushing the committed validated work so the next iteration can resume from the real H9 root cause.
+
+## 2026-09-11T16:50:11 UTC (30min) - Session usage — ralph-1 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2479 (summed from 5 session transcripts: main $0.1611 · subagents $0.0868)
+- tokens input 567,462 · cache-read 5,433,856 · cache-write 0 · output 21,414 · reasoning 5,115
+- context 143,798 tok peak of 272K (53%) across 59 inference calls, monotonic
+- models gpt-5.6-luna $0.2479 (in 567,462 / out 26,529 / cache-read 5,433,856)
+- subagents (4) pi process x4
+  - delegate-727d64dfb3d3b303c5c8711e91dd1a93: gpt-5.6-luna $0.0285, 6 inference calls
+  - delegate-bc8f0953a9ed052a9d19285c913aa108: gpt-5.6-luna $0.0266, 6 inference calls
+  - delegate-c152bf753cacaa4553f1055ec1c31c73: gpt-5.6-luna $0.0287, 6 inference calls
+  - 01a09147-adeb-73f8-b5e1-27b1b5644db0: gpt-5.6-luna $0.0030, 1 inference calls
+- transcript: ralph/.run/20260911T161941Z/001-ralph-1.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 2 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the full batch.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all pending entries in the queue.
+
+Starting G2 image pipeline and G2 tape endpoint review while the validation worker runs the current unit suite.
+
+The code search confirms the queue is real work, not bookkeeping: UFFD negotiation is not connected to live guest RAM, and H9 still depends on the exact Ubuntu userspace path. I am tracing those concrete integration points now.
+
+The Ubuntu spec and artifact manifest both pin LOCAL_TIMER_VECTOR=238, so I corrected all H9 captures from 236. Running the real H9 path next to expose the remaining rootfs/userspace failure.
+
+H9 now reaches real Ubuntu userspace and systemd-udevd, but the first full run timed out after tick 200 with no login banner. I am rerunning with a short watchdog to capture the exact guest RIP and console tail instead of accepting a hang.
+
+The watchdog captured a userspace stall after udev, not a disk fault. Ubuntu was waiting for entropy; I wired the fingerprint boot path to deterministic virtio-rng on PCI IRQ 10/vector 0x3a alongside virtio-blk, preserving the tape-derived input contract. Re-running focused H9.
+
+The short watchdog still stalls in a kernel virtio module after udev, so I am exposing block/rng service counts in the existing H9 server log to identify whether the guest is waiting for an uncompleted request or spinning in IRQ handling.
+
+H9 still reports no virtio queue notify before the watchdog, so the userspace stall is in PCI/driver initialization rather than an uncompleted disk request. I am preserving the failure and validating the new deterministic-rng wiring before the next root-cause pass.
+
+Fingerprint and server tests are green after the H9 changes. I am checking the real image-build acceptance path next; any fixture or missing-tool fallback will remain a failure.
+
+The real image-build CLI drive is green: it built a kernel and initramfs, verified hashes, and booted the freshly emitted artifacts through KVM. I am running the fresh-image tape and userspace harness drive next.
+
+The fresh-image drive is green: the new image booted to /init and emitted a real PROBE record through the guest PIO/character-device tape path. The preferred virtio-serial transport and write-set branch integration remain the next concrete gaps.
+
+The H5 real branch proof is green, including 1000 independent continuations, but it explicitly confirms the current implementation is the full-restore fallback. I am isolating the real virtio-blk driver test now to compare its known-good PCI path with Ubuntu.
+
+The known-good minimal virtio-blk guest passes, while Ubuntu stalls before any queue notify. I added bounded PCI config-write tracing to distinguish a guest probe loop from a BAR/queue negotiation bug, then I will rerun one short capture.
+
+PCI tracing shows Ubuntu never writes BARs or queues, so the hang precedes virtio request service. I am testing whether the forced pci=assign-busses option is trapping the stock ACPI/PCI path; this is a measured root-cause experiment, not a success workaround.
+
+The real pkg-build and pkg-boot drives both pass, and H5 passes its full 1000-branch fallback proof. H9 remains the only observed acceptance failure; the diagnostic experiment did not change the pre-queue PCI stall. Continuing with the delegated root-cause review before editing more runtime code.
+
+The minimal virtio-pci transport unit suite remains green after the diagnostic instrumentation. The Ubuntu failure is narrowed to stock PCI probe/userspace activity before BAR programming, not the deterministic timer or block request service; I am waiting for the independent code-path review before choosing the next fix.
+
+The repository search review confirms the selected items are genuinely incomplete at their integration boundaries, so I am not collapsing them to DONE prematurely. I am continuing the H9 root-cause path while preserving the green image, tape, snapshot, and workspace checks.
+
+The PCI review points to the standard 0x0c header read as the last pre-BAR validation step. I am testing ACPI-off versus the direct PCI path to separate ACPI IRQ/resource setup from the config-header issue.
+
+The ACPI-off diagnostic changed the trace decisively: Ubuntu assigned BAR0 and negotiated virtio-blk, proving ACPI PCI resource setup is the blocker. It then emitted real LAPIC timer and spurious-timer diagnostics. I am running the direct PCI path longer to see whether it reaches login before fixing ACPI resource tables.
+
+ACPI-off proved the missing resource path, but its timer handling is unusable. I am testing Linux pci=noacpi with ACPI still enabled, which should retain the LAPIC tables while forcing legacy PCI resource/IRQ setup.
+
+ACPI-on with pci=noacpi successfully assigned BAR0, but Ubuntu 4.15 then reported virtio_blk probe error -22 before any queue access. The temporary tracing is removed. The remaining issue is transport initialization, not ACPI PCI resource assignment; I delegated that narrower diagnosis before changing production behavior.
+
+The narrow diagnosis identified the missing firmware step: PCI command I/O enable was initialized to zero, so Linux mapped no legacy BAR and exposed no config callback to virtio_blk. PciVirtioFunction now starts with PCI_COMMAND_IO set. I am rerunning H9 before touching the broader queue.
+Initializing PCI_COMMAND_IO alone did not survive Ubuntu's later probe-time command writes. The model now preserves the I/O-enable bit on every command-register write, matching the direct-boot firmware responsibility required for pci_iomap and legacy virtio config access.
+The follow-up review rejected forcing PCI_COMMAND_IO or bus mastering, so that experiment was reverted. ACPI-off with vector 236 did not progress, confirming the unresolved path is coherent ACPI PCI resource and IRQ routing, not a timer-vector-only fix.
+Added and validated a real PCI root-bridge DSDT AML resource template. The simpler compiled form declares PNP0A03, I/O 0xC000..0xC1FF, and bus 0..255, but H9 still stalls before virtio status negotiation. The remaining gap is IRQ routing or another ACPI PCI host-bridge contract, not the missing resource declaration alone.
+Foreground gate rerun was requested. Build, clippy, H0-H7, M9-M13, package, and H5 units passed before the 600-second command timeout; H9 remained the long-running unresolved unit.
+
+## 2026-09-11T18:12:37 UTC (1h22min) - Session usage — ralph-2 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.9159 (summed from 10 session transcripts: main $0.7410 · subagents $0.1748)
+- tokens input 1,319,242 · cache-read 28,393,472 · cache-write 0 · output 70,121 · reasoning 34,714
+- context 258,669 tok peak of 272K (95%) across 226 inference calls, 1 drop(s), final 130,569, resumed 1x
+- models gpt-5.6-luna $0.9159 (in 1,319,242 / out 104,835 / cache-read 28,393,472)
+- subagents (9) pi process x9
+  - delegate-09bed319a60b0712bb1ad1cf9c4e5ae1: gpt-5.6-luna $0.0245, 5 inference calls
+  - delegate-16bcee211e862158498fee354c85f73c: gpt-5.6-luna $0.0260, 4 inference calls
+  - delegate-c84d04cf3d813795953365fe9c8f87a0: gpt-5.6-luna $0.0233, 4 inference calls
+  - delegate-4da272342a9d0308d6073fb3131a5d34: gpt-5.6-luna $0.0181, 4 inference calls
+  - 01a09161-50dd-7255-ad29-dcfe2915d43a: gpt-5.6-luna $0.0066, 2 inference calls
+  - delegate-81fe276533afe489a8b453b127b1d77a: gpt-5.6-luna $0.0263, 4 inference calls
+  - delegate-cd592f842cdcde42ac6f33a0d9df280a: gpt-5.6-luna $0.0243, 3 inference calls
+  - delegate-4d1e05b64c6532b5c62d674cafaa7a1c: gpt-5.6-luna $0.0151, 2 inference calls
+  - delegate-e20682e3be76fa3e4ca94ab7a8878ffd: gpt-5.6-luna $0.0105, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/002-ralph-2.json
+- transcript: ralph/.run/20260911T161941Z/003-ralph-2.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 3 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in @todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all pending entries in the queue.
+
+Starting G6 Ubuntu H9 proof. Inspecting the current ACPI, virtio, timer, and fingerprint path before running the real drive.
+
+Running drive/h/h9.sh with verbose logging to capture the remaining real-guest failure rather than treating a timeout as success.
+
+H9 diagnostics show long KVM_RUN bursts. Reading the periodic device loop and exit servicing to add bounded in-run diagnostics and fix the handoff.
+
+Root cause isolated: the H9 capture path enabled virtio-blk but passed the virtio-rng IRQ vector 0x3a, while PCI assigns the block function IRQ 11, vector 0x3b; fixing that real interrupt path now.
+
+Testing the corrected block interrupt vector in the fingerprint crate before rerunning H9.
+
+Rerunning H9 after correcting the virtio-blk interrupt vector; this is the real acceptance path.
+
+The corrected block IRQ now gets Ubuntu through udev, but the guest stalls waiting for entropy because the capture loop never services the enabled virtio-rng device; wiring both deterministic device interrupts into the real capture path.
+
+Focused fingerprint tests are green. Rerunning H9 with both virtio-rng and virtio-blk completions serviced.
+
+Adding device-service evidence and running a short H9 diagnostic to determine whether Ubuntu posts RNG or block work before the stall.
+
+Testing whether the second PCI function is the stall trigger by running the same H9 path with only virtio-blk enabled.
+
+Formatting the focused H9 and capture-path changes before the next verification pass.
+
+Implemented the missing PCI virtio-rng queue service and switched Ubuntu capture to the transport its initramfs actually probes; compiling focused crates now.
+
+Focused multiverse and fingerprint suites are green, including real KVM tests. Running H9 again with PCI virtio-rng service wired.
+
+The PCI RNG service is present but no queue notifications appear. Instrumenting BAR and command writes to verify the guest completes PCI resource assignment before the next H9 diagnostic.
+
+Diagnosis confirmed direct boot never receives BAR writes, leaving PCI windows at zero. Added fixed deterministic BAR assignment for direct-boot devices and wiring before ACPI/KVM execution.
+
+Focused tests remain green after deterministic BAR assignment. Re-running the real Ubuntu acceptance to verify PCI probing and userspace handoff.
+
+PCI RNG servicing, deterministic BAR assignment, and H9 diagnostics are implemented; the real Ubuntu run still stalls before PCI BAR/queue negotiation, so continuing root-cause work rather than closing the item.
+
+Server, multiverse, fingerprint, and PCI transport tests are green; H9 remains red at the real Ubuntu PCI/virtio probe handoff, so no queue item is being falsely marked DONE.
+
+H9 study confirms the remaining failure is inside the real periodic PCI/virtio handoff, not a valid timeout; continuing from the recorded RIP and device-service evidence.
+
+Instrumenting direct-boot BAR assignment to verify the H9 route reaches the new firmware-substitute path before the guest runs.
+
+The kernel is not assigning or reading the synthetic BAR before virtio probe; adding Linux pci=assign-resources to the real H9 command line and rerunning the bounded acceptance.
+
+Replaced the hand-assembled DSDT AML with compiler-validated encodings for root scope, Eisa HID, split I/O resources, and the 0..255 bus range; testing ACPI before H9.
+
+ACPI tests are green with a valid root bridge resource template. Re-running the real H9 path to verify Linux now sees the PCI resource window.
+The DSDT now validates with iasl and Linux reaches virtio device status, but virtio_blk still returns -EINVAL before queue setup. Tried ACPI _PRT, pci=nomsi, noapic, and alternate IRQ lines; none changed the failure. Restored the H9 command line and IRQ defaults while isolating the remaining probe error.
+Root cause identified: run_kvm enabled MMIO RNG while Ubuntu used PCI RNG. Switched Ubuntu paths to PCI RNG, retained MMIO for legacy test guests, and made the combined pattern loop select the enabled transport.
+Virtio-blk now reaches userspace after expanding the legacy PCI BAR to 0x80 and returning zero for reserved device-config bytes. Ubuntu still stalls in its kernel random wait because the stock 4.15 initramfs contains virtio_blk but no virtio_rng module; the PCI RNG device is enumerated but never brought to virtio status/queue setup. Removed temporary tracing and untrusted random command-line experiments.
+Repeated the H9 command in the foreground with the requested 180-second bound and perf setup. H9.1 passed; H9.2 still failed after a 20-second watchdog at RIP 0xffffffffc009b0da. Virtio-blk probing now succeeds, but Ubuntu never reaches login because the downloaded 4.15 initramfs has no virtio_rng module. No commit or push was made.
+
+## 2026-09-11T19:16:17 UTC (1h03min) - Session usage — ralph-3 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $1.4613 (summed from 11 session transcripts: main $1.2159 · subagents $0.2454)
+- tokens input 1,772,836 · cache-read 49,965,568 · cache-write 0 · output 89,502 · reasoning 39,662
+- context 255,268 tok peak of 272K (94%) across 305 inference calls, 2 drop(s), final 251,687, resumed 1x
+- models gpt-5.6-luna $1.4613 (in 1,772,836 / out 129,164 / cache-read 49,965,568)
+- subagents (10) pi process x10
+  - delegate-b62220df19e408562ac5112f9392f8a5: gpt-5.6-luna $0.0279, 7 inference calls
+  - delegate-09cb78276c21cbb17fd8ccbb65c4cf59: gpt-5.6-luna $0.0272, 6 inference calls
+  - delegate-763aeda7caaaf97d28340a8a0dd1fa13: gpt-5.6-luna $0.0231, 4 inference calls
+  - delegate-1a21905b5f31ec699a6fb640662d363b: gpt-5.6-luna $0.0245, 5 inference calls
+  - delegate-90c3f7b8237c3b454b4789909b013fe5: gpt-5.6-luna $0.0268, 6 inference calls
+  - delegate-6ee6af51b9f66ec75dceba14475e552c: gpt-5.6-luna $0.0227, 4 inference calls
+  - delegate-4829ec1ceab40f187e9a4127b8a7dfd2: gpt-5.6-luna $0.0256, 4 inference calls
+  - 01a091bc-68f4-77ab-b70c-1067fbd97c8d: gpt-5.6-luna $0.0142, 8 inference calls
+  - delegate-d5fb7978bd9ffec40ba4d1c195e4c3f2: gpt-5.6-luna $0.0262, 5 inference calls
+  - delegate-18c724a1878d42fef67297323ec29a14: gpt-5.6-luna $0.0272, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/004-ralph-3.json
+- transcript: ralph/.run/20260911T161941Z/005-ralph-3.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 4 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, then implementing and validating each one end to end.
+
+Chose these 7 items: G2 reproducible image pipeline; G2 guest tape endpoint and harness; G3 write-set-scaled branching; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof — they are all 7 pending items in todo-build.md.
+
+The binding batch is locked. Existing uncommitted work targets H9 and virtio PCI; I am now checking its compile surface while the spec searches run.
+
+The current code confirms G3 has capability negotiation but no caller integration, and G2 still exposes dry-run only as an explicit non-production path. I am using the audit results to make only real-path changes.
+
+While the targeted suite runs, I am checking the real H9 harness and the current diff for malformed integration before making the next root-cause edit.
+
+The code is functionally formatted except one rustfmt drift in virtio_pci.rs; I will apply formatter after the pending integration edits, not hide it.
+
+The snapshot specification confirms the remaining G3 acceptance is specifically UFFDIO_CONTINUE and write-protect branch ownership, not another fallback wrapper. I am waiting for the independent implementation audit before wiring it.
+
+The real guest RAM is already memfd-backed in baud-multiverse, but no branch path asks the snapshot crate to register that mapping. I am narrowing the change to an explicit opt-in branch capability so ordinary boots keep the tested full-restore behavior.
+
+Targeted tests built cleanly; four server tests failed only because stale 3.8 GiB temporary image files filled /tmp. I removed those inactive artifacts and will rerun the same suite after the next code checks.
+
+The DSDT bytes were not valid iasl output: its _CRS package length claimed 0x26 while the descriptors occupy 0x15 bytes. I replaced the hand encoding with compiler-verified AML and restored the required 0xec timer vector. Running ACPI tests and then the real H9 drive.
+
+The corrected DSDT now passes its table tests, but H9 still reaches only Freeing unused kernel memory before the 20,000-tick bound. I increased the harness default bound to 100,000 with BAUD_H9_MAX_TICKS override, then will test 40,000 first to distinguish slow userspace from a true hang.
+
+The H9 timeout is a real serial handoff deadlock, not slow boot: the guest reaches late kernel init and then waits for interrupt-driven tty output after ACPI disables the legacy PIC. I changed the VMM to inject its documented fixed IRQ4 vector for UART wake requests even when PIC bookkeeping is masked, then rerunning the real drive.
+
+The IRQ4 change did not move Ubuntu past the rootfs handoff, so it is not the sole blocker. The run remains a real failure. I am preserving the evidence and switching to the complete workspace verification while tracing the remaining init/getty path separately.
+
+The UART injection experiment broke the real shell-restore regression with KVM FailEntry when IRQ4 was injected while the guest masked the PIC, so I reverted it. Workspace tests otherwise pass; this is a regression to fix before validation, not a permitted failure.
+
+The remaining Ubuntu gap may be systemd never selecting a serial getty in this cloud image. I am testing an explicit serial-getty target through the same real H9 path, without weakening banner validation.
+
+The Ubuntu build notes expose the measured cause: vector 236 is the cheap infinite do_IRQ path, while vector 238 drives real userspace work. This conflicts with the queue wording, so I requested an ultrathink review before changing the authoritative contract rather than pretending 236 can reach login.
+
+The timer-vector audit resolved the inconsistency: Ubuntu 18.04.1 uses 0xee/238, while the generic Linux 6.18 fixture uses 0xec/236. I updated only the Ubuntu queue wording and H9 invocations, preserving generic defaults. Running the corrected pinned Ubuntu acceptance now.
+
+The corrected 238 run proves PCI BAR assignment and reaches systemd-udevd, then stalls before the serial banner even at 100,000 ticks. I am enabling systemd console debug in the pinned H9 command line for one bounded diagnostic run to identify the exact service or device wait; timeout remains failure.
+
+## Iteration 4 closeout
+
+Implemented and verified in this pass:
+
+- Corrected the compiler-verified ACPI DSDT assertion and kept the PCI root resources/checksum tests green.
+- Resolved the timer-vector specification conflict. Ubuntu 18.04.1's Linux 4.15 kernel uses 0xee/238; the generic Linux 6.18 fixture remains 0xec/236. Updated `todo-build.md` and all four Ubuntu H9 fingerprint invocations accordingly.
+- Re-ran focused ACPI, multiverse shell-continuation, and server authentication tests successfully.
+
+Validation limits:
+
+- `drive/h/h9.sh` with vector 238 reaches `Freeing unused kernel memory` and `systemd-udevd`, but does not reach `ubuntu login:` before the 600-second watchdog. The 100,000-tick run and a 3,000-tick diagnostic run both failed closed. Systemd console-debug flags produced no additional handoff log. H9 is therefore not marked done.
+- A focused server test command was allowed to run until the 180-second command limit while longer KVM route tests were still progressing; no assertion failure appeared before termination.
+- The full seven-item lock is not honestly complete. Remaining work is the post-init Ubuntu handoff plus the deeper G3/G5 integration and maintained-drive coverage. The next iteration should instrument the guest's `/init` handoff and inspect the serial/getty device path before changing the VM model again.

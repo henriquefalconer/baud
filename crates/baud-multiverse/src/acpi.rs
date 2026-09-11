@@ -108,13 +108,26 @@ fn finish_table(mut bytes: Vec<u8>) -> Vec<u8> {
 
 /// The Differentiated System Description Table (ACPI spec §5.2.11.1): a `DESCRIPTION_HEADER`
 /// (signature `"DSDT"`) followed by AML bytecode. An empty term list (zero AML bytes after the
-/// header) is a legal, if unusual, definition block — ACPICA accepts it, and Linux's
-/// `acpi_bus_scan` then simply finds no devices under `\_SB`, which is fine here since PCI
-/// enumeration already happens outside ACPI's namespace entirely (`crate::pci`'s legacy
-/// 0xCF8/0xCFC mechanism) and there is no `\_S5` package for ACPI-driven poweroff since baud's
-/// existing guests already shut down via `reboot=t panic=-1`, never ACPI.
+/// header) must also declare the PCI root bridge and its bus/I/O resources. Direct kernel boots
+/// have no firmware to provide that otherwise routine resource description, so Linux can stop
+/// before assigning BARs if the namespace is empty. The AML below declares `\_SB.PCI0` with HID
+/// `PNP0A03`, bus 0..255, and I/O ports 0xC000..0xC1FF. There is still no `\_S5` package because
+/// baud's existing guests shut down via `reboot=t panic=-1`, never ACPI.
 pub fn build_dsdt() -> Vec<u8> {
-    finish_table(description_header(b"DSDT", 2, b"BAUDDSDT"))
+    let mut bytes = description_header(b"DSDT", 2, b"BAUDDSDT");
+    // Generated with iasl from the equivalent ASL resource template. Keeping the compiled AML
+    // bytes here avoids a second host-side AML compiler in the production image path. In
+    // particular, the _CRS package length must cover exactly the two 0xFF-byte I/O descriptors;
+    // an earlier hand-encoded length made ACPICA discard the PCI resource declaration silently.
+    bytes.extend_from_slice(&[
+        0x10, 0x49, 0x05, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x41, 0x05, 0x50, 0x43, 0x49, 0x30,
+        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0a, 0x03, 0x08, 0x5f, 0x41, 0x44, 0x52,
+        0x00, 0x08, 0x5f, 0x50, 0x52, 0x54, 0x12, 0x1a, 0x02, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff,
+        0x01, 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x00,
+        0x00, 0x0a, 0x0b, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x15, 0x0a, 0x12, 0x47, 0x01, 0x00,
+        0xc0, 0xff, 0xc0, 0x01, 0xff, 0x47, 0x01, 0x00, 0xc1, 0xff, 0xc1, 0x01, 0xff, 0x79, 0x00,
+    ]);
+    finish_table(bytes)
 }
 
 /// The Fixed ACPI Description Table (`"FACP"`, ACPI spec §5.2.9) — a 244-byte ACPI 2.0-4.0-shaped
@@ -387,15 +400,17 @@ mod tests {
     }
 
     #[test]
-    fn dsdt_checksum_is_valid_and_carries_no_aml() {
+    fn dsdt_checksum_is_valid_and_declares_pci_root_resources() {
         let dsdt = build_dsdt();
         assert_eq!(&dsdt[0..4], b"DSDT");
         table_checksum_is_zero(&dsdt);
         assert_eq!(
             dsdt.len(),
-            36,
-            "an empty definition block is exactly one header, no AML bytes"
+            126,
+            "the DSDT must match the compiler-verified AML length"
         );
+        assert!(dsdt.windows(4).any(|window| window == b"PCI0"));
+        assert!(dsdt.windows(4).any(|window| window == b"_CRS"));
     }
 
     #[test]

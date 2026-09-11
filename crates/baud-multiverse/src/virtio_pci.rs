@@ -88,9 +88,9 @@ const REG_DEVICE_CONFIG_START: u16 = 0x14;
 /// the BAR0 size `PciVirtioFunction` advertises during PCI BAR sizing, so a probed device's
 /// window and this transport's own dispatch range never disagree. Deliberately wider than the
 /// `0x14` bytes of registers actually defined above (matching real hardware's own convention of a
-/// power-of-two BAR size) — offsets `0x14..0x20` read/write as inert, same as any other
-/// unimplemented register in this crate.
-pub const VIRTIO_PCI_IO_WINDOW_LEN: u16 = 0x20;
+/// power-of-two BAR size) — the fixed legacy register block is followed by the complete
+/// virtio-blk configuration structure through offset 0x50. The next power-of-two window is 0x80.
+pub const VIRTIO_PCI_IO_WINDOW_LEN: u16 = 0x80;
 
 /// The ring-layout addresses [`ring_layout_from_pfn`] derives — the same computation a real
 /// `virtio_pci_legacy` driver's `vring_init(num, page, VIRTIO_PCI_VRING_ALIGN)` performs when it
@@ -332,11 +332,7 @@ impl Bus for VirtioPciTransport {
             // virtio-blk's `capacity` is a `le64`, read as two 32-bit halves by every real driver).
             let start = (offset - REG_DEVICE_CONFIG_START) as usize;
             for (i, b) in data.iter_mut().enumerate() {
-                *b = self
-                    .device_config
-                    .get(start + i)
-                    .copied()
-                    .unwrap_or(OPEN_BUS_BYTE);
+                *b = self.device_config.get(start + i).copied().unwrap_or(0);
             }
             return;
         }
@@ -373,7 +369,7 @@ impl Bus for VirtioPciTransport {
                 self.isr_status = 0; // spec: reading clears it
                 [value, 0, 0, 0]
             }
-            _ => [OPEN_BUS_BYTE; 4], // unimplemented register within the window (e.g. 0x14..0x20)
+            _ => [0; 4], // reserved fixed-register bytes read as zero
         };
         for (i, b) in data.iter_mut().enumerate() {
             *b = word.get(i).copied().unwrap_or(OPEN_BUS_BYTE);
@@ -617,11 +613,11 @@ mod tests {
     }
 
     #[test]
-    fn addresses_outside_the_window_but_still_in_the_bar_read_open_bus_and_absorb_writes() {
+    fn reserved_bytes_inside_the_bar_read_zero_and_absorb_writes() {
         let mut t = transport();
         let mut data = [0u8; 4];
-        t.pio_read(BASE + 0x14, &mut data); // inside the BAR (0x20 bytes) but past defined registers
-        assert_eq!(data, [OPEN_BUS_BYTE; 4]);
+        t.pio_read(BASE + 0x14, &mut data);
+        assert_eq!(data, [0; 4]);
         t.pio_write(BASE + 0x14, &[1, 2, 3, 4]); // must not panic
     }
 
@@ -669,12 +665,12 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_with_no_device_config_reads_open_bus_past_the_fixed_registers() {
+    fn a_transport_with_no_device_config_reads_zero_past_the_fixed_registers() {
         let mut t = transport(); // new_rng: empty device_config
         let mut data = [0u8; 4];
         t.pio_read(BASE + REG_DEVICE_CONFIG_START, &mut data);
         assert_eq!(
-            data, [OPEN_BUS_BYTE; 4],
+            data, [0; 4],
             "virtio-rng defines no device-specific config fields"
         );
     }

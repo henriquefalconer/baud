@@ -228,7 +228,13 @@ impl PciVirtioFunction {
         }
     }
 
+    fn assign_io_base(&mut self, base: u16) {
+        self.bar0_sizing = false;
+        self.bar0_base = u32::from(base);
+    }
+
     fn bar0_write(&mut self, value: u32) {
+        tracing::info!(value, "virtio-pci BAR0 write");
         if value == 0xFFFF_FFFF {
             self.bar0_sizing = true;
         } else {
@@ -267,7 +273,10 @@ impl PciVirtioFunction {
 
     fn config_write_dword(&mut self, register: u8, value: u32) {
         match register {
-            REG_COMMAND_STATUS => self.command = (value as u16) & 0x0007,
+            REG_COMMAND_STATUS => {
+                self.command = (value as u16) & 0x0007;
+                tracing::info!(command = self.command, "virtio-pci command write");
+            }
             REG_BAR0 => self.bar0_write(value),
             REG_INTERRUPT => self.interrupt_line = (value & 0xFF) as u8,
             // Vendor/device/class/subsystem are read-only; anything else this header doesn't
@@ -342,6 +351,21 @@ impl PciHostBridge {
         self.virtio_blk
             .as_ref()
             .and_then(PciVirtioFunction::io_base)
+    }
+
+    /// Assign fixed legacy I/O windows when direct boot has no firmware resource allocator.
+    pub fn assign_default_virtio_io_bases(&mut self) {
+        tracing::info!("assigning direct-boot virtio PCI I/O windows");
+        if let Some(rng) = self.virtio_rng.as_mut() {
+            if rng.io_base().is_none() {
+                rng.assign_io_base(0xc000);
+            }
+        }
+        if let Some(blk) = self.virtio_blk.as_mut() {
+            if blk.io_base().is_none() {
+                blk.assign_io_base(0xc080);
+            }
+        }
     }
 
     /// The dword this bridge presents at `addr`, or `0xFFFF_FFFF` for any unmodeled

@@ -826,7 +826,11 @@ pub(crate) fn boot_run_and_drain(
             .map_err(|e| format!("write_acpi_tables error: {e}"))?;
     }
     if let Some((seed, _, _)) = virtio_rng {
-        mv.enable_virtio_rng();
+        if virtio_blk.is_some() {
+            mv.enable_virtio_pci_rng();
+        } else {
+            mv.enable_virtio_rng();
+        }
         mv.seed_virtio_rng_entropy(seed);
     }
     if let Some((base_image, _, _)) = virtio_blk {
@@ -834,6 +838,9 @@ pub(crate) fn boot_run_and_drain(
         // itself, so the image costs zero heap here instead of the second full-size copy this
         // line used to make.
         mv.enable_virtio_pci_blk(base_image);
+    }
+    if virtio_rng.is_some() || virtio_blk_meta.is_some() {
+        mv.assign_default_virtio_io_bases();
     }
     let halt = match (periodic_timer, halt_console_pattern) {
         (Some((period_rcb, timer_vector, max_ticks)), Some((pattern, max_exits_per_burst))) => {

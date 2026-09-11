@@ -239,7 +239,16 @@ fn boot_and_compare_fingerprints(
         if let Some(path) = disk_path {
             let disk = baud_multiverse::virtio_blk::BlockBase::mapped(path)
                 .map_err(|e| format!("vm{i} disk setup failed: {e}"))?;
+            // Ubuntu's udev and systemd initialization may block on the kernel random pool even
+            // after the root disk is mounted. Use the deterministic virtio-rng stream rather
+            // than letting the real guest wait forever on host entropy. PCI assigns the RNG
+            // function ISA IRQ 10, which is vector 0x3a in the guest's legacy PIC map.
+            // Keep entropy deterministic for Ubuntu services that call getrandom during udev and
+            // systemd startup. The capture loop services this device at the fixed ISA vector.
+            vm.enable_virtio_pci_rng();
+            vm.seed_virtio_rng_entropy(0);
             vm.enable_virtio_pci_blk(disk);
+            vm.assign_default_virtio_io_bases();
             vm.write_acpi_tables()
                 .map_err(|e| format!("vm{i} ACPI setup failed: {e}"))?;
         }

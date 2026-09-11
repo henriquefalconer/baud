@@ -374,6 +374,9 @@ pub struct DeviceBus {
     /// on this struct.
     #[cfg(target_os = "linux")]
     virtio_rng_queue: Option<SplitVirtqueue>,
+    /// The PCI virtio-rng queue cursor, kept separate from the MMIO transport.
+    #[cfg(target_os = "linux")]
+    virtio_pci_rng_queue: Option<SplitVirtqueue>,
     /// The virtio-rng device's own tape-seeded byte stream (todo.md §3.8: an "ever-ready
     /// deterministic byte source"), independent of the `rdrand`/`rdseed` entropy sub-stream
     /// (`timesource::WorkClock`'s `entropy` field) and of the boot `SETUP_RNG_SEED` — see
@@ -450,6 +453,7 @@ impl DeviceBus {
         #[cfg(target_os = "linux")]
         {
             self.virtio_rng_queue = None;
+            self.virtio_pci_rng_queue = None;
             self.virtio_rng_entropy = SplitMix64::new(0);
         }
     }
@@ -471,12 +475,29 @@ impl DeviceBus {
         self.pci
             .attach_virtio_rng(u32::from(crate::virtio_pci::VIRTIO_PCI_IO_WINDOW_LEN));
         self.virtio_pci_rng = Some(VirtioPciTransport::new_rng());
+        #[cfg(target_os = "linux")]
+        {
+            self.virtio_pci_rng_queue = None;
+            self.virtio_rng_entropy = SplitMix64::new(0);
+        }
     }
 
     /// The virtio-pci transport, if [`Self::enable_virtio_pci_rng`] has been called — mirrors
     /// [`Self::virtio_rng`]'s read-access convention for the MMIO transport.
     pub fn virtio_pci_rng(&self) -> Option<&VirtioPciTransport> {
         self.virtio_pci_rng.as_ref()
+    }
+
+    /// Give direct-boot PCI devices deterministic BARs because no BIOS or resource allocator runs
+    /// before Linux probes the synthetic bus.
+    pub fn assign_default_virtio_io_bases(&mut self) {
+        self.pci.assign_default_virtio_io_bases();
+        if let Some(transport) = self.virtio_pci_rng.as_mut() {
+            transport.set_io_base(self.pci.virtio_io_base());
+        }
+        if let Some(transport) = self.virtio_pci_blk.as_mut() {
+            transport.set_io_base(self.pci.virtio_blk_io_base());
+        }
     }
 
     /// Reseed the virtio-rng device's byte stream — call once, right after
@@ -533,6 +554,45 @@ impl DeviceBus {
         })?;
         if processed > 0 {
             self.virtio_rng
+                .as_mut()
+                .expect("checked Some at the top of this function")
+                .raise_used_buffer_notification();
+        }
+        Ok(processed)
+    }
+
+    /// Service writable descriptors posted to the PCI virtio-rng queue. The entropy stream is
+    /// shared with the MMIO spelling, while each transport keeps its own queue cursor and ISR bit.
+    #[cfg(target_os = "linux")]
+    pub fn service_virtio_pci_rng<M: GuestMemoryBackend>(
+        &mut self,
+        mem: &M,
+    ) -> Result<u32, VirtqueueError> {
+        let Some(transport) = self.virtio_pci_rng.as_ref() else {
+            return Ok(0);
+        };
+        let Some(config) = transport.queue_ring_config(0) else {
+            self.virtio_pci_rng_queue = None;
+            return Ok(0);
+        };
+        if self
+            .virtio_pci_rng_queue
+            .as_ref()
+            .map(SplitVirtqueue::config)
+            != Some(config)
+        {
+            self.virtio_pci_rng_queue = Some(SplitVirtqueue::new(config));
+        }
+        let queue = self.virtio_pci_rng_queue.as_mut().expect("just set above");
+        let entropy = &mut self.virtio_rng_entropy;
+        let processed = queue.process_available(mem, |buf| {
+            for chunk in buf.chunks_mut(8) {
+                let word = entropy.next_u64().to_le_bytes();
+                chunk.copy_from_slice(&word[..chunk.len()]);
+            }
+        })?;
+        if processed > 0 {
+            self.virtio_pci_rng
                 .as_mut()
                 .expect("checked Some at the top of this function")
                 .raise_used_buffer_notification();
@@ -644,6 +704,8 @@ impl DeviceBus {
             virtio_pci_rng: None,
             #[cfg(target_os = "linux")]
             virtio_rng_queue: None,
+            #[cfg(target_os = "linux")]
+            virtio_pci_rng_queue: None,
             #[cfg(target_os = "linux")]
             virtio_rng_entropy: SplitMix64::new(0),
             virtio_pci_blk: None,

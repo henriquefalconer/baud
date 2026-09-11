@@ -27,6 +27,7 @@ use crate::timesource::{
     BranchCounter, WorkClock, MSR_IA32_TSC, MSR_IA32_TSC_AUX, MSR_IA32_TSC_DEADLINE,
 };
 use crate::virtio_mmio::VirtioMmioTransport;
+use crate::virtio_pci::VirtioPciTransport;
 use baud_snapshot::{PageRef, PageStore, Universe};
 use baud_vcpu::{DeterminismHole, RunLoopError};
 use kvm_bindings::{
@@ -859,14 +860,14 @@ mod rng_seed_from_tape_tests {
     }
 }
 
-/// The last (up to) 200 bytes of `console`, lossily decoded — attached to
+/// The last (up to) 2000 bytes of `console`, lossily decoded — attached to
 /// [`Multiverse::run_to_first_halt_with_periodic_timer_and_devices`]'s timeout errors so a caller
 /// tuning `max_ticks`/`halt_console_pattern` against a real, slow-booting guest (H9's Ubuntu boot,
 /// todo.md §14 item 12) can see how far the console actually got without a separate debug build —
 /// a bare "guest did not halt"/"pattern not found" message gives no way to tell "stuck at the very
 /// start" from "one byte short of the target" from the error alone.
 fn console_tail(console: &[u8]) -> String {
-    let tail = &console[console.len().saturating_sub(200)..];
+    let tail = &console[console.len().saturating_sub(2000)..];
     String::from_utf8_lossy(tail).into_owned()
 }
 
@@ -1819,6 +1820,21 @@ impl Multiverse {
         self.bus.virtio_rng()
     }
 
+    /// Enable the PCI legacy virtio-rng transport used by stock distro kernels.
+    pub fn enable_virtio_pci_rng(&mut self) {
+        self.bus.enable_virtio_pci_rng();
+    }
+
+    /// Assign direct-boot PCI BARs and synchronize the transport windows.
+    pub fn assign_default_virtio_io_bases(&mut self) {
+        self.bus.assign_default_virtio_io_bases();
+    }
+
+    /// The PCI virtio-rng transport's state, if enabled.
+    pub fn virtio_pci_rng(&self) -> Option<&VirtioPciTransport> {
+        self.bus.virtio_pci_rng()
+    }
+
     /// The dual-8259 PIC bookkeeping stub's current state (`crate::pic8259::Pic8259`) — read
     /// access for a caller/test that wants to confirm a guest's own `probe_8259A()`/
     /// `init_8259A()`/`enable_8259A_irq()` sequence, issued through real `IN`/`OUT` PIO exits,
@@ -2025,8 +2041,52 @@ impl Multiverse {
             .bus
             .service_virtio_rng(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
+        info!(
+            "virtio-rng service: processed {processed} request(s), notify_count {}",
+            self.virtio_rng()
+                .map(|transport| transport.notify_count())
+                .unwrap_or(0),
+        );
         if processed > 0 {
             self.inject_timer_tick(0, vector)?;
+        }
+        Ok(processed)
+    }
+
+    /// Deliver a completion from the PCI virtio-rng transport at a fixed boundary.
+    pub fn service_virtio_pci_rng_interrupt(&mut self, vector: u8) -> Result<u32, RunLoopError> {
+        let processed = self
+            .bus
+            .service_virtio_pci_rng(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        if processed > 0 {
+            self.inject_timer_tick(0, vector)?;
+        }
+        Ok(processed)
+    }
+
+    fn service_virtio_pci_rng_interrupt_while_halted(
+        &mut self,
+        vector: u8,
+    ) -> Result<u32, RunLoopError> {
+        let processed = self
+            .bus
+            .service_virtio_pci_rng(&self.guest.guest_mem)
+            .map_err(|e| DeterminismHole(e.to_string()))?;
+        if processed > 0 {
+            let mut events = self
+                .guest
+                .vcpu
+                .get_vcpu_events()
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            events.interrupt.injected = 1;
+            events.interrupt.nr = vector;
+            events.interrupt.soft = 0;
+            self.guest
+                .vcpu
+                .set_vcpu_events(&events)
+                .map_err(|e| DeterminismHole(e.to_string()))?;
+            self.step_exit_cancellable()?;
         }
         Ok(processed)
     }
@@ -2496,12 +2556,21 @@ impl Multiverse {
     ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
         let mut devices = Vec::new();
         if let Some(vector) = virtio_rng_vector {
-            devices.push(TickPolledDevice {
-                vector,
-                notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
-                service_running: Multiverse::service_virtio_rng_interrupt,
-                service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
-            });
+            if self.virtio_pci_rng().is_some() {
+                devices.push(TickPolledDevice {
+                    vector,
+                    notify_count: |mv| mv.virtio_pci_rng().map(|t| t.notify_count()),
+                    service_running: Multiverse::service_virtio_pci_rng_interrupt,
+                    service_halted: Multiverse::service_virtio_pci_rng_interrupt_while_halted,
+                });
+            } else {
+                devices.push(TickPolledDevice {
+                    vector,
+                    notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
+                    service_running: Multiverse::service_virtio_rng_interrupt,
+                    service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
+                });
+            }
         }
         if let Some(vector) = virtio_blk_vector {
             devices.push(TickPolledDevice {
@@ -2944,6 +3013,7 @@ impl Multiverse {
         &mut self,
         period_rcb: u64,
         timer_vector: u8,
+        rng_vector: Option<u8>,
         block_vector: Option<u8>,
         pattern: &[u8],
         max_ticks: u32,
@@ -2953,7 +3023,7 @@ impl Multiverse {
         self.run_until_console_pattern_with_periodic_timer_and_devices(
             period_rcb,
             timer_vector,
-            None,
+            rng_vector,
             block_vector,
             pattern,
             max_ticks,
