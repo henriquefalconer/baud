@@ -3804,3 +3804,11 @@ Validation limits:
 - `drive/h/h9.sh` with vector 238 reaches `Freeing unused kernel memory` and `systemd-udevd`, but does not reach `ubuntu login:` before the 600-second watchdog. The 100,000-tick run and a 3,000-tick diagnostic run both failed closed. Systemd console-debug flags produced no additional handoff log. H9 is therefore not marked done.
 - A focused server test command was allowed to run until the 180-second command limit while longer KVM route tests were still progressing; no assertion failure appeared before termination.
 - The full seven-item lock is not honestly complete. Remaining work is the post-init Ubuntu handoff plus the deeper G3/G5 integration and maintained-drive coverage. The next iteration should instrument the guest's `/init` handoff and inspect the serial/getty device path before changing the VM model again.
+
+## Iteration 4 final validation rerun
+
+After clearing stale `/tmp` artifacts, the previously backgrounded targeted command was repeated in the foreground:
+
+`cargo test -p baud-multiverse -p baud-snapshot -p baud-server -p baud-packages -p baud-cli`
+
+Result: baud-cli 1 passed; baud-multiverse 237 passed / 10 ignored; baud-packages 45 passed / 2 ignored; baud-server 59 passed; baud-snapshot 44 passed; doc-tests passed. Only existing `aya::Bpf` deprecation warnings remain. The earlier server failures were solely `/tmp` exhaustion.
