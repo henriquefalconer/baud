@@ -130,7 +130,7 @@ FP_JSON="$("$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 238 \
+    --periodic-timer-vector 236 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
@@ -218,7 +218,7 @@ VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 238 \
+    --periodic-timer-vector 236 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
@@ -244,7 +244,7 @@ VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 238 \
+    --periodic-timer-vector 236 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \
@@ -280,7 +280,7 @@ VM1_ALT_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000001 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 238 \
+    --periodic-timer-vector 236 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \

@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use baud_snapshot_store::SnapshotStore;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicBool, Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 use tokio::sync::Mutex;
 
 use crate::routes::server::LogEntry;
@@ -13,6 +16,63 @@ use baud_tape::{
     types::{SandboxSpec, TapeState},
     Backend,
 };
+
+/// The lifecycle phase owned by one worker. Terminal success is only legal after the worker
+/// releases its resources and observes that cancellation did not win the race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPhase {
+    Provisioning,
+    Running,
+    Cancelling,
+    Terminal,
+}
+
+#[derive(Debug)]
+pub struct RunOwnership {
+    pub cancellation: Arc<AtomicBool>,
+    pub phase: RunPhase,
+    pub resources: Vec<String>,
+}
+
+impl RunOwnership {
+    fn new() -> Self {
+        Self {
+            cancellation: Arc::new(AtomicBool::new(false)),
+            phase: RunPhase::Provisioning,
+            resources: Vec::new(),
+        }
+    }
+
+    pub fn cancel(&mut self) {
+        self.cancellation.store(true, Ordering::SeqCst);
+        self.phase = RunPhase::Cancelling;
+    }
+
+    pub fn can_report_success(&self) -> bool {
+        self.phase != RunPhase::Cancelling
+            && !self.cancellation.load(Ordering::SeqCst)
+            && self.phase == RunPhase::Running
+    }
+
+    pub fn release_resource(&mut self, resource: &str) {
+        self.resources.retain(|item| item != resource);
+    }
+
+    pub fn mark_running(&mut self) {
+        if self.phase == RunPhase::Provisioning {
+            self.phase = RunPhase::Running;
+        }
+    }
+
+    pub fn finish(&mut self) -> bool {
+        if self.cancellation.load(Ordering::SeqCst) {
+            self.phase = RunPhase::Cancelling;
+            return false;
+        }
+        self.phase = RunPhase::Terminal;
+        true
+    }
+}
 
 /// Shared application state, cloned into every request handler.
 #[derive(Clone)]
@@ -35,6 +95,10 @@ pub struct AppState {
     /// One cancellation flag per acknowledged run. Every worker that owns a run receives the
     /// same flag, so an abort cannot merely change SQLite while the real task keeps running.
     pub run_cancellations: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
+    /// Shared ownership metadata for KVM, replay, rendering, and backend workers. The legacy
+    /// cancellation map remains as the narrow flag API, while this registry records the phase
+    /// and resource names so terminal status cannot outrun cleanup.
+    pub run_ownership: Arc<RwLock<HashMap<String, RunOwnership>>>,
 }
 
 impl AppState {
@@ -45,6 +109,16 @@ impl AppState {
             .write()
             .expect("run cancellation registry poisoned")
             .insert(run_id.to_owned(), Arc::clone(&token));
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .insert(
+                run_id.to_owned(),
+                RunOwnership {
+                    cancellation: Arc::clone(&token),
+                    ..RunOwnership::new()
+                },
+            );
         token
     }
 
@@ -60,21 +134,38 @@ impl AppState {
         }
         let token = Arc::new(AtomicBool::new(false));
         registry.insert(run_id.to_owned(), Arc::clone(&token));
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .insert(
+                run_id.to_owned(),
+                RunOwnership {
+                    cancellation: Arc::clone(&token),
+                    ..RunOwnership::new()
+                },
+            );
         (token, true)
     }
 
     /// Cancel a live run. Missing IDs are reported to the caller instead of creating a token
     /// that no worker will ever observe.
     pub fn cancel_run(&self, run_id: &str) -> bool {
-        self.run_cancellations
+        let found = self
+            .run_cancellations
             .read()
             .expect("run cancellation registry poisoned")
-            .get(run_id)
-            .map(|token| {
-                token.store(true, std::sync::atomic::Ordering::SeqCst);
-                true
-            })
-            .unwrap_or(false)
+            .contains_key(run_id);
+        if found {
+            if let Some(owner) = self
+                .run_ownership
+                .write()
+                .expect("run ownership registry poisoned")
+                .get_mut(run_id)
+            {
+                owner.cancel();
+            }
+        }
+        found
     }
 
     pub fn remove_run(&self, run_id: &str) {
@@ -82,6 +173,50 @@ impl AppState {
             .write()
             .expect("run cancellation registry poisoned")
             .remove(run_id);
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .remove(run_id);
+    }
+
+    pub fn add_run_resource(&self, run_id: &str, resource: impl Into<String>) -> bool {
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .get_mut(run_id)
+            .map(|owner| {
+                owner.resources.push(resource.into());
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn mark_run_running(&self, run_id: &str) -> bool {
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .get_mut(run_id)
+            .map(|owner| {
+                owner.mark_running();
+                true
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn run_can_report_success(&self, run_id: &str) -> bool {
+        self.run_ownership
+            .read()
+            .expect("run ownership registry poisoned")
+            .get(run_id)
+            .is_some_and(RunOwnership::can_report_success)
+    }
+
+    pub fn finish_run(&self, run_id: &str) -> bool {
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .get_mut(run_id)
+            .map_or(false, RunOwnership::finish)
     }
 
     pub async fn new() -> Result<Self> {
@@ -141,6 +276,7 @@ impl AppState {
             snapshot_store: Arc::new(open_snapshot_store()?),
             tape_backend: local_backend,
             run_cancellations: Arc::new(RwLock::new(HashMap::new())),
+            run_ownership: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }
@@ -186,4 +322,35 @@ pub fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::{RunOwnership, RunPhase};
+
+    #[test]
+    fn cancellation_wins_over_terminal_success() {
+        let mut owner = RunOwnership::new();
+        owner.mark_running();
+        assert_eq!(owner.phase, RunPhase::Running);
+        owner.resources.push("kvm-vm".into());
+        owner.cancel();
+        assert!(!owner.finish());
+        assert!(!owner.can_report_success());
+        assert_eq!(owner.phase, RunPhase::Cancelling);
+    }
+
+    #[test]
+    fn success_requires_running_phase_and_resource_release_is_explicit() {
+        let mut owner = RunOwnership::new();
+        owner
+            .resources
+            .extend(["image-map".into(), "kvm-vm".into()]);
+        owner.mark_running();
+        owner.release_resource("image-map");
+        assert_eq!(owner.resources, vec!["kvm-vm"]);
+        assert!(owner.can_report_success());
+        assert!(owner.finish());
+        assert_eq!(owner.phase, RunPhase::Terminal);
+    }
 }

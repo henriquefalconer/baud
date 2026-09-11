@@ -3477,3 +3477,103 @@ Focused post-fix tests are green, and fetch.sh now restores the external Ubuntu 
   - fetch.sh supports cached sudo or BAUD_SUDO_PASSWORD and reports a clear prerequisite instead of prompting.
   - Focused package, snapshot, server, tape, syntax, and whitespace checks passed; the full gate reached H9 and package-build phases but did not finish green because Ubuntu still stalls after udev.
 ---
+
+## 2026-09-11T06:06:49 UTC (1h10min) - Session usage — ralph-30 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6550 (summed from 6 session transcripts: main $0.5494 · subagents $0.1056)
+- tokens input 1,065,331 · cache-read 19,697,664 · cache-write 0 · output 40,013 · reasoning 14,983
+- context 230,743 tok peak of 272K (85%) across 130 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.6550 (in 1,065,331 / out 54,996 / cache-read 19,697,664)
+- subagents (5) pi process x5
+  - delegate-a0c4ecb298580857cc37e2ad540dc4fc: gpt-5.6-luna $0.0251, 5 inference calls
+  - delegate-c22892b2a87d7333455fdbfdbfd890c0: gpt-5.6-luna $0.0277, 6 inference calls
+  - delegate-773be5f78ae55f5494a9aec83d9d5754: gpt-5.6-luna $0.0252, 6 inference calls
+  - delegate-0f31a33827b99381713288a4994bea9a: gpt-5.6-luna $0.0055, 2 inference calls
+  - 01a08ef7-a133-7325-9fca-05dfa677aacb: gpt-5.6-luna $0.0221, 11 inference calls
+- transcript: ralph/.run/20260910T073659Z/045-ralph-30.json
+- transcript: ralph/.run/20260910T073659Z/046-ralph-30.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 31 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected path before implementation.
+
+Starting the required environment check before repository work.
+
+Environment check completed; reading the work list and repository shape next.
+
+The queue has seven pending entries, so this iteration binds all seven rather than inventing three more: G2 image pipeline, G2 guest tape endpoint, G3 write-set branching, G5 authenticated lifecycle/API, G5 unified ownership/image memory, G5 CLI/route coverage, and G6 Ubuntu H9 proof.
+
+Launching parallel specification and implementation searches for every selected entry.
+
+The source already contains several late-stage pieces, but comments identify real gaps: Nix builds still expose dry-run stubs, UFFD is only a wrapper, and the server ownership registry is cancellation-only. Tracing the exact missing acceptance paths now.
+
+The G5 routes are broadly wired and authenticated, but stream.rs still has explicit non-Linux stubs and image build still documents best-effort warming. I am waiting for the specification audits before choosing precise edits rather than masking open work.
+
+The branching and Ubuntu audits confirm these are real architectural gaps, not documentation-only items. I will preserve the explicit fallback while making the strongest complete integration changes that the current architecture supports, then validate the real drives.
+
+Added a shared run ownership lifecycle to the server state and connected initial provisioning to it, so cancellation cannot be treated as successful completion. Formatting and compile validation are next.
+
+The snapshot layer now exposes a real capability negotiation against a live memfd-backed mapping and maps every negotiation failure to an explicit non-scaled fallback; private-page isolation remains tested. Continuing with route and image contract checks.
+
+The CLI now preserves structured non-success responses and exits 2 when the server reports a goal or invariant violation, instead of collapsing every HTTP failure to exit 1. I am checking the baseline worker result before final integration validation.
+
+Baseline workspace tests and clippy were green. The post-change gate is now running against the ownership, snapshot negotiation, image-build, and CLI changes; I will fix any root cause before touching the queue status.
+
+The post-change gate found one compile error in the new UFFD negotiation call, a usize-to-u64 length mismatch. Fixed it at the typed boundary; rerunning the same workspace verification now.
+
+The Ubuntu artifact notes confirm vector 238 is already wired and the remaining H9 gap is a real long userspace boot, not a wrong constant. I am preserving that evidence rather than weakening the success condition.
+
+The ownership diff is clean and the only changed runtime paths are the provisioning worker, shared state registry, snapshot capability negotiation, image store-warming failure path, and CLI exit mapping. The final workspace gate is still executing.
+
+Workspace tests and clippy are green after the compile fix. The exact required drive/gate.sh pre-push validation is now running; no queue item will be marked DONE unless its real acceptance path supports that claim.
+
+The required gate is still running through its real drive matrix; I am leaving it untouched rather than splitting or weakening it.
+
+No gate result yet. The process is active and remains the authoritative pre-push check.
+
+═══════════════════════════════════════════════════════
+
+ralph (shell loop) starting — harness=pi prompt=prompt-build.md model=openai-codex/gpt-5.6-luna thinking=medium max-iter=0 watchdog=0s
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 1 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the real implementation and verification paths.
+
+Resetting perf_event_paranoid before repository work.
+
+Chose these 6 items: G2 image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, and G6 Ubuntu H9 proof — they are all pending entries in the 6-item queue.
+
+Starting G2 image pipeline and tracing current implementation before edits.
+
+Current changes already cover several lifecycle and fail-closed paths; running the focused workspace tests to expose remaining root causes.
+
+Focused unit tests are green; the full gate is now running while I close concrete contract gaps in image metadata, route errors, and ownership cleanup.
+
+The focused code is green. I am checking the full gate result before changing queue state so only validated end-to-end work is marked DONE.
+
+Validation subagent exited; collecting its report.
+
+The full gate reached one concrete failure only: H9 lacks fetched Ubuntu artifacts. Fetching and validating the required stock image now, then rerunning only H9 before the full gate.
+
+Ubuntu 18.04.1 artifacts are checksum-verified, converted, filesystem-validated, and manifested outside the repository. Running H9 against the real artifacts.
+
+H9 now boots the real image through early userspace but stalls after the first hundred periodic ticks. Re-running with the bounded watchdog to capture the exact KVM/guest diagnostic instead of treating timeout as success.
+
+Following the task requirement, H9 now requests LOCAL_TIMER_VECTOR 0xec consistently in every real fingerprint capture; validating the change with a bounded run.
+
+The 0xec timer path reaches the real Ubuntu kernel through Freeing unused kernel memory and continues deterministic periodic ticks, but the guest never reaches userspace login: the remaining root cause is a missing post-rootfs progress path, not a timeout. Preserving the diagnostic and continuing with validated code only.
+
+Recording the unresolved H9 root cause in the queue and committing all validated lifecycle, image, snapshot, CLI, and timer-path work without claiming the batch is closed.
+
+Pushing the committed validated work so the next iteration can resume from the real H9 root cause.

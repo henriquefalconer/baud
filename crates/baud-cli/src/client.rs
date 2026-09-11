@@ -4,6 +4,13 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+#[derive(Debug, thiserror::Error)]
+#[error("HTTP {status}: {body}")]
+pub struct ClientError {
+    pub status: u16,
+    pub body: Value,
+}
+
 /// Thin HTTP client for the baud-server REST API.
 pub struct Client {
     base: String,
@@ -61,7 +68,11 @@ impl Client {
             .await
             .with_context(|| format!("GET {url}: invalid JSON response"))?;
         if !status.is_success() {
-            anyhow::bail!("GET {url} returned {status}: {body}");
+            return Err(ClientError {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
         Ok(body)
     }
@@ -82,7 +93,11 @@ impl Client {
             .await
             .with_context(|| format!("DELETE {url}: invalid JSON response"))?;
         if !status.is_success() {
-            anyhow::bail!("DELETE {url} returned {status}: {body}");
+            return Err(ClientError {
+                status: status.as_u16(),
+                body,
+            }
+            .into());
         }
         Ok(body)
     }
@@ -103,7 +118,11 @@ impl Client {
             .await
             .with_context(|| format!("POST {url}: invalid JSON response"))?;
         if !status.is_success() {
-            anyhow::bail!("POST {url} returned {status}: {resp_body}");
+            return Err(ClientError {
+                status: status.as_u16(),
+                body: resp_body,
+            }
+            .into());
         }
         Ok(resp_body)
     }

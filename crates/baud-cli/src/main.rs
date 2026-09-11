@@ -110,6 +110,13 @@ async fn main() {
     };
 
     if let Err(e) = result {
+        let exit_code = e
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<client::ClientError>())
+            .and_then(|error| error.body.get("exit_code"))
+            .and_then(serde_json::Value::as_i64)
+            .filter(|code| *code == 2)
+            .map_or(1, |_| 2);
         if json {
             // Machine-readable error output on stdout (baud-cli.md §4):
             // When --json is set, errors are emitted as {"ok": false, "error": "..."} to stdout.
@@ -119,6 +126,6 @@ async fn main() {
         } else {
             eprintln!("error: {e:#}");
         }
-        std::process::exit(1);
+        std::process::exit(exit_code);
     }
 }

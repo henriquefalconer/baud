@@ -185,7 +185,7 @@ pub async fn start(
                 return Err(internal_error(format!("db commit error: {e}")));
             }
             state.register_run(&run_id);
-            let db = state.db.clone();
+            let run_state = state.clone();
             let run_id_clone = run_id.clone();
             let tape_id_clone = tape_id.clone();
             let cancellation = state
@@ -197,7 +197,7 @@ pub async fn start(
                 .expect("run token registered before acknowledgement");
             let registry = Arc::clone(&state.run_cancellations);
             tokio::spawn(async move {
-                provision_run(&db, &run_id_clone, &tape_id_clone, cancellation).await;
+                provision_run(&run_state, &run_id_clone, &tape_id_clone, cancellation).await;
                 // The token must cover the whole worker lifetime, but retaining it after the
                 // worker exits would make the ownership registry grow without bound and let a
                 // later abort appear to cancel work that no longer exists.
@@ -287,16 +287,17 @@ mod exit_code_tests {
 /// There is no fake sleep here. A real backend integration can replace the single transition,
 /// but it must keep the run and its tape in matching states.
 async fn provision_run(
-    db: &sqlx::SqlitePool,
+    state: &AppState,
     run_id: &str,
     tape_id: &str,
     cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        state.finish_run(run_id);
         return;
     }
     let now = crate::state::unix_now() as i64;
-    let mut tx = match db.begin().await {
+    let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
         Err(_) => return,
     };
@@ -316,6 +317,15 @@ async fn provision_run(
     if sqlx::query("UPDATE runs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'provisioning'")
         .bind(now).bind(run_id).execute(&mut *tx).await.is_err() { return; }
     let _ = tx.commit().await;
+    state.mark_run_running(run_id);
+    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status = 'running'")
+            .bind(crate::state::unix_now() as i64)
+            .bind(run_id)
+            .execute(&state.db)
+            .await;
+        state.finish_run(run_id);
+    }
 }
 
 // ---------------------------------------------------------------------------

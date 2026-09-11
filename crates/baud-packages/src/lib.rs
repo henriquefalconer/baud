@@ -266,28 +266,22 @@ fn build_real(spec: &WorkloadSpec) -> Result<BuildResult> {
     paths.sort();
     let closure_hash = blake3::hash(paths.join("\n").as_bytes());
 
-    // nix copy: warm the sandbox /nix/store for 1-minute economics.
-    // The store URL is taken from BAUD_NIX_STORE_URL (default: daemon store).
-    // On failure, log a warning but do not fail the build — the guest binary
-    // was built successfully; store-warming is a best-effort optimization.
+    // If a caller requested store warming, it is part of the requested build contract. A failed
+    // copy must not be hidden behind a successful image result: the next run would otherwise see
+    // a missing closure and fail much later with no useful stage diagnostic.
     if let Ok(store_url) = std::env::var("BAUD_NIX_STORE_URL") {
         let copy_out = std::process::Command::new("nix")
             .args(["copy", "--to", &store_url, &store_path])
             .current_dir(dir.path())
-            .output();
-        match copy_out {
-            Ok(o) if !o.status.success() => {
-                eprintln!(
-                    "[baud-packages] warning: nix copy to {store_url} failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => {
-                eprintln!("[baud-packages] warning: nix copy failed to launch: {e}");
-            }
-            Ok(_) => {
-                eprintln!("[baud-packages] nix copy to {store_url} succeeded");
-            }
+            .output()
+            .map_err(|e| {
+                anyhow::anyhow!("store warming stage failed to launch nix copy to {store_url}: {e}")
+            })?;
+        if !copy_out.status.success() {
+            bail!(
+                "store warming stage failed copying {store_path} to {store_url}: {}",
+                String::from_utf8_lossy(&copy_out.stderr).trim()
+            );
         }
     }
 
