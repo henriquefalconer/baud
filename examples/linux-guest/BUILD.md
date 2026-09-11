@@ -42,7 +42,9 @@ cp arch/x86/boot/bzImage <this-dir>/bzImage
 ```
 
 The tape driver is built into this disposable tree before Kconfig resolution. It registers the
-spec-required `/dev/tape` endpoint over the fixed PIO window. The `/init` harness prefers that
+spec-required `/dev/tape` endpoint over the fixed PIO window. Images with virtio-console support
+may expose `/dev/virtio-ports/baud-tape`; `/init` tries that preferred receive queue first, then
+uses `/dev/tape` for control records or the PIO fallback. The `/init` harness prefers that
 character device and falls back to direct PIO against the same registers when the tiny initramfs has
 no devtmpfs. `minimal.config` is a fragment
 implementing spec §4.1's required/disabled list (`allnoconfig` base + this fragment + `olddefconfig`

@@ -3974,3 +3974,65 @@ The gate repeatedly passed build, clippy, H5, and the completed drives but excee
 ---
 
 Pushing the committed implementation and verifying the remote tip and working tree.
+
+## 2026-09-11T22:38:19 UTC (1h22min) - Session usage — ralph-6 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6433 (summed from 4 session transcripts: main $0.5704 · subagents $0.0729)
+- tokens input 890,567 · cache-read 21,233,152 · cache-write 0 · output 33,737 · reasoning 12,976
+- context 253,760 tok peak of 272K (93%) across 121 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.6433 (in 890,567 / out 46,713 / cache-read 21,233,152)
+- subagents (3) pi process x3
+  - delegate-b25475ad22b826cbb4116ecee895a0cd: gpt-5.6-luna $0.0231, 4 inference calls
+  - delegate-d95d153a6e0f3108b9ca196b50dd04c1: gpt-5.6-luna $0.0256, 6 inference calls
+  - delegate-82a04e1ff38185f5a55489fa4a6ccae6: gpt-5.6-luna $0.0242, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/010-ralph-6.json
+- transcript: ralph/.run/20260911T161941Z/011-ralph-6.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 7 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the full batch.
+
+Chose these 6 items: G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 6 pending items in the queue.
+
+Starting G2 guest tape endpoint and harness. I am tracing the endpoint contract, guest image plumbing, and existing acceptance tests before editing.
+
+G2 tracing shows the PIO fallback is real but virtio-serial is absent; I am checking whether the acceptance contract permits a documented fallback or requires a new transport.
+
+G5 API work found a concrete failure mode: non-JSON HTTP errors made the thin CLI lose the stable error contract, and token comparison was timing-sensitive. The client now preserves structured status on plain-text responses, and server bearer checks are case-insensitive, whitespace-safe, and constant-time. Running focused compile/tests next.
+
+The first focused command was invalid because baud-cli and baud-server are binary targets, not libraries. I am rerunning their package tests with the correct Cargo target selection, then I will fix any real compile failures.
+
+G6 tracing found the Ubuntu blocker is earlier than queue servicing: Linux enumerates the PCI function and assigns BARs, but the real log contains no virtio queue PFN writes, so I am comparing the known-good hand-built PCI guest path before touching the transport.
+
+The real virtio-blk drive is green end to end, including queue PFNs, BAR assignment, /dev/vda, reads, and writes. Ubuntu's failure is therefore a distro boot progress problem after device binding, not generic virtio-blk plumbing. I am preserving that evidence and moving to the shared-memory branch path while the focused test worker finishes.
+
+G2 now has a real preferred virtio-console receive transport at a fixed MMIO window, sharing the same tape cursor as the PIO fallback, with queue servicing and used-buffer signaling; the fallback remains intact for old images. Compiling the transport and its tests before wiring callers.
+
+The transport test command used two Cargo filters, which Cargo rejects. I am rerunning the full baud-multiverse library suite so the new field initialization and Linux queue code are checked together.
+
+The guest harness now probes the preferred virtio-console tape receive path first, then falls back to the existing character device and fixed PIO record path. Host and guest share one cursor contract, and the documentation names the fallback instead of hiding it. Running formatting and the image build acceptance.
+
+Formatting found only rustfmt layout changes in the two edited Rust files. Applying rustfmt, then rerunning the image drive so the C harness and transport changes are compiled through the real package path.
+
+Focused Rust tests pass: 237 baud-multiverse tests, including real Linux boot, PCI virtio-blk, timer/device combinators, snapshot/restore, shell continuation, and watchdog cancellation. The fresh image build also passes. I am checking the final diff for transport initialization and then updating the queue only where the evidence supports DONE.
+
+G2 transport and guest preference compile and the fresh image build is green, but the real image acceptance still exercises only the documented PIO fallback because no existing route enables virtio-console queue servicing. I am not marking G2 DONE until that preferred path is wired into the real run loop.
+
+The route audit found the observation verifier is implemented and wired; a stale header called it a stub, which I corrected. I am running the maintained lifecycle/CLI drive now to verify the advertised command and error paths before collapsing any G5 entries.
+
+M11, M12, and M13 all pass real frame, branch, restore, replay, render, and fail-closed coverage. The G5 CLI/route seam is now exercised through direct and branch/resume paths. H9 still needs the distro boot fix; I am testing the likely systemd udev-settle wait by adding only deterministic service masks already allowed by the Ubuntu spec.
+
+The Ubuntu command line now masks systemd-udev-settle and legacy networking, both nondeterministic external waits that the spec already masks analogous services for. Running the real two-VM H9 proof with the unchanged acceptance and watchdog semantics.
+
+The H9 rerun still stalls at systemd-udevd after the kernel frees memory; masking udev-settle/networking did not change the failure. I am narrowing the distro target to getty.target, which should start the required serial login without multi-user service waits, while preserving the same root disk and timer path.
+
+getty.target made no difference; the same RIP and udev tail reproduced before the 60-second watchdog. Reverting that speculative unit change and keeping the measured failure as the H9 root cause, rather than claiming a service-mask workaround.
+
+Iteration 7 verification checkpoint
+- `cargo fmt --all -- --check` passed.
+- `cargo test -p baud-multiverse -p baud-server -p baud-cli` passed: 237 multiverse tests, 59 server tests, 1 CLI test.
+- `bash drive/m/m11.sh`, `bash drive/m/m12.sh`, and `bash drive/m/m13.sh` passed against real /dev/kvm.
+- `bash drive/h/h9.sh` was rerun twice. Both Ubuntu attempts stalled at the same `systemd-udevd` tail and RIP `0xffffffffc009b0da`; the 60-second diagnostic watchdog confirmed failure, so G6 remains open. Speculative service masks and `getty.target` were reverted.
+- G2's virtio-console tape transport is implemented and unit-tested, but the real image still uses PIO because the existing run-loop route does not enable/service the new transport. G2 remains open.
+- G3 UFFD/write-set scaling was not completed in this iteration.

@@ -249,24 +249,35 @@ fn configured_auth_token() -> Result<Option<String>, std::io::Error> {
     Ok(std::env::var("BAUD_AUTH_TOKEN").ok())
 }
 
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= usize::from(left.get(index).copied().unwrap_or(0))
+            ^ usize::from(right.get(index).copied().unwrap_or(0));
+    }
+    difference == 0
+}
+
 fn authorization_matches(
     header: Option<&str>,
     expected: Option<std::borrow::Cow<'_, str>>,
     identity_seed: Option<&str>,
 ) -> bool {
-    let Some(token) = header.and_then(|value| value.strip_prefix("Bearer ")) else {
+    let Some((scheme, token)) = header.and_then(|value| value.split_once(' ')) else {
         return false;
     };
-    if token.is_empty() {
+    if !scheme.eq_ignore_ascii_case("Bearer")
+        || token.is_empty()
+        || token.contains(char::is_whitespace)
+    {
         return false;
     }
     // BAUD_AUTH_TOKEN remains a local-development credential. Deployed servers can instead
     // verify the signed ten-minute agent token minted by baud-identity. Invalid seed material
     // fails closed, and the token itself is never logged.
-    if expected
-        .as_deref()
-        .is_some_and(|configured| !configured.is_empty() && token == configured)
-    {
+    if expected.as_deref().is_some_and(|configured| {
+        !configured.is_empty() && constant_time_equal(token.as_bytes(), configured.as_bytes())
+    }) {
         return true;
     }
     identity_seed
@@ -283,6 +294,11 @@ mod auth_tests {
     fn bearer_auth_requires_exact_token() {
         assert!(authorization_matches(
             Some("Bearer secret"),
+            Some("secret".into()),
+            None
+        ));
+        assert!(authorization_matches(
+            Some("bearer secret"),
             Some("secret".into()),
             None
         ));
@@ -305,6 +321,11 @@ mod auth_tests {
         assert!(!authorization_matches(
             Some("Bearer "),
             Some("secret".into()),
+            None
+        ));
+        assert!(!authorization_matches(
+            Some("Bearer secret extra"),
+            Some("secret extra".into()),
             None
         ));
     }

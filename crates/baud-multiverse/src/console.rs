@@ -359,6 +359,8 @@ pub struct DeviceBus {
     /// guest-memory access to do so, see `virtio_mmio.rs`'s doc), and real interrupt delivery is
     /// still unimplemented.
     virtio_rng: Option<VirtioMmioTransport>,
+    /// Preferred virtio-console tape endpoint. The PIO tape bus remains the explicit fallback.
+    virtio_tape: Option<VirtioMmioTransport>,
     /// The virtio-pci legacy transport register block (`crate::virtio_pci`), `None` until
     /// [`Self::enable_virtio_pci_rng`] is called — the second on-ramp to the same entropy device
     /// `virtio_rng` already exposes over MMIO, this one reachable through PCI enumeration
@@ -374,6 +376,9 @@ pub struct DeviceBus {
     /// on this struct.
     #[cfg(target_os = "linux")]
     virtio_rng_queue: Option<SplitVirtqueue>,
+    /// The preferred virtio-console tape queue cursor.
+    #[cfg(target_os = "linux")]
+    virtio_tape_queue: Option<SplitVirtqueue>,
     /// The PCI virtio-rng queue cursor, kept separate from the MMIO transport.
     #[cfg(target_os = "linux")]
     virtio_pci_rng_queue: Option<SplitVirtqueue>,
@@ -465,6 +470,22 @@ impl DeviceBus {
         self.virtio_rng.as_ref()
     }
 
+    /// Enable the preferred virtio-console tape endpoint. Callers must service its queue with
+    /// [`Self::service_virtio_tape`] whenever the transport's notify count changes.
+    pub fn enable_virtio_tape(&mut self) {
+        self.virtio_tape = Some(VirtioMmioTransport::new_tape(
+            crate::layout::VIRTIO_MMIO_TAPE_BASE,
+        ));
+        #[cfg(target_os = "linux")]
+        {
+            self.virtio_tape_queue = None;
+        }
+    }
+
+    pub fn virtio_tape(&self) -> Option<&VirtioMmioTransport> {
+        self.virtio_tape.as_ref()
+    }
+
     /// Attaches a virtio-pci legacy entropy-device function at 00:01.0 (`self.pci.attach_virtio_
     /// rng`) and stands up its I/O-port transport, unassigned until the guest's own PCI core walks
     /// the BAR0 sizing/assignment protocol (`Self::pio_write` keeps the transport's window
@@ -554,6 +575,41 @@ impl DeviceBus {
         })?;
         if processed > 0 {
             self.virtio_rng
+                .as_mut()
+                .expect("checked Some at the top of this function")
+                .raise_used_buffer_notification();
+        }
+        Ok(processed)
+    }
+
+    /// Drain the preferred virtio-console tape receive queue. The queue uses the same fixed tape
+    /// cursor as the PIO endpoint, so a guest that supports virtio-console can consume input without
+    /// changing replay semantics. Outbound control records continue through the PIO character
+    /// device until a guest image opts into the documented record framing.
+    #[cfg(target_os = "linux")]
+    pub fn service_virtio_tape<M: GuestMemoryBackend>(
+        &mut self,
+        mem: &M,
+    ) -> Result<u32, VirtqueueError> {
+        let Some(transport) = self.virtio_tape.as_ref() else {
+            return Ok(0);
+        };
+        let Some(config) = transport.queue_ring_config(0) else {
+            self.virtio_tape_queue = None;
+            return Ok(0);
+        };
+        if self.virtio_tape_queue.as_ref().map(SplitVirtqueue::config) != Some(config) {
+            self.virtio_tape_queue = Some(SplitVirtqueue::new(config));
+        }
+        let queue = self.virtio_tape_queue.as_mut().expect("just set above");
+        let tape = self.tape.device_mut();
+        let processed = queue.process_available(mem, |buf| {
+            for byte in buf {
+                *byte = tape.pio_read(baud_tape_device::reg::DATA);
+            }
+        })?;
+        if processed > 0 {
+            self.virtio_tape
                 .as_mut()
                 .expect("checked Some at the top of this function")
                 .raise_used_buffer_notification();
@@ -720,9 +776,12 @@ impl DeviceBus {
             lapic: LocalApic::default(),
             pci: PciHostBridge::default(),
             virtio_rng: None,
+            virtio_tape: None,
             virtio_pci_rng: None,
             #[cfg(target_os = "linux")]
             virtio_rng_queue: None,
+            #[cfg(target_os = "linux")]
+            virtio_tape_queue: None,
             #[cfg(target_os = "linux")]
             virtio_pci_rng_queue: None,
             #[cfg(target_os = "linux")]
@@ -826,6 +885,12 @@ impl Bus for DeviceBus {
                 return;
             }
         }
+        if let Some(virtio_tape) = self.virtio_tape.as_mut() {
+            if virtio_tape.in_range(addr).is_some() {
+                virtio_tape.mmio_read(addr, data);
+                return;
+            }
+        }
         if LocalApic::in_range(addr).is_some() {
             self.lapic.mmio_read(addr, data);
             return;
@@ -841,6 +906,12 @@ impl Bus for DeviceBus {
         if let Some(virtio_rng) = self.virtio_rng.as_mut() {
             if virtio_rng.in_range(addr).is_some() {
                 virtio_rng.mmio_write(addr, data);
+                return;
+            }
+        }
+        if let Some(virtio_tape) = self.virtio_tape.as_mut() {
+            if virtio_tape.in_range(addr).is_some() {
+                virtio_tape.mmio_write(addr, data);
                 return;
             }
         }

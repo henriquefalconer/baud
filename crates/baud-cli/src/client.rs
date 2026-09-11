@@ -29,6 +29,29 @@ pub(crate) fn auth_token() -> Result<Option<String>> {
     Ok(std::env::var("BAUD_AUTH_TOKEN").ok())
 }
 
+async fn response_json(response: reqwest::Response, url: &str, method: &str) -> Result<Value> {
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("{method} {url}: failed to read response"))?;
+    if bytes.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "error": format!("{method} {url} returned an empty response"),
+            "http_status": status.as_u16(),
+        }));
+    }
+    match serde_json::from_slice(&bytes) {
+        Ok(body) => Ok(body),
+        Err(_) => Ok(serde_json::json!({
+            "ok": false,
+            "error": String::from_utf8_lossy(&bytes).trim().to_owned(),
+            "http_status": status.as_u16(),
+        })),
+    }
+}
+
 impl Client {
     pub fn new(base: &str) -> Self {
         Client {
@@ -63,10 +86,7 @@ impl Client {
             .await
             .with_context(|| format!("GET {url}: could not connect to baud-server"))?;
         let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("GET {url}: invalid JSON response"))?;
+        let body = response_json(resp, &url, "GET").await?;
         if !status.is_success() {
             return Err(ClientError {
                 status: status.as_u16(),
@@ -88,10 +108,7 @@ impl Client {
             .await
             .with_context(|| format!("DELETE {url}: could not connect to baud-server"))?;
         let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("DELETE {url}: invalid JSON response"))?;
+        let body = response_json(resp, &url, "DELETE").await?;
         if !status.is_success() {
             return Err(ClientError {
                 status: status.as_u16(),
@@ -113,10 +130,7 @@ impl Client {
             .await
             .with_context(|| format!("POST {url}: could not connect to baud-server"))?;
         let status = resp.status();
-        let resp_body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("POST {url}: invalid JSON response"))?;
+        let resp_body = response_json(resp, &url, "POST").await?;
         if !status.is_success() {
             return Err(ClientError {
                 status: status.as_u16(),

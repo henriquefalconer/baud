@@ -1877,6 +1877,20 @@ impl Multiverse {
         self.bus.enable_virtio_pci_blk(base_image);
     }
 
+    /// Enable the preferred virtio-console tape receive endpoint. The endpoint shares the tape
+    /// cursor with the PIO character-device fallback, so selecting it does not create a second
+    /// source of input or alter replay semantics.
+    pub fn enable_virtio_tape(&mut self) {
+        self.bus.enable_virtio_tape();
+    }
+
+    /// Service queued virtio-console tape input and raise its used-buffer notification.
+    pub fn service_virtio_tape(&mut self) -> Result<u32, DeterminismHole> {
+        self.bus
+            .service_virtio_tape(&self.guest.guest_mem)
+            .map_err(|error| DeterminismHole(error.to_string()))
+    }
+
     /// The virtio-pci block-device transport's own state, if
     /// [`enable_virtio_pci_blk`](Self::enable_virtio_pci_blk) has been called — mirrors
     /// [`virtio_rng`](Self::virtio_rng)'s read-access convention.

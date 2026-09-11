@@ -61,6 +61,9 @@ pub const VIRTIO_VENDOR_ID_BAUD: u32 = 0x0000_ba0d;
 /// The entropy-source device id (virtio spec 1.1 §5, device id table) — the value virtio-rng
 /// exposes at offset `0x008` so an unmodified guest's `virtio_rng` driver binds to it.
 pub const VIRTIO_DEVICE_ID_RNG: u32 = 4;
+/// Virtio console/serial device id. Baud exposes the tape stream through this preferred
+/// transport when a caller opts in; the fixed PIO character device remains the compatibility path.
+pub const VIRTIO_DEVICE_ID_CONSOLE: u32 = 3;
 
 /// The block-device id (virtio spec 1.1 §5, device id table) — `crate::virtio_pci::VirtioPciTransport
 /// ::new_blk`/`crate::pci::PciHostBridge::attach_virtio_blk` use this so an unmodified guest's
@@ -207,6 +210,13 @@ impl VirtioMmioTransport {
     /// for the small fixed-size requests a `hwrng_fillfn` reseed loop issues).
     pub fn new_rng(base: u64) -> Self {
         Self::new(base, VIRTIO_DEVICE_ID_RNG, VIRTIO_F_VERSION_1, 1, 256)
+    }
+
+    /// A one-queue virtio-console transport for the preferred tape endpoint. Queue descriptors
+    /// carry opaque tape bytes, while the existing PIO device remains available as a documented
+    /// fallback for images without virtio-console support.
+    pub fn new_tape(base: u64) -> Self {
+        Self::new(base, VIRTIO_DEVICE_ID_CONSOLE, VIRTIO_F_VERSION_1, 1, 256)
     }
 
     /// Whether `addr` falls inside this device's MMIO window, and if so its offset from

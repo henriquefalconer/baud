@@ -206,6 +206,9 @@ pub const ACPI_MADT_ADDR: u64 = ACPI_DSDT_ADDR + 0x1000;
 /// register `virtio_mmio.rs`'s [`crate::virtio_mmio::VirtioMmioTransport`] defines, config space
 /// included, with room to spare (virtio-mmio v2, specs/baud-multiverse.md §3's determinism table).
 pub const VIRTIO_MMIO_RNG_BASE: u64 = 0xd000_0000;
+/// Preferred virtio-console tape endpoint, placed beside the rng window in the same identity-mapped
+/// 1 GiB region. It never overlaps the legacy PIO tape device or the LAPIC window.
+pub const VIRTIO_MMIO_TAPE_BASE: u64 = VIRTIO_MMIO_RNG_BASE + 0x200;
 pub const VIRTIO_MMIO_RNG_LEN: u64 = 0x200;
 
 /// The conventional Local APIC MMIO base (Intel SDM Vol. 3A §10.4.3, absent an `IA32_APIC_BASE`

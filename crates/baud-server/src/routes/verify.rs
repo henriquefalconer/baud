@@ -5,7 +5,7 @@
 //
 // Routes:
 //   POST /verify/determinism   → run spec twice, compare observation stream hashes
-//   GET  /verify/observation   → (stub, M7) cross-check syscall log vs eBPF
+//   GET  /verify/observation/:run_id → cross-check syscall log vs eBPF
 
 use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
