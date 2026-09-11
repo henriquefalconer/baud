@@ -4036,3 +4036,4 @@ Iteration 7 verification checkpoint
 - `bash drive/h/h9.sh` was rerun twice. Both Ubuntu attempts stalled at the same `systemd-udevd` tail and RIP `0xffffffffc009b0da`; the 60-second diagnostic watchdog confirmed failure, so G6 remains open. Speculative service masks and `getty.target` were reverted.
 - G2's virtio-console tape transport is implemented and unit-tested, but the real image still uses PIO because the existing run-loop route does not enable/service the new transport. G2 remains open.
 - G3 UFFD/write-set scaling was not completed in this iteration.
+- Foreground focused command rerun completed successfully: `cargo test -p baud-tape-device -p baud-multiverse -p baud-server -p baud-cli -p baud-packages --all-targets` passed (1 CLI, 237 multiverse, 45 packages, 59 server, 25 tape-device tests; ignored tests were reported but not run).
