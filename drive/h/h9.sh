@@ -130,7 +130,7 @@ FP_JSON="$("$BAUD" verify fingerprint \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
     --periodic-timer-period-rcb 500000 \
-    --periodic-timer-vector 238 \
+    --periodic-timer-vector 236 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
     --expected-banner "$EXPECTED_BANNER" \

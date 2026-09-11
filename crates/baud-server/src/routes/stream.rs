@@ -41,21 +41,35 @@ pub async fn append_frame(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Json(body): Json<AppendFrameBody>,
-) -> Json<Value> {
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     let now = unix_now() as i64;
     if body.width == 0 || body.height == 0 {
-        return Json(json!({ "error": "frame width and height must be non-zero" }));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "frame width and height must be non-zero" })),
+        ));
     }
     let pixels = u64::from(body.width).saturating_mul(u64::from(body.height));
     if pixels > 16_777_216 {
-        return Json(json!({ "error": "frame geometry exceeds 16 megapixels" }));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "frame geometry exceeds 16 megapixels" })),
+        ));
     }
     if !matches!(body.format.as_str(), "indexed8" | "rgb565" | "rgba8888") {
-        return Json(json!({ "error": "unsupported frame format" }));
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "unsupported frame format" })),
+        ));
     }
     let hash_bytes = match hex::decode_hash(&body.hash) {
         Ok(b) => b,
-        Err(e) => return Json(json!({ "error": e })),
+        Err(e) => {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e })),
+            ))
+        }
     };
 
     let result = sqlx::query(
@@ -74,8 +88,13 @@ pub async fn append_frame(
     .await;
 
     match result {
-        Ok(_) => Json(json!({ "ok": true, "run_id": run_id, "step": body.step })),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(_) => Ok(Json(
+            json!({ "ok": true, "run_id": run_id, "step": body.step }),
+        )),
+        Err(e) => Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("db error: {e}") })),
+        )),
     }
 }
 
@@ -519,14 +538,11 @@ async fn render_frames_from_real_restore(
             )
         }
     };
-    // No `run_kvm::CancelGuard` here, deliberately — unlike the reboot path above, this one is
-    // materially different in the one way that matters: every loop it can dispatch to is a
-    // `run_until_branch_or_halt*` variant, and none of those calls `Multiverse::is_cancelled` at
-    // all, so installing a flag would be pure decoration — a mechanism that reads as working
-    // while cancelling nothing. It also has no disk image to map, so it never carried the
-    // double-copy cost that motivated this work. When the branch/resume loops in
-    // `baud-multiverse` learn to poll the flag, this call site gets the same three lines the
-    // reboot path above has.
+    // Keep the ownership guard across the blocking restore/replay just like the reboot path.
+    // Branch and periodic-timer loops poll the same Multiverse cancellation flag, so a dropped
+    // render request cannot leave a restored VM running after its client is gone.
+    let cancel = crate::routes::run_kvm::CancelGuard::new();
+    let cancel_flag = cancel.flag();
     let records = tokio::task::spawn_blocking(move || -> Result<Vec<baud_proto::Msg>, String> {
         let universe =
             crate::routes::run_kvm::reconstruct_universe(&store, &store_run_id, &snapshot_node_id)?;
@@ -537,6 +553,7 @@ async fn render_frames_from_real_restore(
             None,
         )
         .map_err(|e| format!("restore branch error: {e}"))?;
+        branch.set_cancel_flag(cancel_flag);
         if let Some((seed, _, _)) = virtio_rng {
             branch.enable_virtio_rng();
             branch.seed_virtio_rng_entropy(seed);
@@ -577,6 +594,7 @@ async fn render_frames_from_real_restore(
     })
     .await
     .expect("stream/render restore task panicked");
+    drop(cancel);
 
     let records = match records {
         Ok(records) => records,
