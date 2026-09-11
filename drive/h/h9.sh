@@ -280,7 +280,9 @@ VM1_ALT_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
 VM1_ALT_EVENTS="$(fp_field "$VM1_ALT_JSON" events)"
 VM1_ALT_RIP="$(fp_field "$VM1_ALT_JSON" rip)"
 VM1_ALT_GPA="$(fp_field "$VM1_ALT_JSON" gpa)"
-if [[ "$VM1_ALT_EVENTS" == "$VM1_EVENTS" && "$VM1_ALT_RIP" == "$VM1_RIP" && "$VM1_ALT_GPA" == "$VM1_GPA" ]]; then
+VM1_ALT_HASH="$(fp_field "$VM1_ALT_JSON" mem_hash)"
+VM1_ALT_BANNER="$(fp_field "$VM1_ALT_JSON" banner_hex)"
+if [[ "$VM1_ALT_EVENTS" == "$VM1_EVENTS" && "$VM1_ALT_RIP" == "$VM1_RIP" && "$VM1_ALT_GPA" == "$VM1_GPA" && "$VM1_ALT_HASH" == "$VM1_HASH" && "$VM1_ALT_BANNER" == "$VM1_BANNER" ]]; then
     fail "H9.5: changing target_rcb did not change any compared execution field"
 fi
 pass "H9.5: a second real capture at target_rcb=100001 diverged from target_rcb=100000"

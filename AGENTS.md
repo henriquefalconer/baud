@@ -161,6 +161,7 @@ with "unable to open database file") plus `BAUD_SNAPSHOT_STORE=<dir>`; the **CLI
 never reads it, and defaults to `http://127.0.0.1:7734` if unset. `examples/ubuntu/BUILD.md` has the
 full real-Ubuntu-boot recipe (needs `bash examples/ubuntu/fetch.sh` first, artifacts land outside the
 repo in `~/.baud-tmp/ubuntu-1804` per the same convention as `~/wsl-kernel-src`).
+H9 diagnostics can set `BAUD_PERIODIC_TICK_WATCHDOG_SECS` to override the per-periodic-tick watchdog for a bounded real Ubuntu boot diagnostic; the default remains 600 seconds.
 
 ## Subagents
 

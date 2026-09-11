@@ -1890,6 +1890,12 @@ impl Multiverse {
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
+        info!(
+            "virtio-blk service: processed {processed} request(s), notify_count {}",
+            self.virtio_pci_blk()
+                .map(|transport| transport.notify_count())
+                .unwrap_or(0),
+        );
         if processed > 0 {
             self.inject_timer_tick(0, vector)?;
         }
@@ -2205,8 +2211,9 @@ impl Multiverse {
             if tick_index % RUN_LOOP_PROGRESS_LOG_INTERVAL_TICKS == 0 {
                 info!(
                     "run_to_first_halt_with_periodic_timer_and_devices: tick {tick_index}/{max_ticks}, \
-                     console_output {} bytes, {:.1}s elapsed",
+                     console_output {} bytes, tail {:?}, {:.1}s elapsed",
                     self.bus.console.output().len(),
+                    console_tail(self.bus.console.output()),
                     progress_start.elapsed().as_secs_f64(),
                 );
             }

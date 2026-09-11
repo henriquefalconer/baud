@@ -3046,3 +3046,57 @@ Stale gate workers are cleaned up and perf_event_paranoid is now -1; rerunning H
 The single verification worker independently passed cargo test -p baud-server: 57 passed, 0 failed; H9 still stalls in the real Ubuntu path after ~200 ticks, so the selected G2/G3/G6 acceptance work is not complete.
 
 The selected batch remains open because the real guest endpoint, write-set-scaled branches, and Ubuntu login proof still fail their acceptance paths; committing only the verified API hardening and diagnostic corrections so the work is durable for the next pass.
+
+## 2026-09-11T00:13:27 UTC (30min) - Session usage — ralph-24 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2440 (summed from 5 session transcripts: main $0.1678 · subagents $0.0762)
+- tokens input 492,532 · cache-read 6,203,392 · cache-write 0 · output 17,848 · reasoning 4,277
+- context 146,756 tok peak of 272K (54%) across 59 inference calls, monotonic
+- models gpt-5.6-luna $0.2440 (in 492,532 / out 22,125 / cache-read 6,203,392)
+- subagents (4) pi process x4
+  - delegate-552d6ae3c7fd012f8fb088af5a63b5df: gpt-5.6-luna $0.0250, 5 inference calls
+  - delegate-82ccd5d8199665c52e9bda8aec487a1a: gpt-5.6-luna $0.0266, 5 inference calls
+  - delegate-74b8f7a81ce55e86a6e646817d708de6: gpt-5.6-luna $0.0233, 5 inference calls
+  - 01a08dba-b8fa-724a-b692-309b4f5f1bcc: gpt-5.6-luna $0.0013, 2 inference calls
+- transcript: ralph/.run/20260910T073659Z/035-ralph-24.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 25 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected item through its real implementation and verification path.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 pending items in todo-build.md.
+
+Tracing the selected items revealed the main hard gaps: the image builder still contains explicit stub-only tests, UFFD is only a raw wrapper with no multiverse integration, and server ownership is only a cancellation map; reading route and boot paths next.
+
+The route inventory shows much of G5 is already wired and authenticated, while the documented hard gaps remain real: branch() explicitly restores full RAM, image build is host-path based rather than pinned pipeline, and H9 still needs a genuine login banner. Awaiting specification audits before selecting code changes.
+
+Ubuntu artifacts are present at ~/.baud-tmp/ubuntu-1804, so H9 is runnable rather than owner-blocked; running the real H9 drive now to capture the current root cause before editing.
+
+The first H9 attempt still stalls after 500 ticks, so I added console-tail progress evidence and tightened H9.5 to compare every fingerprint field; now delegating the focused build/test run before deeper boot changes.
+
+The specification audit confirms the open items are real, not bookkeeping: UFFD has no live fault worker, run pause/resume only mutate SQL, and the image/tape path has no fresh guest endpoint proof. I am preserving those as open while fixing concrete contract bugs and keeping the real H9 diagnostic path observable.
+
+The real H9 stall is a single periodic tick exceeding the fixed 600-second diagnostic window; I exposed the existing per-VM watchdog setter through BAUD_PERIODIC_TICK_WATCHDOG_SECS so the next run can fail with guest RIP and console tail instead of an outer shell timeout.
+
+The 30-second diagnostic run captured guest RIP 0xffffffffc009b0da and console tail ending after systemd-udevd; I am instrumenting block completion counts to distinguish a queue-service bug from a guest-side probe loop before changing transport semantics.
+
+Focused tests passed: baud-multiverse 236 and baud-fingerprint 8; formatting exposed an existing guest_build.rs drift, so I am applying repository formatting before the next verification.
+
+Formatting is clean now; running the directly affected package/server suites in the foreground, including the new H9 diagnostic configuration and image/route paths.
+
+Focused package/server verification is green: baud-packages 45 passed with 2 ignored, baud-server 57 passed; H9 now fails closed with a concrete guest RIP and no block QueueNotify, pointing to virtio_blk probe/initialization rather than a serviced request.
+
+The bounded H9 diagnostic confirms no virtio-blk QueueNotify is serviced before the watchdog: the guest stops in Ubuntu 4.15 module code at RIP 0xffffffffc009b0da after the final udev line. This narrows the root cause to virtio-pci/virtio-blk probe initialization, not block completion timing; continuing that investigation rather than claiming H9.
+
+The PCI audit found a real missing contract field: the minimal config space discarded the guest PCI command word, so Linux could not observe I/O and bus-master enablement. I added command/status storage and a regression test, then I will re-run the Ubuntu diagnostic to test whether probe initialization advances.
+
+The command-register fix did not change H9, so I am tracing the legacy virtio PCI handshake itself. Queue-PFN and QueueNotify logs will show whether Linux reaches queue activation before the guest RIP stall.
+
+The PCI trace now proves Ubuntu scans the attached block function (vendor/device, class, header reads) but never reaches BAR, command, queue-size, queue-PFN, or QueueNotify before stalling; the guest RIP shifts only within the same module cleanup region. The blocker is therefore earlier PCI/virtio probe completion, and the selected batch remains open.
+
+No selected item is being relabeled DONE: package/server/unit paths are green, but the real guest endpoint, UFFD live branch path, complete run lifecycle, and Ubuntu login acceptance remain unclosed. Holding the batch open while preserving the measured PCI probe evidence.

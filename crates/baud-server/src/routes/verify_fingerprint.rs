@@ -230,6 +230,12 @@ fn boot_and_compare_fingerprints(
             vm.write_acpi_tables()
                 .map_err(|e| format!("vm{i} ACPI setup failed: {e}"))?;
         }
+        if let Ok(seconds) = std::env::var("BAUD_PERIODIC_TICK_WATCHDOG_SECS") {
+            let seconds = seconds
+                .parse::<u64>()
+                .map_err(|e| format!("BAUD_PERIODIC_TICK_WATCHDOG_SECS is not an integer: {e}"))?;
+            vm.set_periodic_tick_watchdog_budget(std::time::Duration::from_secs(seconds));
+        }
         let f = baud_fingerprint::capture_with_periodic_timer(
             &mut vm,
             &format!("vm{i}"),

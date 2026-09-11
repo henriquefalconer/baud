@@ -87,9 +87,8 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
             lint.violations
         );
     }
-    let bzimage_src = build_bzimage(&cfg.kernel).map_err(|e| {
-        anyhow::anyhow!("kernel build stage failed while producing bzImage: {e:#}")
-    })?;
+    let bzimage_src = build_bzimage(&cfg.kernel)
+        .map_err(|e| anyhow::anyhow!("kernel build stage failed while producing bzImage: {e:#}"))?;
     let final_config = cfg.kernel.kernel_src.join(".config");
     let final_config_text = fs::read_to_string(&final_config).with_context(|| {
         format!(

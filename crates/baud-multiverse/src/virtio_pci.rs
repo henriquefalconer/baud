@@ -354,6 +354,11 @@ impl Bus for VirtioPciTransport {
                 } else {
                     0
                 };
+                tracing::info!(
+                    queue = self.queue_select,
+                    size,
+                    "virtio-pci queue size read"
+                );
                 let b = size.to_le_bytes();
                 [b[0], b[1], 0, 0]
             }
@@ -386,6 +391,7 @@ impl Bus for VirtioPciTransport {
             REG_GUEST_FEATURES => self.guest_features = u32::from_le_bytes(word),
             REG_QUEUE_ADDRESS => {
                 let pfn = u32::from_le_bytes(word);
+                tracing::info!(queue = self.queue_select, pfn, "virtio-pci queue PFN write");
                 if let Some(queue) = self.selected_queue_mut() {
                     queue.pfn = pfn;
                 }
@@ -394,12 +400,19 @@ impl Bus for VirtioPciTransport {
             REG_QUEUE_NOTIFY => {
                 self.notify_count += 1;
                 self.last_notified_queue = Some(u16::from_le_bytes([word[0], word[1]]));
+                tracing::info!(
+                    queue = self.last_notified_queue,
+                    count = self.notify_count,
+                    "virtio-pci queue notify"
+                );
             }
             REG_DEVICE_STATUS => {
                 if word[0] == 0 {
+                    tracing::info!("virtio-pci device reset");
                     self.reset();
                 } else {
                     self.status = word[0];
+                    tracing::info!(status = self.status, "virtio-pci device status");
                 }
             }
             // Read-only registers (host features, queue size, ISR status) and anything past the

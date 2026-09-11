@@ -105,6 +105,7 @@ const HOST_BRIDGE_CLASS_CODE: u32 = 0x0600_0000;
 /// an otherwise-reserved/unimplemented register on real hardware (a `0` header-type/BIST/latency/
 /// cache-line-size byte is exactly what a single-function, non-bridge-capable device reports).
 const REG_VENDOR_DEVICE: u8 = 0x00; // vendor ID (bits 15:0), device ID (bits 31:16)
+const REG_COMMAND_STATUS: u8 = 0x04; // command (bits 15:0), status (bits 31:16)
 const REG_CLASS_REVISION: u8 = 0x08; // revision ID (bits 7:0), class code (bits 31:8)
 const REG_HEADER_BIST: u8 = 0x0C; // cache-line-size/latency-timer/header-type/BIST
 const REG_BAR0: u8 = 0x10;
@@ -179,6 +180,11 @@ pub struct PciVirtioFunction {
     /// "the guest wants to point the BAR at address `0xFFFF_FFFC`", so this bridge tracks it
     /// explicitly instead of misinterpreting an all-ones write as a real (nonsensical) base.
     bar0_sizing: bool,
+    /// PCI command register. Linux sets I/O-space and bus-mastering before probing a legacy
+    /// virtio function. The device model still decodes its BAR without these bits, but returning
+    /// and retaining the guest's command word is required for the stock PCI driver to complete
+    /// `pci_enable_device()` rather than observing a permanently disabled function.
+    command: u16,
     /// `Interrupt Line` (PCI Local Bus spec §6.2.4) — guest-writable, but seeded with a nonzero
     /// default at construction (see [`Self::new`]'s `default_interrupt_line` param): baud never
     /// reads this field back to pick an injection vector itself (a caller always names the vector
@@ -201,6 +207,7 @@ impl PciVirtioFunction {
             bar0_size,
             bar0_base: 0,
             bar0_sizing: false,
+            command: 0,
             interrupt_line: default_interrupt_line,
         }
     }
@@ -244,6 +251,7 @@ impl PciVirtioFunction {
     fn config_read_dword(&self, register: u8) -> u32 {
         match register {
             REG_VENDOR_DEVICE => (VIRTIO_VENDOR_ID as u32) | ((self.device_id() as u32) << 16),
+            REG_COMMAND_STATUS => u32::from(self.command),
             REG_CLASS_REVISION => self.class_code,
             REG_HEADER_BIST => 0, // header type 0 (single-function), no BIST capability
             REG_BAR0 => self.bar0_read(),
@@ -259,6 +267,7 @@ impl PciVirtioFunction {
 
     fn config_write_dword(&mut self, register: u8, value: u32) {
         match register {
+            REG_COMMAND_STATUS => self.command = (value as u16) & 0x0007,
             REG_BAR0 => self.bar0_write(value),
             REG_INTERRUPT => self.interrupt_line = (value & 0xFF) as u8,
             // Vendor/device/class/subsystem are read-only; anything else this header doesn't
@@ -358,7 +367,9 @@ impl PciHostBridge {
         }
         if addr.device == 2 && addr.function == 0 {
             if let Some(virtio) = &self.virtio_blk {
-                return virtio.config_read_dword(addr.register);
+                let value = virtio.config_read_dword(addr.register);
+                tracing::info!(register = addr.register, value, "virtio-pci config read");
+                return value;
             }
         }
         0xFFFF_FFFF
@@ -698,6 +709,21 @@ mod tests {
             0xC000 | BAR_IO_SPACE_BIT
         );
         assert_eq!(bus.virtio_io_base(), Some(0xC000));
+    }
+
+    #[test]
+    fn pci_enable_command_round_trips_io_and_bus_master_bits() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_blk(0x20);
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_COMMAND_STATUS),
+        );
+        write_u32(&mut bus, PCI_CONFIG_DATA, 0x0007);
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) & 0x0007, 0x0007);
+        // Status is read-only in this minimal function and remains zero.
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) >> 16, 0);
     }
 
     #[test]
