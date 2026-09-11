@@ -3174,3 +3174,5 @@ The documented fetch script itself needs the AGENTS.md sudo password bridge on t
 The ZFS masks had no effect and are reverted. A concrete wiring bug is now found: H9 passed vector 0xee while every kernel fixture and the implementation define Linux LOCAL_TIMER_VECTOR as 0xec; correcting the drive to 236 and rerunning the real boot.
 
 The corrected timer vector moves Ubuntu past the earlier ZFS stall, but the guest still stops after `Freeing unused kernel memory` without reaching virtio-blk queue setup or `ubuntu login:`. The frame HTTP-status fix and restore/render cancellation ownership fix are green in focused tests. The exact gate still fails to complete because H9 is not proven, so the selected build batch remains incomplete and no DONE labels are claimed.
+
+The required foreground `bash drive/gate.sh` run completed in 8m15s: 24 units passed, H9 failed at the post-memory-freeing guest stall, and `pkg-build-cli` failed during the real image build after Kconfig resolution. Workspace tests, clippy, and the other drive scripts passed. The isolated package drive reproduced the image-build failure. No pending item is marked DONE.
