@@ -39,13 +39,19 @@ pub struct ImageLintBody {
     pub content: String,
 }
 
-/// POST /image/lint — lint a guest kernel .config
-pub async fn lint(Json(body): Json<ImageLintBody>) -> Json<Value> {
+/// POST /image/lint — lint a guest kernel .config. Contract violations use 422 so callers cannot
+/// mistake a JSON body with `ok: false` for an accepted image.
+pub async fn lint(Json(body): Json<ImageLintBody>) -> ApiResult {
     let report = baud_packages::lint_kernel_config(&body.content);
-    Json(json!({
+    let response = Json(json!({
         "ok": report.ok(),
         "violations": report.violations,
-    }))
+    }));
+    if report.ok() {
+        Ok(response)
+    } else {
+        Err((StatusCode::UNPROCESSABLE_ENTITY, response))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,7 +142,12 @@ pub async fn build(Json(body): Json<ImageBuildBody>) -> ApiResult {
         baud_packages::build_guest_image(&cfg)
     })
     .await
-    .expect("image/build task panicked");
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("guest image build task failed: {error}")})),
+        )
+    })?;
 
     match result {
         Ok(r) => Ok(Json(json!({
@@ -147,6 +158,9 @@ pub async fn build(Json(body): Json<ImageBuildBody>) -> ApiResult {
             "initramfs_sha256": r.initramfs_sha256,
             "image_hash": r.image_hash,
         }))),
-        Err(e) => Err(bad_request(format!("guest image build failed: {e:#}"))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("guest image build failed: {e:#}")})),
+        )),
     }
 }

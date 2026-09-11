@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -42,6 +44,107 @@ fn deterministic_build_env() -> [(&'static str, &'static str); 4] {
         ("KBUILD_BUILD_HOST", "baud"),
         ("SOURCE_DATE_EPOCH", "0"),
     ]
+}
+
+struct SourceBuildLock {
+    path: PathBuf,
+}
+
+impl SourceBuildLock {
+    fn acquire(kernel_src: &Path) -> Result<Self> {
+        let canonical = kernel_src
+            .canonicalize()
+            .unwrap_or_else(|_| kernel_src.to_path_buf());
+        let key = blake3::hash(canonical.to_string_lossy().as_bytes());
+        let path = std::env::temp_dir().join(format!("baud-kernel-build-{}.lock", key.to_hex()));
+        let deadline = Instant::now() + Duration::from_secs(1800);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    drop(file);
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "timed out waiting for another kernel build to release {}",
+                            path.display()
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to create kernel build lock {}", path.display())
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl Drop for SourceBuildLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn install_tape_driver(kernel_src: &Path) -> Result<()> {
+    let driver_dir = kernel_src.join("drivers/baud");
+    std::fs::create_dir_all(&driver_dir).with_context(|| {
+        format!(
+            "creating guest tape driver directory {}",
+            driver_dir.display()
+        )
+    })?;
+    std::fs::write(
+        driver_dir.join("Kconfig"),
+        include_bytes!("../../baud-tape-device/guest/Kconfig"),
+    )?;
+    std::fs::write(
+        driver_dir.join("Makefile"),
+        include_bytes!("../../baud-tape-device/guest/Makefile"),
+    )?;
+    std::fs::write(
+        driver_dir.join("baud_tape.c"),
+        include_bytes!("../../baud-tape-device/guest/baud_tape.c"),
+    )?;
+
+    let kconfig = kernel_src.join("drivers/Kconfig");
+    let mut kconfig_text = std::fs::read_to_string(&kconfig)
+        .with_context(|| format!("reading {}", kconfig.display()))?;
+    if !kconfig_text.contains("source \"drivers/baud/Kconfig\"") {
+        kconfig_text.push_str("\nsource \"drivers/baud/Kconfig\"\n");
+        std::fs::write(&kconfig, kconfig_text)?;
+    }
+    let makefile = kernel_src.join("drivers/Makefile");
+    let mut makefile_text = std::fs::read_to_string(&makefile)
+        .with_context(|| format!("reading {}", makefile.display()))?;
+    if !makefile_text.contains("obj-y += baud/") {
+        makefile_text.push_str("\nobj-y += baud/\n");
+        std::fs::write(&makefile, makefile_text)?;
+    }
+
+    // x86_64 kernels hard-define HPET_TIMER=y even when the fragment says `n`. Baud never
+    // supplies an HPET table or MMIO device, so leave the generic kernel choice intact but make
+    // the baud image's custom driver symbol disable that unreachable timer at Kconfig time. This
+    // keeps the image lint meaningful instead of accepting a kernel that can read an unmodeled
+    // timer, and it avoids carrying a hand-edited .config into the artifact.
+    let x86_kconfig = kernel_src.join("arch/x86/Kconfig");
+    if x86_kconfig.exists() {
+        let text = std::fs::read_to_string(&x86_kconfig)
+            .with_context(|| format!("reading {}", x86_kconfig.display()))?;
+        let original = "config HPET_TIMER\n\tdef_bool X86_64\n";
+        let patched = "config HPET_TIMER\n\tdef_bool X86_64 && !BAUD_TAPE_DEVICE\n";
+        if text.contains(original) {
+            std::fs::write(&x86_kconfig, text.replace(original, patched))?;
+        }
+    }
+    Ok(())
 }
 
 fn run_make(kernel_src: &Path, cc: &str, args: &[&str]) -> Result<()> {
@@ -79,6 +182,12 @@ pub fn build_bzimage(cfg: &KernelBuildConfig) -> Result<PathBuf> {
             cfg.kernel_src.display()
         );
     }
+    // Kbuild mutates the source tree from `mrproper` through the final artifact. Serialize
+    // callers that share a source directory, especially the real CLI and reproducibility drives.
+    // Without this guard one caller can copy or compile while another is cleaning the tree, which
+    // produces misleading missing-header failures instead of a failed lock acquisition.
+    let _build_lock = SourceBuildLock::acquire(cfg.kernel_src)?;
+
     let config_fragment = cfg.config_fragment.canonicalize().with_context(|| {
         format!(
             "config fragment {} not found",
@@ -87,6 +196,7 @@ pub fn build_bzimage(cfg: &KernelBuildConfig) -> Result<PathBuf> {
     })?;
 
     run_make(cfg.kernel_src, cfg.cc, &["mrproper"])?;
+    install_tape_driver(cfg.kernel_src)?;
     run_make(cfg.kernel_src, cfg.cc, &["allnoconfig"])?;
 
     let merge_script = cfg.kernel_src.join("scripts/kconfig/merge_config.sh");
@@ -126,8 +236,11 @@ pub fn build_bzimage(cfg: &KernelBuildConfig) -> Result<PathBuf> {
     }
 
     let jobs = cfg.jobs.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
+        std::env::var("BAUD_KERNEL_BUILD_JOBS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|jobs: &usize| *jobs > 0)
+            .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
             .unwrap_or(1)
     });
     let jobs_flag = format!("-j{jobs}");

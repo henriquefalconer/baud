@@ -1,0 +1,21 @@
+# Copyright (c) 2026 Henrique Falconer. All rights reserved.
+# SPDX-License-Identifier: Proprietary
+
+[ubuntu]
+release = "18.04.1"
+artifact = "release-20180806"
+kernel = "vmlinuz-generic"
+initramfs = "initrd-generic"
+rootfs = "rootfs.raw"
+expected_banner = "Ubuntu 18.04.1 LTS ubuntu ttyS0\n\nubuntu login:"
+
+[boot]
+cmdline = "systemd.unit=multi-user.target cloud-init=disabled console=ttyS0 root=/dev/vda1 ro rootwait nokaslr net.ifnames=0 biosdevname=0 clocksource=tsc tsc=reliable no_timer_check pci=conf1 pci=assign-busses scsi_mod.scan=sync udev.children_max=1 fsck.mode=skip systemd.mask=systemd-timesyncd.service systemd.mask=systemd-time-wait-sync.service systemd.mask=systemd-random-seed.service systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd-wait-online.service systemd.mask=systemd-resolved.service systemd.mask=cloud-init-local.service systemd.mask=cloud-init.service systemd.mask=cloud-config.service systemd.mask=cloud-final.service systemd.mask=apt-daily.timer systemd.mask=apt-daily-upgrade.timer systemd.mask=motd-news.timer systemd.mask=man-db.timer systemd.mask=fstrim.timer systemd.mask=systemd-tmpfiles-clean.timer systemd.mask=snapd.service systemd.mask=snapd.socket systemd.mask=snapd.seeded.service"
+periodic_timer_period_rcb = 500000
+periodic_timer_vector = 238
+periodic_timer_max_ticks = 20000
+periodic_tick_watchdog_budget_secs = 600
+
+[fingerprint]
+target_rcb = 100000000
+times = 2

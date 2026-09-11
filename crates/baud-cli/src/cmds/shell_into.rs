@@ -48,7 +48,7 @@ pub async fn run(args: ShellIntoArgs, c: &Client, json: bool) -> Result<()> {
         .clone()
         .into_client_request()
         .context("build shell-into websocket request")?;
-    if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+    if let Some(token) = crate::client::auth_token()? {
         request.headers_mut().insert(
             "authorization",
             format!("Bearer {token}")

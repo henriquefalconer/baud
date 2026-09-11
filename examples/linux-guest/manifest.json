@@ -7,7 +7,7 @@
   },
   "initramfs": {
     "path": "initramfs.cpio.gz",
-    "sha256": "b81c5e8ecbea57e631c1c67923338fc02c3db547fc208aeec4c83f8c5d1a0fc9"
+    "sha256": "f8196e9f59d1e3e72e01c9af274701ab4747593bb17485c281a86975413c1899"
   },
   "kernel_config": {
     "path": "minimal.config",

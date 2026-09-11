@@ -10,6 +10,18 @@ pub struct Client {
     http: reqwest::Client,
 }
 
+pub(crate) fn auth_token() -> Result<Option<String>> {
+    if let Some(path) = std::env::var_os("BAUD_AUTH_TOKEN_FILE") {
+        let mut token =
+            std::fs::read_to_string(path).context("failed to read BAUD_AUTH_TOKEN_FILE")?;
+        if token.ends_with('\n') {
+            token.pop();
+        }
+        return Ok(Some(token));
+    }
+    Ok(std::env::var("BAUD_AUTH_TOKEN").ok())
+}
+
 impl Client {
     pub fn new(base: &str) -> Self {
         Client {
@@ -36,7 +48,7 @@ impl Client {
     pub async fn get(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let mut request = self.http.get(&url);
-        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+        if let Some(token) = auth_token()? {
             request = request.bearer_auth(token);
         }
         let resp = request
@@ -57,7 +69,7 @@ impl Client {
     pub async fn delete(&self, path: &str) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let mut request = self.http.delete(&url);
-        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+        if let Some(token) = auth_token()? {
             request = request.bearer_auth(token);
         }
         let resp = request
@@ -78,7 +90,7 @@ impl Client {
     pub async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
         let mut request = self.http.post(&url).json(body);
-        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+        if let Some(token) = auth_token()? {
             request = request.bearer_auth(token);
         }
         let resp = request
@@ -102,7 +114,7 @@ impl Client {
     pub async fn stream_get(&self, path: &str) -> Result<()> {
         let url = format!("{}{}", self.base, path);
         let mut request = self.http.get(&url).header("accept", "text/event-stream");
-        if let Ok(token) = std::env::var("BAUD_AUTH_TOKEN") {
+        if let Some(token) = auth_token()? {
             request = request.bearer_auth(token);
         }
         let resp = request

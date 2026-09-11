@@ -238,19 +238,19 @@ pass "M9.6b: a third resume (generate mode) call continued accumulating driver s
 # ---------------------------------------------------------------------------
 log "--- M9.7: error handling ---"
 
-ERR_BOTH=$(curl -sf -X POST "$SRV/run/kvm/branch" -H "Content-Type: application/json" \
+ERR_BOTH=$(curl -s -X POST "$SRV/run/kvm/branch" -H "Content-Type: application/json" \
     -d "{\"kernel_path\": \"$HELLO_KERNEL\", \"branch_tapes_hex\": [\"aa\"], \"generate\": {\"seed\": 1, \"count\": 1}}")
 ERR_BOTH_MSG=$(echo "$ERR_BOTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))")
 [[ -n "$ERR_BOTH_MSG" ]] || fail "M9.7: expected an error for branch_tapes_hex+generate together: $ERR_BOTH"
 pass "M9.7a: branch_tapes_hex + generate together → error ($ERR_BOTH_MSG)"
 
-ERR_HEX=$(curl -sf -X POST "$SRV/run/kvm" -H "Content-Type: application/json" \
+ERR_HEX=$(curl -s -X POST "$SRV/run/kvm" -H "Content-Type: application/json" \
     -d "{\"kernel_path\": \"$HELLO_KERNEL\", \"tape_hex\": \"not-hex\"}")
 ERR_HEX_MSG=$(echo "$ERR_HEX" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))")
 [[ -n "$ERR_HEX_MSG" ]] || fail "M9.7: expected an error for invalid tape_hex: $ERR_HEX"
 pass "M9.7b: invalid tape_hex → error ($ERR_HEX_MSG)"
 
-ERR_UNKNOWN=$(curl -sf -X POST "$SRV/run/kvm/resume" -H "Content-Type: application/json" \
+ERR_UNKNOWN=$(curl -s -X POST "$SRV/run/kvm/resume" -H "Content-Type: application/json" \
     -d "{\"run_id\": \"no-such-run-$$\", \"node_id\": \"$(printf '0%.0s' {1..64})\", \"branch_tapes_hex\": [\"aa\"]}")
 ERR_UNKNOWN_MSG=$(echo "$ERR_UNKNOWN" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error',''))")
 [[ -n "$ERR_UNKNOWN_MSG" ]] || fail "M9.7: expected an error resuming an unknown run/node: $ERR_UNKNOWN"

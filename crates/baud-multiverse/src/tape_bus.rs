@@ -16,8 +16,8 @@ use baud_vcpu::{Bus, OPEN_BUS_BYTE};
 
 /// Base I/O port for the tape device. An arbitrary but fixed choice, outside the legacy COM1
 /// range (`console::COM1_BASE`, 0x3f8-0x3ff) this codebase already occupies — the in-guest driver
-/// contract that will document this for real guest images (todo.md §4's "image contract",
-/// `baud-packages`' tape-device shim) does not exist yet.
+/// contract used by real guest images (todo.md §4's "image contract", installed by
+/// `baud-packages`' tape-device shim).
 pub const TAPE_DEVICE_BASE: u16 = 0x0500;
 /// Highest offset `TapeDevice` serves (`baud_tape_device::reg::STATUS` = 0x10) plus headroom for
 /// future registers without immediately colliding with the next device.

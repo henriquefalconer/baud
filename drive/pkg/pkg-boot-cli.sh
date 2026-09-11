@@ -104,6 +104,7 @@ BOOT_JSON="$("$BAUD" run kvm \
     --kernel "$KERNEL" \
     --initramfs "$INITRAMFS" \
     --cmdline "$CMDLINE" \
+    --tape-hex 42 \
     --periodic-timer-period-rcb 500000 \
     --periodic-timer-vector 236 \
     --periodic-timer-max-ticks 2000 \
@@ -119,6 +120,11 @@ CONSOLE_TEXT="$(python3 -c "import sys; print(bytes.fromhex(sys.argv[1]).decode(
 echo "$CONSOLE_TEXT" | grep -q "baud-guest: minimal kernel reached /init" \
     || fail "console output does not contain the /init marker:\n$CONSOLE_TEXT"
 pass "guest reached /init (marker found in console output over real HTTP)"
+
+# The image must exercise the tape endpoint, not merely boot past it. The empty-key PROBE emitted
+# by /init is serialized by the real route as an opaque observation record.
+echo "$BOOT_JSON" | python3 -c 'import json,sys; records=json.load(sys.stdin).get("tape_records", []); assert any(r.get("msg") == "observe" for r in records), records'
+pass "guest tape endpoint emitted one real PROBE record through the PIO/character-device path"
 
 echo ""
 echo "=== baud run kvm --initramfs/--periodic-timer-*: PASSED ==="

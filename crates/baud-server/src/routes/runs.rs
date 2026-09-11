@@ -178,6 +178,10 @@ pub async fn start(
     match result {
         Ok(_) => {
             if let Err(e) = tx.commit().await {
+                // The backend allocation happened before the transaction. If SQLite rejects the
+                // commit, release that allocation before reporting failure or the accepted run
+                // path leaks a live sandbox that has no durable owner.
+                let _ = state.tape_backend.delete(&tape_id).await;
                 return Err(internal_error(format!("db commit error: {e}")));
             }
             state.register_run(&run_id);
@@ -479,13 +483,18 @@ pub async fn abort(
             // inside KVM or a backend call, but it now has the same cancellation token that was
             // registered before acknowledgement.
             state.cancel_run(&id);
-            let _ = sqlx::query(
+            if let Err(error) = sqlx::query(
                 "UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = (SELECT tape_id FROM runs WHERE id = ?) AND state IN ('creating','running')"
             )
             .bind(now)
             .bind(&id)
             .execute(&state.db)
-            .await;
+            .await
+            {
+                // The run is already durably aborted and its worker has been signalled. Surface a
+                // tape-journal failure instead of returning a false all-clear response.
+                return Err(internal_error(format!("tape abort journal error: {error}")));
+            }
             Ok(Json(json!({ "ok": true, "id": id, "status": "aborted" })))
         }
         Err(e) => Err(internal_error(format!("db error: {e}"))),

@@ -30,14 +30,23 @@ Copy it to a scratch location first:
 cp -a ~/wsl-kernel-src/src ~/baud-guest-kernel-src && cd ~/baud-guest-kernel-src
 make CC=gcc-13 mrproper                          # this copy has no in-tree build artifacts to keep
 make CC=gcc-13 allnoconfig
+mkdir -p drivers/baud
+cp <this-repo>/crates/baud-tape-device/guest/{Kconfig,Makefile,baud_tape.c} drivers/baud/
+printf '\nsource "drivers/baud/Kconfig"\n' >> drivers/Kconfig
+printf '\nobj-y += baud/\n' >> drivers/Makefile
+sed -i 's/def_bool X86_64$/def_bool X86_64 \&\& !BAUD_TAPE_DEVICE/' arch/x86/Kconfig
 ./scripts/kconfig/merge_config.sh -m .config <this-dir>/minimal.config
 make CC=gcc-13 olddefconfig
 make CC=gcc-13 -j$(nproc) bzImage                # ~65s on this dev host; output at arch/x86/boot/bzImage
 cp arch/x86/boot/bzImage <this-dir>/bzImage
 ```
 
-`minimal.config` is a fragment implementing spec §4.1's required/disabled list (`allnoconfig` base +
-this fragment + `olddefconfig` to resolve dependencies) — notably **`CONFIG_X86_IOPL_IOPERM=y`**,
+The tape driver is built into this disposable tree before Kconfig resolution. It registers the
+spec-required `/dev/tape` endpoint over the fixed PIO window. The `/init` harness prefers that
+character device and falls back to direct PIO against the same registers when the tiny initramfs has
+no devtmpfs. `minimal.config` is a fragment
+implementing spec §4.1's required/disabled list (`allnoconfig` base + this fragment + `olddefconfig`
+to resolve dependencies) — notably **`CONFIG_X86_IOPL_IOPERM=y`**,
 without which `/init`'s `iopl(3)` call below faults immediately (a real bug this fixture's own
 first real-hardware boot caught, todo.md §14). Two Kconfig symbols in the spec's disable list cannot
 actually be turned off on x86_64 and are harmless as compiled-in-but-inert: `HPET_TIMER` (`def_bool
@@ -49,6 +58,9 @@ model was needed" below).
 ## Regenerating the initramfs
 
 Only needs `musl-gcc` and `cpio` (`sudo apt-get install -y cpio` if missing) — no kernel source tree:
+The resulting `/init` reads exactly one host-supplied byte and finalizes one `PROBE` record before
+powering off. It prefers `/dev/tape` and uses direct PIO when the tiny initramfs has no devtmpfs. That
+is the smallest real end-to-end harness for this image.
 
 ```
 musl-gcc -static -Os -o init init.c && strip init

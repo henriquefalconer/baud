@@ -276,6 +276,9 @@ mod tests {
         .unwrap();
 
         fs::create_dir_all(root.join("scripts/kconfig")).unwrap();
+        fs::create_dir_all(root.join("drivers")).unwrap();
+        fs::write(root.join("drivers/Kconfig"), "mainmenu \"stub\"\n").unwrap();
+        fs::write(root.join("drivers/Makefile"), "").unwrap();
         let merge_script = root.join("scripts/kconfig/merge_config.sh");
         fs::write(
             &merge_script,
@@ -349,7 +352,20 @@ mod tests {
         })
         .expect("stub-tree guest image build failed");
 
-        // 1. The kernel steps ran, in spec §4.5's order, and nothing else ran.
+        // 1. The real guest endpoint is installed before Kconfig resolves the custom symbol.
+        assert!(kernel_dir.path().join("drivers/baud/baud_tape.c").exists());
+        assert!(
+            fs::read_to_string(kernel_dir.path().join("drivers/Kconfig"))
+                .unwrap()
+                .contains("source \"drivers/baud/Kconfig\"")
+        );
+        assert!(
+            fs::read_to_string(kernel_dir.path().join("drivers/Makefile"))
+                .unwrap()
+                .contains("obj-y += baud/")
+        );
+
+        // 2. The kernel steps ran, in spec §4.5's order, and nothing else ran.
         let log = fs::read_to_string(kernel_dir.path().join("build-steps.log")).unwrap();
         let steps: Vec<&str> = log.lines().collect();
         assert_eq!(steps.len(), 5, "unexpected step count in:\n{log}");

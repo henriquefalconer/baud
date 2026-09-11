@@ -18,7 +18,7 @@
 // Linux-only, like every route calling into `baud_multiverse::linux`/`baud_fingerprint::capture`.
 
 use super::run_kvm::PeriodicTimerSpec;
-use axum::Json;
+use axum::{http::StatusCode, Json};
 use baud_fingerprint::Fingerprint;
 use baud_multiverse::linux::Multiverse;
 use serde::Deserialize;
@@ -80,20 +80,34 @@ fn default_times() -> u32 {
     2
 }
 
-pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value> {
+type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn bad_request(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"ok": false, "error": message.into()})),
+    )
+}
+
+fn server_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"ok": false, "error": message.into()})),
+    )
+}
+
+pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> ApiResult {
     let tape = match hex_decode(&body.tape_hex) {
         Some(t) => t,
-        None => {
-            return Json(json!({ "ok": false, "error": "tape_hex must be a valid hex string" }))
-        }
+        None => return Err(bad_request("tape_hex must be a valid hex string")),
     };
     let expected_banner = match &body.expected_banner_hex {
         Some(hex) => match hex_decode(hex) {
             Some(bytes) => Some(bytes),
             None => {
-                return Json(
-                    json!({ "ok": false, "error": "expected_banner_hex must be a valid hex string" }),
-                )
+                return Err(bad_request(
+                    "expected_banner_hex must be a valid hex string",
+                ))
             }
         },
         None => None,
@@ -102,10 +116,9 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
         Some(path) => match std::fs::read(path) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
-                return Json(json!({
-                    "ok": false,
-                    "error": format!("failed to read initramfs_path '{path}': {e}"),
-                }))
+                return Err(bad_request(format!(
+                    "failed to read initramfs_path '{path}': {e}"
+                )))
             }
         },
         None => None,
@@ -114,9 +127,9 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
     let disk_path = match &body.virtio_blk_image_path {
         Some(path) => {
             if !std::path::Path::new(path).is_file() {
-                return Json(
-                    json!({ "ok": false, "error": format!("virtio_blk_image_path is not a readable file: {path}") }),
-                );
+                return Err(bad_request(format!(
+                    "virtio_blk_image_path is not a readable file: {path}"
+                )));
             }
             Some(PathBuf::from(path))
         }
@@ -148,12 +161,12 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
         )
     })
     .await
-    .expect("verify/fingerprint task panicked");
+    .map_err(|error| server_error(format!("verify/fingerprint task failed: {error}")))?;
 
     match result {
         Ok((fingerprints, divergence)) => {
             let verified = divergence.is_none();
-            Json(json!({
+            Ok(Json(json!({
                 "ok": verified,
                 "verified": verified,
                 "times": times,
@@ -169,9 +182,9 @@ pub async fn fingerprint(Json(body): Json<VerifyFingerprintBody>) -> Json<Value>
                 } else {
                     "DETERMINISM VIOLATION: boots produced diverging fingerprints".to_string()
                 },
-            }))
+            })))
         }
-        Err(e) => Json(json!({ "ok": false, "error": e })),
+        Err(e) => Err(server_error(e)),
     }
 }
 

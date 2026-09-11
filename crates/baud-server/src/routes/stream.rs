@@ -113,7 +113,7 @@ pub async fn list_frames(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Query(q): Query<FramesQuery>,
-) -> Json<Value> {
+) -> Result<Json<Value>, (axum::http::StatusCode, Json<Value>)> {
     let rows = sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>)>(
         "SELECT node, step, width, height, format, hash
          FROM frame_records
@@ -148,9 +148,12 @@ pub async fn list_frames(
                     })
                 })
                 .collect();
-            Json(json!({ "run_id": run_id, "frames": frames }))
+            Ok(Json(json!({ "run_id": run_id, "frames": frames })))
         }
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Err(e) => Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("db error: {e}") })),
+        )),
     }
 }
 
@@ -420,9 +423,7 @@ async fn render_frames_from_real_replay(
     };
     let virtio_blk_meta = virtio_blk.map(|(_, v, m)| (v, m));
     let kernel_path_buf = PathBuf::from(&kernel_path);
-    // Same client-disconnect cancellation as `/run/kvm`: a replay is a full KVM boot, so an
-    // abandoned `POST /stream/:run_id/render` must not leave one running (see
-    // `run_kvm::CancelGuard`).
+    // Same client-disconnect cancellation as `/run/kvm`: a replay is a full KVM boot.
     let cancel = crate::routes::run_kvm::CancelGuard::new();
     let cancel_flag = cancel.flag();
     let records = tokio::task::spawn_blocking(move || {
@@ -443,7 +444,7 @@ async fn render_frames_from_real_replay(
         )
     })
     .await
-    .expect("stream/render replay task panicked");
+    .map_err(|error| json!({ "error": format!("replay task failed: {error}") }))?;
     drop(cancel); // held across the `.await` above on purpose — that is the whole mechanism
 
     let records = match records {
@@ -539,8 +540,6 @@ async fn render_frames_from_real_restore(
         }
     };
     // Keep the ownership guard across the blocking restore/replay just like the reboot path.
-    // Branch and periodic-timer loops poll the same Multiverse cancellation flag, so a dropped
-    // render request cannot leave a restored VM running after its client is gone.
     let cancel = crate::routes::run_kvm::CancelGuard::new();
     let cancel_flag = cancel.flag();
     let records = tokio::task::spawn_blocking(move || -> Result<Vec<baud_proto::Msg>, String> {
@@ -593,7 +592,7 @@ async fn render_frames_from_real_restore(
         Ok(records)
     })
     .await
-    .expect("stream/render restore task panicked");
+    .map_err(|error| json!({ "error": format!("restore task failed: {error}") }))?;
     drop(cancel);
 
     let records = match records {

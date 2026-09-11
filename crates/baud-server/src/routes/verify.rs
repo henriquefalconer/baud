@@ -8,7 +8,7 @@
 //   GET  /verify/observation   → (stub, M7) cross-check syscall log vs eBPF
 
 use crate::AppState;
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use baud_proto::{Observation, Value as ProbeValue};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -405,17 +405,26 @@ pub async fn determinism_poisoned(
 pub async fn observation(
     State(state): State<AppState>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
-) -> Json<Value> {
-    // Ensure run exists
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // A missing run is a client error. Do not return HTTP 200 with an error body because the CLI
+    // maps transport status to its stable exit contract.
     let run_exists = sqlx::query_as::<_, (String,)>("SELECT id FROM runs WHERE id = ?")
         .bind(&run_id)
         .fetch_optional(&state.db)
         .await
-        .unwrap_or(None)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": format!("database error: {error}")})),
+            )
+        })?
         .is_some();
 
     if !run_exists {
-        return Json(json!({ "ok": false, "error": format!("run not found: {run_id}") }));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": format!("run not found: {run_id}") })),
+        ));
     }
 
     // Fetch plane-1: syscall records from supervisor (untyped)
@@ -426,7 +435,12 @@ pub async fn observation(
     .bind(&run_id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": format!("database error reading syscall records: {error}")})),
+        )
+    })?;
 
     let syscall_records: Vec<baud_proto::SyscallRecord> = syscall_rows
         .iter()
@@ -453,7 +467,12 @@ pub async fn observation(
     .bind(&run_id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": format!("database error reading eBPF records: {error}")})),
+        )
+    })?;
 
     // Build a TracingSession from the stored eBPF records (now tuples: node, event, value, vtime, source)
     let mut session = baud_tracing::TracingSession::new(&run_id);
@@ -485,7 +504,7 @@ pub async fn observation(
     } else {
         "fallback"
     };
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO observation_checks (run_id, passed, divergent_node, plane2_source, message, checked_at)
          VALUES (?, ?, ?, ?, ?, ?)"
     )
@@ -496,7 +515,13 @@ pub async fn observation(
     .bind(&result.message)
     .bind(now)
     .execute(&state.db)
-    .await;
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": format!("database error storing observation check: {error}")})),
+        )
+    })?;
 
     let plane1_map: serde_json::Map<String, Value> = result
         .plane1_counts
@@ -511,7 +536,7 @@ pub async fn observation(
 
     let exit_code = if result.passed { 0 } else { 1 };
 
-    Json(json!({
+    Ok(Json(json!({
         "ok": result.passed,
         "run_id": run_id,
         "passed": result.passed,
@@ -523,7 +548,7 @@ pub async fn observation(
         "exit_code": exit_code,
         "syscall_records_total": syscall_records.len(),
         "ebpf_records_total": ebpf_rows.len(),
-    }))
+    })))
 }
 
 // ---------------------------------------------------------------------------

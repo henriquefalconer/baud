@@ -1,0 +1,6 @@
+config BAUD_TAPE_DEVICE
+	bool "Baud tape device"
+	default y
+	help
+	  Build the deterministic baud tape character device into the guest kernel.
+	  It maps the fixed baud PIO window and exposes /dev/baud-tape.

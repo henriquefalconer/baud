@@ -13,7 +13,7 @@
 // ever builds/runs on real Linux+KVM hosts (CLAUDE.md), so there is no non-Linux fallback to write.
 
 use axum::extract::State;
-use axum::Json;
+use axum::{http::StatusCode, Json};
 use baud_snapshot_store::SnapshotStore;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -21,6 +21,22 @@ use std::path::{Path, PathBuf};
 
 use crate::state::unix_now;
 use crate::AppState;
+
+type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn request_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": message.into()})),
+    )
+}
+
+fn server_error(message: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": message.into()})),
+    )
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RunKvmBody {
@@ -411,25 +427,25 @@ fn run_loop_error(e: impl Into<baud_vcpu::RunLoopError>) -> String {
 
 /// POST /run/kvm — boot `kernel_path` (plus an optional `initramfs_path`/`periodic_timer`) and run
 /// it to its first `Hlt`/`Shutdown`.
-pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) -> Json<Value> {
+pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) -> ApiResult {
     let tape = match hex_decode(&body.tape_hex) {
         Some(t) => t,
-        None => return Json(json!({ "error": "tape_hex must be a valid hex string" })),
-    };
-    let initramfs = match &body.initramfs_path {
-        Some(path) => match read_initramfs(path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) => return Json(json!({ "error": e })),
-        },
-        None => None,
+        None => return Err(request_error("tape_hex must be a valid hex string")),
     };
     // Mapped, not read: see `open_virtio_blk_image`'s doc for why this route never puts a disk
     // image on the heap (nor a second copy of it) any more.
+    let initramfs = match &body.initramfs_path {
+        Some(path) => match read_initramfs(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => return Err(request_error(e)),
+        },
+        None => None,
+    };
     let virtio_blk_image = match &body.virtio_blk {
         Some(spec) => {
             match open_virtio_blk_image(&spec.image_path, virtio_blk_image_size_limit()) {
                 Ok(base) => Some(base),
-                Err(e) => return Json(json!({ "error": e })),
+                Err(e) => return Err(request_error(e)),
             }
         }
         None => None,
@@ -445,25 +461,23 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     let virtio_blk_meta = body.virtio_blk.as_ref().map(|s| (s.vector, s.max_exits));
     let acpi = body.acpi;
     if body.halt_console_pattern_hex.is_some() && body.run_id.is_some() {
-        return Json(json!({
-            "error": "halt_console_pattern_hex is not yet combinable with run_id persistence"
-        }));
+        return Err(request_error(
+            "halt_console_pattern_hex is not yet combinable with run_id persistence",
+        ));
     }
     if body.halt_console_pattern_hex.is_some() && periodic_timer.is_none() {
-        return Json(
-            json!({ "error": "halt_console_pattern_hex requires periodic_timer to also be set" }),
-        );
+        return Err(request_error(
+            "halt_console_pattern_hex requires periodic_timer to also be set",
+        ));
     }
     let halt_console_pattern = match &body.halt_console_pattern_hex {
         Some(hex) => match hex_decode(hex) {
             Some(bytes) if !bytes.is_empty() => Some((bytes, body.halt_max_exits_per_burst)),
-            Some(_) => {
-                return Json(json!({ "error": "halt_console_pattern_hex must not be empty" }))
-            }
+            Some(_) => return Err(request_error("halt_console_pattern_hex must not be empty")),
             None => {
-                return Json(
-                    json!({ "error": "halt_console_pattern_hex must be a valid hex string" }),
-                )
+                return Err(request_error(
+                    "halt_console_pattern_hex must be a valid hex string",
+                ))
             }
         },
         None => None,
@@ -530,6 +544,10 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                 "ok": true,
                 "console_output_hex": hex_encode(&console_output),
                 "ram_hash": ram_hash,
+                // Keep the opaque tape-device records visible to direct callers too. Persisted
+                // runs still store the same records in their journal, but hiding them here made
+                // the real guest endpoint impossible to verify through the CLI drive.
+                "tape_records": serde_json::to_value(&records).unwrap_or_else(|_| json!([])),
             });
             if let Some(run_id) = &body.run_id {
                 let params = KvmBootParams {
@@ -552,9 +570,9 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                     Err(e) => response["persist_error"] = json!(e),
                 }
             }
-            Json(response)
+            Ok(Json(response))
         }
-        Err(e) => Json(json!({ "error": e })),
+        Err(e) => Err(server_error(e)),
     }
 }
 

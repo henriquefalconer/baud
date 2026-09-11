@@ -3176,3 +3176,215 @@ The ZFS masks had no effect and are reverted. A concrete wiring bug is now found
 The corrected timer vector moves Ubuntu past the earlier ZFS stall, but the guest still stops after `Freeing unused kernel memory` without reaching virtio-blk queue setup or `ubuntu login:`. The frame HTTP-status fix and restore/render cancellation ownership fix are green in focused tests. The exact gate still fails to complete because H9 is not proven, so the selected build batch remains incomplete and no DONE labels are claimed.
 
 The required foreground `bash drive/gate.sh` run completed in 8m15s: 24 units passed, H9 failed at the post-memory-freeing guest stall, and `pkg-build-cli` failed during the real image build after Kconfig resolution. Workspace tests, clippy, and the other drive scripts passed. The isolated package drive reproduced the image-build failure. No pending item is marked DONE.
+
+## 2026-09-11T01:44:54 UTC (58min) - Session usage — ralph-26 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6519 (summed from 5 session transcripts: main $0.5704 · subagents $0.0815)
+- tokens input 973,153 · cache-read 20,317,184 · cache-write 0 · output 42,449 · reasoning 17,649
+- context 256,423 tok peak of 272K (94%) across 148 inference calls, 1 drop(s), final 104,216, resumed 1x
+- models gpt-5.6-luna $0.6519 (in 973,153 / out 60,098 / cache-read 20,317,184)
+- subagents (4) pi process x4
+  - delegate-8f5591770dfd0a282126cd76f54aace2: gpt-5.6-luna $0.0245, 5 inference calls
+  - delegate-0dbe7999bed4e01a6d3dabfeaf2d873f: gpt-5.6-luna $0.0258, 6 inference calls
+  - delegate-db42a5e8dc6fb71da39638dc124caa02: gpt-5.6-luna $0.0265, 5 inference calls
+  - 01a08e04-5f45-7277-861c-b6db74fa7e63: gpt-5.6-luna $0.0047, 2 inference calls
+- transcript: ralph/.run/20260910T073659Z/038-ralph-26.json
+- transcript: ralph/.run/20260910T073659Z/039-ralph-26.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 27 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and then implementing and validating the selected batch end to end.
+
+Chose these 7 items: G2 reproducible image pipeline; G2 guest tape endpoint and harness; G3 write-set-scaled branching; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof — they are all 7 pending entries in todo-build.md.
+
+Starting G2 reproducible image pipeline. Inspecting current implementation and tests before changing code.
+
+The repository already contains substantial implementations, but the remaining queue is broad; checking acceptance drives and current failures before making targeted fixes.
+
+Launching the single build/test subagent while I inspect the remaining integration seams.
+
+Searching advertised CLI commands against server route registration and checking image/tape integration seams.
+
+The prior iteration isolated two hard acceptance failures: pkg-build-cli stops in real Kconfig resolution, and H9 stops after freeing kernel memory; tracing both root causes through the current builder and Ubuntu image before edits.
+
+The package failure was a shared-source-tree race: the CLI drive copies while another real build can run mrproper in the same external tree, producing missing kernel files. I am hardening the pipeline to reject/avoid mutable-source concurrency rather than treating the compiler failure as a guest-image result.
+
+Added the real guest tape kernel endpoint and wired kernel builds to install it into disposable trees before Kconfig resolution; also serialized concurrent Kbuild callers and corrected image-build server failures to HTTP 500. Now checking compile/test feedback before expanding the same acceptance path.
+
+Formatting exposed only style changes; running the package and server checks now to catch driver embedding, lock, and HTTP error-path compilation issues.
+
+Package/server/CLI checks compile cleanly. Running package unit tests to validate the new guest-driver injection against the existing stub pipeline.
+
+The guest endpoint now exposes the spec-required /dev/tape name, ships a stable ioctl header, and the linux-guest init performs one tape-paced probe before shutdown. Compiling the real init and checking the integrated source tree next.
+
+The real init compiles statically and all affected Rust crates check cleanly. Running tape-device and multiverse endpoint tests now, then I will address any integration failures rather than marking the item from unit-only evidence.
+
+The real KVM route now rejects malformed inputs with 400 and execution/persistence failures with 500 instead of returning HTTP 200 error JSON; the first compile caught and I fixed the Result wrapping.
+
+Authentication now honors BAUD_AUTH_TOKEN_FILE with the secret contract’s single trailing-newline strip and fails closed when the file is unreadable; compiling the lifecycle path before adding client-side file forwarding.
+
+CLI HTTP, SSE, and shell WebSocket clients now share BAUD_AUTH_TOKEN_FILE handling, so authenticated lifecycle is consistent across transport types. Running affected unit suites next.
+
+The combined Cargo filter was invalid because Cargo accepts one test-name filter; rerunning the affected package suites with a valid workspace selection.
+
+The server route suite is green at 57 tests, including real KVM branches and cancellation. Because the checked-in linux-guest initramfs must match the new /dev/tape harness, rebuilding that artifact reproducibly before broader validation.
+
+The checked-in initramfs now contains the tape-paced /init; the package/server unit suites remain green. Running the real two-independent-tree image reproducibility proof with the newly injected built-in driver.
+
+The first real reproducibility run reached Kconfig and exposed the actual blocker: Linux x86_64 hard-defines CONFIG_HPET_TIMER=y, so the existing lint rejected every real baud guest despite the documented no-HPET contract. I am fixing the pipeline at the kernel Kconfig source, not weakening the lint.
+
+The real build blocker is fixed by injecting a baud-specific Kconfig condition that disables Linux’s x86_64 HPET hard-default when CONFIG_BAUD_TAPE_DEVICE is enabled; the lint remains strict and manual build instructions now apply the same source change.
+
+The real kernel build compiled the injected driver and found one Linux API mismatch, no_llseek on this kernel is noop_llseek; fixed the driver and rerunning the same reproducibility proof from the failed build trees.
+
+The injected driver now compiles and the first real bzImage completed, but the two-build proof exceeded 600 seconds during its second independent full compile. I am checking CPU availability and will increase only the test’s parallel build setting, not relax acceptance.
+
+## 2026-09-11T02:24:47 UTC (40min) - Session usage — ralph-27 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4661 (summed from 6 session transcripts: main $0.3580 · subagents $0.1081)
+- tokens input 849,078 · cache-read 12,585,984 · cache-write 0 · output 37,167 · reasoning 10,366
+- context 196,347 tok peak of 272K (72%) across 101 inference calls, monotonic
+- models gpt-5.6-luna $0.4661 (in 849,078 / out 47,533 / cache-read 12,585,984)
+- subagents (5) pi process x5
+  - delegate-ebf60377ba7ab7f69a6618e2ac41ca53: gpt-5.6-luna $0.0280, 7 inference calls
+  - delegate-2031d11b9cd1f11d8ee2f56885393d8f: gpt-5.6-luna $0.0261, 6 inference calls
+  - delegate-c0e44cd481d31c78f610fb8bcffaa979: gpt-5.6-luna $0.0278, 5 inference calls
+  - delegate-d1f400587df3e10231e428a74d3a4922: gpt-5.6-luna $0.0208, 4 inference calls
+  - 01a08e25-01c4-7043-873e-bee12f37eb7d: gpt-5.6-luna $0.0053, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/040-ralph-27.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 27 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected item through its real implementation and verification path.
+
+Starting repository and specification review.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 pending items in todo-build.md.
+
+Reviewing existing worktree changes before selecting implementation slices.
+
+Launching the single build/test subagent while I inspect the remaining live acceptance seams.
+
+The checked-in Ubuntu build notes confirm the pinned 4.15 kernel uses LOCAL_TIMER_VECTOR 0xee; correcting H9 to the measured vector before the next real boot, while keeping the generic Linux default at 0xec.
+
+Added the declarative Ubuntu target manifest, corrected H9 to the pinned 4.15 timer vector 0xee, expanded the canonical systemd mask set, and made fingerprint/list-frame failure paths return non-success HTTP responses instead of HTTP 200 errors.
+
+Running the single post-change build/test validation subagent after the API and Ubuntu target fixes.
+
+Focused validation is green: baud-server 57 tests, baud-packages 45 tests, baud-tape-device 25 tests, baud-snapshot 44 tests, baud-cli 1 test, and baud-multiverse 237 tests. Starting the exact repository gate now; its real-image and Ubuntu phases will determine whether the selected batch can close.
+
+The gate exposed three concrete integration issues: the checked-in initramfs manifest hash was stale, M9 still expected invalid KVM requests to return HTTP 200 JSON, and H9 lacked fetched Ubuntu artifacts. The first two are fixed; fetching the pinned Ubuntu artifacts now before rerunning H9.
+
+Pinned Ubuntu artifacts are now fetched, verified, clean, and available under ~/.baud-tmp/ubuntu-1804. Running H9 standalone with the corrected 0xee vector and full login banner requirement.
+
+H9 with the pinned 500k period still stalled after udev, and H9.4/H9.5 were also missing timer injection entirely. I reduced the period to 50k for the measured Ubuntu path and wired the same timer into every independent fingerprint capture before retrying.
+
+The 50k timer increases Ubuntu progress through udev but still stalls before virtio-blk/login, so H9 remains genuinely open rather than being relabeled. Fixed the gate manifest hash and updated M9 to accept structured HTTP errors without requiring HTTP 200; rerunning those real drives in isolation next.
+
+M9 now passes end to end after its negative cases were updated for real HTTP 400 responses. H6 remains a host-timing flake under current load and passes in one isolated run but missed its strict 0.85 threshold on retries. H9 still reaches systemd-udevd with the measured 50k timer but never reaches virtio-blk/login; the PCI probe remains the root blocker. Selected items are therefore not DONE and no completion block or DONE labels are being written.
+
+## 2026-09-11T03:18:32 UTC (54min) - Session usage — ralph-27 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5325 (summed from 7 session transcripts: main $0.4145 · subagents $0.1179)
+- tokens input 927,296 · cache-read 15,373,824 · cache-write 0 · output 32,934 · reasoning 9,731
+- context 206,532 tok peak of 272K (76%) across 110 inference calls, monotonic
+- models gpt-5.6-luna $0.5325 (in 927,296 / out 42,665 / cache-read 15,373,824)
+- subagents (6) pi process x6
+  - delegate-1036948706cfbcdea23cfa3593fe9357: gpt-5.6-luna $0.0285, 7 inference calls
+  - delegate-28d6da4ac8f94632a57ab6234dd5af76: gpt-5.6-luna $0.0255, 4 inference calls
+  - delegate-55d7a9e856a47a5ec360f29fc6ca5060: gpt-5.6-luna $0.0269, 4 inference calls
+  - delegate-530a21048f21dc469a14aec49c1646d4: gpt-5.6-luna $0.0237, 6 inference calls
+  - 01a08e49-4378-71a3-a869-e21ca739e366: gpt-5.6-luna $0.0068, 5 inference calls
+  - 01a08e4d-5f63-7776-960e-de3e6b226734: gpt-5.6-luna $0.0065, 4 inference calls
+- transcript: ralph/.run/20260910T073659Z/041-ralph-27.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 28 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and then implementing and validating the selected batch end to end.
+
+Studying the eight queued outcomes and searching existing implementations before locking the batch.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 pending items.
+
+Subagent review confirms G3 still lacks live memfd/UFFD integration, G2 lacks the spec-driven Buildroot/Nix pipeline and generic guest harness, and G5 lacks a shared durable ownership lease; keeping these items open while the required gate runs.
+
+Unified stream render and restore cancellation with the persisted run registry token, so aborts now reach replay/branch work instead of creating isolated guards; the build subagent is validating this change.
+
+Replay now uses the same registered run cancellation token as KVM and stream rendering, extending abort/disconnect cleanup across another real blocking path; checking the gate for compile and route regressions.
+
+The full gate remains in progress under the single verification subagent; no queue item is being relabeled while G3, G2 pipeline, and H9 real userspace acceptance are still unproven.
+
+Focused baud-server tests compile but the full suite exceeded ten minutes because real-KVM route tests run serially under current contention; this is a failing verification result requiring root-cause work, not a pass.
+
+The required gate run was not green: H9 still stalls after `Freeing unused kernel memory`, while the post-change focused server suite exceeded ten minutes under real-KVM contention; the selected batch remains open and no DONE markers or commit are justified.
+
+Running the required gate in the foreground now, as requested, before deciding the iteration status.
+
+Focused regressions are fixed: M13 and both virtio-rng replay/branch drives pass after removing the unsafe persistent-token reuse; the foreground full gate still failed at H9 and timed out before completion.
+
+## 2026-09-11T04:16:32 UTC (58min) - Session usage — ralph-28 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6020 (summed from 8 session transcripts: main $0.4778 · subagents $0.1242)
+- tokens input 908,164 · cache-read 18,790,400 · cache-write 0 · output 37,164 · reasoning 12,235
+- context 172,262 tok peak of 272K (63%) across 151 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.6020 (in 908,164 / out 49,399 / cache-read 18,790,400)
+- subagents (7) pi process x7
+  - delegate-936115a449fe926ee53c6e906175a0bc: gpt-5.6-luna $0.0236, 5 inference calls
+  - delegate-af50ee56cf1d9c994623964177f1d0c0: gpt-5.6-luna $0.0225, 4 inference calls
+  - delegate-de68cc322fc25420dd57a118b4c8b7ed: gpt-5.6-luna $0.0204, 5 inference calls
+  - delegate-7779f1c33258cc179abf1bfa3b85bf74: gpt-5.6-luna $0.0253, 4 inference calls
+  - 01a08e7a-b14d-73c0-a4c6-af147bf1cda3: gpt-5.6-luna $0.0039, 2 inference calls
+  - delegate-ff8e25f0388dcd2d7419ff9f915eae0f: gpt-5.6-luna $0.0269, 5 inference calls
+  - 01a08e7e-3639-7542-bc36-9ea05cc1e74d: gpt-5.6-luna $0.0015, 2 inference calls
+- transcript: ralph/.run/20260910T073659Z/042-ralph-28.json
+- transcript: ralph/.run/20260910T073659Z/043-ralph-28.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 29 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items to address, studying the specifications, and tracing each selected item through the real implementation and verification path.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 of 7 pending items.
+
+Running focused package, tape, snapshot, server, and CLI tests against the inherited implementation before extending it.
+
+Starting G2 guest tape endpoint. The current initramfs may not have devtmpfs, so I am wiring the documented direct PIO fallback and adding a regression check before the next image boot.
+
+Rebuilding the checked-in minimal guest initramfs from the updated PIO fallback and checking its real byte identity.
+
+The fallback binary is rebuilt and archived; running the maintained real guest boot/tape drive to exercise the updated endpoint through KVM.
+
+Starting G5 route coverage. Observation verification still swallowed database failures and returned HTTP 200 error JSON; I am converting that path to structured non-success responses before adding focused assertions.
+
+Observation verification now fails closed on missing runs and every database read/write, preserving stable HTTP semantics; formatting and server tests follow.
+
+The first combined Cargo filter was invalid because Cargo accepts one test-name filter; rerunning the full server suite with the corrected command.
+
+The real pkg boot drive is green with the updated /init, including the direct PIO fallback and clean poweroff; server route hardening is next in the focused suite.
+
+The single validation worker exited after launching a nested task, so it produced no gate result. I am running the mandated gate directly in this session now; any failure will drive further root-cause work.
+
+H9 trace shows Ubuntu sees the virtio-blk function but stops before BAR assignment. I am forcing Linux 4.15 to use legacy config mechanism and assign the bus resources, then running the bounded real H9 drive to test that root cause.
+
+The guest harness now emits a valid empty-key PROBE in both transports, and the CLI boot drive asserts the returned opaque record instead of only checking console output. Running that end-to-end proof now.
+
+The tape proof is green: a real KVM boot now returns an Observe record with the supplied byte, and the manifest hash matches the regenerated artifact. H9 still fails at Ubuntu PCI resource setup, so I am preserving that root-cause evidence while running the final required gate attempt.
+
+The final gate again passed warm-up, clippy, workspace tests, H5, and every completed drive including the new tape assertion, but H9 remained in Ubuntu before login and the 600-second gate limit expired. I am recording the incomplete H9 status rather than claiming a green gate.
+
+Checkpoint: preserved the real guest tape fallback and record assertion, manifest identity update, fail-closed observation/image/lifecycle routes, and the H9 PCI diagnostic changes. The selected queue remains open because write-set UFFD integration, the pinned production image pipeline, full lifecycle coverage, and Ubuntu login proof still lack green end-to-end acceptance.

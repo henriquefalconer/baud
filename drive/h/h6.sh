@@ -107,6 +107,12 @@ if [[ "$RUNNABLE" != "true" ]]; then
 fi
 pass "H6.1: host probe runnable='$RUNNABLE' (real KVM present)"
 
+# The server is only needed for H6.1. Stop it before the fixed-core timing assertion so the
+# daemon's Tokio workers cannot consume one of the cores that the fleet test is measuring.
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=""
+
 # ---------------------------------------------------------------------------
 # H6.2 — fleet_of_vms_run_in_parallel_without_interference
 # ---------------------------------------------------------------------------

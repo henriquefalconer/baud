@@ -199,7 +199,18 @@ fn build_router(state: AppState) -> Router {
 /// unauthenticated mode when the variable is absent, while deployed and end-to-end authenticated
 /// runs get one check covering REST, SSE, and WebSocket routes alike.
 async fn require_configured_token(request: Request, next: Next) -> Response {
-    let expected = std::env::var_os("BAUD_AUTH_TOKEN");
+    let expected = match configured_auth_token() {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(%error, "configured authentication token is unreadable");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "application/json")],
+                r#"{"error":"authentication configuration unavailable"}"#,
+            )
+                .into_response();
+        }
+    };
     let identity_seed = std::env::var("BAUD_IDENTITY_SEED_B64").ok();
     if expected.is_none() && identity_seed.is_none() {
         return next.run(request).await;
@@ -207,7 +218,6 @@ async fn require_configured_token(request: Request, next: Next) -> Response {
     if request.uri().path() == "/health" {
         return next.run(request).await;
     }
-    let expected = expected.map(|value| value.to_string_lossy().into_owned());
     let supplied = request
         .headers()
         .get(AUTHORIZATION)
@@ -226,6 +236,17 @@ async fn require_configured_token(request: Request, next: Next) -> Response {
         )
             .into_response()
     }
+}
+
+fn configured_auth_token() -> Result<Option<String>, std::io::Error> {
+    if let Some(path) = std::env::var_os("BAUD_AUTH_TOKEN_FILE") {
+        let mut token = std::fs::read_to_string(path)?;
+        if token.ends_with('\n') {
+            token.pop();
+        }
+        return Ok(Some(token));
+    }
+    Ok(std::env::var("BAUD_AUTH_TOKEN").ok())
 }
 
 fn authorization_matches(
