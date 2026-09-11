@@ -635,6 +635,25 @@ impl DeviceBus {
         self.virtio_pci_blk.as_ref()
     }
 
+    /// Check the block queue producer cursor without consuming a request. This lets the Linux
+    /// run loop notice work even when a legacy guest's queue-notify write did not produce a
+    /// separate userspace exit.
+    #[cfg(target_os = "linux")]
+    pub fn virtio_blk_has_pending<M: GuestMemoryBackend>(&mut self, mem: &M) -> bool {
+        let Some(transport) = self.virtio_pci_blk.as_ref() else {
+            return false;
+        };
+        let Some(config) = transport.queue_ring_config(0) else {
+            return false;
+        };
+        if self.virtio_blk_queue.as_ref().map(SplitVirtqueue::config) != Some(config) {
+            self.virtio_blk_queue = Some(SplitVirtqueue::new(config));
+        }
+        self.virtio_blk_queue
+            .as_ref()
+            .is_some_and(|queue| queue.has_available(mem).unwrap_or(false))
+    }
+
     /// [`Self::service_virtio_rng`]'s counterpart for the block device: drain every virtio_blk_req
     /// chain posted to `virtio_pci_blk`'s sole queue since the last call, servicing each against
     /// the backing store (`crate::virtio_blk::service_request`) — read/write sector data, an

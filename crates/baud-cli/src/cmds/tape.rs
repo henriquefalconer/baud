@@ -70,6 +70,11 @@ pub enum TapeAction {
         /// Tape ID
         id: String,
     },
+    /// Get the tape's live preview endpoint
+    Endpoint {
+        /// Tape ID
+        id: String,
+    },
 }
 
 pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
@@ -165,6 +170,10 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
         }
         TapeAction::ProbeCaps { id } => {
             let v = c.get(&format!("/tapes/{id}/probe-caps")).await?;
+            print_value(&v, json);
+        }
+        TapeAction::Endpoint { id } => {
+            let v = c.get(&format!("/tapes/{id}/endpoint")).await?;
             print_value(&v, json);
         }
     }

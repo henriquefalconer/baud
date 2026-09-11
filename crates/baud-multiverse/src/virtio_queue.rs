@@ -104,6 +104,20 @@ impl SplitVirtqueue {
         self.config
     }
 
+    /// Report whether the driver has posted work not yet consumed by this device cursor.
+    /// Reading the producer index is side-effect free, so the run loop can use this deterministic
+    /// fallback when a legacy guest posts a request without a separate notify exit.
+    pub(crate) fn has_available<M: GuestMemoryBackend>(
+        &self,
+        mem: &M,
+    ) -> Result<bool, VirtqueueError> {
+        if self.config.num == 0 {
+            return Ok(false);
+        }
+        let driver_idx = self.read_u16(mem, self.config.driver + AVAIL_IDX_OFFSET)?;
+        Ok(driver_idx != self.next_avail_idx)
+    }
+
     fn read_u16<M: GuestMemoryBackend>(&self, mem: &M, addr: u64) -> Result<u16, VirtqueueError> {
         let mut buf = [0u8; 2];
         mem.read_slice(&mut buf, GuestAddress(addr))

@@ -52,6 +52,7 @@ impl RunOwnership {
         self.phase != RunPhase::Cancelling
             && !self.cancellation.load(Ordering::SeqCst)
             && self.phase == RunPhase::Running
+            && self.resources.is_empty()
     }
 
     pub fn release_resource(&mut self, resource: &str) {
@@ -65,8 +66,10 @@ impl RunOwnership {
     }
 
     pub fn finish(&mut self) -> bool {
-        if self.cancellation.load(Ordering::SeqCst) {
-            self.phase = RunPhase::Cancelling;
+        if self.cancellation.load(Ordering::SeqCst) || !self.resources.is_empty() {
+            if self.cancellation.load(Ordering::SeqCst) {
+                self.phase = RunPhase::Cancelling;
+            }
             return false;
         }
         self.phase = RunPhase::Terminal;
@@ -349,6 +352,8 @@ mod ownership_tests {
         owner.mark_running();
         owner.release_resource("image-map");
         assert_eq!(owner.resources, vec!["kvm-vm"]);
+        assert!(!owner.can_report_success());
+        owner.release_resource("kvm-vm");
         assert!(owner.can_report_success());
         assert!(owner.finish());
         assert_eq!(owner.phase, RunPhase::Terminal);

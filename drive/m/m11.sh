@@ -222,11 +222,14 @@ LEGACY_RUN_ID=$(echo "$LEGACY_RUN_OUT" | python3 -c "import sys,json; print(json
 HASH=$(python3 -c "import hashlib; print(hashlib.blake2b(b'm11-legacy-frame', digest_size=32).hexdigest())")
 curl -sf -X POST "$SRV/runs/$LEGACY_RUN_ID/frames" -H "Content-Type: application/json" \
     -d "{\"node\": 0, \"step\": 0, \"width\": 4, \"height\": 4, \"format\": \"indexed8\", \"hash\": \"$HASH\"}" > /dev/null
-LEGACY_RENDER=$(curl -sf -X POST "$SRV/runs/$LEGACY_RUN_ID/stream/render" -H "Content-Type: application/json" \
+LEGACY_RENDER_WITH_STATUS=$(curl -s -w '\n%{http_code}' -X POST "$SRV/runs/$LEGACY_RUN_ID/stream/render" -H "Content-Type: application/json" \
     -d "{\"format\": \"qoi-seq\", \"out\": \"$OUT_LEGACY\"}")
+LEGACY_RENDER=$(echo "$LEGACY_RENDER_WITH_STATUS" | sed '$d')
+LEGACY_STATUS=$(echo "$LEGACY_RENDER_WITH_STATUS" | tail -n1)
 LEGACY_ERROR=$(echo "$LEGACY_RENDER" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error', ''))")
+[[ "$LEGACY_STATUS" == "404" ]] || fail "M11.5: hash-only render must return HTTP 404, got $LEGACY_STATUS: $LEGACY_RENDER"
 echo "$LEGACY_ERROR" | grep -q "no replayable KVM image" || fail "M11.5: hash-only render was not rejected: $LEGACY_RENDER"
-pass "M11.5: pre-pivot hash-only frames fail closed instead of fabricating pixels"
+pass "M11.5: pre-pivot hash-only frames fail closed with HTTP 404 instead of fabricating pixels"
 
 curl -sf "$SRV/health" > /dev/null || fail "baud-server is no longer healthy at the end of the run"
 pass "baud-server remained healthy throughout"

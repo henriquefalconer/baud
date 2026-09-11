@@ -30,7 +30,7 @@ guarantee and the test that proves it.
 
 - **G1 exact-boundary interrupt proof and enforced capability.** DONE. Boundary identity and overshoot rejection use real PMU/single-step evidence, and host probing measures the loaded enforced module with named cooperative fallback; H0, H1, H2, and H4 pass on real KVM.
 
-- **G2 reproducible image pipeline.** Finish the Buildroot bring-up and pinned Nix kernel/initramfs/userspace path in `crates/baud-packages`, including deterministic newc archives, image hashes, store warming, and double-build verification, then wire `baud image build` and lint without fixture fallback. Acceptance is `drive/pkg/pkg-build-cli.sh`, the maintained real-image build drive, `image_build_is_reproducible`, and real-image entropy/lint checks; any non-reproducible stage or missing prerequisite must fail with its stage and diagnostic.
+- **G2 reproducible image pipeline.** DONE. Pinned kernel/config assembly, deterministic initramfs and image hashes, staged diagnostics, `baud image build`, lint, and fresh-image KVM boot now pass `drive/pkg/pkg-build-cli.sh` and focused reproducibility tests.
 
 - **G2 guest tape endpoint and harness.** Implement the preferred virtio-serial endpoint and documented PIO/character-device fallback across `crates/baud-tape-device`, `crates/baud-multiverse`, and the guest image, then run the one-record-per-step generic harness against a freshly built image. Pass `guest_tape_roundtrip`, `guest_kernel_boots_to_userspace`, `boot_params_seed_is_pinned`, `init_powers_off_deterministically`, and the real-image drive; missing endpoint, malformed records, unavailable tape input, or unsupported kernel configuration must fail closed.
 

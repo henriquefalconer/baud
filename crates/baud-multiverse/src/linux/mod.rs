@@ -882,7 +882,7 @@ fn console_tail(console: &[u8]) -> String {
 /// `run_to_first_halt_with_virtio_pci_blk` each already hand-wrote inline.
 struct TickPolledDevice {
     vector: u8,
-    notify_count: fn(&Multiverse) -> Option<u64>,
+    notify_count: fn(&mut Multiverse) -> Option<u64>,
     service_running: fn(&mut Multiverse, u8) -> Result<u32, RunLoopError>,
     service_halted: fn(&mut Multiverse, u8) -> Result<u32, RunLoopError>,
 }
@@ -1901,6 +1901,12 @@ impl Multiverse {
     /// [`service_virtio_rng_interrupt`](Self::service_virtio_rng_interrupt) —
     /// [`service_virtio_blk_interrupt_while_halted`](Self::service_virtio_blk_interrupt_while_halted)
     /// is that counterpart.
+    fn virtio_blk_poll_counter(&mut self) -> Option<u64> {
+        let count = self.virtio_pci_blk()?.notify_count();
+        let pending = self.bus.virtio_blk_has_pending(&self.guest.guest_mem);
+        Some(count.saturating_add(u64::from(pending)))
+    }
+
     pub fn service_virtio_blk_interrupt(&mut self, vector: u8) -> Result<u32, RunLoopError> {
         let processed = self
             .bus
@@ -2575,7 +2581,7 @@ impl Multiverse {
         if let Some(vector) = virtio_blk_vector {
             devices.push(TickPolledDevice {
                 vector,
-                notify_count: |mv| mv.virtio_pci_blk().map(|t| t.notify_count()),
+                notify_count: Multiverse::virtio_blk_poll_counter,
                 service_running: Multiverse::service_virtio_blk_interrupt,
                 service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,
             });
@@ -2656,7 +2662,7 @@ impl Multiverse {
                 },
                 TickPolledDevice {
                     vector: virtio_blk_vector,
-                    notify_count: |mv| mv.virtio_pci_blk().map(|t| t.notify_count()),
+                    notify_count: Multiverse::virtio_blk_poll_counter,
                     service_running: Multiverse::service_virtio_blk_interrupt,
                     service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,
                 },
@@ -3626,7 +3632,7 @@ mod tests {
     fn burst_loop_services_devices_between_raw_exits() {
         HALT_THEN_MULTI_IO_SERVICE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
 
-        fn fake_notify_count(mv: &Multiverse) -> Option<u64> {
+        fn fake_notify_count(mv: &mut Multiverse) -> Option<u64> {
             Some(mv.bus.console.output().len() as u64)
         }
         fn fake_service_running(_mv: &mut Multiverse, _vector: u8) -> Result<u32, RunLoopError> {

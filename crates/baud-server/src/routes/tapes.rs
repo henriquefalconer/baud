@@ -209,6 +209,7 @@ async fn get_tape(state: &AppState, id: &str) -> ApiResult {
 // ---------------------------------------------------------------------------
 
 pub async fn start(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    require_tape_state(&state, &id, "stopped").await?;
     state
         .tape_backend
         .start(&id)
@@ -222,6 +223,7 @@ pub async fn start(State(state): State<AppState>, Path(id): Path<String>) -> Api
 // ---------------------------------------------------------------------------
 
 pub async fn stop(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    require_tape_state(&state, &id, "running").await?;
     state
         .tape_backend
         .stop(&id)
@@ -235,6 +237,7 @@ pub async fn stop(State(state): State<AppState>, Path(id): Path<String>) -> ApiR
 // ---------------------------------------------------------------------------
 
 pub async fn restore(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    require_tape_state(&state, &id, "archived").await?;
     state
         .tape_backend
         .restore(&id)
@@ -286,6 +289,29 @@ pub async fn ensure(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     }
 }
 
+async fn require_tape_state(
+    state: &AppState,
+    id: &str,
+    expected: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let current = sqlx::query_scalar::<_, String>("SELECT state FROM tapes WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| server_error(format!("db error: {e}")))?;
+    match current {
+        None => Err(not_found(format!("tape {id} not found"))),
+        Some(state) if state == "deleted" => Err(not_found(format!("tape {id} not found"))),
+        Some(state) if state == expected => Ok(()),
+        Some(state) => Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error": format!("tape {id} is not in state {expected} (state: {state})")}),
+            ),
+        )),
+    }
+}
+
 async fn update_tape_state(state: &AppState, id: &str, from: &str, to: &str) -> ApiResult {
     let now = crate::state::unix_now() as i64;
     let result =
@@ -310,6 +336,15 @@ async fn update_tape_state(state: &AppState, id: &str, from: &str, to: &str) -> 
 
 pub async fn kill(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let now = crate::state::unix_now() as i64;
+    let exists =
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM tapes WHERE id = ? AND state != 'deleted'")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| server_error(format!("db error: {e}")))?;
+    if exists.is_none() {
+        return Err(not_found(format!("tape {id} not found")));
+    }
     if let Err(e) = state.tape_backend.delete(&id).await {
         return Err(server_error(format!("backend delete failed: {e}")));
     }

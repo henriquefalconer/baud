@@ -27,6 +27,10 @@ static ssize_t baud_tape_read(struct file *file, char __user *out, size_t len,
     if (len == 0)
         return 0;
     for (i = 0; i < len; i++) {
+        /* STATUS bit 7 is the host's last-record error latch. Never let a harness
+         * continue after malformed or oversized output was rejected. */
+        if (inb(BAUD_TAPE_BASE + BAUD_TAPE_STATUS) & 0x80)
+            return i ? (ssize_t)i : -EIO;
         byte = inb(BAUD_TAPE_BASE + BAUD_TAPE_DATA);
         if (copy_to_user(out + i, &byte, 1))
             return i ? (ssize_t)i : -EFAULT;
@@ -66,7 +70,10 @@ static long baud_tape_ioctl(struct file *file, unsigned int command,
 
 static __poll_t baud_tape_poll(struct file *file, poll_table *wait)
 {
-    /* The host's tape is finite and status is deterministic. Reads never block on host I/O. */
+    /* The host's tape is finite and status is deterministic. Reads never block on host I/O.
+     * A rejected record is an error, not readable input that a harness may ignore. */
+    if (inb(BAUD_TAPE_BASE + BAUD_TAPE_STATUS) & 0x80)
+        return POLLERR | POLLOUT;
     return POLLIN | POLLOUT;
 }
 

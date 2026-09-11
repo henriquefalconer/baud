@@ -135,16 +135,29 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
             contents,
         ));
     }
-    let initramfs_bytes = build_reproducible_initramfs(&entries)?;
+    let initramfs_bytes = build_reproducible_initramfs(&entries)
+        .map_err(|e| anyhow::anyhow!("initramfs assembly stage failed: {e:#}"))?;
 
-    fs::create_dir_all(cfg.output_dir)
-        .with_context(|| format!("failed to create output dir {}", cfg.output_dir.display()))?;
+    fs::create_dir_all(cfg.output_dir).with_context(|| {
+        format!(
+            "image output stage failed creating output dir {}",
+            cfg.output_dir.display()
+        )
+    })?;
     let bzimage_path = cfg.output_dir.join("bzImage");
     let initramfs_path = cfg.output_dir.join("initramfs.cpio.gz");
-    fs::write(&bzimage_path, &bzimage_bytes)
-        .with_context(|| format!("failed to write {}", bzimage_path.display()))?;
-    fs::write(&initramfs_path, &initramfs_bytes)
-        .with_context(|| format!("failed to write {}", initramfs_path.display()))?;
+    fs::write(&bzimage_path, &bzimage_bytes).with_context(|| {
+        format!(
+            "image output stage failed writing {}",
+            bzimage_path.display()
+        )
+    })?;
+    fs::write(&initramfs_path, &initramfs_bytes).with_context(|| {
+        format!(
+            "image output stage failed writing {}",
+            initramfs_path.display()
+        )
+    })?;
 
     let (bzimage_sha256, initramfs_sha256, image_hash) =
         hash_image(&bzimage_bytes, &initramfs_bytes);
@@ -153,8 +166,12 @@ pub fn build_guest_image(cfg: &GuestImageBuildConfig) -> Result<GuestImageBuildR
     let metadata = format!(
         "{{\"format\":\"baud-guest-image-v1\",\"bzImage\":\"bzImage\",\"initramfs\":\"initramfs.cpio.gz\",\"bzimage_sha256\":\"{bzimage_sha256}\",\"initramfs_sha256\":\"{initramfs_sha256}\",\"image_hash\":\"{image_hash}\"}}\n"
     );
-    fs::write(cfg.output_dir.join("metadata.json"), metadata)
-        .with_context(|| format!("failed to write {}/metadata.json", cfg.output_dir.display()))?;
+    fs::write(cfg.output_dir.join("metadata.json"), metadata).with_context(|| {
+        format!(
+            "image metadata stage failed writing {}/metadata.json",
+            cfg.output_dir.display()
+        )
+    })?;
 
     Ok(GuestImageBuildResult {
         bzimage_path,

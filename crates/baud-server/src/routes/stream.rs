@@ -13,6 +13,7 @@ use crate::state::unix_now;
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::sse::{Event, Sse},
     Json,
 };
@@ -178,7 +179,7 @@ pub async fn render(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Json(body): Json<RenderBody>,
-) -> Json<Value> {
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let from_step = body.from_step.unwrap_or(0);
     let to_step = body.to_step;
     let fmt = body.format.as_deref().unwrap_or("y4m").to_string();
@@ -216,7 +217,7 @@ pub async fn render(
     .fetch_optional(&state.db)
     .await;
 
-    let frames: Result<Vec<(u32, u32, Vec<u8>)>, Value> = match kvm_meta {
+    let frames: Result<Vec<(u32, u32, Vec<u8>)>, (StatusCode, Json<Value>)> = match kvm_meta {
         Ok(Some((
             kernel_path,
             cmdline,
@@ -265,36 +266,45 @@ pub async fn render(
                         to_step,
                     })
                     .await
+                    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(error)))
                 }
-                _ => {
-                    render_frames_from_real_replay(RealReplayParams {
-                        kernel_path,
-                        cmdline,
-                        tape_hex,
-                        initramfs_path,
-                        periodic_timer,
-                        virtio_rng,
-                        virtio_blk,
-                        acpi,
-                        from_step,
-                        to_step,
-                    })
-                    .await
-                }
+                _ => render_frames_from_real_replay(RealReplayParams {
+                    kernel_path,
+                    cmdline,
+                    tape_hex,
+                    initramfs_path,
+                    periodic_timer,
+                    virtio_rng,
+                    virtio_blk,
+                    acpi,
+                    from_step,
+                    to_step,
+                })
+                .await
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(error))),
             }
         }
-        Ok(None) => Err(json!({
-            "error": "frame pixels are unavailable: this run has no replayable KVM image and stored hashes cannot be rendered"
-        })),
-        Err(e) => Err(json!({ "error": format!("db error: {e}") })),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "frame pixels are unavailable: this run has no replayable KVM image and stored hashes cannot be rendered"
+            })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("db error: {e}") })),
+        )),
     };
 
     let frames = match frames {
         Ok(frames) => frames,
-        Err(e) => return Json(e),
+        Err(error) => return Err(error),
     };
     if frames.is_empty() {
-        return Json(json!({ "error": "no frames found for this run/range" }));
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no frames found for this run/range" })),
+        ));
     }
     let (w, h, _) = &frames[0];
     let (w, h) = (*w, *h);
@@ -329,7 +339,7 @@ pub async fn render(
         Ok((bytes, n)) => {
             let write_result = std::fs::write(&out_path, &bytes);
             match write_result {
-                Ok(()) => Json(json!({
+                Ok(()) => Ok(Json(json!({
                     "ok": true,
                     "run_id": run_id,
                     "format": fmt,
@@ -340,16 +350,22 @@ pub async fn render(
                     "bytes_written": bytes.len(),
                     "from_step": from_step,
                     "to_step": to_step,
-                })),
-                Err(e) => Json(json!({
-                    "ok": false,
-                    "error": format!("could not write {out_path}: {e}"),
-                    "frame_count": n,
-                    "bytes_generated": bytes.len(),
-                })),
+                }))),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "ok": false,
+                        "error": format!("could not write {out_path}: {e}"),
+                        "frame_count": n,
+                        "bytes_generated": bytes.len(),
+                    })),
+                )),
             }
         }
-        Err(e) => Json(json!({ "error": e })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )),
     }
 }
 

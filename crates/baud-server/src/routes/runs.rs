@@ -19,7 +19,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -143,7 +142,7 @@ pub async fn start(
     };
     let tape_result = sqlx::query(
         "INSERT INTO tapes (id, backend, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image, created_at, updated_at)
-         VALUES (?, ?, 'running', 1, 1024, 1024, 60, 300, ?, ?, ?)"
+         VALUES (?, ?, 'creating', 1, 1024, 1024, 60, 300, ?, ?, ?)"
     )
     .bind(&tape_id)
     .bind(&body.backend)
@@ -195,16 +194,12 @@ pub async fn start(
                 .get(&run_id)
                 .cloned()
                 .expect("run token registered before acknowledgement");
-            let registry = Arc::clone(&state.run_cancellations);
             tokio::spawn(async move {
                 provision_run(&run_state, &run_id_clone, &tape_id_clone, cancellation).await;
-                // The token must cover the whole worker lifetime, but retaining it after the
-                // worker exits would make the ownership registry grow without bound and let a
-                // later abort appear to cancel work that no longer exists.
-                registry
-                    .write()
-                    .expect("run cancellation registry poisoned")
-                    .remove(&run_id_clone);
+                // The token must cover the whole worker lifetime, but retaining either registry
+                // entry after the worker exits would let a later abort target a run that no
+                // longer exists and would leak ownership metadata forever.
+                run_state.remove_run(&run_id_clone);
             });
             Ok(Json(json!({
                 "id": run_id,
@@ -293,13 +288,33 @@ async fn provision_run(
     cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        let now = crate::state::unix_now() as i64;
+        let _ = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status IN ('pending','provisioning')")
+            .bind(now)
+            .bind(run_id)
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = ? AND state = 'creating'")
+            .bind(now)
+            .bind(tape_id)
+            .execute(&state.db)
+            .await;
         state.finish_run(run_id);
         return;
     }
     let now = crate::state::unix_now() as i64;
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(_) => return,
+        Err(error) => {
+            let now = crate::state::unix_now() as i64;
+            let _ = sqlx::query("UPDATE runs SET status = 'failed', updated_at = ? WHERE id = ? AND status IN ('pending','provisioning')")
+                .bind(now)
+                .bind(run_id)
+                .execute(&state.db)
+                .await;
+            tracing::error!(%run_id, %error, "run provisioning transaction failed");
+            return;
+        }
     };
     if sqlx::query("UPDATE runs SET status = 'provisioning', updated_at = ? WHERE id = ? AND status = 'pending'")
         .bind(now).bind(run_id).execute(&mut *tx).await.is_err() { return; }
