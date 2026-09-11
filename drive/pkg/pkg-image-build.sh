@@ -41,8 +41,10 @@ cargo build -q -p baud-packages 2>&1
 # /tmp on this dev host is a small tmpfs (a few GB, RAM-backed) — nowhere near enough for two
 # copies of a kernel source tree plus their build output. Scratch onto the real disk instead
 # (tempfile::tempdir() honors $TMPDIR).
-export TMPDIR="$HOME/.baud-tmp"
-mkdir -p "$TMPDIR"
+TMP_ROOT="$HOME/.baud-tmp"
+mkdir -p "$TMP_ROOT"
+TMPDIR="$(mktemp -d "$TMP_ROOT/pkg-image-build-XXXXXX")"
+export TMPDIR
 trap 'rm -rf "$TMPDIR"' EXIT
 
 log "Running image_build_is_reproducible against $KERNEL_SRC (builds a real kernel twice, ~2-5 min)..."

@@ -3388,3 +3388,92 @@ The tape proof is green: a real KVM boot now returns an Observe record with the 
 The final gate again passed warm-up, clippy, workspace tests, H5, and every completed drive including the new tape assertion, but H9 remained in Ubuntu before login and the 600-second gate limit expired. I am recording the incomplete H9 status rather than claiming a green gate.
 
 Checkpoint: preserved the real guest tape fallback and record assertion, manifest identity update, fail-closed observation/image/lifecycle routes, and the H9 PCI diagnostic changes. The selected queue remains open because write-set UFFD integration, the pinned production image pipeline, full lifecycle coverage, and Ubuntu login proof still lack green end-to-end acceptance.
+
+## 2026-09-11T04:56:19 UTC (40min) - Session usage — ralph-29 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4767 (summed from 5 session transcripts: main $0.4020 · subagents $0.0747)
+- tokens input 519,691 · cache-read 16,844,800 · cache-write 0 · output 29,899 · reasoning 9,803
+- context 183,792 tok peak of 272K (68%) across 134 inference calls, monotonic
+- models gpt-5.6-luna $0.4767 (in 519,691 / out 39,702 / cache-read 16,844,800)
+- subagents (4) pi process x4
+  - delegate-770fb1bf984286e71a6845d54bd7a1d5: gpt-5.6-luna $0.0232, 8 inference calls
+  - delegate-b48be0748941f803146bd5516932436a: gpt-5.6-luna $0.0213, 5 inference calls
+  - delegate-18f12c24cd73fb6e0ce2ecf6d19c17ef: gpt-5.6-luna $0.0240, 5 inference calls
+  - 01a08eb3-05c1-7271-b852-da96184e9790: gpt-5.6-luna $0.0063, 5 inference calls
+- transcript: ralph/.run/20260910T073659Z/044-ralph-29.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 30 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected item through the code before implementation.
+
+Started iteration 30 and reset perf_event_paranoid; now reading the work register and specifications.
+
+Inspecting repository status and recent progress.
+
+Chose these 7 items: G2 reproducible image pipeline, G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 7 of 7 pending.
+
+Existing code already contains raw UFFD and memfd primitives but no live Multiverse integration; inspecting the branch API and package build path next.
+
+The queue audit confirms seven eligible items. Running focused snapshot, package, server, and CLI tests now to establish the current failures before changing implementation.
+
+Focused tests are green, but they expose the remaining architectural gaps: image build still needs stronger real-artifact checks, UFFD is not connected to guest RAM, and H9 remains blocked after kernel memory release.
+
+H9 artifacts are incomplete: the pinned Ubuntu directory lacks vmlinuz-generic. Running the authoritative fetch and manifest validation before debugging the guest boot.
+
+The kernel download is now present; fetch only failed at its interactive sudo filesystem validation, so I am validating the recorded artifacts and running H9 directly.
+
+Starting the real H9 drive now that all pinned Ubuntu artifacts are available; any timeout or boot failure is being treated as root-cause work.
+
+The H9 drive was using 50,000 retired branches per timer tick while examples/ubuntu/spec.toml pins 500,000; aligned all four real captures with the declared acceptance configuration and rerunning H9.
+
+The H9 run confirms the process stalls inside the resumed guest path after userspace udev output; using the documented bounded watchdog override to capture the guest RIP and distinguish slow progress from a wedge.
+
+H9 watchdog evidence identifies the stalled guest RIP as 0xffffffffc009b0da after systemd-udevd; I am recording that concrete address and now exercising the image pipeline acceptance drive independently.
+
+The real image reproducibility drive passes with two independent kernel builds and byte-identical bzImages; H9 remains the active failure. Running the maintained guest tape boot drive next.
+
+The real guest tape path now passes through the rebuilt linux-guest image and CLI/server, emitting one PROBE record; the broader preferred virtio-serial and generic harness contract remains under active implementation.
+
+The H9 acceptance configuration now matches the pinned Ubuntu spec at 500,000 retired branches per tick, and shell syntax plus whitespace checks are clean. Waiting for the sole gate worker while reviewing its remaining failures.
+
+The stalled RIP is consistent with Ubuntu userspace waiting on a kernel service after udev; checking the unmodified image under ordinary QEMU will separate image boot configuration from the deterministic VMM path.
+
+The Ubuntu kernel configuration confirms virtio and ext4 support; narrowing the post-udev stall to the guest entropy or getty transition rather than missing storage support.
+
+The pinned Ubuntu initramfs includes the stock virtio modules; I am checking whether its module-load ordering explains the post-udev wait before changing the VMM.
+
+Fixed the Ubuntu artifact fetch path for headless execution by requiring cached sudo credentials and using non-interactive loop/mount operations; documented the prerequisite in CLAUDE.md. The H9 guest stall remains a separate VMM/userspace issue.
+
+The sole validation worker has entered the exact full gate. I am leaving its test scope undisturbed while it completes, then I will use the terminal result to drive any remaining fixes.
+
+The validation worker is no longer running; repeating the exact pre-push gate in the foreground as requested.
+
+Foreground gate passed warm-up, clippy, workspace tests, H0-H7, M-series, and package drives; H9 failed immediately and phase 5 exceeded 600 seconds. Inspecting both logs and artifact state before repair.
+
+Root cause found: pkg-build-cli.sh and pkg-image-build.sh exported TMPDIR=$HOME/.baud-tmp and deleted the entire directory on EXIT, erasing H9 Ubuntu artifacts; both now clean only dedicated subdirectories. Regenerating artifacts and rerunning validation.
+
+Fetch now downloads and validates all artifacts but reports the converted ext4 rootfs dirty after tune2fs; checking whether the validator is rejecting its own preparation step before adjusting it.
+
+The validator failure was a sudo timestamp mismatch, not a dirty filesystem: direct privileged inspection reports clean. fetch.sh now accepts an explicit BAUD_SUDO_PASSWORD for headless sudo while retaining cached-sudo mode; rerunning it with the project credential.
+
+Artifact preparation now passes and package-drive cleanup no longer deletes the Ubuntu directory; rerunning real H9 with the declared default watchdog to test whether preserved artifacts allow the full path to advance.
+
+H9 now reaches the same post-udev stall with preserved artifacts, proving the earlier immediate gate failure was caused by package cleanup deleting ~/.baud-tmp, not by missing Ubuntu inputs. Running focused Rust tests and script checks after the cleanup fix.
+
+Focused post-fix tests are green, and fetch.sh now restores the external Ubuntu artifacts reliably; the foreground gate remains non-green only because H9 still stalls in Ubuntu userspace and the full package build exceeded the 600-second command limit. Recording the verified changes before commit.
+
+## 2026-09-11T06:06:18 UTC - Changes committed.
+- Fixed destructive package-drive temporary-directory cleanup and aligned H9 with the pinned Ubuntu timer period.
+- Made Ubuntu artifact preparation work in headless shells with explicit non-interactive sudo handling.
+- Files changed: AGENTS.md, drive/h/h9.sh, drive/pkg/pkg-build-cli.sh, drive/pkg/pkg-image-build.sh, examples/ubuntu/fetch.sh, ralph/progress.txt.
+- **Brief description of changes:**
+  - Package drives now remove only their private temporary directories, preserving external Ubuntu validation artifacts.
+  - H9 captures use the 500000-RCB period declared by examples/ubuntu/spec.toml.
+  - fetch.sh supports cached sudo or BAUD_SUDO_PASSWORD and reports a clear prerequisite instead of prompting.
+  - Focused package, snapshot, server, tape, syntax, and whitespace checks passed; the full gate reached H9 and package-build phases but did not finish green because Ubuntu still stalls after udev.
+---

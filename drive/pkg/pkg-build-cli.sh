@@ -42,8 +42,10 @@ cargo build -q -p baud-server -p baud-cli -p baud-packages 2>&1
 
 # /tmp on this dev host is a small tmpfs (a few GB, RAM-backed) — nowhere near enough for a
 # kernel-source-tree copy plus its build output (same finding drive/pkg/pkg-image-build.sh made).
-export TMPDIR="$HOME/.baud-tmp"
-mkdir -p "$TMPDIR"
+TMP_ROOT="$HOME/.baud-tmp"
+mkdir -p "$TMP_ROOT"
+TMPDIR="$(mktemp -d "$TMP_ROOT/pkg-build-cli-XXXXXX")"
+export TMPDIR
 SCRATCH_KERNEL="$(mktemp -d)"
 OUTPUT_DIR="$(mktemp -d)"
 INIT_DIR="$(mktemp -d)"

@@ -31,6 +31,17 @@ done
 
 log() { echo "[fetch-ubuntu] $*" >&2; }
 
+# The final raw-image checks need loop-device and mount privileges. Use a non-interactive sudo
+# invocation so a headless drive fails with an actionable prerequisite instead of hanging on a
+# terminal prompt. Prime the credential once before calling this script, as documented in CLAUDE.md.
+sudo_cmd() {
+    if [[ -n "${BAUD_SUDO_PASSWORD:-}" ]]; then
+        printf '%s\n' "$BAUD_SUDO_PASSWORD" | sudo -S -p '' "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
 mkdir -p "$OUT_DIR"
 cd "$OUT_DIR"
 
@@ -92,10 +103,10 @@ if [[ ! -f rootfs.raw ]] || [[ "ubuntu-18.04-server-cloudimg-amd64.img" -nt root
     qemu-img convert -O raw ubuntu-18.04-server-cloudimg-amd64.img rootfs.raw
 
     log "pinning mount-count/check-interval on the root partition (tune2fs -c 0 -i 0)"
-    LOOP="$(sudo losetup -fP --show rootfs.raw)"
-    trap 'sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
-    sudo tune2fs -c 0 -i 0 "${LOOP}p1" >/dev/null
-    sudo losetup -d "$LOOP"
+    LOOP="$(sudo_cmd losetup -fP --show rootfs.raw)"
+    trap 'sudo_cmd losetup -d "$LOOP" 2>/dev/null || true' EXIT
+    sudo_cmd tune2fs -c 0 -i 0 "${LOOP}p1" >/dev/null
+    sudo_cmd losetup -d "$LOOP"
     trap - EXIT
 fi
 
@@ -103,21 +114,25 @@ fi
 # point release or a dirty journal can still have perfectly valid SHA256 values and then boot a
 # different userspace than H9 claims to prove.
 log "validating Ubuntu release metadata and clean filesystem state"
-LOOP_VALIDATE="$(sudo losetup -fP --show rootfs.raw)"
+if ! sudo_cmd true 2>/dev/null; then
+    echo "Ubuntu artifact validation needs cached sudo credentials; run 'echo baud | sudo -S -v' first or set BAUD_SUDO_PASSWORD" >&2
+    exit 1
+fi
+LOOP_VALIDATE="$(sudo_cmd losetup -fP --show rootfs.raw)"
 MOUNT_VALIDATE="$(mktemp -d)"
 cleanup_validate() {
-    sudo umount "$MOUNT_VALIDATE" 2>/dev/null || true
-    sudo losetup -d "$LOOP_VALIDATE" 2>/dev/null || true
+    sudo_cmd umount "$MOUNT_VALIDATE" 2>/dev/null || true
+    sudo_cmd losetup -d "$LOOP_VALIDATE" 2>/dev/null || true
     rmdir "$MOUNT_VALIDATE" 2>/dev/null || true
 }
 trap cleanup_validate EXIT
-sudo mount -o ro "${LOOP_VALIDATE}p1" "$MOUNT_VALIDATE"
+sudo_cmd mount -o ro "${LOOP_VALIDATE}p1" "$MOUNT_VALIDATE"
 grep -Fx 'PRETTY_NAME="Ubuntu 18.04.1 LTS"' "$MOUNT_VALIDATE/etc/os-release" >/dev/null \
     || { echo "rootfs is not Ubuntu 18.04.1 LTS" >&2; exit 1; }
 grep -F 'Ubuntu 18.04.1 LTS' "$MOUNT_VALIDATE/etc/issue" >/dev/null \
     || { echo "rootfs /etc/issue does not identify Ubuntu 18.04.1 LTS" >&2; exit 1; }
-sudo umount "$MOUNT_VALIDATE"
-sudo tune2fs -l "${LOOP_VALIDATE}p1" | grep -E 'Filesystem state:[[:space:]]+clean' >/dev/null \
+sudo_cmd umount "$MOUNT_VALIDATE"
+sudo_cmd tune2fs -l "${LOOP_VALIDATE}p1" | grep -E 'Filesystem state:[[:space:]]+clean' >/dev/null \
     || { echo "rootfs filesystem is not clean" >&2; exit 1; }
 cleanup_validate
 trap - EXIT

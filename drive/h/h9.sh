@@ -129,7 +129,7 @@ FP_JSON="$("$BAUD" verify fingerprint \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
-    --periodic-timer-period-rcb 50000 \
+    --periodic-timer-period-rcb 500000 \
     --periodic-timer-vector 238 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
@@ -217,7 +217,7 @@ VM0_FP_JSON="$(BAUD_SERVER="$VM0_SRV" "$BAUD" verify fingerprint \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
-    --periodic-timer-period-rcb 50000 \
+    --periodic-timer-period-rcb 500000 \
     --periodic-timer-vector 238 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
@@ -243,7 +243,7 @@ VM1_FP_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000000 \
-    --periodic-timer-period-rcb 50000 \
+    --periodic-timer-period-rcb 500000 \
     --periodic-timer-vector 238 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
@@ -279,7 +279,7 @@ VM1_ALT_JSON="$(BAUD_SERVER="$VM1_SRV" "$BAUD" verify fingerprint \
     --cmdline "$UBUNTU_CMDLINE" \
     --initramfs "$INITRAMFS" \
     --target-rcb 100000001 \
-    --periodic-timer-period-rcb 50000 \
+    --periodic-timer-period-rcb 500000 \
     --periodic-timer-vector 238 \
     --periodic-timer-max-ticks 20000 \
     --virtio-blk-image "$ROOTFS" \
