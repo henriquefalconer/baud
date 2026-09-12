@@ -4352,3 +4352,60 @@ The short H9 run added one useful fact: Ubuntu never reads the virtio-pci I/O BA
 All 238 baud-multiverse tests, 61 server tests, and the CLI test pass after the ownership and cancellation fixes. The selected batch is not closed: G3 still lacks live KVM/UFFD integration, G5 still lacks durable agent ownership/watchdog coverage, and G6 still fails H9 at PCI probe. No DONE lines or promise are being emitted yet.
 
 The selected contract remains open. I am preserving the verified fixes and diagnostics in a commit so the next pass can continue from a clean tip instead of losing the cancellation regression fix, route ownership leases, CLI coverage, and UFFD fault-source correction.
+
+## 2026-09-12T03:17:45 UTC (1h24min) - Session usage — ralph-11 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1869148, receipt ralph/.run/20260911T161941Z/019-ralph-11.json.processes/receipt.json)
+- cost $0.6215 (summed from 7 session transcripts: main $0.4687 · subagents $0.1528)
+- tokens input 1,124,892 · cache-read 17,601,024 · cache-write 0 · output 37,110 · reasoning 12,981
+- context 236,376 tok peak of 272K (87%) across 115 inference calls, monotonic
+- models gpt-5.6-luna $0.6215 (in 1,124,892 / out 50,091 / cache-read 17,601,024)
+- subagents (6) pi process x6
+  - delegate-a6017872993b5f1da022ca826764a56b: gpt-5.6-luna $0.0262, 5 inference calls
+  - delegate-b617a5bc31fb3badb976ffc6edb14814: gpt-5.6-luna $0.0242, 5 inference calls
+  - delegate-b821e4da14e075f506064be8e6c20aad: gpt-5.6-luna $0.0283, 7 inference calls
+  - delegate-9246c44f1af430ae15fb8b6e52bce052: gpt-5.6-luna $0.0253, 6 inference calls
+  - delegate-07e694ede4d15455ea0a4c7854a5255c: gpt-5.6-luna $0.0248, 5 inference calls
+  - delegate-d649c0275bdc64e705aad2f176e3182d: gpt-5.6-luna $0.0240, 6 inference calls
+- transcript: ralph/.run/20260911T161941Z/019-ralph-11.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 12 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications and build queue, then implementing and verifying the selected batch.
+
+Chose these 5 items: G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all pending items in todo-build.md, and the queue contains fewer than ten.
+
+Starting G3 write-set-scaled branching.
+
+The repository already contains partial auth, ownership, stream, and live-CoW scaffolding. I am tracing the actual integration boundaries while the implementation pass closes concrete gaps, with no credit given for scaffolding alone.
+
+The coding pass is still active; I am checking the untouched tree for whitespace and repository hygiene before reviewing its changes.
+
+The implementation pass has found at least one tool failure and is continuing; I am keeping the selected contract intact and waiting for its concrete edits before validation.
+
+The implementation pass has made concrete edits in CLI authentication and run lifecycle handling, and its focused validation exposed dependency/test issues. It is repairing those before I review and run the mandated gate.
+
+Closed one advertised CLI gap by making stream tail --out write the real authenticated SSE byte stream to disk; now continuing the live-CoW integration.
+
+The live-CoW pass now exposes a real shared memfd/KVM registration and explicit fallback, with focused tests. Validation is running against the full gate and real H5/H9 paths before any queue item is collapsed.
+
+The validation helper handed off the gate instead of collecting its result, so I am running the required gate directly now and will repair every concrete failure before committing.
+
+The first gate run timed out after 600 seconds with all completed units green through the listed H-series and package drives; I am inspecting the gate logs, then I will rerun the full protocol with the remaining work isolated.
+
+The gate reached H9 but timed out during the real Ubuntu run after the other completed units passed; its log confirms Ubuntu reached tick 13 without login. I am rerunning the mandated gate to collect the remaining unit results, then I will fix any current-change failures.
+
+The rerun passed warm build, clippy, workspace tests, H0-H7, H5, M9-M13, and package drives; only the long real H9 process exceeded the 600-second tool limit. I am running H9 directly now to capture its terminal evidence.
+
+Direct H9 again reproduced the real blocker: Ubuntu reaches 20,114 bytes through systemd-udevd and then remains unchanged while periodic ticks continue, never reaching ubuntu login before 600 seconds. I am preserving this evidence and tracing the virtio-blk/timer handoff rather than marking G6 complete.
+
+H9 evidence points to a queued block descriptor missed during the initramfs handoff, so I changed the production virtio-blk device poll to check every exit instead of relying on the transport notify counter. I am rerunning the real Ubuntu acceptance to test that root cause.
+
+The every-exit block poll did not change the real trace: the guest never published a virtio-blk request at all, so I reverted that performance-heavy experiment. The remaining H9 evidence now points to PCI/driver discovery before queue submission, and the queue remains open.
+
+The selected items are not closed, so no DONE lines or final completion block are being written. I am committing the verified implementation work and the H9 diagnostic evidence so the next pass can continue from a clean pushed tip.

@@ -58,13 +58,10 @@
 //     post-fork CoW pages. Proven correct and independent on real hardware
 //     (`thousand_branches_are_independent_and_deterministic`, todo.md §14), at `O(total RAM)` cost
 //     per branch rather than the spec's `O(write-set)` guarantee.
-//   - NOT built: userfaultfd-based CoW branching is still not connected to the live KVM slot. The
-//     multiverse now allocates guest RAM from memfd-backed `GuestMemoryMmap` regions, which removes
-//     the old anonymous-mapping blocker. The remaining integration work is to retain and share the
-//     backing fd across branch VMs, register each UFFD-managed mapping with KVM, and service faults
-//     alongside the vCPU run loop. `branch::LiveCowBranch` keeps a separate source mapping so its
-//     `UFFDIO_CONTINUE`/`UFFDIO_COPY` calls are safe, while unsupported hosts still select the
-//     explicit full-restore mode.
+//   - Live userfaultfd CoW is available as `ExternalCowBranch`: it accepts the exact
+//     `GuestMemoryMmap` address, registers that address with KVM, and has a concurrent fault worker.
+//     Unsupported hosts return `BranchMode::FullRestore`; serialized universes still use the full
+//     restore path because their process-local memfd cannot be serialized.
 
 #![allow(dead_code)]
 
@@ -91,7 +88,8 @@ mod xsave;
 pub use branch::{BranchMode, FallbackReason};
 
 #[cfg(target_os = "linux")]
-pub use branch::LiveCowBranch;
+#[cfg(target_os = "linux")]
+pub use branch::{ExternalCowBranch, FaultWorker, LiveCowBranch};
 pub use dirty_ring::{harvest, RawDirtyGfn, DIRTY_BIT, RESET_BIT};
 pub use page_store::{PageHash, PageRef, PageStore, PAGE_SIZE};
 pub use tree::{NodeId, Tree};

@@ -101,9 +101,6 @@ pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
             out,
             hashes_only,
         } => {
-            if out.is_some() {
-                anyhow::bail!("stream tail --out is not supported for a live SSE stream; use stream render --out for replayed pixels");
-            }
             let endpoint = if json { "frames" } else { "stream/tail" };
             let mut url = format!("/runs/{run}/{endpoint}");
             let mut params = Vec::new();
@@ -117,7 +114,8 @@ pub async fn run(cmd: StreamCmd, c: &Client, json: bool) -> Result<()> {
                 url = format!("{url}?{}", params.join("&"));
             }
             if !json {
-                c.stream_get(&url).await?;
+                c.stream_get_to(&url, out.as_deref().map(std::path::Path::new))
+                    .await?;
                 return Ok(());
             }
             let resp: serde_json::Value = c.get(&url).await?;

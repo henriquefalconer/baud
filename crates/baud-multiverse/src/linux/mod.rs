@@ -43,6 +43,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::FromRawFd;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 use vm_memory::{Address, Bytes, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
@@ -96,6 +97,35 @@ pub struct BootedGuest {
     pub vm: VmFd,
     pub vcpu: VcpuFd,
     pub guest_mem: GuestMemory,
+    /// Retained so a live branch can map the same memfd. A serialized `Universe` cannot carry it.
+    pub ram_backing: Arc<baud_snapshot::backing::GuestRamBacking>,
+}
+
+/// The real shared-RAM hand-off for a branch VM. `guest_mem` is the mapping registered with KVM;
+/// `fault_worker` must stay alive while that VM runs. This low-level API is intentionally separate
+/// from `Multiverse::branch`, whose serialized-universe contract remains the explicit full-restore
+/// fallback.
+pub struct SharedCowGuestMemory {
+    pub guest_mem: GuestMemory,
+    pub fault_worker: baud_snapshot::FaultWorker,
+}
+
+impl SharedCowGuestMemory {
+    pub fn mode(&self) -> baud_snapshot::BranchMode {
+        baud_snapshot::BranchMode::SharedPrivateCow
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SharedCowError {
+    #[error("shared CoW negotiation fell back to full restore: {0:?}")]
+    Fallback(baud_snapshot::BranchMode),
+    #[error("failed to duplicate the guest-RAM backing fd: {0}")]
+    DuplicateFd(io::Error),
+    #[error("failed to map shared guest RAM: {0}")]
+    Mapping(String),
+    #[error("failed to register the shared guest-RAM mapping with KVM: {0}")]
+    Kvm(#[from] kvm_ioctls::Error),
 }
 
 /// The `Kvm::new → create_vm → [negotiate dirty ring] → register zeroed guest RAM → create_vcpu →
@@ -123,7 +153,7 @@ fn create_vm_vcpu_shell(
         baud_snapshot::linux::DirtyRing::negotiate_capability(&vm, entries)?;
     }
 
-    let guest_mem =
+    let (guest_mem, ram_backing) =
         allocate_and_register_guest_ram(&vm, layout::GUEST_RAM_SIZE, dirty_ring_entries.is_some())?;
 
     let vcpu = vm.create_vcpu(0)?;
@@ -140,6 +170,7 @@ fn create_vm_vcpu_shell(
             vm,
             vcpu,
             guest_mem,
+            ram_backing,
         },
         dirty_ring,
     ))
@@ -332,7 +363,7 @@ fn allocate_and_register_guest_ram(
     vm: &VmFd,
     ram_size: usize,
     log_dirty_pages: bool,
-) -> Result<GuestMemory, BootError> {
+) -> Result<(GuestMemory, Arc<baud_snapshot::backing::GuestRamBacking>), BootError> {
     // A memfd-backed mapping is shareable between branch VMs and is the required backing for
     // userfaultfd minor-fault CoW. Keep the file inside GuestMemory's FileOffset so it remains
     // alive for exactly as long as KVM can access the mapping.
@@ -348,6 +379,10 @@ fn allocate_and_register_guest_ram(
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.set_len(ram_size as u64)
         .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?;
+    let backing = Arc::new(
+        baud_snapshot::backing::GuestRamBacking::from_file(&file, ram_size)
+            .map_err(|e| BootError::GuestMemory(ram_size, e.to_string()))?,
+    );
     let guest_mem = GuestMemory::from_ranges_with_files(&[(
         GuestAddress(layout::GUEST_RAM_START),
         ram_size,
@@ -382,7 +417,7 @@ fn allocate_and_register_guest_ram(
     // `VmFd` it is registered with (both live in the caller's `BootedGuest` until dropped
     // together).
     unsafe { vm.set_user_memory_region(region) }?;
-    Ok(guest_mem)
+    Ok((guest_mem, backing))
 }
 
 impl CpuidEntry for kvm_cpuid_entry2 {
@@ -1019,6 +1054,47 @@ impl Multiverse {
     /// entry, then returns `-EINTR` immediately without executing any new guest instruction), clear
     /// the flag back to `0` again afterward (the same stickiness this field has everywhere else in
     /// this workspace).
+    /// Negotiate and register a live shared-CoW RAM slot for a separately-created branch VM.
+    ///
+    /// The returned mapping is backed by this guest's memfd, so clean pages remain shared. The
+    /// worker resolves UFFD minor faults and write-protect faults concurrently with KVM. If UFFD
+    /// negotiation fails this returns `SharedCowError::Fallback`; callers must use `branch`/
+    /// `restore` and must not silently report CoW mode.
+    pub fn open_shared_cow_guest_memory(
+        &self,
+        vm: &VmFd,
+        slot: u32,
+        guest_phys_addr: u64,
+    ) -> Result<SharedCowGuestMemory, SharedCowError> {
+        let raw =
+            unsafe { libc::fcntl(self.guest.ram_backing.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if raw < 0 {
+            return Err(SharedCowError::DuplicateFd(io::Error::last_os_error()));
+        }
+        let file = unsafe { std::fs::File::from_raw_fd(raw) };
+        let guest_mem = GuestMemory::from_ranges_with_files(&[(
+            GuestAddress(guest_phys_addr),
+            layout::GUEST_RAM_SIZE,
+            Some(FileOffset::new(file, 0)),
+        )])
+        .map_err(|e| SharedCowError::Mapping(e.to_string()))?;
+        let host_addr = guest_mem
+            .get_host_address(GuestAddress(guest_phys_addr))
+            .map_err(|e| SharedCowError::Mapping(e.to_string()))?;
+        let cow = baud_snapshot::ExternalCowBranch::open(
+            self.guest.ram_backing.clone(),
+            host_addr as u64,
+            layout::GUEST_RAM_SIZE,
+        )
+        .map_err(SharedCowError::Fallback)?;
+        cow.register_kvm(vm, slot, guest_phys_addr)?;
+        let fault_worker = cow.start_fault_worker();
+        Ok(SharedCowGuestMemory {
+            guest_mem,
+            fault_worker,
+        })
+    }
+
     pub fn snapshot(
         &mut self,
         page_store: &mut PageStore,
@@ -1140,6 +1216,24 @@ impl Multiverse {
         dirty_ring_entries: Option<u32>,
     ) -> Result<Self, RestoreError> {
         Self::restore(universe, tape_suffix, k, false, dirty_ring_entries)
+    }
+
+    /// Branch a serialized universe and report the mode explicitly. A `Universe` has no memfd or
+    /// live mapping handle, so this path is always the correct full-restore fallback. Callers that
+    /// still have a live parent and want shared RAM use [`Self::open_shared_cow_guest_memory`].
+    pub fn branch_with_mode(
+        universe: &Universe,
+        tape_suffix: Vec<u8>,
+        k: u64,
+        dirty_ring_entries: Option<u32>,
+    ) -> Result<(Self, baud_snapshot::BranchMode), RestoreError> {
+        let branch = Self::branch(universe, tape_suffix, k, dirty_ring_entries)?;
+        Ok((
+            branch,
+            baud_snapshot::BranchMode::FullRestore {
+                fallback: baud_snapshot::FallbackReason::BackingUnavailable,
+            },
+        ))
     }
 
     /// Rewind guest RAM to `base_ram`'s content for exactly the pages the dirty ring reports as

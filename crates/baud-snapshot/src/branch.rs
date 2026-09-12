@@ -139,6 +139,167 @@ impl LiveCowBranch {
     }
 }
 
+/// UFFD owner for a mapping created by `GuestMemoryMmap`. KVM must be registered against this
+/// exact address, not a second mapping, so this type deliberately does not own or unmap the
+/// destination. The caller owns the `GuestMemoryMmap` and keeps it alive for this value's lifetime.
+#[cfg(target_os = "linux")]
+pub struct ExternalCowBranch {
+    _backing: Arc<crate::backing::GuestRamBacking>,
+    mapping_start: u64,
+    mapping_len: usize,
+    source: crate::backing::PrivateCowMapping,
+    uffd: crate::userfaultfd::CowRegion,
+    page_size: usize,
+    dirty_pages: std::collections::BTreeSet<usize>,
+}
+
+#[cfg(target_os = "linux")]
+unsafe impl Send for ExternalCowBranch {}
+
+#[cfg(target_os = "linux")]
+impl ExternalCowBranch {
+    /// Register the exact UFFD-managed mapping as a KVM memory slot. The caller must keep this
+    /// branch and the mapping owner alive until the VM is destroyed.
+    pub fn register_kvm(
+        &self,
+        vm: &kvm_ioctls::VmFd,
+        slot: u32,
+        guest_phys_addr: u64,
+    ) -> Result<(), kvm_ioctls::Error> {
+        let region = kvm_bindings::kvm_userspace_memory_region {
+            slot,
+            guest_phys_addr,
+            memory_size: self.mapping_len as u64,
+            userspace_addr: self.mapping_start,
+            flags: 0,
+        };
+        unsafe { vm.set_user_memory_region(region) }
+    }
+
+    pub fn open(
+        backing: Arc<crate::backing::GuestRamBacking>,
+        mapping_start: u64,
+        mapping_len: usize,
+    ) -> Result<Self, BranchMode> {
+        let source = backing.map_shared().map_err(|_| BranchMode::FullRestore {
+            fallback: FallbackReason::MappingFailed,
+        })?;
+        let uffd = negotiate_shared_cow_at(mapping_start, mapping_len)?;
+        uffd.write_protect(true)
+            .map_err(|_| BranchMode::FullRestore {
+                fallback: FallbackReason::RequiredCapabilityMissing,
+            })?;
+        Ok(Self {
+            _backing: backing,
+            mapping_start,
+            mapping_len,
+            source,
+            uffd,
+            page_size: unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize },
+            dirty_pages: std::collections::BTreeSet::new(),
+        })
+    }
+
+    pub fn mapping_start(&self) -> u64 {
+        self.mapping_start
+    }
+    pub fn mapping_len(&self) -> usize {
+        self.mapping_len
+    }
+    pub fn dirty_pages(&self) -> impl Iterator<Item = usize> + '_ {
+        self.dirty_pages.iter().copied()
+    }
+
+    pub fn service_faults(&mut self) -> Result<usize, crate::userfaultfd::Error> {
+        let mut serviced = 0;
+        while let Some(fault) = self.uffd.read_fault()? {
+            let offset = fault
+                .address
+                .checked_sub(self.mapping_start)
+                .ok_or(crate::userfaultfd::Error::UnalignedRange)?
+                as usize;
+            if offset >= self.mapping_len {
+                return Err(crate::userfaultfd::Error::UnalignedRange);
+            }
+            let page = offset / self.page_size;
+            let address = self.mapping_start + (page * self.page_size) as u64;
+            let source = self.source.as_ptr() as u64 + (page * self.page_size) as u64;
+            if fault.minor {
+                self.uffd
+                    .continue_from(address, self.page_size as u64, source)?;
+            } else if fault.write_protect && fault.write {
+                self.uffd.copy_page(address, source)?;
+                self.dirty_pages.insert(page);
+            } else {
+                return Err(crate::userfaultfd::Error::UnexpectedEvent(0));
+            }
+            serviced += 1;
+        }
+        Ok(serviced)
+    }
+
+    /// The worker must run concurrently with KVM. A faulting vCPU is blocked in the kernel until
+    /// this thread resolves the UFFD event, so servicing after `KVM_RUN` returns is incorrect.
+    pub fn start_fault_worker(self) -> FaultWorker {
+        FaultWorker::start(self)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn negotiate_shared_cow_at(
+    start: u64,
+    len: usize,
+) -> Result<crate::userfaultfd::CowRegion, BranchMode> {
+    crate::userfaultfd::CowRegion::open(start, len as u64).map_err(|error| {
+        let fallback = match error {
+            crate::userfaultfd::Error::MissingFeature(_)
+            | crate::userfaultfd::Error::MissingIoctl(_)
+            | crate::userfaultfd::Error::Api(_, _) => FallbackReason::RequiredCapabilityMissing,
+            crate::userfaultfd::Error::Io(_) => FallbackReason::UserfaultfdUnavailable,
+            crate::userfaultfd::Error::UnalignedRange
+            | crate::userfaultfd::Error::UnexpectedEvent(_)
+            | crate::userfaultfd::Error::ShortRead => FallbackReason::MappingFailed,
+        };
+        BranchMode::FullRestore { fallback }
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub struct FaultWorker {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<Result<ExternalCowBranch, crate::userfaultfd::Error>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl FaultWorker {
+    fn start(mut branch: ExternalCowBranch) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let join = std::thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                if branch.uffd.wait_for_fault(50)? {
+                    branch.service_faults()?;
+                }
+            }
+            Ok(branch)
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FaultWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +315,27 @@ mod tests {
             BranchMode::FullRestore {
                 fallback: FallbackReason::BackingUnavailable
             }
+        ));
+    }
+
+    #[test]
+    fn negotiated_shared_mode_reports_write_set_scaling() {
+        assert!(BranchMode::SharedPrivateCow.is_write_set_scaled());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invalid_external_mapping_reports_full_restore_instead_of_claiming_cow() {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+        let backing = std::sync::Arc::new(
+            crate::backing::GuestRamBacking::from_bytes(&vec![0; page]).unwrap(),
+        );
+        let result = ExternalCowBranch::open(backing, 1, page);
+        assert!(matches!(
+            result,
+            Err(BranchMode::FullRestore {
+                fallback: FallbackReason::MappingFailed
+            })
         ));
     }
 }

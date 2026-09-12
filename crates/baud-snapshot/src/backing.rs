@@ -38,6 +38,25 @@ pub struct GuestRamBacking {
 }
 
 impl GuestRamBacking {
+    /// Retain a duplicate of an existing memfd-backed guest-RAM file.
+    ///
+    /// The duplicate is independent of the `File` used by `GuestMemoryMmap`, but refers to the
+    /// same file description and page cache. This is the hand-off used by a live multiverse branch.
+    pub fn from_file(file: &File, len: usize) -> Result<Self, BackingError> {
+        let page = page_size();
+        if len == 0 || !len.is_multiple_of(page) {
+            return Err(BackingError::InvalidLength);
+        }
+        let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(BackingError::Create(io::Error::last_os_error()));
+        }
+        Ok(Self {
+            file: Arc::new(unsafe { File::from_raw_fd(fd) }),
+            len,
+        })
+    }
+
     /// Build one backing file from a complete captured RAM image.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BackingError> {
         let page = page_size();
@@ -92,6 +111,11 @@ impl GuestRamBacking {
     /// page by `UFFDIO_COPY` rather than modifying the memfd.
     pub fn map_shared(&self) -> Result<PrivateCowMapping, BackingError> {
         self.map_with_flags(libc::MAP_SHARED)
+    }
+
+    /// Return the file descriptor for integration code that creates its own shared mapping.
+    pub fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
     }
 
     fn map_with_flags(&self, flags: i32) -> Result<PrivateCowMapping, BackingError> {

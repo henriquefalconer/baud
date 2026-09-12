@@ -198,6 +198,21 @@ impl CowRegion {
 
     /// Read one page-fault event from the nonblocking descriptor. `Ok(None)` means there is no
     /// event yet, so a branch worker can drain faults without blocking the vCPU thread.
+    /// Wait briefly for a fault without blocking forever. The vCPU can remain blocked in KVM
+    /// while this worker is waiting, so a bounded poll also gives shutdown a chance to run.
+    pub fn wait_for_fault(&self, timeout_ms: i32) -> Result<bool, Error> {
+        let mut pollfd = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if result < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(result != 0 && (pollfd.revents & libc::POLLIN) != 0)
+    }
+
     pub fn read_fault(&self) -> Result<Option<Fault>, Error> {
         let mut message = Message::default();
         let n = unsafe {

@@ -491,37 +491,79 @@ pub async fn abort(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // Read the durable owner first. Updating only SQLite and leaving the backend sandbox running
+    // made an abort look complete while the real resource remained live and could still accept
+    // work after a server restart.
+    let owner = sqlx::query_as::<_, (Option<String>, String)>(
+        "SELECT tape_id, status FROM runs WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| internal_error(format!("db error: {error}")))?;
+    let Some((tape_id, status)) = owner else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("run {id} not found") })),
+        ));
+    };
+    if !matches!(status.as_str(), "pending" | "provisioning" | "running") {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("run {id} not found or not in an abortable state") })),
+        ));
+    }
+
+    // Signal the worker before touching the backend. A KVM/replay worker may be blocked in a
+    // syscall, but it now observes the same token as this request. Do not publish an aborted
+    // response until the backend stop and durable transition both succeed.
+    state.cancel_run(&id);
+    if let Some(tape_id) = tape_id.as_deref() {
+        // Ask the backend for its live state rather than trusting the SQLite copy. The worker can
+        // be between the creating/running journal transitions when abort arrives.
+        let tape_status = state
+            .tape_backend
+            .status(tape_id)
+            .await
+            .map_err(|error| internal_error(format!("backend status failed: {error}")))?;
+        if matches!(tape_status.state, baud_tape::types::TapeState::Running) {
+            state
+                .tape_backend
+                .stop(tape_id)
+                .await
+                .map_err(|error| internal_error(format!("backend stop failed: {error}")))?;
+        }
+    }
+
     let now = crate::state::unix_now() as i64;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| internal_error(format!("db transaction error: {error}")))?;
     let result = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status IN ('pending','provisioning','running')")
         .bind(now)
         .bind(&id)
-        .execute(&state.db)
-        .await;
-
-    match result {
-        Ok(r) if r.rows_affected() == 0 => Err((
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| internal_error(format!("run abort journal error: {error}")))?;
+    if result.rows_affected() != 1 {
+        let _ = tx.rollback().await;
+        return Err((
             StatusCode::CONFLICT,
-            Json(json!({ "error": format!("run {id} not found or not in an abortable state") })),
-        )),
-        Ok(_) => {
-            // Signal the worker before returning the durable aborted state. The worker may be
-            // inside KVM or a backend call, but it now has the same cancellation token that was
-            // registered before acknowledgement.
-            state.cancel_run(&id);
-            if let Err(error) = sqlx::query(
-                "UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = (SELECT tape_id FROM runs WHERE id = ?) AND state IN ('creating','running')"
-            )
-            .bind(now)
-            .bind(&id)
-            .execute(&state.db)
-            .await
-            {
-                // The run is already durably aborted and its worker has been signalled. Surface a
-                // tape-journal failure instead of returning a false all-clear response.
-                return Err(internal_error(format!("tape abort journal error: {error}")));
-            }
-            Ok(Json(json!({ "ok": true, "id": id, "status": "aborted" })))
-        }
-        Err(e) => Err(internal_error(format!("db error: {e}"))),
+            Json(json!({ "error": format!("run {id} changed state while aborting") })),
+        ));
     }
+    if let Some(tape_id) = tape_id {
+        sqlx::query("UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = ? AND state IN ('creating','running')")
+            .bind(now)
+            .bind(tape_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| internal_error(format!("tape abort journal error: {error}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| internal_error(format!("db commit error: {error}")))?;
+    Ok(Json(json!({ "ok": true, "id": id, "status": "aborted" })))
 }

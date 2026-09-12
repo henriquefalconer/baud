@@ -21,12 +21,31 @@ pub(crate) fn auth_token() -> Result<Option<String>> {
     if let Some(path) = std::env::var_os("BAUD_AUTH_TOKEN_FILE") {
         let token = std::fs::read_to_string(path).context("failed to read BAUD_AUTH_TOKEN_FILE")?;
         let token = token.trim_end_matches(['\r', '\n']).to_owned();
-        if token.is_empty() {
-            anyhow::bail!("BAUD_AUTH_TOKEN_FILE contains an empty token");
+        if token.is_empty() || token.chars().any(char::is_whitespace) {
+            anyhow::bail!("BAUD_AUTH_TOKEN_FILE contains an empty or whitespace-bearing token");
         }
         return Ok(Some(token));
     }
-    Ok(std::env::var("BAUD_AUTH_TOKEN").ok())
+    if let Some(token) = std::env::var("BAUD_AUTH_TOKEN").ok() {
+        if token.is_empty() || token.chars().any(char::is_whitespace) {
+            anyhow::bail!("BAUD_AUTH_TOKEN contains an empty or whitespace-bearing token");
+        }
+        return Ok(Some(token));
+    }
+
+    // A server configured with BAUD_IDENTITY_SEED_B64 accepts signed agent tokens as well as
+    // the local bearer token. Mint one here so the CLI does not silently become unauthenticated
+    // when an operator uses the identity configuration. The seed is read only from the process
+    // environment and the resulting JWT is kept as a String only for reqwest's header API.
+    let Some(seed) = std::env::var("BAUD_IDENTITY_SEED_B64").ok() else {
+        return Ok(None);
+    };
+    let root = baud_identity::RootKey::from_seed_b64(&seed)
+        .context("BAUD_IDENTITY_SEED_B64 is not a valid identity seed")?;
+    let token = root
+        .mint_tape_token("cli", "client")
+        .context("failed to mint CLI identity token")?;
+    Ok(Some(token.expose().to_owned()))
 }
 
 async fn response_json(response: reqwest::Response, url: &str, method: &str) -> Result<Value> {
@@ -145,11 +164,25 @@ impl Client {
     /// client makes `obs tail` and frame tailing genuine streaming commands instead of silently
     /// degrading to a one-shot JSON snapshot.
     pub async fn stream_get(&self, path: &str) -> Result<()> {
+        self.stream_get_to(path, None).await
+    }
+
+    /// Consume an SSE response either on stdout or into a caller-selected file. The file is
+    /// created before the request starts, so a successful command always leaves a complete byte
+    /// stream and a failed request never silently discards the requested output destination.
+    pub async fn stream_get_to(&self, path: &str, output: Option<&std::path::Path>) -> Result<()> {
         let url = format!("{}{}", self.base, path);
         let mut request = self.http.get(&url).header("accept", "text/event-stream");
         if let Some(token) = auth_token()? {
             request = request.bearer_auth(token);
         }
+        let mut sink: Box<dyn std::io::Write> = match output {
+            Some(path) => Box::new(
+                std::fs::File::create(path)
+                    .with_context(|| format!("create stream output {}", path.display()))?,
+            ),
+            None => Box::new(std::io::stdout()),
+        };
         let resp = request
             .send()
             .await
@@ -165,9 +198,8 @@ impl Client {
             .await
             .with_context(|| format!("GET {url}: stream read failed"))?
         {
-            use std::io::Write;
-            std::io::stdout().write_all(&chunk)?;
-            std::io::stdout().flush()?;
+            sink.write_all(&chunk)?;
+            sink.flush()?;
         }
         Ok(())
     }
