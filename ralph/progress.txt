@@ -5554,3 +5554,93 @@ Removed temporary request/ISR tracing after the capture. No new code change is r
 Repeated the requested command in the foreground with the normal H9 settings:
 `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && timeout 600 bash drive/h/h9.sh`.
 It reached tick 400/20000 and the same 20,245-byte console tail, never produced `ubuntu login:`, and exited 124 on the 600-second timeout. G6 therefore remains incomplete. No code or todo changes were made after the prior closeout.
+
+## 2026-09-12T20:27:10 UTC (29min) - Session usage — ralph-31 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3313 (summed from 4 session transcripts: main $0.2589 · subagents $0.0724)
+- tokens input 722,398 · cache-read 8,200,704 · cache-write 0 · output 18,993 · reasoning 6,549
+- context 254,761 tok peak of 272K (94%) across 77 inference calls, 1 drop(s), final 138,793, resumed 1x
+- models gpt-5.6-luna $0.3313 (in 722,398 / out 25,542 / cache-read 8,200,704)
+- subagents (3) pi process x3
+  - delegate-f18cadc6675a029a5bd8592e0edbc9e5: gpt-5.6-luna $0.0223, 5 inference calls
+  - delegate-f28043305a4e5751704b7dcbc995348c: gpt-5.6-luna $0.0240, 5 inference calls
+  - delegate-ee0ab799a3d22f6a39d530c42fe2e6d1: gpt-5.6-luna $0.0260, 7 inference calls
+- transcript: ralph/.run/20260911T161941Z/056-ralph-31.json
+- transcript: ralph/.run/20260911T161941Z/057-ralph-31.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 32 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address by studying the specifications, todo-build.md, and existing implementation paths.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item of 1 in todo-build.md.
+
+Starting G6 Ubuntu H9 proof. I am tracing the real legacy INTx completion path before changing code.
+
+Running a bounded real H9 capture with the documented watchdog to obtain fresh guest-RIP and console evidence before editing.
+
+Testing both kernel and modprobe btrfs blacklist parameters against the same bounded H9 boot; failure will revert the experiment.
+
+The blacklist experiment reproduced the same RIP and was reverted; the failure is not a removable btrfs module, so I am validating the ACPI resource descriptor and legacy IRQ contract next.
+
+The compiler-generated DSDT now uses a valid Word/DWord I/O resource descriptor instead of the prior malformed resource bytes; running bounded real H9 to see whether Linux keeps the bridge window and reaches login.
+
+The corrected DSDT now advertises the PCI I/O window and implements link _SRS methods, so Linux can retain the real IRQ route; running bounded H9 again.
+
+Instrumenting only the first root-partition sectors to compare guest-visible bytes with the immutable image; this will be removed after the bounded capture.
+
+The ACPI repair is real: Linux now reports root bus I/O 0xc000-0xc1ff and accepts both PCI IRQ links, while rootfs sectors match the immutable image byte-for-byte. H9 still fails at the same btrfs resolve_indirect_refs RIP, so G6 remains open and the queue wording now records that exact blocker.
+
+Focused ACPI tests are green and the generated DSDT fix is retained, but the bounded real H9 capture still fails closed at the stock btrfs resolve_indirect_refs RIP before ubuntu login; no DONE marker, commit, push, or completion claim is justified.
+
+## 2026-09-12T20:37:56 UTC (11min) - Session usage — ralph-32 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4678 (summed from 5 session transcripts: main $0.3833 · subagents $0.0844)
+- tokens input 975,681 · cache-read 12,185,088 · cache-write 0 · output 24,100 · reasoning 10,036
+- context 217,273 tok peak of 272K (80%) across 82 inference calls, monotonic
+- models gpt-5.6-luna $0.4678 (in 975,681 / out 34,136 / cache-read 12,185,088)
+- subagents (4) pi process x4
+  - delegate-e1cefe0cdfa1944c89a3e7d74c9e75e8: gpt-5.6-luna $0.0279, 6 inference calls
+  - delegate-fd64b47f99af27a7658f5a1f3e8373a5: gpt-5.6-luna $0.0248, 5 inference calls
+  - delegate-424f1345ee765a983f1e7dc654746f82: gpt-5.6-luna $0.0274, 5 inference calls
+  - 01a09754-0333-7431-9947-9d859d00c308: gpt-5.6-luna $0.0043, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/058-ralph-32.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 33 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the specifications and the 10 most important build items, then implementing and verifying the full batch.
+
+Starting the specification and backlog review now.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item in the build queue.
+
+Starting G6 Ubuntu H9 proof. Reading the drive and implementation before changing code.
+
+Preparing real KVM verification by resetting the perf_event policy, then running the H9 acceptance drive.
+
+H9 reached real Ubuntu PCI enumeration and vda, then stalled after the final block completion; inspecting the bounded drive log and interrupt state.
+
+Adding temporary interrupt lifecycle logging and rerunning H9 with a bounded tick count to isolate the stalled KVM boundary.
+
+Fixed the level-triggered INTx lifecycle: ISR_STATUS reads now deassert the PCI line, while LAPIC EOI no longer clears unrelated completions. Running focused multiverse tests.
+
+The focused INTx test now proves assertion and ISR-read deassertion. Re-running the real H9 path without diagnostic logging to measure guest progress.
+
+The line now deasserts on ISR read, but Ubuntu still enters a long no-exit stretch after roughly 112 block requests. Forcing the documented per-tick watchdog to 20 seconds to capture the guest RIP instead of waiting six hundred seconds.
+
+The RIP is a btrfs metadata-resolution loop. Running one controlled diagnostic with rootfstype=ext4 to test whether the stock initramfs probe is the only blocker; this drive change will be reverted.
+
+The ext4-forced diagnostic also failed, so the issue is below filesystem selection. Re-reading the project plan and preserving the standard H9 command line before the next code change.
+
+Iteration 33 completion record:
+
+The requested foreground rerun was performed with perf_event_paranoid reset. `bash drive/h/h9.sh` still fails H9.2 after the real Ubuntu guest reaches PCI enumeration, discovers `vda: vda1 vda14 vda15`, and emits the final observed udev progress. The 600-second watchdog again stops at RIP `0xffffffffc00a50da` in the btrfs module, before `ubuntu login:`. The focused virtio-blk interrupt test passes, and `cargo fmt --all -- --check` plus `git diff --check` pass. G6 remains open because the required H9.2-H9.5 acceptance did not pass. This iteration ends with the next iteration promise.

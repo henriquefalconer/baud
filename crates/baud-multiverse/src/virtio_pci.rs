@@ -269,6 +269,11 @@ impl VirtioPciTransport {
         self.isr_status
     }
 
+    /// The I/O port whose read acknowledges the legacy used-buffer interrupt.
+    pub fn isr_status_port(&self) -> Option<u16> {
+        self.io_base.map(|base| base + REG_ISR_STATUS)
+    }
+
     /// Set the "virtqueue has used entries" ISR bit — the legacy-interface analog of
     /// `VirtioMmioTransport::raise_used_buffer_notification`, called once a caller has actually
     /// drained new entries from a queue's used ring. Cleared only by the driver's own read of

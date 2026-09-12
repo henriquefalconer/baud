@@ -886,10 +886,26 @@ impl Bus for DeviceBus {
             .as_ref()
             .is_some_and(|t| t.in_range(port).is_some())
         {
+            let isr_port = self
+                .virtio_pci_blk
+                .as_ref()
+                .and_then(crate::virtio_pci::VirtioPciTransport::isr_status_port);
+            let had_used_interrupt = self
+                .virtio_pci_blk
+                .as_ref()
+                .is_some_and(|transport| transport.isr_status() != 0);
             self.virtio_pci_blk
                 .as_mut()
                 .expect("checked Some above")
                 .pio_read(port, data);
+            // Legacy virtio INTx is level-triggered by the transport's ISR bit. The line
+            // deasserts when Linux reads ISR_STATUS, not when it writes LAPIC EOI. Clearing it
+            // here preserves a completion that arrives while another interrupt is in service.
+            if had_used_interrupt && isr_port == Some(port) {
+                if let Some(irq) = self.pci.virtio_blk_interrupt_line() {
+                    self.ioapic.clear_irq(irq);
+                }
+            }
         } else {
             self.fallback.pio_read(port, data);
         }
@@ -983,11 +999,8 @@ impl Bus for DeviceBus {
                 return;
             }
         }
-        if let Some(offset) = LocalApic::in_range(addr) {
+        if LocalApic::in_range(addr).is_some() {
             self.lapic.mmio_write(addr, data);
-            if offset == crate::lapic::EOI_OFFSET {
-                self.ioapic.clear_all_asserted();
-            }
             return;
         }
         if IoApic::in_range(addr).is_some() {
@@ -1836,6 +1849,10 @@ mod virtio_blk_service_tests {
 
         let processed = bus.service_virtio_blk(&mem).unwrap();
         assert_eq!(processed, 1);
+        assert!(
+            bus.ioapic.irq_asserted(11),
+            "completion asserts legacy INTx"
+        );
 
         let mut data = vec![0u8; SECTOR_SIZE as usize];
         mem.read_slice(&mut data, GuestAddress(0x201_000)).unwrap();
@@ -1854,6 +1871,10 @@ mod virtio_blk_service_tests {
 
         bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
         assert_ne!(isr, [0], "draining a chain raises the ISR queue bit");
+        assert!(
+            !bus.ioapic.irq_asserted(11),
+            "ISR read deasserts legacy INTx"
+        );
         bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
         assert_eq!(isr, [0], "reading the ISR register clears it");
 
