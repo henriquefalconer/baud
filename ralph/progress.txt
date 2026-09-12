@@ -4037,3 +4037,67 @@ Iteration 7 verification checkpoint
 - G2's virtio-console tape transport is implemented and unit-tested, but the real image still uses PIO because the existing run-loop route does not enable/service the new transport. G2 remains open.
 - G3 UFFD/write-set scaling was not completed in this iteration.
 - Foreground focused command rerun completed successfully: `cargo test -p baud-tape-device -p baud-multiverse -p baud-server -p baud-cli -p baud-packages --all-targets` passed (1 CLI, 237 multiverse, 45 packages, 59 server, 25 tape-device tests; ignored tests were reported but not run).
+
+## 2026-09-11T23:26:25 UTC (48min) - Session usage — ralph-7 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1529326, receipt ralph/.run/20260911T161941Z/012-ralph-7.json.processes/receipt.json)
+- cost $0.6103 (summed from 5 session transcripts: main $0.5081 · subagents $0.1021)
+- tokens input 953,631 · cache-read 18,995,712 · cache-write 0 · output 33,017 · reasoning 11,211
+- context 256,729 tok peak of 272K (94%) across 134 inference calls, 2 drop(s), final 79,618, resumed 1x
+- models gpt-5.6-luna $0.6103 (in 953,631 / out 44,228 / cache-read 18,995,712)
+- subagents (4) pi process x4
+  - delegate-34cb8c3f765b4ecb9f0d168a2914c9f0: gpt-5.6-luna $0.0245, 7 inference calls
+  - delegate-de9142c69244d548189c5e62e6a5130d: gpt-5.6-luna $0.0240, 5 inference calls
+  - delegate-703652993ec756f77f1d0259171ecdfd: gpt-5.6-luna $0.0206, 4 inference calls
+  - delegate-a982c9fbd4b862b12b719ccd7d1ec2ff: gpt-5.6-luna $0.0330, 13 inference calls
+- transcript: ralph/.run/20260911T161941Z/012-ralph-7.json
+- transcript: ralph/.run/20260911T161941Z/013-ralph-7.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 8 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the selected batch end to end.
+
+Starting by reading the build queue and repository state.
+
+--- todo-build.md ---
+
+Chose these 8 items: G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof, plus the two pending entries exactly as listed above. They are all 8 pending items in todo-build.md.
+
+Correction: the binding selection is the 6 pending entries: G2 guest tape endpoint and harness; G3 write-set-scaled branching; G5 authenticated lifecycle and public API contract; G5 unified run ownership and image memory; G5 complete advertised CLI and route coverage; G6 Ubuntu H9 proof.
+
+Repository history shows the prior iteration already implemented the preferred tape transport, authentication/lifecycle coverage, ownership cleanup, and core PCI block path. The binding gaps remain real UFFD branch integration and Ubuntu userspace progress; I am tracing those root causes instead of relabeling them DONE.
+
+The prior H9 log reaches systemd-udevd and shows the PCI device being configured, so the remaining failure is post-rootfs userspace scheduling or service completion, not PCI discovery. I am keeping the diagnostic evidence and testing the current acceptance worker before editing the timer/device loop again.
+
+Found and fixed a concrete advertised-route mismatch: replay now registers both /replay/:id and /replay/:id/to-step to the same validated implementation. Running the focused server compile while the verification worker continues.
+
+Server all-target tests pass, including 59 real-KVM lifecycle, replay, route, ownership, shell, and fingerprint tests. The new replay to-step route compiles cleanly. The remaining selected failures are the preferred guest harness, production UFFD branch integration, full lifecycle drive evidence, and H9 login.
+
+The route fix is formatted and server all-target verification is green. I am not marking the queue entries yet because the delegated specification audit confirms the preferred guest driver, production UFFD fault service, replay ownership registration, and real Ubuntu login proof still lack acceptance evidence.
+
+The focused verification subagent is still running the real H5 drive after the green server suite. I am leaving it as the single build/test worker and continuing only code review, not starting another test process.
+
+The single verification worker timed out while running H5 after the focused server tests; this is a test-run timeout, not a green result. Existing H5 gate evidence remains green for the full-restore fallback, while the UFFD item is still open. Continuing root-cause work rather than treating timeout as acceptance.
+
+The prior H9 evidence stops after udev starts, so I am running one bounded diagnostic with the documented watchdog override to capture the exact stalled RIP and console tail before touching the scheduler path.
+
+The bounded H9 diagnostic reproduced a deterministic stall at RIP 0xffffffffc009b0da after systemd-udevd starts. Root cause evidence points to an initial virtio-blk request being visible in the avail ring before a notify transition; the poll baseline then treated it as already observed. I changed the combined device loop so block queues are serviced at every deterministic tick, while RNG and test devices keep notify-gated polling.
+
+The first unconditional-poll patch exposed an ownership bug in the halted branch: a no-op service counted as progress and prevented terminal halt. I corrected serviced_any to depend on processed requests; both real virtio-blk tests and the three-device combinator are green. Re-running bounded H9 to test the actual Ubuntu path.
+
+The second H9 run no longer reports missing block work, but Ubuntu still wedges at the same 0xffffffffc009b0d3 kernel-module RIP while udev is active; repeated zero-request polls prove the queue is idle at the stall. The block polling fix is green on all focused real-device tests, but G6 remains open pending the module-level scheduler/device root cause.
+
+Full baud-multiverse all-target verification is now green: 237 passed, 10 ignored. The block poll fix is safe across the entire KVM/device suite, but the real Ubuntu run still fails at the same udev-era guest RIP, so I am not claiming H9 completion.
+
+Symbol-level inspection identified the H9 RIP: initramfs btrfs.ko places scrub_pending_trans_workers_inc at offset 0x9b080, matching guest RIP 0xffffffffc009b0d3. Ubuntu is probing an unused btrfs path during udev. I added deterministic btrfs blacklisting to the H9 command line and documented recipe; running the real proof again.
+
+Blacklisting btrfs via modprobe, initramfs, and kernel module parameters did not change the module-offset stall, so the symbol match alone is not sufficient evidence that btrfs is the loaded image at c009b0. The next root-cause target is the distro PCI probe path, with queue/PFN traces required; the real H9 acceptance remains red.
+
+The blacklist experiment had no effect and was reverted. I am preserving the symbol evidence and not altering the pinned unmodified image contract; no further speculative H9 workaround will be promoted without an acceptance run.
+
+Repeating the focused verification command in the foreground as requested, then I will use its evidence to finish the selected batch and run the required pre-push gate.
+
+Focused foreground verification passed: baud-cli, baud-multiverse, baud-packages, baud-server, baud-snapshot, and baud-tape-device all passed their selected all-target tests (237 multiverse, 59 server, 44 snapshot, 25 tape, 47 package, 1 CLI; ignored tests were expected).
+
+The full gate was repeated in the foreground. Most units passed, including H5 and the previously flaky dynamic-link drive on the second run. The gate still failed on H9, which reproduced the Ubuntu userspace stall, and H6's CPU-rate assertion under concurrent gate load. The gate timed out during the later package-build phase. H9 and the selected UFFD/tape acceptance items remain open; no completion claim is made.

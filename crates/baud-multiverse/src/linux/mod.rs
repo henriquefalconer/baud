@@ -882,6 +882,10 @@ fn console_tail(console: &[u8]) -> String {
 /// `run_to_first_halt_with_virtio_pci_blk` each already hand-wrote inline.
 struct TickPolledDevice {
     vector: u8,
+    /// Some devices, such as legacy virtio-blk, can expose work before the first notify
+    /// transition. Those devices must be serviced on every deterministic boundary so a queued
+    /// request cannot strand the guest waiting for an interrupt.
+    poll_always: bool,
     notify_count: fn(&mut Multiverse) -> Option<u64>,
     service_running: fn(&mut Multiverse, u8) -> Result<u32, RunLoopError>,
     service_halted: fn(&mut Multiverse, u8) -> Result<u32, RunLoopError>,
@@ -2351,7 +2355,7 @@ impl Multiverse {
                     });
                     for (i, dev) in devices.iter().enumerate() {
                         let notify_count = (dev.notify_count)(self).unwrap_or(0);
-                        if notify_count != last_notify[i] {
+                        if dev.poll_always || notify_count != last_notify[i] {
                             last_notify[i] = notify_count;
                             let service_start = std::time::Instant::now();
                             (dev.service_running)(self, dev.vector)?;
@@ -2382,10 +2386,10 @@ impl Multiverse {
                     let mut serviced_any = false;
                     for (i, dev) in devices.iter().enumerate() {
                         let notify_count = (dev.notify_count)(self).unwrap_or(0);
-                        if notify_count != last_notify[i] {
+                        if dev.poll_always || notify_count != last_notify[i] {
                             last_notify[i] = notify_count;
                             let service_start = std::time::Instant::now();
-                            (dev.service_halted)(self, dev.vector)?;
+                            let processed = (dev.service_halted)(self, dev.vector)?;
                             let service_elapsed = service_start.elapsed();
                             if service_elapsed >= SLOW_TICK_PHASE_LOG_THRESHOLD {
                                 info!(
@@ -2394,7 +2398,7 @@ impl Multiverse {
                                     service_elapsed.as_secs_f64(),
                                 );
                             }
-                            serviced_any = true;
+                            serviced_any |= processed > 0;
                         }
                     }
                     if serviced_any {
@@ -2484,7 +2488,7 @@ impl Multiverse {
                         // above, at burst-loop granularity instead of tick granularity.
                         for (i, dev) in devices.iter().enumerate() {
                             let notify_count = (dev.notify_count)(self).unwrap_or(0);
-                            if notify_count != last_notify[i] {
+                            if dev.poll_always || notify_count != last_notify[i] {
                                 last_notify[i] = notify_count;
                                 let service_start = std::time::Instant::now();
                                 (dev.service_running)(self, dev.vector)?;
@@ -2579,6 +2583,7 @@ impl Multiverse {
             if self.virtio_pci_rng().is_some() {
                 devices.push(TickPolledDevice {
                     vector,
+                    poll_always: false,
                     notify_count: |mv| mv.virtio_pci_rng().map(|t| t.notify_count()),
                     service_running: Multiverse::service_virtio_pci_rng_interrupt,
                     service_halted: Multiverse::service_virtio_pci_rng_interrupt_while_halted,
@@ -2586,6 +2591,7 @@ impl Multiverse {
             } else {
                 devices.push(TickPolledDevice {
                     vector,
+                    poll_always: false,
                     notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
                     service_running: Multiverse::service_virtio_rng_interrupt,
                     service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
@@ -2595,6 +2601,7 @@ impl Multiverse {
         if let Some(vector) = virtio_blk_vector {
             devices.push(TickPolledDevice {
                 vector,
+                poll_always: true,
                 notify_count: Multiverse::virtio_blk_poll_counter,
                 service_running: Multiverse::service_virtio_blk_interrupt,
                 service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,
@@ -2633,6 +2640,7 @@ impl Multiverse {
             timer_vector,
             &[TickPolledDevice {
                 vector: virtio_rng_vector,
+                poll_always: false,
                 notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
                 service_running: Multiverse::service_virtio_rng_interrupt,
                 service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
@@ -2670,12 +2678,14 @@ impl Multiverse {
             &[
                 TickPolledDevice {
                     vector: virtio_rng_vector,
+                    poll_always: false,
                     notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
                     service_running: Multiverse::service_virtio_rng_interrupt,
                     service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
                 },
                 TickPolledDevice {
                     vector: virtio_blk_vector,
+                    poll_always: true,
                     notify_count: Multiverse::virtio_blk_poll_counter,
                     service_running: Multiverse::service_virtio_blk_interrupt,
                     service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,
@@ -3663,6 +3673,7 @@ mod tests {
 
         let devices = [TickPolledDevice {
             vector: 0,
+            poll_always: false,
             notify_count: fake_notify_count,
             service_running: fake_service_running,
             service_halted: fake_service_halted,
