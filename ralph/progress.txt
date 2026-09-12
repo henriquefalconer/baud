@@ -5550,3 +5550,7 @@ Removed temporary request/ISR tracing after the capture. No new code change is r
 - Read-only specification reviews completed for core determinism, runtime/CLI integration, and pending-item mapping.
 - Diagnostic result: 207 successful block requests and repeated ISR reads are observed; the guest still stops after partition discovery. A 1000-tick run hits the bounded watchdog in guest code.
 - Temporary tracing was removed. No acceptance claim or `DONE` mark is made.
+
+Repeated the requested command in the foreground with the normal H9 settings:
+`echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && timeout 600 bash drive/h/h9.sh`.
+It reached tick 400/20000 and the same 20,245-byte console tail, never produced `ubuntu login:`, and exited 124 on the 600-second timeout. G6 therefore remains incomplete. No code or todo changes were made after the prior closeout.
