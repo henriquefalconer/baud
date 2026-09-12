@@ -5494,3 +5494,13 @@ I found that request draining is real and repeated, so I completed the missing l
 Focused multiverse and vCPU tests are green. I am rerunning the real H9 path after the IOAPIC assertion/EOI integration; if it still stalls, I will trace the remaining guest-visible wait rather than closing G6.
 
 The EOI lifecycle is unit-tested and focused tests remain green, but H9 still stops at the same userspace boundary. I am preserving G6 as open and recording the new evidence before the next debugging pass.
+
+## 2026-09-12T20:00:00 UTC (19min) - Iteration 30 closeout
+
+- Selected item: G6 Ubuntu H9 proof. It remains open because `bash drive/h/h9.sh` still stops after `vda: vda1 vda14 vda15`, before `ubuntu login:`.
+- Implemented and committed the level-triggered virtio-blk line lifecycle: completion asserts the modeled IOAPIC line, and LAPIC EOI clears asserted lines. Added IOAPIC coverage.
+- Foreground verification passed:
+  - `cargo test -p baud-multiverse --lib`: 244 passed, 0 failed, 10 ignored.
+  - `cargo test -p baud-vcpu --lib`: 41 passed, 0 failed.
+- H9 acceptance remains red. No item was marked `DONE` and no completion claim is made.
+- Commit `3c0ec6c` was pushed to `main`.
