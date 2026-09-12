@@ -4519,3 +4519,29 @@ Full gate reached the long H5 and most drive phases cleanly, but the single 600-
 The UFFD review caught that clearing protection on the existing shared mapping would be unsafe, so I reverted that speculative change and kept only the verified fingerprint target fix plus duplicate cfg cleanup. Re-running formatting and focused tests before recording the gate outcome.
 
 Verification summary: focused snapshot/fingerprint suites, H5, clippy, workspace tests, and all completed gate units passed; H9 still times out after systemd-udevd, and the full gate did not finish within two 600-second runs. The selected batch is not complete, so no DONE markers or completion block are being fabricated.
+
+Ubuntu study completed and confirms the remaining H9 failure is real userspace progress after udev, not artifact setup; continuing root-cause work on the periodic timer and virtio-blk path.
+
+Repeating the verification command in the foreground as requested, without backgrounding it.
+
+Foreground verification passed: baud-cli, baud-fingerprint, baud-multiverse, baud-server, and baud-snapshot all passed their unit and integration suites.
+
+The selected batch is still open in todo-build.md: G3 UFFD end-to-end scaling, G5 durable lifecycle/API work, and G6 Ubuntu H9 userspace progress remain unresolved.
+
+
+
+## 2026-09-12T05:46:19 UTC - Changes committed.
+
+- Fixed timed fingerprint capture to honor the requested RCB after the console banner appears.
+
+- Removed a duplicate Linux export guard.
+
+- Files changed: crates/baud-fingerprint/src/lib.rs, crates/baud-multiverse/src/linux/mod.rs, crates/baud-snapshot/src/lib.rs, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Fingerprint captures now reject a banner reached after the target and advance exactly to the requested target before hashing.
+
+  - Focused tests and all completed gate units passed; H9 still stalls after systemd-udevd.
+
+---
