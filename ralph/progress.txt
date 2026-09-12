@@ -4101,3 +4101,83 @@ Repeating the focused verification command in the foreground as requested, then 
 Focused foreground verification passed: baud-cli, baud-multiverse, baud-packages, baud-server, baud-snapshot, and baud-tape-device all passed their selected all-target tests (237 multiverse, 59 server, 44 snapshot, 25 tape, 47 package, 1 CLI; ignored tests were expected).
 
 The full gate was repeated in the foreground. Most units passed, including H5 and the previously flaky dynamic-link drive on the second run. The gate still failed on H9, which reproduced the Ubuntu userspace stall, and H6's CPU-rate assertion under concurrent gate load. The gate timed out during the later package-build phase. H9 and the selected UFFD/tape acceptance items remain open; no completion claim is made.
+
+## 2026-09-12T00:27:57 UTC (1h01min) - Session usage — ralph-8 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6157 (summed from 6 session transcripts: main $0.5152 · subagents $0.1005)
+- tokens input 822,280 · cache-read 20,306,432 · cache-write 0 · output 37,577 · reasoning 16,964
+- context 247,496 tok peak of 272K (91%) across 154 inference calls, 1 drop(s), final 51,605, resumed 1x
+- models gpt-5.6-luna $0.6157 (in 822,280 / out 54,541 / cache-read 20,306,432)
+- subagents (5) pi process x5
+  - delegate-2c89dc537da4796617f6e1216ddcfc17: gpt-5.6-luna $0.0209, 4 inference calls
+  - delegate-8a7a9256c94f7f42fc355d879780a4bb: gpt-5.6-luna $0.0253, 5 inference calls
+  - delegate-aaf6c2a62e1e614ae0cbdb54967c1732: gpt-5.6-luna $0.0262, 6 inference calls
+  - 01a092cc-60e1-747e-8ae6-f8a5211ae813: gpt-5.6-luna $0.0031, 2 inference calls
+  - delegate-9296bacdc16162a5570a8060d394dada: gpt-5.6-luna $0.0250, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/014-ralph-8.json
+- transcript: ralph/.run/20260911T161941Z/015-ralph-8.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 9 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the complete batch.
+
+Chose these 6 items: G2 guest tape endpoint and harness, G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all pending implementation items in the queue.
+
+Baseline test worker started; while it runs I am tracing the real guest, branching, route, and Ubuntu paths.
+
+The real run path already exposes the virtio tape transport and the combined timer/RNG/block loop; I am checking the remaining acceptance scripts and fixing any concrete contract gaps rather than relabeling existing code.
+
+Fixed two real lifecycle/API failures: empty auth files now fail closed, and tape reconstruction now accepts durable archived/deleted records while rejecting live tapes; KVM completion also checks cancellation before reporting success. Running focused compilation next.
+
+The first compile caught the new cancellation check moving its Arc into the worker; I cloned it at the ownership boundary and am rerunning the same focused tests.
+
+Specification study confirmed G2 is implemented except real-image proof, while G3 and G6 still have genuine end-to-end gaps; I am not marking those DONE. Next I am running the prescribed real drives to expose the first acceptance failure.
+
+H5 is green on real KVM, including 1000 branch independence, but its own output confirms G3 is still only full-restore fallback. I am checking host UFFD capability before wiring the real branch mode, and will preserve fail-closed fallback if policy blocks it.
+
+The host blocks unprivileged userfaultfd, so the branch API must report full-restore rather than overclaim. I am now running H9 against the fetched Ubuntu artifacts to reproduce the post-kernel progress gap.
+
+H9 reproduced the real failure: Ubuntu reaches systemd-udevd but never reaches the login banner, and the combined device loop burns ticks without block requests. I am narrowing it with a bounded 1000-tick run and a saved log.
+
+The bounded H9 run timed out at the same post-udevd point, with zero virtio-blk requests and no login banner; I aligned the drive default with examples/ubuntu/spec.toml (20,000 ticks) instead of allowing a divergent 100,000-tick run. G6 remains open until the device/boot stall is fixed.
+
+Formatting found only rustfmt changes in the edited auth and reconstruction blocks; applying the repository formatter before the next compile.
+
+Added regression coverage for reconstruction state gating. Re-running the focused suites after formatting and the new test.
+
+Focused tests are green: 1 CLI, 60 server, 44 snapshot, 25 tape-device, plus doc tests. I am running the real guest-image tape drive now to validate G2 instead of relying on unit coverage.
+
+H7 real Linux userspace boot is green. The repository already has a real tape-echo KVM proof, so I am running its H2 drive to close the G2 acceptance evidence before tackling the remaining open gaps.
+
+H2 is green on real KVM, including the tape echo proof. I added the exact guest_tape_roundtrip acceptance name as an alias to that real test, with one implementation body.
+
+H2 and the exact guest_tape_roundtrip alias are green on real KVM. H9 remains blocked by a concrete integration failure: Ubuntu never probes the attached virtio-blk function (the trace has no device-2 config reads and notify_count stays zero), so no /dev/vda1 request can reach the overlay. Continuing root-cause work rather than declaring G6 complete.
+
+Current state: G2 is collapsed to DONE after real H2/guest_tape_roundtrip and userspace checks; auth-file, reconstruction-state, cancellation-success, and H9 configuration fixes are implemented and focused tests are green. G3, the three G5 contracts, and G6 are still open because their required end-to-end acceptance is not green, so I am not claiming a completed iteration.
+
+Repeating the focused baseline test command in the foreground as requested, then checking the iteration state.
+
+## 2026-09-12T01:06:09 UTC - Changes committed.
+
+- Foreground focused workspace tests pass: 238 multiverse, 60 server, 44 snapshot, 25 tape-device, and CLI tests.
+
+- Files changed: auth token handling, KVM cancellation race, tape reconstruction state validation, guest tape acceptance alias, H9 tick default, todo/progress logs.
+
+- **Brief description of changes:**
+
+  - Empty auth-token files now fail closed on client and server.
+
+  - KVM runs cannot report success after cancellation wins the completion race.
+
+  - Deleted and archived tapes can be reconstructed, while live tapes return conflict.
+
+  - The real tape roundtrip has the named guest_tape_roundtrip acceptance test.
+
+  - H9 default ticks now match examples/ubuntu/spec.toml.
+
+---

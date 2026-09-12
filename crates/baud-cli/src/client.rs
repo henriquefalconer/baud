@@ -19,10 +19,10 @@ pub struct Client {
 
 pub(crate) fn auth_token() -> Result<Option<String>> {
     if let Some(path) = std::env::var_os("BAUD_AUTH_TOKEN_FILE") {
-        let mut token =
-            std::fs::read_to_string(path).context("failed to read BAUD_AUTH_TOKEN_FILE")?;
-        if token.ends_with('\n') {
-            token.pop();
+        let token = std::fs::read_to_string(path).context("failed to read BAUD_AUTH_TOKEN_FILE")?;
+        let token = token.trim_end_matches(['\r', '\n']).to_owned();
+        if token.is_empty() {
+            anyhow::bail!("BAUD_AUTH_TOKEN_FILE contains an empty token");
         }
         return Ok(Some(token));
     }

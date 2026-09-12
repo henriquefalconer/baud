@@ -505,6 +505,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     let cancel_flag = cancel.flag();
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
+    let worker_cancel_flag = std::sync::Arc::clone(&cancel_flag);
     let result = tokio::task::spawn_blocking(move || {
         let virtio_blk = match (virtio_blk_image, virtio_blk_meta) {
             (Some(image), Some((vector, max_exits))) => Some((image, vector, max_exits)),
@@ -523,7 +524,7 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
                 .as_ref()
                 .map(|(p, m)| (p.as_slice(), *m)),
             periodic_tick_watchdog_budget_secs,
-            Some(cancel_flag),
+            Some(worker_cancel_flag),
         )
     })
     .await
@@ -537,6 +538,16 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
             state.remove_run(run_id);
         }
     }
+
+    // Cancellation and successful completion race at the boundary between the blocking worker
+    // and this handler. Never turn a cancellation that won the race into an HTTP 200 success.
+    // The worker may have returned a complete-looking outcome just as an abort or disconnect set
+    // the shared flag, so check the flag after the join and before constructing the response.
+    let result = if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        Err("run cancelled before completion".to_owned())
+    } else {
+        result
+    };
 
     match result {
         Ok(((console_output, ram_hash, _mark_branch_step, _node_id), records)) => {

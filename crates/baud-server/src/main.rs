@@ -241,9 +241,13 @@ async fn require_configured_token(request: Request, next: Next) -> Response {
 
 fn configured_auth_token() -> Result<Option<String>, std::io::Error> {
     if let Some(path) = std::env::var_os("BAUD_AUTH_TOKEN_FILE") {
-        let mut token = std::fs::read_to_string(path)?;
-        if token.ends_with('\n') {
-            token.pop();
+        let token = std::fs::read_to_string(path)?;
+        let token = token.trim_end_matches(['\r', '\n']).to_owned();
+        if token.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "BAUD_AUTH_TOKEN_FILE contains an empty token",
+            ));
         }
         return Ok(Some(token));
     }

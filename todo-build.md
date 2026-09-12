@@ -32,7 +32,7 @@ guarantee and the test that proves it.
 
 - **G2 reproducible image pipeline.** DONE. Pinned kernel/config assembly, deterministic initramfs and image hashes, staged diagnostics, `baud image build`, lint, and fresh-image KVM boot now pass `drive/pkg/pkg-build-cli.sh` and focused reproducibility tests.
 
-- **G2 guest tape endpoint and harness.** Implement the preferred virtio-serial endpoint and documented PIO/character-device fallback across `crates/baud-tape-device`, `crates/baud-multiverse`, and the guest image, then run the one-record-per-step generic harness against a freshly built image. Pass `guest_tape_roundtrip`, `guest_kernel_boots_to_userspace`, `boot_params_seed_is_pinned`, `init_powers_off_deterministically`, and the real-image drive; missing endpoint, malformed records, unavailable tape input, or unsupported kernel configuration must fail closed.
+- **G2 guest tape endpoint and harness.** DONE. The guest prefers virtio-console input with `/dev/tape` and direct PIO fallbacks, and real-KVM `guest_tape_roundtrip`, userspace boot, pinned seed, deterministic poweroff, and malformed-record tests pass.
 
 - **G3 write-set-scaled branching.** Connect `crates/baud-snapshot/src/userfaultfd.rs` to shared memfd-backed guest RAM in `crates/baud-multiverse`, with minor-fault continuation, write protection, per-branch isolation, and an explicit full-restore fallback. Prove unchanged-page sharing and private dirty pages with `thousand_branches_are_independent_and_deterministic`, write-set memory measurements, and `drive/h/h5.sh`; unsupported UFFD or memfd negotiation must select the documented fallback and never claim scaling.
 

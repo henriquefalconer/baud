@@ -416,20 +416,37 @@ pub async fn reconstruct(State(state): State<AppState>, Path(id): Path<String>) 
     // Read the complete durable specification before creating the replacement. Reconstructing
     // with `SandboxSpec::default()` loses image, resource, and timeout identity, so a later
     // exec/endpoint request would run in a different sandbox while claiming success.
-    let row = sqlx::query_as::<_, (String, String, u32, u32, u32, u32, u32, Option<String>)>(
-        "SELECT id, backend, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image
-         FROM tapes WHERE id = ? AND state != 'deleted'",
+    let row = sqlx::query_as::<_, (String, String, String, u32, u32, u32, u32, u32, Option<String>)>(
+        "SELECT id, backend, state, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image
+         FROM tapes WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.db)
     .await;
 
-    let (_, backend, vcpus, memory_mib, disk_mib, auto_stop_secs, auto_archive_secs, image) =
-        match row {
-            Err(e) => return Err(server_error(format!("db error: {e}"))),
-            Ok(None) => return Err(not_found(format!("tape {id} not found"))),
-            Ok(Some(row)) => row,
-        };
+    let (
+        _,
+        backend,
+        state_value,
+        vcpus,
+        memory_mib,
+        disk_mib,
+        auto_stop_secs,
+        auto_archive_secs,
+        image,
+    ) = match row {
+        Err(e) => return Err(server_error(format!("db error: {e}"))),
+        Ok(None) => return Err(not_found(format!("tape {id} not found"))),
+        Ok(Some(row)) => row,
+    };
+    if !reconstruct_allowed_state(&state_value) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({ "error": format!("tape {id} is {state_value}; reconstruct requires archived or deleted state") }),
+            ),
+        ));
+    }
     if backend != "local" {
         return Err(server_error(format!(
             "cannot reconstruct tape {id}: backend {backend:?} is unavailable"
@@ -490,6 +507,10 @@ pub async fn reconstruct(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+fn reconstruct_allowed_state(state: &str) -> bool {
+    matches!(state, "deleted" | "archived")
+}
+
 fn sandbox_spec_from_row(
     vcpus: u32,
     memory_mib: u32,
@@ -511,7 +532,15 @@ fn sandbox_spec_from_row(
 
 #[cfg(test)]
 mod tests {
-    use super::sandbox_spec_from_row;
+    use super::{reconstruct_allowed_state, sandbox_spec_from_row};
+
+    #[test]
+    fn reconstruction_requires_a_non_live_tape() {
+        assert!(reconstruct_allowed_state("deleted"));
+        assert!(reconstruct_allowed_state("archived"));
+        assert!(!reconstruct_allowed_state("running"));
+        assert!(!reconstruct_allowed_state("creating"));
+    }
 
     #[test]
     fn reconstruction_preserves_the_persisted_sandbox_spec() {

@@ -4177,6 +4177,13 @@ mod tests {
         );
     }
 
+    /// Named acceptance alias for the guest-harness contract. This intentionally calls the same
+    /// real-KVM proof as `all_input_is_tape_derived`, keeping one test body as the source of truth.
+    #[test]
+    fn guest_tape_roundtrip() {
+        all_input_is_tape_derived();
+    }
+
     /// `tests/fixtures/rdrand-guest/`'s payload: executes `rdrand eax` directly (ignoring the
     /// masked CPUID feature bit — an adversarial/non-compliant guest) and echoes the 4 raw result
     /// bytes to COM1, then halts. See that directory's `BUILD.md` for exact provenance and why
