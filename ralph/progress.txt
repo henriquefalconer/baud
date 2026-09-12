@@ -4460,3 +4460,7 @@ The exact gate exceeded its 600-second allowance before the agent could report; 
 The full gate passed every unit except H9. H9 still reaches 20,115 bytes and RIP 0xffffffffc009b0da after systemd-udevd, then the 600-second watchdog fails before ubuntu login; this is the same real post-rootfs userspace stall, so no selected item can be collapsed to DONE.
 
 I am preserving the verified ownership, cancellation, and timer-default fixes in a commit with the gate evidence. The selected batch remains open because G3 live branch integration, durable G5 lifecycle/journal paths, and G6 login proof are not green.
+
+Repeating the repository-defined full gate in the foreground as requested, with no background wrapper; I will record its terminal result before closing this iteration.
+
+Foreground gate rerun reached the same terminal state: warm build, clippy, workspace tests, H5, H0-H7, M9-M13, and package drives passed; the 600-second call timed out while H9 remained active. H9 is still not green, so the selected G3/G5/G6 entries remain open.
