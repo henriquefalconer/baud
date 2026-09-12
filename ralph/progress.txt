@@ -4616,3 +4616,426 @@ Focused PCI and stream regressions are green. G3 and G5 are collapsed to DONE; G
   - Ubuntu H9 diagnostics identified the remaining 4.15 virtio-pci probe/queue gap after correcting the PCI ID.
 
 ---
+
+## 2026-09-12T06:26:35 UTC (40min) - Session usage — ralph-15 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5111 (summed from 5 session transcripts: main $0.4334 · subagents $0.0777)
+- tokens input 970,828 · cache-read 14,065,152 · cache-write 0 · output 29,721 · reasoning 11,659
+- context 230,114 tok peak of 272K (85%) across 94 inference calls, monotonic
+- models gpt-5.6-luna $0.5111 (in 970,828 / out 41,380 / cache-read 14,065,152)
+- subagents (4) pi process x4
+  - delegate-146b3b51fecd7ebd2254cb8377827ca3: gpt-5.6-luna $0.0225, 5 inference calls
+  - delegate-46809a3f9566c7a73771cd9df6e9fa07: gpt-5.6-luna $0.0208, 4 inference calls
+  - delegate-8d7e797314eb1626e47885db287ec006: gpt-5.6-luna $0.0249, 7 inference calls
+  - 01a0942e-1b10-762c-a22d-d4f1bece4739: gpt-5.6-luna $0.0096, 6 inference calls
+- transcript: ralph/.run/20260911T161941Z/025-ralph-15.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 16 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each implementation path before making changes.
+
+Studying the Ubuntu H9 specification and tracing the real virtio-blk, PCI, interrupt, and fingerprint paths before locking the sole pending item.
+
+Chose this 1 item: G6 Ubuntu H9 proof — it is the only pending implementation item in todo-build.md.
+
+Tracing the live run loop and interrupt delivery now, with special attention to the ACK-without-queue-request stall described by the H9 item.
+
+Checking the real KVM environment and focused virtio/Ubuntu tests before editing.
+
+The real virtio-blk Linux-driver proof passes in isolation; continuing with the full multiverse Linux tests and artifact availability to expose the remaining H9 failure.
+
+All 238 baud-multiverse unit tests are green, including real Linux virtio-blk discovery and two-boot reproducibility; running the full H9 drive against the pinned Ubuntu artifacts now.
+
+The full H9 run reproduces the stall: Ubuntu reaches systemd-udevd and then makes no visible virtio-blk queue progress within 600 seconds. Re-running a bounded capture with diagnostics to isolate the last guest/device transition.
+
+The bounded diagnostic still spends its time in real guest execution before returning, so I am narrowing to a short capture and reading the resulting device trace rather than waiting on another long full-drive timeout.
+
+The short trace confirms PCI enumeration and virtio status ACK, but no queue notify or queue-address write follows. Enabling the per-tick watchdog to capture the exact guest RIP during the long native stretch.
+
+Added device-kind fields to virtio-pci transport diagnostics so the real Ubuntu probe can be separated between rng and blk; rerunning the short trace.
+
+Expanded the diagnostic console tail temporarily to retain the full early Ubuntu boot log, then rerunning the bounded capture to identify whether the stock driver reports a bind or IRQ failure.
+
+Root cause found in the full Ubuntu log: ACPI exposes the second I/O window at 0xc100..0xc1fe, but the block BAR was hard-coded at 0xc080 and Linux rejected it as crossing the first window. Moving the block BAR to 0xc100 and restoring the normal diagnostic tail; running focused tests before H9.
+
+The first focused command exposed only a test-filter syntax mistake, not a code failure; rerunning the PCI unit suite with Cargo’s supported single-filter form.
+
+PCI and legacy transport tests pass with the corrected resource placement; running the real Linux virtio-blk KVM integration test next.
+
+The real Linux virtio-blk integration test remains green; rerunning the complete Ubuntu H9 drive after the ACPI-window fix.
+
+The resource conflict is fixed and Ubuntu now reaches the real virtio-blk probe, which fails with -22 (EINVAL) after DRIVER_OK. The next trace isolates the queue/config value causing that driver rejection.
+
+The -22 trace shows the block device reaches FEATURES_OK but never writes a queue; logging every legacy register and device-config read to locate the pre-queue EINVAL.
+
+The register trace confirms the block transport reaches FEATURES_OK but its legacy config callback is still rejected before queue setup; expanding the captured boot log to expose the exact kernel error.
+
+The ACPI _PRT is present, but Linux still returns EINVAL from virtio-blk before queue setup, so I am testing the kernel’s explicit pci=routeirq path against the modeled interrupt-line values.
+
+The kernel’s -22 path is the INTx request before queue setup, so I am testing a free legacy IRQ5 end to end instead of the IRQ11 line Linux leaves unroutable on this minimal PIC/ACPI setup.
+
+IRQ5 also failed before queue setup, confirming the problem is the guest’s legacy IRQ descriptor rather than the selected PCI line. I am trying IRQ4, which the serial console has already initialized and which virtio requests with IRQF_SHARED.
+
+The register trace proved queue setup never started because virtio-pci fell back to INTx with an unroutable PCI IRQ. I found the ACPI _PRT AML entries were over-encoded by one byte each, so ACPICA could not map the PCI functions. I corrected the package lengths and entry fields, then re-running H9.
+
+## 2026-09-12T07:50:04 UTC (1h23min) - Session usage — ralph-16 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $1.3630 (summed from 7 session transcripts: main $1.2162 · subagents $0.1469)
+- tokens input 1,714,882 · cache-read 45,441,536 · cache-write 0 · output 92,700 · reasoning 52,005
+- context 255,458 tok peak of 272K (94%) across 331 inference calls, 3 drop(s), final 100,229, resumed 1x
+- models gpt-5.6-luna $1.3630 (in 1,714,882 / out 144,705 / cache-read 45,441,536)
+- subagents (6) pi process x6
+  - delegate-d61d250f9419314bf46e8cf5eb15e1f4: gpt-5.6-luna $0.0282, 6 inference calls
+  - delegate-d0b1e00ae154109dc02bbd9558fbea97: gpt-5.6-luna $0.0248, 5 inference calls
+  - delegate-ac4d1c1a04e5db753a2b54107c9cf996: gpt-5.6-luna $0.0168, 3 inference calls
+  - delegate-d8d51d4cd74feb2bb67225c5c7d43326: gpt-5.6-luna $0.0260, 4 inference calls
+  - delegate-de6fa489c1e73d64ed3591f5baf8e2ef: gpt-5.6-luna $0.0222, 3 inference calls
+  - delegate-7bb796603f3d2935c3d38fbf4691e7ef: gpt-5.6-luna $0.0290, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/026-ralph-16.json
+- transcript: ralph/.run/20260911T161941Z/027-ralph-16.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 17 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, reading the specifications, and mapping each item to its real implementation path.
+
+Started the iteration log and reset perf_event_paranoid for native KVM validation.
+
+The queue contains one pending entry, so the binding batch is G6 Ubuntu H9 proof.
+
+G6 is in flight. Existing uncommitted work targets ACPI resource descriptors, virtio-blk BAR placement, and ELCR/PIC routing; I am tracing the complete Linux boot path before testing it.
+
+Disassembly exposed the remaining ACPI defect: the block _PRT IRQ was encoded as AML 0x080b instead of byte value 11. Corrected the descriptor and added a regression assertion before rerunning the real acceptance.
+
+The corrected DSDT now disassembles to _PRT IRQ 10 and IRQ 11, with both PCI resource windows intact. Continuing with the real H9 run and its focused regressions.
+
+The specification review confirms the only queue item is the real Ubuntu H9 path, and that acceptance is specifically end-to-end virtio-pci discovery, queue submission, deterministic completion, login, and cross-process fingerprints.
+
+All three read-only audits agree the corrected _PRT is the key remaining integration defect. The binding batch remains open until the single build/test worker reports focused green results and H9 reaches login.
+
+Focused G6 suites are green: PIC, virtio-blk, PCI, ACPI, fingerprint, and server route tests passed. The worker could not retain its nested H9 process, so I am running the authoritative drive directly now.
+
+H9 now reaches the real Ubuntu virtio probe but still fails with `virtio_blk: probe of virtio1 failed with error -22` before queue setup. The DSDT IRQ encoding is fixed; I am tracing the remaining legacy INTx request path instead of weakening the drive.
+
+The remaining EINVAL is explained by the FADT declaring hardware-reduced ACPI: Linux installs a null legacy PIC, so PCI INTx request_irq fails before queue creation. I removed only that false capability flag, kept fixed registers absent and SMI disabled, and updated the ACPI regression.
+
+The non-reduced FADT experiment caused a real KVM FailEntry, so I restored the reduced flag and implemented the missing IO APIC instead. The ACPI MADT now advertises one IO APIC, and the guest bus models its redirection registers so Linux can allocate PCI IRQs.
+
+The IO APIC model compiles and is now wired into the guest MMIO path, but H9 still reports EINVAL. I am capturing whether Linux actually programs the advertised redirection entries before choosing the next fix.
+
+The ACPI experiments measured two distinct failure modes: reduced ACPI keeps the guest alive but leaves PCI INTx without a Linux IRQ domain; non-reduced ACPI reaches KVM FailEntry, and omitting MADT hangs earlier. I restored the authoritative reduced tables plus IO APIC model and am preserving this evidence while continuing the interrupt-path fix.
+
+The new IO APIC implementation is formatted and compiles, but Linux 4.15 still reports `Using PIC`; the non-reduced experiment produces KVM VM-entry reason 0x80000021 before virtio initialization. No DONE marker or commit is allowed yet; continuing root-cause work on the ACPI interrupt model.
+
+Repeating the repository-defined validation in the foreground as requested, then I will continue root-cause work on any failing acceptance path rather than closing G6 early.
+
+The foreground gate found a real regression in the new IO APIC range check: `then_some` evaluated `addr - base` even for unrelated low MMIO addresses, causing overflow in two console tests. Replacing it with an explicit conditional and rerunning the affected unit now.
+
+The IO APIC regression tests are green after the range fix. I am repeating the exact foreground gate; H9 remains the acceptance blocker and will be treated as root-cause work if it fails again.
+
+The repeated gate is green through workspace tests and every completed drive; H9 remains the sole failure. Its kernel log says `Using PIC` under reduced ACPI, so I am testing the narrowest PCI fallback: retain the pre-routed Interrupt Line while suppressing the unusable ACPI pin route, then I will keep or reject it from the real H9 result.
+
+The PCI pin-zero experiment did not change Ubuntu virtio-blk probe failure, so it was reverted. The exact foreground gate completed all non-H9 phases green twice, while H9 still fails before queue setup; G6 is not DONE and no commit/push is being claimed.
+
+## 2026-09-12T08:49:15 UTC (59min) - Session usage — ralph-17 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6450 (summed from 5 session transcripts: main $0.5500 · subagents $0.0950)
+- tokens input 865,866 · cache-read 20,788,736 · cache-write 0 · output 46,701 · reasoning 20,663
+- context 223,448 tok peak of 272K (82%) across 140 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.6450 (in 865,866 / out 67,364 / cache-read 20,788,736)
+- subagents (4) pi process x4
+  - delegate-ebb7a2929c55a5c6413d0a14a75164b6: gpt-5.6-luna $0.0288, 8 inference calls
+  - delegate-2ce964e4b5bb0c05eedf10f2a147cfcd: gpt-5.6-luna $0.0292, 7 inference calls
+  - delegate-e18b7b31cd865162f93b013e0f67e9bf: gpt-5.6-luna $0.0244, 6 inference calls
+  - 01a09499-2a39-742c-ab99-5480ca4eb5a5: gpt-5.6-luna $0.0126, 7 inference calls
+- transcript: ralph/.run/20260911T161941Z/028-ralph-17.json
+- transcript: ralph/.run/20260911T161941Z/029-ralph-17.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 18 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address in @todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+Resetting perf_event_paranoid before repository work.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item in todo-build.md.
+
+The real artifacts are present. Current code has PCI, PIC, LAPIC, and IOAPIC bookkeeping plus a combined timer/block run loop, so I am tracing the actual Ubuntu interrupt route rather than adding another stub.
+
+The probe fails before queue PFN, which points to Linux request_irq/IRQ-domain setup rather than block I/O. I added temporary PIC write tracing to distinguish PIC discovery from PCI route failure, then will remove or replace it after the focused boot.
+
+The focused Ubuntu traces now show ACPI using PIC and virtio-pci setting FAILED before any queue PFN write. PCI byte reads are correct, and changing the IRQ line, pin, PRT GSI, ACPI flags, or IOAPIC presence does not alter the failure. I am preserving only the principled ACPI/PIC/IOAPIC model changes and continuing to isolate Linux IRQ descriptor setup.
+
+The long early console confirms the real blocker: Ubuntu prints `APIC: Switch to symmetric I/O mode setup` followed by `Not enabling interrupt remapping due to skipped IO-APIC setup`; reduced ACPI intentionally skips IO-APIC and installs no usable legacy PIC. The principled next fix is a complete conventional ACPI fixed-hardware model or a guest-compatible IRQ setup, not another hard-coded PCI line. I am keeping the reduced tables and explicit IOAPIC/PIC models coherent while validating the current tree.
+
+Focused unit tests and workspace compilation are green. H9 is still red, so G6 remains open and there will be no DONE marker, commit, push, or promise until the real Ubuntu IRQ path reaches queue setup and login.
+
+Repeated the repository-defined gate in the foreground, as requested. Warm-up, clippy, workspace tests, H5, and all completed drive phases passed; the gate exceeded the 600-second foreground timeout before completing the remaining long H9 phase. G6 is still open because Ubuntu has not reached login, so no DONE marker, commit, or push was made.
+
+## 2026-09-12T09:42:22 UTC (53min) - Session usage — ralph-18 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3150699, receipt ralph/.run/20260911T161941Z/030-ralph-18.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3150697, receipt ralph/.run/20260911T161941Z/030-ralph-18.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3150698, receipt ralph/.run/20260911T161941Z/030-ralph-18.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3153830, receipt ralph/.run/20260911T161941Z/030-ralph-18.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3156839, receipt ralph/.run/20260911T161941Z/030-ralph-18.json.processes/receipt.json)
+- cost $1.0305 (summed from 8 session transcripts: main $0.8591 · subagents $0.1714)
+- tokens input 1,141,934 · cache-read 36,416,512 · cache-write 0 · output 61,480 · reasoning 30,188
+- context 255,573 tok peak of 272K (94%) across 208 inference calls, 1 drop(s), final 84,819, resumed 1x
+- models gpt-5.6-luna $1.0305 (in 1,141,934 / out 91,668 / cache-read 36,416,512)
+- subagents (7) pi process x7
+  - delegate-c8b78c50c7ee96626bfcd76e9d8ca33f: gpt-5.6-luna $0.0257, 7 inference calls
+  - delegate-f437b413b3c5705964fb256918ae50f4: gpt-5.6-luna $0.0263, 5 inference calls
+  - delegate-9a7468031c5fe5f9be85c93ce8e96fce: gpt-5.6-luna $0.0273, 5 inference calls
+  - delegate-7f9644ca55232e081155a214b2349cd9: gpt-5.6-luna $0.0177, 3 inference calls
+  - delegate-2c42c8f48ffa11deb6144cac63c2e17b: gpt-5.6-luna $0.0300, 6 inference calls
+  - 01a094cf-4ec1-72ef-9bc1-79a73c169fde: gpt-5.6-luna $0.0128, 4 inference calls
+  - delegate-280001085c38a9a2547503286ea8cd5e: gpt-5.6-luna $0.0316, 21 inference calls
+- transcript: ralph/.run/20260911T161941Z/030-ralph-18.json
+- transcript: ralph/.run/20260911T161941Z/031-ralph-18.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 19 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the implementation before changing code.
+
+Started iteration 19 and reset perf_event_paranoid; now reading the build queue and repository shape.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending implementation item in todo-build.md.
+
+Starting G6: tracing the real Ubuntu boot stall through PCI, interrupts, virtio-blk, and the H9 acceptance drive.
+
+The inherited tree contains an IOAPIC model and MSI capability work but H9 is still open; running focused device tests before the next real boot trace.
+
+The focused cargo invocation accepts one filter only; switching to the complete baud-multiverse unit suite so all device regressions run together.
+
+All 239 baud-multiverse unit tests pass, including the new ACPI, IOAPIC, PCI, and virtio paths. Running the real H9 drive now to capture the remaining guest-level failure.
+
+The real run now reaches PCI enumeration and virtio status 131 but still emits no queue PFN or notify. I am shortening H9 to 300 ticks and enabling device tracing to identify the exact probe operation that returns -22.
+
+The shortened trace confirms the block transport never receives queue programming. Checking the guest ACPI and IRQ-domain messages next, because a failed irq allocation can abort virtio probe before queue setup.
+
+The tail omits the early ACPI lines, so capturing one shortened boot to a file and extracting only ACPI/IRQ/PCI diagnostics.
+
+The trace shows virtio probe aborts before queue setup, exactly where Linux chooses an interrupt mode. I removed the unimplemented MSI advertisement so the now-modeled ACPI INTx route is the only path, then I am rerunning the focused PCI suite and shortened H9.
+
+PCI and virtio-pci integration tests remain green with MSI hidden. Running the real boot for 120 ticks to see whether Linux now reaches queue PFN and notify.
+
+Hiding MSI did not change the failure, so I am separating the two virtio functions in the trace. The next shortened boot will show whether rng or blk reaches queue negotiation and which operation returns first.
+
+The block fails during virtio_find_vqs before queue setup, so I am checking whether Linux ever programs the advertised IOAPIC redirection table. That distinguishes a bad ACPI domain from a bad legacy transport.
+
+Linux never writes IOAPIC in the shortened boot, so I am checking whether it instead initializes the emulated legacy PIC and whether the PCI INTx line is ever unmasked.
+
+The ACPI trace exposed the root cause: the new _PIC AML method declared a package one byte too long, so its scope consumed the following PCI object and ACPICA never installed the IOAPIC domain. Correcting the AML length and its regression assertion, then rerunning ACPI tests and H9.
+
+ACPI unit coverage is green after the AML package-length correction. Running the real H9 path for 120 ticks to verify IOAPIC programming and queue setup.
+
+Offline iASL validation proved the DSDT had two malformed package lengths and a bad scope prefix; the corrected bytes now disassemble cleanly to Scope(_SB).Device(PCI0) with no warnings. Re-running ACPI tests and a real boot to confirm Linux programs the IOAPIC.
+
+The DSDT now parses cleanly offline but Linux still does not touch IOAPIC. I am exposing the early console head for one bounded boot to learn whether ACPICA rejects the tables or selects a different IRQ model.
+
+The early console proves Ubuntu skips IOAPIC because the FADT advertises hardware-reduced ACPI, not because the DSDT is still malformed. With the DSDT fixed, switching to the conventional ACPI flag is now the principled route; testing it on the real guest.
+
+The conventional FADT still causes a KVM FailEntry, so I restored the reduced fixed-register contract. With the corrected DSDT now valid, I am restoring the MSI capability and testing whether Ubuntu can complete virtio probe through its message-signaled path instead of the skipped IOAPIC route.
+
+The conventional FADT now advances past the earlier immediate FailEntry and no longer stops during early ACPI setup; the bounded 20-tick run simply ended before virtio discovery. Retesting at 120 ticks to allow the guest to reach the block probe.
+
+Conventional ACPI reaches the legacy PIC unmask and then KVM FailEntry, so I restored the reduced FADT and am testing a narrower guest-visible fallback: map virtio-blk to the ACPI SCI IRQ 9, the only legacy descriptor the reduced platform is guaranteed to expose.
+
+The real blocker is Linux request_irq on the reduced ACPI platform. I am testing the complete conventional route with KVM’s in-kernel irqchip enabled only under an explicit diagnostic environment flag, to determine whether the prior FailEntry came from the userspace-only APIC contract.
+
+A second trace confirmed verify/fingerprint already writes ACPI whenever virtio-blk is requested, so the missing --acpi hypothesis is false for H9. The remaining blocker is the unconnected PCI interrupt path: Linux reaches virtio_blk probe, but no queue setup follows because userspace PIC/IOAPIC bookkeeping never creates a requestable guest IRQ domain.
+
+Foreground gate rerun completed its independent work through H5, clippy, workspace tests, and all drives that finished before the 600-second timeout. The H9 worker was still running when the timeout killed the gate; its captured log again shows Ubuntu reaching `systemd-udevd` and `virtio_blk: probe of virtio1 failed with error -22`, with no queue PFN or notify. G6 therefore remains open. No DONE marker, commit, or push was made.
+
+## 2026-09-12T10:31:00 UTC (49min) - Session usage — ralph-19 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.7797 (summed from 5 session transcripts: main $0.6708 · subagents $0.1090)
+- tokens input 1,023,204 · cache-read 25,542,144 · cache-write 0 · output 53,521 · reasoning 23,916
+- context 255,597 tok peak of 272K (94%) across 178 inference calls, 1 drop(s), final 94,356, resumed 1x
+- models gpt-5.6-luna $0.7797 (in 1,023,204 / out 77,437 / cache-read 25,542,144)
+- subagents (4) pi process x4
+  - delegate-b3d816824060d73e40dd097efc0e4ea6: gpt-5.6-luna $0.0294, 7 inference calls
+  - delegate-6127c5ebad377bb7741e588281af215c: gpt-5.6-luna $0.0251, 5 inference calls
+  - delegate-7f69aff1af10dede01c91e3607a280e8: gpt-5.6-luna $0.0255, 4 inference calls
+  - delegate-9ff1e73db4e7452483d213054b1c4cf5: gpt-5.6-luna $0.0289, 7 inference calls
+- transcript: ralph/.run/20260911T161941Z/032-ralph-19.json
+- transcript: ralph/.run/20260911T161941Z/033-ralph-19.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 20 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address in @todo-build.md, then implementing and verifying each one end to end.
+
+Resetting perf_event_paranoid before inspection.
+
+Reading the build queue and repository layout.
+
+Chose these 1 items: G6 Ubuntu H9 proof — it is the only pending item in the current implementation queue.
+
+Starting G6: inspecting the in-progress PCI and interrupt implementation before changing it.
+
+The locked G6 work already has uncommitted PCI/MSI, ACPI MADT, PIC, LAPIC, and I/O APIC changes; compiling the focused multiverse tests now to expose missing wiring.
+
+Focused multiverse tests are green. Running the authoritative H9 drive to validate the real Ubuntu path and capture its current failure.
+
+The AML audit found the concrete IRQ-domain defect: both _PRT wildcard addresses were encoded as 0x1ffff/0x2ffff, so Linux could not map the PCI pins. Corrected them to 0xffffffff and added byte-level regression assertions; formatting and retesting now.
+
+The corrected DSDT passes its focused ACPI tests. Running H9 with a bounded tick budget and quiet tracing to verify whether Linux now maps the PCI IRQ and submits virtio-blk queues.
+
+The _PRT wildcard fix did not change the guest failure, so I am extracting the complete early Ubuntu console and PCI probe trace rather than guessing at another ACPI variant.
+
+The DSDT now disassembles cleanly with iasl, and its _PRT matches compiler output except for the intended fixed GSI routes. Re-running the real boot to test this corrected AML.
+
+The full early console confirms ACPI tables load, but Linux still skips IOAPIC setup and reports only 16 legacy IRQs. Testing the now-valid conventional FADT with the modeled PIC/LAPIC/IOAPIC to activate the PCI IRQ domain.
+
+Conventional ACPI still fails KVM entry, so I restored the honest hardware-reduced FADT and forced virtio PCI away from the unusable legacy INTx pin to test the advertised MSI capability path.
+
+The trace proves the virtio transport reaches DRIVER_OK but no queue/config access follows, so the failure is request_irq during virtio_find_vqs. Testing Linux pci=routeirq against the valid _PRT/IRQ line before changing the VMM again.
+
+The PIC-compatible ACPI link-device DSDT now compiles and disassembles without AML corruption, with LNKA/LNKB resources and a valid PCI _PRT. Running the guest again to see whether Linux derives GSI 10/11 and reaches virtio queues.
+
+Iteration 20 remains open. The ACPI DSDT now has compiler-validated PIC link devices and correct IRQ resources, and the guest confirms LNKA=10/LNKB=11, but Linux still reports no GSI for the PCI INT A route and virtio_blk probe -22. H9 therefore did not pass; no DONE marker, commit, push, or success promise is justified.
+
+Foreground rerun of bash drive/h/h9.sh completed the same early Ubuntu path, then timed out at 600 seconds without ubuntu login. ACPI link resources load as LNKA=10/LNKB=11, but Linux still reports no GSI for PCI INT A and virtio_blk probe -22. G6 remains open for the next iteration.
+
+## 2026-09-12T11:28:30 UTC (57min) - Session usage — ralph-20 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.7028 (summed from 4 session transcripts: main $0.6170 · subagents $0.0857)
+- tokens input 964,804 · cache-read 22,252,544 · cache-write 0 · output 53,957 · reasoning 19,844
+- context 255,475 tok peak of 272K (94%) across 169 inference calls, 2 drop(s), final 123,331, resumed 1x
+- models gpt-5.6-luna $0.7028 (in 964,804 / out 73,801 / cache-read 22,252,544)
+- subagents (3) pi process x3
+  - delegate-64abe90d2469940bba18889a6101ac15: gpt-5.6-luna $0.0294, 5 inference calls
+  - delegate-d12d9721108e779d4b63ad446445d17f: gpt-5.6-luna $0.0301, 4 inference calls
+  - delegate-d6f26ec6da87f29f0823a7c9a8d5c59d: gpt-5.6-luna $0.0262, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/034-ralph-20.json
+- transcript: ralph/.run/20260911T161941Z/035-ralph-20.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 21 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected path before implementation.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item of 1.
+
+Starting G6 Ubuntu H9 proof. Inspecting the in-progress interrupt and PCI changes before compiling.
+
+Delegating the single build/test investigation while I trace and implement the H9 device path.
+
+The pending path now has ACPI _PRT/_PIC, I/O APIC state, MSI capability state, and block completion vector selection. I am checking exact AML and PCI semantics before marking it done.
+
+I found the code path is wired through DeviceBus and the Linux run loop, so I am adding focused capability tests rather than another fixture-only check.
+
+The validation child found one test-only type mismatch in the new MSI assertion; I fixed it. Workspace build passed, multiverse tests passed, and I am rerunning the complete gate before closing G6.
+
+The full workspace run exposed a stale DSDT length assertion after adding the slot-2 _PRT entry. The generated table is 300 bytes, so I corrected the test and am rerunning the focused ACPI and PCI suites.
+
+Focused ACPI and MSI tests are green. The slot-2 routing hole is closed, and the full end-to-end gate is now the final acceptance check.
+
+H9 reached Ubuntu userspace but exposed malformed AML in _PRT: the hand-encoded PCI address used a word prefix with three payload bytes. I corrected every PRT address to a proper AML DWord and updated package lengths; next I am rerunning H9 directly.
+
+The first AML repair used the right integer width but retained an invalid NameString root prefix. I compared the PRT bytes with iasl output and replaced the entries with the compiler form, including the correct package lengths and unprefixed link names.
+
+The corrected PRT table now passes its checksum and structural test. I am rerunning the real H9 drive with quiet logging so its Ubuntu driver output can confirm the route rather than relying on unit tests.
+
+The Ubuntu log showed the PRT parser still saw references in the pin field. The remaining culprit was two hand-added Alias opcodes inside PCI0. I removed them and reduced the enclosing device package length, matching the iasl-generated namespace.
+
+The alias removal shortened the actual DSDT by 20 bytes, not 12, because each AML Alias name string is five bytes. The structural assertion now reflects the measured 281-byte table; I am rerunning H9 to validate Linux parsing.
+
+The next H9 run moved past the PRT warnings but ACPICA rejected the enclosing PCI0 package. Removing two Alias terms removes 20 bytes, so the package length must be 0x33 rather than 0x3b; I corrected that exact AML length.
+
+The operand failure came from removing valid Alias namespace entries, not from the PRT integer encoding. I restored the aliases and their original enclosing length while retaining the compiler-correct PRT entries. This preserves the known-loading AML shape and fixes only the routing payload.
+
+The known-good AML now loads cleanly, but H9 still waits in userspace. The current fingerprint helper already supplies both device vectors; I am capturing a bounded 100-tick diagnostic to identify whether virtio-blk is probing, posting, or waiting for completion.
+
+The bounded run isolated the stall to ACPI evaluation immediately after PCI function discovery. The corrected PRT source names were relative to PCI0 while Alias entries also existed, creating a self-referential resolution path. I changed each source to an explicit root NameString and adjusted package/table lengths.
+
+The A/B check proved the PRT rewrite alone caused the stall. I restored the previously booting two-entry AML shape, retaining the I/O APIC and MSI/device code; I am now validating the original H9 failure point before making the smallest device-side fix.
+
+The controlled HEAD-ACPI run reaches the real virtio-blk probe and reports -22, so the remaining blocker is inside the legacy transport negotiation, not ACPI. I am isolating that probe contract before changing the device model.
+
+The authoritative H9 diagnostic is now clear: with clean baseline ACPI, Ubuntu reaches virtio_blk probe and returns -22 before any rootfs request. The selected G6 item remains open; I am leaving the queue honest rather than marking a failing end-to-end path DONE.
+
+The H9 trace exposed a concrete firmware defect: the MADT advertised only a LAPIC, so Ubuntu logged `ACPI: Skipping IOAPIC probe` and then virtio_blk failed with -22 before queue setup. Added a real MADT type-1 IOAPIC entry at 0xFEC00000/GSI 0 and identity-mapped that MMIO leaf alongside the LAPIC. Focused ACPI and page-table tests pass; rerunning H9 now.
+
+Per instruction, reran `bash drive/h/h9.sh` in the foreground after rebuilding. The valid AML now loads `_PIC` and link devices, but the real Ubuntu boot still reports `ACPI Exception: AE_NOT_FOUND, Evaluating _SRS`, `PCI INT A: no GSI`, and virtio_blk probe `-22`; H9 did not reach login. Focused ACPI/IOAPIC mapping tests remain green. G6 is still open.
+
+## 2026-09-12T13:42:54 UTC (2h14min) - Session usage — ralph-21 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.6682 (summed from 5 session transcripts: main $0.5845 · subagents $0.0837)
+- tokens input 1,072,508 · cache-read 19,792,896 · cache-write 0 · output 48,159 · reasoning 18,482
+- context 255,784 tok peak of 272K (94%) across 162 inference calls, 1 drop(s), final 198,159, resumed 1x
+- models gpt-5.6-luna $0.6682 (in 1,072,508 / out 66,641 / cache-read 19,792,896)
+- subagents (4) pi process x4
+  - delegate-d35ef6b14de08b9c88a1dbf3405c4ed3: gpt-5.6-luna $0.0226, 5 inference calls
+  - delegate-9b4d391c58ab7befc768c59a7518bcab: gpt-5.6-luna $0.0231, 5 inference calls
+  - delegate-697e1fbedc1c86b64864bfc2feb90a81: gpt-5.6-luna $0.0260, 4 inference calls
+  - 01a09560-e937-70ff-a5f2-b8a804e10765: gpt-5.6-luna $0.0120, 8 inference calls
+- transcript: ralph/.run/20260911T161941Z/036-ralph-21.json
+- transcript: ralph/.run/20260911T161941Z/037-ralph-21.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 22 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing their real implementation paths.
+
+Reset perf_event_paranoid and started the iteration study.
+
+Chose this 1 item: G6 Ubuntu H9 proof — it is the only pending item of 1.
+
+Starting G6 Ubuntu H9 proof. I am tracing the real virtio-pci probe failure before changing the device model.
+
+Focused source tracing shows the IO APIC is dispatched and identity-mapped, but Linux still reports PIC fallback; I am running a short authoritative H9 capture to identify the first failed IRQ operation.
+
+The Ubuntu kernel source shows maxcpus=1 forces APIC_SYMMETRIC_IO_NO_ROUTING, which calls disable_ioapic_support; removing the redundant nosmp/maxcpus limit lets the one-CPU CPUID topology retain IO APIC routing. Running H9 again.
+
+The IO APIC now resolves Linux’s programmed redirection vector instead of injecting the hard-coded timer vector 0xee for virtio-blk completions. Adding focused tests and rerunning the short H9 path.
+
+The focused vector regression is green. Re-running H9 at 300 ticks to verify the injected completion reaches Ubuntu’s block driver.
+
+The short H9 run now reaches IOAPIC mode, submits the real virtio-blk request, and enumerates vda1/vda14/vda15; the hard-coded-vector bug is fixed. Running the full 20,000-tick H9 acceptance now.
+
+The full run progressed to tick 400 then stalled inside the next exact-boundary interrupt, so I am bounding the next 500-tick capture to isolate the post-vda interrupt state before changing the scheduler.
+
+The 500-tick reproduction stalls after the first block read at the same boundary around tick 400. I am enabling the documented per-tick watchdog to capture the guest RIP instead of waiting on the next period.
+
+The watchdog identifies RIP 0xffffffffc00a50da, inside the Ubuntu initramfs btrfs module while udev probes the newly working vda partitions. I am testing the permitted deterministic module-blacklist cmdline against this now-reachable path.
+
+## Iteration 22 diagnosis update
+- The H9 path now reaches PCI/IOAPIC virtio-blk operation and enumerates `vda1`, `vda14`, and `vda15`.
+- The full acceptance still fails before userspace. With the watchdog enabled, the guest spins at `0xffffffffc00a50da`, which resolves to the Ubuntu 4.15 btrfs module's `resolve_indirect_refs` loop.
+- Verified the host image is GPT with one ext4 partition at sector 227328, and verified the ext4 magic and absence of btrfs magic at the standard superblock offsets.
+- Tested cmdline filesystem forcing and module blacklisting; neither changed the spin. Removed those experiments and temporary block tracing.
+- `cargo test -p baud-multiverse` is green: 242 passed, 10 ignored.
+- Iteration remains open. No commit, push, or promise emitted because H9.2 is not green.

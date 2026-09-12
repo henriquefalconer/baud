@@ -115,17 +115,25 @@ fn finish_table(mut bytes: Vec<u8>) -> Vec<u8> {
 /// baud's existing guests shut down via `reboot=t panic=-1`, never ACPI.
 pub fn build_dsdt() -> Vec<u8> {
     let mut bytes = description_header(b"DSDT", 2, b"BAUDDSDT");
-    // Generated with iasl from the equivalent ASL resource template. Keeping the compiled AML
-    // bytes here avoids a second host-side AML compiler in the production image path. In
-    // particular, the _CRS package length must cover exactly the two 0xFF-byte I/O descriptors;
-    // an earlier hand-encoded length made ACPICA discard the PCI resource declaration silently.
+    // Generated with iasl from /tmp/baud.dsl. This includes _PIC, link devices for IRQs 10 and
+    // 11, and _PRT entries for the modeled PCI slots. Keeping the compiler output here avoids a
+    // host-side AML compiler in the production image path.
     bytes.extend_from_slice(&[
-        0x10, 0x49, 0x05, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x41, 0x05, 0x50, 0x43, 0x49, 0x30,
-        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0a, 0x03, 0x08, 0x5f, 0x41, 0x44, 0x52,
-        0x00, 0x08, 0x5f, 0x50, 0x52, 0x54, 0x12, 0x1a, 0x02, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff,
-        0x01, 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x12, 0x0b, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x00,
-        0x00, 0x0a, 0x0b, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x15, 0x0a, 0x12, 0x47, 0x01, 0x00,
-        0xc0, 0xff, 0xc0, 0x01, 0xff, 0x47, 0x01, 0x00, 0xc1, 0xff, 0xc1, 0x01, 0xff, 0x79, 0x00,
+        0x08, 0x50, 0x49, 0x43, 0x4d, 0x00, 0x14, 0x0c, 0x5f, 0x50, 0x49, 0x43, 0x01, 0x70, 0x68,
+        0x50, 0x49, 0x43, 0x4d, 0x5b, 0x82, 0x3a, 0x4c, 0x4e, 0x4b, 0x41, 0x08, 0x5f, 0x48, 0x49,
+        0x44, 0x0c, 0x41, 0xd0, 0x0c, 0x0f, 0x08, 0x5f, 0x55, 0x49, 0x44, 0x01, 0x08, 0x5f, 0x50,
+        0x52, 0x53, 0x11, 0x09, 0x0a, 0x06, 0x23, 0x00, 0x04, 0x18, 0x79, 0x00, 0x08, 0x5f, 0x43,
+        0x52, 0x53, 0x11, 0x09, 0x0a, 0x06, 0x23, 0x00, 0x04, 0x18, 0x79, 0x00, 0x14, 0x06, 0x5f,
+        0x53, 0x52, 0x53, 0x01, 0x5b, 0x82, 0x3b, 0x4c, 0x4e, 0x4b, 0x42, 0x08, 0x5f, 0x48, 0x49,
+        0x44, 0x0c, 0x41, 0xd0, 0x0c, 0x0f, 0x08, 0x5f, 0x55, 0x49, 0x44, 0x0a, 0x02, 0x08, 0x5f,
+        0x50, 0x52, 0x53, 0x11, 0x09, 0x0a, 0x06, 0x23, 0x00, 0x08, 0x18, 0x79, 0x00, 0x08, 0x5f,
+        0x43, 0x52, 0x53, 0x11, 0x09, 0x0a, 0x06, 0x23, 0x00, 0x08, 0x18, 0x79, 0x00, 0x14, 0x06,
+        0x5f, 0x53, 0x52, 0x53, 0x01, 0x5b, 0x82, 0x46, 0x04, 0x50, 0x43, 0x49, 0x30, 0x08, 0x5f,
+        0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0a, 0x03, 0x08, 0x5f, 0x41, 0x44, 0x52, 0x00, 0x08,
+        0x5f, 0x50, 0x52, 0x54, 0x12, 0x2a, 0x03, 0x12, 0x0b, 0x04, 0x0b, 0xff, 0xff, 0x00, 0x4c,
+        0x4e, 0x4b, 0x41, 0x00, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x01, 0x00, 0x00, 0x4c, 0x4e,
+        0x4b, 0x42, 0x00, 0x12, 0x0d, 0x04, 0x0c, 0xff, 0xff, 0x02, 0x00, 0x00, 0x4c, 0x4e, 0x4b,
+        0x42, 0x00,
     ]);
     finish_table(bytes)
 }
@@ -211,11 +219,8 @@ pub fn build_fadt() -> Vec<u8> {
 /// Local Interrupt Controller Address ([`LOCAL_APIC_MMIO_BASE`]) and Flags (`PCAT_COMPAT` set,
 /// bit 0 -- a dual-8259 is also present, matching `crate::pic8259::Pic8259`'s existing stub), then
 /// exactly one Processor Local APIC structure (type 0): ACPI Processor UID 0, APIC ID 0, `Enabled`
-/// flag bit 0 set -- todo.md §14 item 5(c)'s "MADT with one LAPIC". No I/O APIC entry: with
-/// `nr_ioapics == 0` Linux falls back to the same legacy-PIC interrupt routing it already uses
-/// with no MADT at all, which is the intended outcome (baud never registers a real
-/// `KVM_CREATE_IRQCHIP` and delivers every interrupt via direct `KVM_INTERRUPT` injection
-/// regardless of what routing the guest believes is in effect).
+/// flag bit 0 set, followed by one I/O APIC structure (type 1) at the modeled IOAPIC MMIO address.
+/// Linux needs the I/O APIC declaration to keep ACPI interrupt routing enabled for PCI devices.
 pub fn build_madt() -> Vec<u8> {
     /// MADT `Flags` bit 0: a dual-8259 PIC is also present and must be disabled by the OS before
     /// using the APIC (ACPI spec §5.2.12) -- true here, `Pic8259` is unconditionally modeled.
@@ -226,6 +231,8 @@ pub fn build_madt() -> Vec<u8> {
     /// Local APIC `Flags` bit 0: `Enabled` -- an entry with this clear is a CPU OSPM must not try
     /// to boot at all (ACPI spec §5.2.12.2).
     const LOCAL_APIC_FLAG_ENABLED: u32 = 1 << 0;
+    const MADT_TYPE_IO_APIC: u8 = 1;
+    const MADT_IO_APIC_STRUCT_LEN: u8 = 12;
 
     let mut bytes = description_header(b"APIC", 3, b"BAUDMADT");
     bytes.extend_from_slice(&LOCAL_APIC_MMIO_BASE.to_le_bytes());
@@ -235,7 +242,13 @@ pub fn build_madt() -> Vec<u8> {
     bytes.push(0); // ACPI Processor UID
     bytes.push(0); // APIC ID
     bytes.extend_from_slice(&LOCAL_APIC_FLAG_ENABLED.to_le_bytes());
-    debug_assert_eq!(bytes.len(), 36 + 8 + 8);
+    bytes.push(MADT_TYPE_IO_APIC);
+    bytes.push(MADT_IO_APIC_STRUCT_LEN);
+    bytes.push(1); // I/O APIC ID
+    bytes.push(0); // Reserved
+    bytes.extend_from_slice(&(layout::IOAPIC_MMIO_BASE as u32).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // Global System Interrupt base
+    debug_assert_eq!(bytes.len(), 36 + 8 + 8 + 12);
     finish_table(bytes)
 }
 
@@ -406,7 +419,7 @@ mod tests {
         table_checksum_is_zero(&dsdt);
         assert_eq!(
             dsdt.len(),
-            126,
+            248,
             "the DSDT must match the compiler-verified AML length"
         );
         assert!(dsdt.windows(4).any(|window| window == b"PCI0"));
@@ -414,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn madt_checksum_is_valid_and_declares_exactly_one_enabled_lapic() {
+    fn madt_checksum_is_valid_and_declares_lapic_and_ioapic() {
         let madt = build_madt();
         assert_eq!(&madt[0..4], b"APIC");
         table_checksum_is_zero(&madt);
@@ -427,8 +440,8 @@ mod tests {
         );
         assert_eq!(
             madt.len(),
-            36 + 8 + 8,
-            "header + local-apic-address/flags + exactly one entry"
+            36 + 8 + 8 + 12,
+            "header + local-apic-address/flags + LAPIC and IOAPIC entries"
         );
         assert_eq!(madt[44], 0, "entry type 0: Processor Local APIC");
         assert_eq!(madt[45], 8, "entry length 8");
@@ -441,6 +454,17 @@ mod tests {
             entry_flags & 1,
             1,
             "the LAPIC entry's own Enabled bit must be set"
+        );
+        assert_eq!(madt[52], 1, "entry type 1: I/O APIC");
+        assert_eq!(madt[53], 12, "entry length 12");
+        assert_eq!(
+            u32::from_le_bytes(madt[56..60].try_into().unwrap()),
+            layout::IOAPIC_MMIO_BASE as u32
+        );
+        assert_eq!(
+            u32::from_le_bytes(madt[60..64].try_into().unwrap()),
+            0,
+            "I/O APIC GSI base"
         );
     }
 

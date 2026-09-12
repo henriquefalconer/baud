@@ -48,6 +48,8 @@ pub const PIC_MASTER_CMD: u16 = 0x20;
 pub const PIC_MASTER_DATA: u16 = 0x21;
 pub const PIC_SLAVE_CMD: u16 = 0xa0;
 pub const PIC_SLAVE_DATA: u16 = 0xa1;
+pub const ELCR_MASTER: u16 = 0x4d0;
+pub const ELCR_SLAVE: u16 = 0x4d1;
 
 /// `ICW1`'s "init" bit (bit 4) -- a command-port write with this bit set (re)starts the
 /// initialization sequence, exactly as a real 8259 defines it.
@@ -174,17 +176,33 @@ impl PicChip {
 /// The pair of chained 8259s -- see this module's doc for why this exists and what it does and
 /// does not model. Hardware-independent (plain `u8` bookkeeping, no KVM/perf), same pattern as
 /// [`crate::console::Cmos`].
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Pic8259 {
     master: PicChip,
     slave: PicChip,
+    elcr: u16,
+}
+
+impl Default for Pic8259 {
+    fn default() -> Self {
+        Self {
+            master: PicChip::default(),
+            slave: PicChip::default(),
+            elcr: 0x0800,
+        }
+    }
 }
 
 impl Pic8259 {
     pub(crate) fn in_range(port: u16) -> bool {
         matches!(
             port,
-            PIC_MASTER_CMD | PIC_MASTER_DATA | PIC_SLAVE_CMD | PIC_SLAVE_DATA
+            PIC_MASTER_CMD
+                | PIC_MASTER_DATA
+                | PIC_SLAVE_CMD
+                | PIC_SLAVE_DATA
+                | ELCR_MASTER
+                | ELCR_SLAVE
         )
     }
 
@@ -204,7 +222,13 @@ impl Pic8259 {
     /// injecting a queued device wake, so a guest that only polls COM1 is not handed an interrupt
     /// vector before it has initialized its PIC/IDT.
     pub fn irq_unmasked(&self, irq: u8) -> bool {
-        irq < 8 && self.master.imr & (1u8 << irq) == 0
+        if irq < 8 {
+            self.master.imr & (1u8 << irq) == 0
+        } else if irq < 16 {
+            self.slave.imr & (1u8 << (irq - 8)) == 0 && self.master.imr & (1u8 << 2) == 0
+        } else {
+            false
+        }
     }
 }
 
@@ -216,6 +240,8 @@ impl Bus for Pic8259 {
             PIC_MASTER_DATA => self.master.data_read(),
             PIC_SLAVE_CMD => self.slave.cmd_read(),
             PIC_SLAVE_DATA => self.slave.data_read(),
+            ELCR_MASTER => self.elcr as u8,
+            ELCR_SLAVE => (self.elcr >> 8) as u8,
             _ => OPEN_BUS_BYTE,
         };
         if let Some(first) = data.first_mut() {
@@ -229,11 +255,14 @@ impl Bus for Pic8259 {
     fn pio_write(&mut self, port: u16, data: &[u8]) {
         debug_assert!(Self::in_range(port));
         let Some(&byte) = data.first() else { return };
+        tracing::debug!(port = format_args!("{port:#x}"), byte, "PIC write");
         match port {
             PIC_MASTER_CMD => self.master.cmd_write(byte),
             PIC_MASTER_DATA => self.master.data_write(byte),
             PIC_SLAVE_CMD => self.slave.cmd_write(byte),
             PIC_SLAVE_DATA => self.slave.data_write(byte),
+            ELCR_MASTER => self.elcr = (self.elcr & 0xff00) | u16::from(byte),
+            ELCR_SLAVE => self.elcr = (self.elcr & 0x00ff) | (u16::from(byte) << 8),
             _ => {}
         }
     }

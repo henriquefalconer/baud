@@ -195,6 +195,8 @@ pub const ACPI_XSDT_ADDR: u64 = ACPI_RSDP_ADDR + 0x1000;
 pub const ACPI_FADT_ADDR: u64 = ACPI_XSDT_ADDR + 0x1000;
 pub const ACPI_DSDT_ADDR: u64 = ACPI_FADT_ADDR + 0x1000;
 pub const ACPI_MADT_ADDR: u64 = ACPI_DSDT_ADDR + 0x1000;
+/// Conventional x86 I/O APIC MMIO base advertised by the minimal MADT.
+pub const IOAPIC_MMIO_BASE: u64 = 0xFEC0_0000;
 
 /// MMIO device windows — deliberately **outside** [`GUEST_RAM_SIZE`], since any address KVM has a
 /// registered memory region for is served straight from guest RAM and never reaches a VM exit at
@@ -343,6 +345,16 @@ pub fn build_identity_page_tables(ram_size: usize) -> IdentityPageTables {
         "the two device windows must not alias one leaf"
     );
     mmio_pde[lapic_pde_index] = LAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
+
+    // The ACPI MADT advertises this I/O APIC, and Linux touches its redirection-table
+    // registers while bringing up PCI interrupt routing. It shares the same 1 GiB PDPTE
+    // region as the other fixed device windows, so one more 2 MiB leaf is enough.
+    let ioapic_pde_index = ((IOAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+    assert!(
+        ioapic_pde_index != mmio_pde_index && ioapic_pde_index != lapic_pde_index,
+        "the fixed device windows must not alias one leaf"
+    );
+    mmio_pde[ioapic_pde_index] = IOAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB;
 
     let mmio_pde_page_index = pde_pages.len();
     pdpte[mmio_pdpte_index] =
@@ -496,11 +508,13 @@ mod tests {
             mmio_pde_page[mmio_pde_index],
             VIRTIO_MMIO_RNG_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
         );
-        // Every other entry in this page stays not-present, except the LAPIC window's own leaf
-        // (`identity_map_also_covers_the_lapic_window` below) -- only these two are ever mapped.
+        // Every other entry in this page stays not-present, except the LAPIC and IOAPIC
+        // windows' leaves -- only the fixed device windows are mapped here.
         let lapic_pde_index = ((LAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
         for (i, &entry) in mmio_pde_page.iter().enumerate() {
-            if i != mmio_pde_index && i != lapic_pde_index {
+            let ioapic_pde_index =
+                ((IOAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+            if i != mmio_pde_index && i != lapic_pde_index && i != ioapic_pde_index {
                 assert_eq!(
                     entry, 0,
                     "no fabricated mapping outside the two device windows"
@@ -530,6 +544,24 @@ mod tests {
         assert_eq!(
             mmio_pde_page[lapic_pde_index],
             LAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
+        );
+    }
+
+    #[test]
+    fn identity_map_also_covers_the_ioapic_window() {
+        let tables = build_identity_page_tables(GUEST_RAM_SIZE);
+        let ioapic_pdpte_index = (IOAPIC_MMIO_BASE / (1u64 << 30)) as usize;
+        let ioapic_pde_index = ((IOAPIC_MMIO_BASE % (1u64 << 30)) / PDE_PAGE_SIZE_BYTES) as usize;
+        let mmio_pde_page = tables.pde_pages.last().expect("fixed device page exists");
+        assert_eq!(
+            tables.pdpte[ioapic_pdpte_index],
+            (PDE_ADDR + ((tables.pde_pages.len() - 1) as u64) * 0x1000)
+                | PTE_PRESENT
+                | PTE_WRITABLE
+        );
+        assert_eq!(
+            mmio_pde_page[ioapic_pde_index],
+            IOAPIC_MMIO_BASE | PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE_2MB
         );
     }
 

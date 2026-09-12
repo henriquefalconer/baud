@@ -32,6 +32,7 @@
 pub mod console;
 pub mod cpuid;
 pub mod dirty;
+pub mod ioapic;
 pub mod lapic;
 pub mod layout;
 pub mod pci;

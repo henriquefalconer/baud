@@ -911,8 +911,16 @@ mod rng_seed_from_tape_tests {
 /// a bare "guest did not halt"/"pattern not found" message gives no way to tell "stuck at the very
 /// start" from "one byte short of the target" from the error alone.
 fn console_tail(console: &[u8]) -> String {
-    let tail = &console[console.len().saturating_sub(2000)..];
-    String::from_utf8_lossy(tail).into_owned()
+    if console.len() <= 52000 {
+        return String::from_utf8_lossy(console).into_owned();
+    }
+    let head = &console[..50000];
+    let tail = &console[console.len() - 2000..];
+    format!(
+        "{}\n... <console middle elided> ...\n{}",
+        String::from_utf8_lossy(head),
+        String::from_utf8_lossy(tail)
+    )
 }
 
 /// One virtio device serviceable from inside
@@ -2104,6 +2112,7 @@ impl Multiverse {
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         if processed > 0 {
+            let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
             info!(
                 "virtio-blk service: processed {processed} request(s), notify_count {}",
                 self.virtio_pci_blk()
@@ -2131,6 +2140,7 @@ impl Multiverse {
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         if processed > 0 {
+            let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
             let mut events = self
                 .guest
                 .vcpu

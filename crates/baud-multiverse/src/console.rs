@@ -21,6 +21,7 @@
 // hardware-independent and runs on this Windows dev machine with no KVM/perf, the same pattern
 // `cpuid.rs`/`layout.rs`/`baud-vcpu`'s `boundary.rs` use.
 
+use crate::ioapic::IoApic;
 use crate::lapic::LocalApic;
 use crate::pci::PciHostBridge;
 use crate::pic8259::Pic8259;
@@ -344,6 +345,8 @@ pub struct DeviceBus {
     /// effects on any other device, and dormant for any guest whose cmdline sets `acpi=off` (every
     /// existing fixture up to this point, none of which ever touches this address).
     lapic: LocalApic,
+    /// The I/O APIC redirection table Linux programs for ACPI PCI INTx routing.
+    ioapic: IoApic,
     /// The legacy PCI configuration-mechanism-#1 host bridge (`crate::pci`), present
     /// unconditionally like [`Pic8259`] above — pure guest-write-derived bookkeeping with no side
     /// effects on any other device, and dormant for any guest whose cmdline sets `pci=off` (every
@@ -691,6 +694,27 @@ impl DeviceBus {
         self.virtio_pci_blk.as_ref()
     }
 
+    /// Returns the guest-programmed MSI vector for virtio-blk, if enabled.
+    pub fn virtio_pci_blk_msi_vector(&self) -> Option<u8> {
+        self.pci.virtio_blk_msi_vector()
+    }
+
+    /// Resolve the vector Linux programmed for the block device. MSI takes precedence; otherwise
+    /// use the IO APIC redirection entry for the PCI Interrupt Line, with the legacy PIC formula
+    /// as the honest fallback before Linux has programmed the IO APIC.
+    pub fn virtio_pci_blk_interrupt_vector(&self, fallback: u8) -> u8 {
+        if let Some(vector) = self.pci.virtio_blk_msi_vector() {
+            return vector;
+        }
+        if let Some(irq) = self.pci.virtio_blk_interrupt_line() {
+            if let Some(vector) = self.ioapic.vector_for_irq(irq) {
+                return vector;
+            }
+            return crate::pic8259::isa_irq_vector(irq);
+        }
+        fallback
+    }
+
     /// Check the block queue producer cursor without consuming a request. This lets the Linux
     /// run loop notice work even when a legacy guest's queue-notify write did not produce a
     /// separate userspace exit.
@@ -774,6 +798,7 @@ impl DeviceBus {
             cmos: Cmos,
             pic: Pic8259::default(),
             lapic: LocalApic::default(),
+            ioapic: IoApic::default(),
             pci: PciHostBridge::default(),
             virtio_rng: None,
             virtio_tape: None,
@@ -895,6 +920,10 @@ impl Bus for DeviceBus {
             self.lapic.mmio_read(addr, data);
             return;
         }
+        if IoApic::in_range(addr).is_some() {
+            self.ioapic.mmio_read(addr, data);
+            return;
+        }
         self.fallback.mmio_read(addr, data);
     }
 
@@ -917,6 +946,10 @@ impl Bus for DeviceBus {
         }
         if LocalApic::in_range(addr).is_some() {
             self.lapic.mmio_write(addr, data);
+            return;
+        }
+        if IoApic::in_range(addr).is_some() {
+            self.ioapic.mmio_write(addr, data);
             return;
         }
         self.fallback.mmio_write(addr, data);
@@ -1153,6 +1186,18 @@ mod tests {
     /// The virtio-blk counterpart of `device_bus_routes_virtio_pci_bar0_once_the_guest_assigns_it`
     /// — same real BAR0 sizing/assignment protocol, this time against the block function at
     /// 00:02.0, and confirming rng's own BAR0 (00:01.0) is unaffected by blk's separate assignment.
+    #[test]
+    fn virtio_pci_blk_interrupt_vector_prefers_ioapic_redirection() {
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_blk(vec![0u8; 4096]);
+        let register = 0x10 + 11 * 2;
+        bus.ioapic
+            .mmio_write(crate::layout::IOAPIC_MMIO_BASE, &[register, 0, 0, 0]);
+        bus.ioapic
+            .mmio_write(crate::layout::IOAPIC_MMIO_BASE + 0x10, &[0x59, 0, 0, 0]);
+        assert_eq!(bus.virtio_pci_blk_interrupt_vector(0xee), 0x59);
+    }
+
     #[test]
     fn device_bus_routes_virtio_pci_blk_bar0_once_the_guest_assigns_it() {
         use crate::pci::{PCI_CONFIG_ADDRESS, PCI_CONFIG_DATA};

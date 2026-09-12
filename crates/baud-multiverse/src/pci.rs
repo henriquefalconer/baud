@@ -110,7 +110,11 @@ const REG_CLASS_REVISION: u8 = 0x08; // revision ID (bits 7:0), class code (bits
 const REG_HEADER_BIST: u8 = 0x0C; // cache-line-size/latency-timer/header-type/BIST
 const REG_BAR0: u8 = 0x10;
 const REG_SUBSYSTEM: u8 = 0x2C; // subsystem vendor ID (bits 15:0), subsystem ID (bits 31:16)
+const REG_CAP_PTR: u8 = 0x34;
 const REG_INTERRUPT: u8 = 0x3C; // interrupt line (bits 7:0), interrupt pin (bits 15:8)
+const REG_MSI_CAP: u8 = 0x50;
+const REG_MSI_ADDR: u8 = 0x54;
+const REG_MSI_DATA: u8 = 0x58;
 
 /// virtio's own PCI-SIG-assigned vendor ID (never Red Hat's QEMU-project ID the host bridge above
 /// uses) — real virtio-pci hardware and every virtio guest driver's `pci_device_id` table key off
@@ -197,6 +201,9 @@ pub struct PciVirtioFunction {
     /// "no BIOS exists, so the VMM must pre-program what a BIOS normally would" role baud already
     /// plays for e.g. `boot_params`/e820 (§4.2).
     interrupt_line: u8,
+    msi_control: u16,
+    msi_address: u32,
+    msi_data: u16,
 }
 
 impl PciVirtioFunction {
@@ -209,6 +216,9 @@ impl PciVirtioFunction {
             bar0_sizing: false,
             command: 0,
             interrupt_line: default_interrupt_line,
+            msi_control: 0,
+            msi_address: 0xfee0_0000,
+            msi_data: 0,
         }
     }
 
@@ -264,7 +274,7 @@ impl PciVirtioFunction {
     fn config_read_dword(&self, register: u8) -> u32 {
         match register {
             REG_VENDOR_DEVICE => (VIRTIO_VENDOR_ID as u32) | ((self.device_id() as u32) << 16),
-            REG_COMMAND_STATUS => u32::from(self.command),
+            REG_COMMAND_STATUS => u32::from(self.command) | (1 << 20), // CAP_LIST
             REG_CLASS_REVISION => self.class_code,
             REG_HEADER_BIST => 0, // header type 0 (single-function), no BIST capability
             REG_BAR0 => self.bar0_read(),
@@ -273,7 +283,11 @@ impl PciVirtioFunction {
                 // vendor ID mirrors the real virtio vendor ID (virtio spec, Legacy Interface).
                 (VIRTIO_VENDOR_ID as u32) | (self.device_kind << 16)
             }
+            REG_CAP_PTR => u32::from(REG_MSI_CAP),
             REG_INTERRUPT => (self.interrupt_line as u32) | (INTERRUPT_PIN_INTA << 8),
+            REG_MSI_CAP => 0x0000_0005 | (u32::from(self.msi_control) << 16),
+            REG_MSI_ADDR => self.msi_address,
+            REG_MSI_DATA => u32::from(self.msi_data),
             _ => 0,
         }
     }
@@ -286,6 +300,9 @@ impl PciVirtioFunction {
             }
             REG_BAR0 => self.bar0_write(value),
             REG_INTERRUPT => self.interrupt_line = (value & 0xFF) as u8,
+            REG_MSI_CAP => self.msi_control = (value >> 16) as u16,
+            REG_MSI_ADDR => self.msi_address = value,
+            REG_MSI_DATA => self.msi_data = value as u16,
             // Vendor/device/class/subsystem are read-only; anything else this header doesn't
             // model (Command/Status, Cache Line Size, other BARs) is silently absorbed.
             _ => {}
@@ -360,6 +377,21 @@ impl PciHostBridge {
             .and_then(PciVirtioFunction::io_base)
     }
 
+    /// The guest-programmed MSI vector for the block function, when MSI is enabled.
+    pub fn virtio_blk_msi_vector(&self) -> Option<u8> {
+        self.virtio_blk
+            .as_ref()
+            .and_then(|f| (f.msi_control & 1 != 0).then_some((f.msi_data & 0xff) as u8))
+    }
+
+    /// The PCI Interrupt Line byte for the block function. Linux uses this legacy IRQ number
+    /// when MSI is unavailable, and the IO APIC turns it into the CPU vector.
+    pub fn virtio_blk_interrupt_line(&self) -> Option<u8> {
+        self.virtio_blk
+            .as_ref()
+            .map(|function| function.interrupt_line)
+    }
+
     /// Assign fixed legacy I/O windows when direct boot has no firmware resource allocator.
     pub fn assign_default_virtio_io_bases(&mut self) {
         tracing::info!("assigning direct-boot virtio PCI I/O windows");
@@ -370,7 +402,10 @@ impl PciHostBridge {
         }
         if let Some(blk) = self.virtio_blk.as_mut() {
             if blk.io_base().is_none() {
-                blk.assign_io_base(0xc080);
+                // The ACPI DSDT exposes the second legacy I/O window at 0xc100..0xc1fe;
+                // placing the 0x80-byte BAR at 0xc080 crosses the first window's
+                // 0xc000..0xc0fe boundary and makes Linux reject the resource.
+                blk.assign_io_base(0xc100);
             }
         }
     }
@@ -753,8 +788,8 @@ mod tests {
         );
         write_u32(&mut bus, PCI_CONFIG_DATA, 0x0007);
         assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) & 0x0007, 0x0007);
-        // Status is read-only in this minimal function and remains zero.
-        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) >> 16, 0);
+        // Status is read-only; bit 4 advertises the MSI capability list.
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) >> 16, 1 << 4);
     }
 
     #[test]
@@ -766,6 +801,49 @@ mod tests {
         let dword = read_u32(&mut bus, PCI_CONFIG_DATA);
         assert_eq!(dword & 0xFF, 11, "interrupt line round-trips");
         assert_eq!((dword >> 8) & 0xFF, 1, "interrupt pin is fixed at INTA#");
+    }
+
+    #[test]
+    fn msi_capability_round_trips_enable_address_data_and_vector() {
+        let mut bus = PciHostBridge::default();
+        bus.attach_virtio_blk(0x20);
+
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_CAP_PTR));
+        assert_eq!(
+            read_u32(&mut bus, PCI_CONFIG_DATA) & 0xff,
+            u32::from(REG_MSI_CAP)
+        );
+
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_MSI_CAP));
+        write_u32(&mut bus, PCI_CONFIG_DATA, 0x0001_0005);
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_MSI_ADDR),
+        );
+        write_u32(&mut bus, PCI_CONFIG_DATA, 0xfee1_2000);
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_MSI_DATA),
+        );
+        write_u32(&mut bus, PCI_CONFIG_DATA, 0x00d7);
+
+        write_u32(&mut bus, PCI_CONFIG_ADDRESS, select_virtio_blk(REG_MSI_CAP));
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) >> 16, 1);
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_MSI_ADDR),
+        );
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA), 0xfee1_2000);
+        write_u32(
+            &mut bus,
+            PCI_CONFIG_ADDRESS,
+            select_virtio_blk(REG_MSI_DATA),
+        );
+        assert_eq!(read_u32(&mut bus, PCI_CONFIG_DATA) & 0xffff, 0x00d7);
+        assert_eq!(bus.virtio_blk_msi_vector(), Some(0xd7));
     }
 
     #[test]
