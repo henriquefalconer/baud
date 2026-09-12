@@ -5039,3 +5039,9 @@ The watchdog identifies RIP 0xffffffffc00a50da, inside the Ubuntu initramfs btrf
 - Tested cmdline filesystem forcing and module blacklisting; neither changed the spin. Removed those experiments and temporary block tracing.
 - `cargo test -p baud-multiverse` is green: 242 passed, 10 ignored.
 - Iteration remains open. No commit, push, or promise emitted because H9.2 is not green.
+
+## Iteration 22 closeout
+- Repeated `timeout 600 bash drive/h/h9.sh` in the foreground as requested. It timed out while the guest remained at tick 400, before the Ubuntu login banner.
+- Re-ran `cargo test -p baud-multiverse`: 242 passed, 10 ignored. `git diff --check` passed and formatting check passed.
+- Committed and pushed the implementation as `a56fa6a` (`wire Ubuntu PCI interrupt routing`).
+- G6 remains open. The next iteration must diagnose the post-block btrfs spin and rerun the full H9 gate before claiming completion.
