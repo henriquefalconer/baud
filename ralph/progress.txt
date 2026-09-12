@@ -5450,3 +5450,5 @@ The stall is after vda partition discovery, so I am tracing the real completion 
 The trace did not expose a completion line at info level. I am enabling transport-level tracing for one bounded capture to confirm whether the root-read request is drained and which vector is injected.
 
 The combined periodic Ubuntu path had another real bug: PCI virtio-rng was injected with the caller's PIC fallback vector instead of the IOAPIC vector Linux programmed for its legacy INTx line. The wrapper now resolves the PCI RNG route exactly as the block device does. Focused build passes, but the bounded H9 rerun still stalls in the guest btrfs path, so G6 remains open and no completion claim is made.
+
+Repeated the full foreground acceptance exactly as requested: `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && timeout 600 bash drive/h/h9.sh`. It again reached `vda: vda1 vda14 vda15` and stopped before `ubuntu login:` around tick 300, exiting on the 600-second timeout. G6 remains open; this iteration ends with the reproducible H9 failure documented rather than falsely marking completion.
