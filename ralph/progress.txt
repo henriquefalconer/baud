@@ -5348,3 +5348,5 @@ The watchdog evidence changes the diagnosis: the hang is inside one long native 
 Formatting is clean. The smaller-period experiment only changed the drive temporarily and did not escape the guest btrfs path, so the documented 500000-RCB acceptance period is restored; running the full focused crate suite after the final guarded changes.
 
 Focused final verification passes: `cargo fmt --all`, all 14 virtio-rng tests, and the baud-vcpu crate tests. The full H9 acceptance remains open: Ubuntu reaches vda and receives block completions but still does not reach `ubuntu login:`; G6 is intentionally not marked DONE. The device-event staging fix is committed as an intermediate iteration result for the next H9 investigation.
+
+Repeated `bash drive/h/h9.sh` in the foreground after resetting perf_event_paranoid. The real run again reached Ubuntu's ACPI IOAPIC setup, discovered `vda: vda1 vda14 vda15`, and stalled at the same post-block point around tick 400 until the 600-second command timeout. This confirms the pending G6 failure is reproducible and was not caused by background execution.
