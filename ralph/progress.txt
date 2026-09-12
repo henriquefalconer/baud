@@ -5644,3 +5644,51 @@ The ext4-forced diagnostic also failed, so the issue is below filesystem selecti
 Iteration 33 completion record:
 
 The requested foreground rerun was performed with perf_event_paranoid reset. `bash drive/h/h9.sh` still fails H9.2 after the real Ubuntu guest reaches PCI enumeration, discovers `vda: vda1 vda14 vda15`, and emits the final observed udev progress. The 600-second watchdog again stops at RIP `0xffffffffc00a50da` in the btrfs module, before `ubuntu login:`. The focused virtio-blk interrupt test passes, and `cargo fmt --all -- --check` plus `git diff --check` pass. G6 remains open because the required H9.2-H9.5 acceptance did not pass. This iteration ends with the next iteration promise.
+
+## 2026-09-12T21:14:55 UTC (37min) - Session usage — ralph-33 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2571861, receipt ralph/.run/20260911T161941Z/059-ralph-33.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2571862, receipt ralph/.run/20260911T161941Z/059-ralph-33.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2571860, receipt ralph/.run/20260911T161941Z/059-ralph-33.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2574971, receipt ralph/.run/20260911T161941Z/059-ralph-33.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2578170, receipt ralph/.run/20260911T161941Z/059-ralph-33.json.processes/receipt.json)
+- cost $0.5304 (summed from 5 session transcripts: main $0.4372 · subagents $0.0931)
+- tokens input 871,757 · cache-read 16,109,568 · cache-write 0 · output 28,192 · reasoning 11,151
+- context 254,920 tok peak of 272K (94%) across 110 inference calls, 1 drop(s), final 81,578, resumed 1x
+- models gpt-5.6-luna $0.5304 (in 871,757 / out 39,343 / cache-read 16,109,568)
+- subagents (4) pi process x4
+  - delegate-56c0b9a045a58bd15c04f11aadb30e8f: gpt-5.6-luna $0.0292, 6 inference calls
+  - delegate-9affd1930725b6b33bad9d475b31762d: gpt-5.6-luna $0.0291, 5 inference calls
+  - delegate-dbf0a52b40534eb9925ea8e5cd6f4a57: gpt-5.6-luna $0.0251, 4 inference calls
+  - delegate-362a988be17b80701004f6a0bbf3ac3a: gpt-5.6-luna $0.0097, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/059-ralph-33.json
+- transcript: ralph/.run/20260911T161941Z/060-ralph-33.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 34 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items in @todo-build.md, then studying the specifications and implementing each selected item end to end.
+
+Chose these 1 items: G6 Ubuntu H9 proof — it is the only pending item in the queue.
+
+Starting the bounded real Ubuntu H9 capture with the required perf reset, then using its RIP and console diagnostics to repair the remaining boot path.
+
+The short capture confirms 113 real block completions and correct ACPI/PCI discovery; extending to a bounded 1000-tick run now to capture the post-udev failure without waiting on the full gate.
+
+Adding request-level virtio-blk tracing and rerunning the bounded capture to verify whether the btrfs probe receives the correct partition sectors and completion statuses.
+
+The btrfs hook is an initramfs userspace scan, so I am logging the first real request sectors and descriptor shapes to test for a disk-read protocol error rather than guessing from the module RIP.
+Request tracing confirmed the guest issues valid absolute disk-sector reads, including partition-table sectors and Ubuntu partition sectors, with one data descriptor per request. Both the default and rootfstype=ext4 command lines still stop after vda partition discovery, so no source workaround was justified. H9 remains pending.
+
+Iteration 34 foreground verification
+
+The prescribed foreground `bash drive/gate.sh` was rerun after resetting perf_event_paranoid. Build, clippy, workspace tests, H5, and the completed drive units passed before the 600-second command limit expired. The gate did not reach H9, and the selected G6 item remains pending because the real Ubuntu boot still stops after virtio partition discovery.
+
+Changes committed: 2026-09-12T21:33:00Z
+
+- Recorded the H9 investigation and foreground gate result.
+- No implementation change was made without a reproducible fix.
