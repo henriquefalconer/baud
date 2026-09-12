@@ -5452,3 +5452,45 @@ The trace did not expose a completion line at info level. I am enabling transpor
 The combined periodic Ubuntu path had another real bug: PCI virtio-rng was injected with the caller's PIC fallback vector instead of the IOAPIC vector Linux programmed for its legacy INTx line. The wrapper now resolves the PCI RNG route exactly as the block device does. Focused build passes, but the bounded H9 rerun still stalls in the guest btrfs path, so G6 remains open and no completion claim is made.
 
 Repeated the full foreground acceptance exactly as requested: `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && timeout 600 bash drive/h/h9.sh`. It again reached `vda: vda1 vda14 vda15` and stopped before `ubuntu login:` around tick 300, exiting on the 600-second timeout. G6 remains open; this iteration ends with the reproducible H9 failure documented rather than falsely marking completion.
+
+## 2026-09-12T19:41:12 UTC (34min) - Session usage — ralph-29 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3546 (summed from 4 session transcripts: main $0.2788 · subagents $0.0758)
+- tokens input 835,308 · cache-read 8,184,832 · cache-write 0 · output 19,829 · reasoning 7,500
+- context 255,215 tok peak of 272K (94%) across 76 inference calls, 1 drop(s), final 146,191, resumed 1x
+- models gpt-5.6-luna $0.3546 (in 835,308 / out 27,329 / cache-read 8,184,832)
+- subagents (3) pi process x3
+  - delegate-e65d4e3fba8700e93ae7b88c02d28b5a: gpt-5.6-luna $0.0271, 5 inference calls
+  - delegate-afa9cde00c5de98a47cd78e7ded16212: gpt-5.6-luna $0.0210, 3 inference calls
+  - delegate-876ea5ecff793d3acbf8cee2027ca6eb: gpt-5.6-luna $0.0277, 6 inference calls
+- transcript: ralph/.run/20260911T161941Z/052-ralph-29.json
+- transcript: ralph/.run/20260911T161941Z/053-ralph-29.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 30 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected item through the code before making changes.
+
+Started iteration 30 and reset perf_event_paranoid. Reading the backlog and repository shape now.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending build item, and it is the binding contract for this iteration.
+
+Starting the locked G6 investigation. I am reading the Ubuntu, boot, PCI, interrupt, and drive specifications while tracing the current implementation.
+
+The code already models PCI, ACPI, IOAPIC, PIC, virtio-blk, and completion polling. I am running a bounded H9 capture and reading the exact final guest state before changing anything.
+
+The guest reaches partition discovery but never starts userspace. I am capturing transport-level queue notifications and completions to separate a missing request from a missing interrupt.
+
+Queue notifications are present. I am now checking the exact injected vector and whether Linux programmed the IOAPIC route before the first completion.
+
+The route is dynamically programmed to vector 0x21, not the fallback 0x3b. I am correlating completed request counts with the last interrupt delivery before changing the lifecycle.
+
+I found that request draining is real and repeated, so I completed the missing level-triggered line lifecycle: virtio-blk now asserts its modeled IOAPIC line and LAPIC EOI clears it, with unit coverage. Running formatting and compile checks while the focused test worker finishes.
+
+Focused multiverse and vCPU tests are green. I am rerunning the real H9 path after the IOAPIC assertion/EOI integration; if it still stalls, I will trace the remaining guest-visible wait rather than closing G6.
+
+The EOI lifecycle is unit-tested and focused tests remain green, but H9 still stops at the same userspace boundary. I am preserving G6 as open and recording the new evidence before the next debugging pass.

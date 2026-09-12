@@ -23,6 +23,7 @@ const MASKED: u64 = 1 << 16;
 pub struct IoApic {
     register: u8,
     redirection: [u64; REDIR_COUNT],
+    asserted: [bool; REDIR_COUNT],
 }
 
 impl Default for IoApic {
@@ -30,6 +31,7 @@ impl Default for IoApic {
         Self {
             register: 0,
             redirection: [MASKED; REDIR_COUNT],
+            asserted: [false; REDIR_COUNT],
         }
     }
 }
@@ -52,6 +54,28 @@ impl IoApic {
             return None;
         }
         Some((entry & 0xff) as u8)
+    }
+
+    /// Assert a level-triggered PCI INTx line after publishing a used-ring entry.
+    pub fn assert_irq(&mut self, irq: u8) {
+        if let Some(line) = self.asserted.get_mut(irq as usize) {
+            *line = true;
+        }
+    }
+
+    /// Clear the asserted PCI line when the guest completes its APIC EOI.
+    pub fn clear_irq(&mut self, irq: u8) {
+        if let Some(line) = self.asserted.get_mut(irq as usize) {
+            *line = false;
+        }
+    }
+
+    pub fn irq_asserted(&self, irq: u8) -> bool {
+        self.asserted.get(irq as usize).copied().unwrap_or(false)
+    }
+
+    pub fn clear_all_asserted(&mut self) {
+        self.asserted.fill(false);
     }
 
     fn read_register(&self, register: u8) -> u32 {
@@ -153,5 +177,19 @@ mod tests {
         write(&mut io, IOREGSEL, u32::from(REDIR_BASE + 11 * 2));
         write(&mut io, IOWIN, 0x3b);
         assert_eq!(io.vector_for_irq(11), Some(0x3b));
+        io.assert_irq(11);
+        assert!(io.irq_asserted(11));
+        io.clear_irq(11);
+        assert!(!io.irq_asserted(11));
+    }
+
+    #[test]
+    fn eoi_clear_releases_all_level_triggered_lines() {
+        let mut io = IoApic::default();
+        io.assert_irq(10);
+        io.assert_irq(11);
+        io.clear_all_asserted();
+        assert!(!io.irq_asserted(10));
+        assert!(!io.irq_asserted(11));
     }
 }

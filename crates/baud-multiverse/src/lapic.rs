@@ -76,6 +76,8 @@ const REG_ID: u64 = 0x020;
 const REG_LVR: u64 = 0x030;
 const APIC_VERSION_VALUE: u32 = 0x0006_0014;
 const REG_TPR: u64 = 0x080;
+/// Local APIC end-of-interrupt register. DeviceBus uses this write to release level-triggered PCI INTx.
+pub const EOI_OFFSET: u64 = 0x0B0;
 const REG_LDR: u64 = 0x0D0;
 const REG_DFR: u64 = 0x0E0;
 const REG_SPIV: u64 = 0x0F0;

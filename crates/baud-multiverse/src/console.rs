@@ -721,6 +721,7 @@ impl DeviceBus {
         }
         if let Some(irq) = self.pci.virtio_blk_interrupt_line() {
             if let Some(vector) = self.ioapic.vector_for_irq(irq) {
+                tracing::info!(irq, vector, "virtio-blk interrupt route");
                 return vector;
             }
             return crate::pic8259::isa_irq_vector(irq);
@@ -799,6 +800,9 @@ impl DeviceBus {
                 .as_mut()
                 .expect("checked Some at the top of this function")
                 .raise_used_buffer_notification();
+            if let Some(irq) = self.pci.virtio_blk_interrupt_line() {
+                self.ioapic.assert_irq(irq);
+            }
         }
         Ok(processed)
     }
@@ -979,8 +983,11 @@ impl Bus for DeviceBus {
                 return;
             }
         }
-        if LocalApic::in_range(addr).is_some() {
+        if let Some(offset) = LocalApic::in_range(addr) {
             self.lapic.mmio_write(addr, data);
+            if offset == crate::lapic::EOI_OFFSET {
+                self.ioapic.clear_all_asserted();
+            }
             return;
         }
         if IoApic::in_range(addr).is_some() {
