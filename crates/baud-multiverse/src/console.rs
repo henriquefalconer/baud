@@ -699,6 +699,19 @@ impl DeviceBus {
         self.pci.virtio_blk_msi_vector()
     }
 
+    /// Whether the legacy block device still has an asserted used-ring interrupt.
+    ///
+    /// Legacy virtio INTx is level-triggered by the transport's ISR status.  The line remains
+    /// asserted until the guest reads the ISR register, so a completion that was staged while a
+    /// different external interrupt occupied KVM's single injection slot must be retried even
+    /// after the avail ring has been drained.
+    #[cfg(target_os = "linux")]
+    pub fn virtio_pci_blk_interrupt_pending(&self) -> bool {
+        self.virtio_pci_blk
+            .as_ref()
+            .is_some_and(|transport| transport.isr_status() != 0)
+    }
+
     /// Resolve the vector Linux programmed for the block device. MSI takes precedence; otherwise
     /// use the IO APIC redirection entry for the PCI Interrupt Line, with the legacy PIC formula
     /// as the honest fallback before Linux has programmed the IO APIC.

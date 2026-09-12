@@ -5350,3 +5350,103 @@ Formatting is clean. The smaller-period experiment only changed the drive tempor
 Focused final verification passes: `cargo fmt --all`, all 14 virtio-rng tests, and the baud-vcpu crate tests. The full H9 acceptance remains open: Ubuntu reaches vda and receives block completions but still does not reach `ubuntu login:`; G6 is intentionally not marked DONE. The device-event staging fix is committed as an intermediate iteration result for the next H9 investigation.
 
 Repeated `bash drive/h/h9.sh` in the foreground after resetting perf_event_paranoid. The real run again reached Ubuntu's ACPI IOAPIC setup, discovered `vda: vda1 vda14 vda15`, and stalled at the same post-block point around tick 400 until the 600-second command timeout. This confirms the pending G6 failure is reproducible and was not caused by background execution.
+
+## 2026-09-12T18:25:31 UTC (1h04min) - Session usage — ralph-27 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1618721, receipt ralph/.run/20260911T161941Z/048-ralph-27.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1618728, receipt ralph/.run/20260911T161941Z/048-ralph-27.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1618727, receipt ralph/.run/20260911T161941Z/048-ralph-27.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1621880, receipt ralph/.run/20260911T161941Z/048-ralph-27.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 1624072, receipt ralph/.run/20260911T161941Z/048-ralph-27.json.processes/receipt.json)
+- cost $0.6338 (summed from 5 session transcripts: main $0.5341 · subagents $0.0997)
+- tokens input 801,645 · cache-read 21,206,528 · cache-write 0 · output 41,137 · reasoning 17,815
+- context 251,303 tok peak of 272K (92%) across 139 inference calls, 1 drop(s), final 88,540, resumed 1x
+- models gpt-5.6-luna $0.6338 (in 801,645 / out 58,952 / cache-read 21,206,528)
+- subagents (4) pi process x4
+  - delegate-92637ad9b875a77552aa371b0aa4c81a: gpt-5.6-luna $0.0282, 6 inference calls
+  - delegate-215ffa89ca823e0919b8c5f840ad3631: gpt-5.6-luna $0.0306, 6 inference calls
+  - delegate-7126cb026c079eaa8b70c58a131c5f29: gpt-5.6-luna $0.0210, 4 inference calls
+  - delegate-865fabc7230a16ec4cfef452c6cff1bb: gpt-5.6-luna $0.0199, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/048-ralph-27.json
+- transcript: ralph/.run/20260911T161941Z/049-ralph-27.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 28 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the complete batch.
+
+Chose this item: G6 Ubuntu H9 proof — it is the only pending item in todo-build.md, so the batch has 1 of 1 eligible items.
+
+Starting G6 Ubuntu H9 proof investigation.
+
+Reading H9 device and run-loop implementation.
+
+Inspecting current tree and Ubuntu artifacts before the first real H9 attempt.
+
+Running the required perf permission reset and a bounded real H9 attempt to capture the current root cause.
+
+The bounded run confirms progress through tick 500 but no login; reducing the per-tick watchdog to capture the exact stalled guest RIP.
+
+The watchdog captured RIP 0xffffffffc00a50da, inside a guest module; resolving it against the stock Ubuntu module symbols before changing code.
+
+The guest RIP resolves to btrfs code during udev; testing the documented module-blacklist hypothesis against an otherwise identical real H9 run.
+
+The blacklist does not alter the stall, so I am testing the ACPI PCI resource handoff itself; the boot log reports both BARs outside the declared bridge window before firmware assignment.
+
+Added level-triggered legacy INTx retry semantics and a regression-visible transport query; formatting and focused tests are next.
+
+Focused multiverse tests are green. Running the real H9 acceptance with the level-triggered retry change.
+
+H9 still stalls after tick 400; the 600-second acceptance attempt timed out before login. No completion commit or promise is justified.
+
+Running a bounded H9 diagnostic with the documented 5-second periodic watchdog to capture the exact stalled RIP.
+
+Fixed H9 device-vector selection to use the programmed IOAPIC route, with PIC fallback. Focused tests passed; rerunning bounded H9.
+
+Corrected the combined Ubuntu path to resolve virtio-blk delivery from the Linux-programmed IOAPIC vector instead of hard-coded PIC vector 0x3b. Focused tests remain green, but bounded H9 still stalls in btrfs::resolve_indirect_refs at 0xffffffffc00a50d3; G6 stays open.
+
+Final bounded H9 rerun after IOAPIC-vector correction still failed during H9.2 before banner; focused multiverse suite passed 243/243. Iteration remains open with no commit or push.
+
+Foreground command rerun as requested: `timeout 600000 bash drive/h/h9.sh` still stalled at tick 400 in btrfs::resolve_indirect_refs and timed out. Iteration 28 cannot close G6; leave worktree uncommitted for the next iteration.
+
+## 2026-09-12T19:07:27 UTC (42min) - Session usage — ralph-28 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5790 (summed from 6 session transcripts: main $0.4502 · subagents $0.1288)
+- tokens input 1,379,105 · cache-read 13,254,144 · cache-write 0 · output 31,719 · reasoning 12,316
+- context 257,674 tok peak of 272K (95%) across 109 inference calls, 1 drop(s), final 168,828, resumed 1x
+- models gpt-5.6-luna $0.5790 (in 1,379,105 / out 44,035 / cache-read 13,254,144)
+- subagents (5) pi process x5
+  - delegate-2fb2de939c9d6b6be4afbfa8b9bd712a: gpt-5.6-luna $0.0268, 6 inference calls
+  - delegate-53a81dba4cf855f819a060b19da4680b: gpt-5.6-luna $0.0243, 5 inference calls
+  - delegate-40d47cdce18615b513139169aad9c094: gpt-5.6-luna $0.0263, 5 inference calls
+  - delegate-a48ec0270acebd39dcdc0f109d8369ca: gpt-5.6-luna $0.0266, 6 inference calls
+  - delegate-9d59d99e3f4dfbe0dd346d535380923d: gpt-5.6-luna $0.0249, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/050-ralph-28.json
+- transcript: ralph/.run/20260911T161941Z/051-ralph-28.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 29 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the selected batch end to end.
+
+Starting the required host setup before inspecting the build queue.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending build item.
+
+Starting G6. The current H9 path has PCI, ACPI, virtio block, and RNG wiring; I am running the real acceptance to capture the remaining interrupt failure.
+
+The real run reaches vda and systemd-udevd, then stops before any login output. I am rerunning with the documented short per-tick watchdog to capture RIP and interrupt state.
+
+The stall is after vda partition discovery, so I am tracing the real completion vector and ISR path rather than changing the acceptance target.
+
+The trace did not expose a completion line at info level. I am enabling transport-level tracing for one bounded capture to confirm whether the root-read request is drained and which vector is injected.
+
+The combined periodic Ubuntu path had another real bug: PCI virtio-rng was injected with the caller's PIC fallback vector instead of the IOAPIC vector Linux programmed for its legacy INTx line. The wrapper now resolves the PCI RNG route exactly as the block device does. Focused build passes, but the bounded H9 rerun still stalls in the guest btrfs path, so G6 remains open and no completion claim is made.

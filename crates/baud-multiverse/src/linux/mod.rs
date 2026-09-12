@@ -2165,7 +2165,9 @@ impl Multiverse {
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
-        if processed > 0 {
+        // Legacy virtio INTx is level-triggered by the transport ISR. Retry an asserted line
+        // even after its request was drained, until the guest reads ISR_STATUS and deasserts it.
+        if processed > 0 || self.bus.virtio_pci_blk_interrupt_pending() {
             let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
             self.inject_timer_tick(0, vector)?;
         }
@@ -2200,7 +2202,7 @@ impl Multiverse {
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
-        if processed > 0 {
+        if processed > 0 || self.bus.virtio_pci_blk_interrupt_pending() {
             let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
             let mut events = self
                 .guest
@@ -2837,7 +2839,10 @@ impl Multiverse {
         if let Some(vector) = virtio_rng_vector {
             if self.virtio_pci_rng().is_some() {
                 devices.push(TickPolledDevice {
-                    vector,
+                    // Legacy PCI INTx follows the IOAPIC route Linux programmed after the
+                    // device was enumerated. The caller's vector remains the fallback for the
+                    // MMIO transport and guests that never configure an IOAPIC.
+                    vector: self.bus.virtio_pci_rng_interrupt_vector(vector),
                     poll_always: false,
                     notify_count: |mv| mv.virtio_pci_rng().map(|t| t.notify_count()),
                     service_running: Multiverse::service_virtio_pci_rng_interrupt,
@@ -2954,7 +2959,9 @@ impl Multiverse {
             &[
                 rng_device,
                 TickPolledDevice {
-                    vector: virtio_blk_vector,
+                    // Linux programs the legacy PCI IRQ's IOAPIC vector during boot. The caller's
+                    // PIC vector is only a fallback for guests that never initialize the IOAPIC.
+                    vector: self.bus.virtio_pci_blk_interrupt_vector(virtio_blk_vector),
                     poll_always: true,
                     notify_count: Multiverse::virtio_blk_poll_counter,
                     service_running: Multiverse::service_virtio_blk_interrupt,
