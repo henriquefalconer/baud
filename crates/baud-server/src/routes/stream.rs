@@ -17,6 +17,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
+use base64::Engine;
 use baud_stream::encode_qoi;
 use baud_stream::Y4mWriter;
 use serde::Deserialize;
@@ -55,6 +56,8 @@ pub struct AppendFrameBody {
     pub format: String,
     /// Base64-encoded blake3 hash (32 bytes)
     pub hash: String,
+    /// Optional raw pixel payload for live SSE delivery. KVM replay records intentionally omit it.
+    pub pixels_base64: Option<String>,
 }
 
 pub async fn append_frame(
@@ -92,9 +95,38 @@ pub async fn append_frame(
         }
     };
 
+    let pixels = match body.pixels_base64.as_deref() {
+        Some(encoded) => match base64::engine::general_purpose::STANDARD.decode(encoded) {
+            Ok(bytes) => {
+                let expected = match body.format.as_str() {
+                    "rgba8888" => pixels.saturating_mul(4),
+                    "rgb565" => pixels.saturating_mul(2),
+                    "indexed8" => pixels,
+                    _ => 0,
+                } as usize;
+                if bytes.len() != expected {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(
+                            json!({ "error": format!("pixel payload has {} bytes, expected {expected}", bytes.len()) }),
+                        ),
+                    ));
+                }
+                Some(bytes)
+            }
+            Err(_) => {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "pixels_base64 is not valid base64" })),
+                ));
+            }
+        },
+        None => None,
+    };
+
     let result = sqlx::query(
-        "INSERT INTO frame_records (run_id, node, step, width, height, format, hash, recorded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO frame_records (run_id, node, step, width, height, format, hash, pixels, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&run_id)
     .bind(body.node as i64)
@@ -103,6 +135,7 @@ pub async fn append_frame(
     .bind(body.height as i64)
     .bind(&body.format)
     .bind(&hash_bytes)
+    .bind(pixels)
     .bind(now)
     .execute(&state.db)
     .await;
@@ -705,8 +738,11 @@ pub async fn tail(
                 return None;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let rows = match sqlx::query_as::<_, (i64, i64, i64, i64, String, Vec<u8>, i64)>(
-                "SELECT node, step, width, height, format, hash, id
+            let rows = match sqlx::query_as::<
+                _,
+                (i64, i64, i64, i64, String, Vec<u8>, Option<Vec<u8>>, i64),
+            >(
+                "SELECT node, step, width, height, format, hash, pixels, id
              FROM frame_records
              WHERE run_id = ? AND (? IS NULL OR node = ?) AND id > ?
              ORDER BY id ASC",
@@ -731,7 +767,7 @@ pub async fn tail(
             };
             let next_id = rows
                 .iter()
-                .map(|(_, _, _, _, _, _, id)| *id)
+                .map(|(_, _, _, _, _, _, _, id)| *id)
                 .max()
                 .unwrap_or(last_id);
             if rows.is_empty() {
@@ -769,11 +805,15 @@ pub async fn tail(
                     }
                 }
             } else {
-                let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash, _id)| {
+                let data: Vec<Value> = rows.into_iter().map(|(n, step, w, h, fmt, hash, pixels, _id)| {
                 if hashes_only {
                     json!({ "run_id": run_id, "node": n, "step": step, "hash": hex_encode(&hash) })
                 } else {
-                    json!({ "run_id": run_id, "node": n, "step": step, "width": w, "height": h, "format": fmt, "hash": hex_encode(&hash) })
+                    let mut frame = json!({ "run_id": run_id, "node": n, "step": step, "width": w, "height": h, "format": fmt, "hash": hex_encode(&hash) });
+                    if let Some(bytes) = pixels {
+                        frame["pixels_base64"] = Value::String(base64::engine::general_purpose::STANDARD.encode(bytes));
+                    }
+                    frame
                 }
             }).collect();
                 Some((

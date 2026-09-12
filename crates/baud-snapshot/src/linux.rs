@@ -338,6 +338,53 @@ pub fn restore(
     universe: &Universe,
     template_active: bool,
 ) -> Result<(), RestoreError> {
+    restore_with_ram(
+        kvm,
+        vm,
+        vcpu,
+        mem,
+        ram_start,
+        universe,
+        template_active,
+        true,
+    )
+}
+
+/// Restore CPU, clock, and device-independent state while retaining an already-populated RAM
+/// mapping. Live shared-CoW branches use this after mapping the parent's memfd: copying the
+/// serialized page store here would defeat write-set scaling and would also fault the branch's
+/// UFFD mapping before KVM starts.
+pub fn restore_without_ram(
+    kvm: &Kvm,
+    vm: &VmFd,
+    vcpu: &VcpuFd,
+    mem: &GuestMemory,
+    ram_start: u64,
+    universe: &Universe,
+    template_active: bool,
+) -> Result<(), RestoreError> {
+    restore_with_ram(
+        kvm,
+        vm,
+        vcpu,
+        mem,
+        ram_start,
+        universe,
+        template_active,
+        false,
+    )
+}
+
+fn restore_with_ram(
+    kvm: &Kvm,
+    vm: &VmFd,
+    vcpu: &VcpuFd,
+    mem: &GuestMemory,
+    ram_start: u64,
+    universe: &Universe,
+    template_active: bool,
+    restore_ram_pages: bool,
+) -> Result<(), RestoreError> {
     let xsave_size = crate::xsave::size(vm)?;
     validate_state_lengths(universe, xsave_size)?;
     let xsave = crate::xsave::decode(&universe.vcpu.xsave)?;
@@ -352,7 +399,11 @@ pub fn restore(
     for step in restore_plan() {
         match step {
             RestoreStep::SetTscKhz => vcpu.set_tsc_khz(universe.clock.tsc_khz)?,
-            RestoreStep::RegisterRam => restore_ram(mem, ram_start, &universe.ram)?,
+            RestoreStep::RegisterRam => {
+                if restore_ram_pages {
+                    restore_ram(mem, ram_start, &universe.ram)?;
+                }
+            }
             // SAFETY: `bytes_to_struct` reconstructs a fresh `Default`-initialized struct of the
             // exact type each `set_*` ioctl expects, then overwrites it with bytes this same
             // module's `capture` produced from that exact type via `struct_to_bytes` — see both

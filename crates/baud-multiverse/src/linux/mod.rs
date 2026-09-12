@@ -99,6 +99,8 @@ pub struct BootedGuest {
     pub guest_mem: GuestMemory,
     /// Retained so a live branch can map the same memfd. A serialized `Universe` cannot carry it.
     pub ram_backing: Arc<baud_snapshot::backing::GuestRamBacking>,
+    /// Keeps the UFFD fault resolver alive for a live shared-CoW branch.
+    cow_worker: Option<baud_snapshot::FaultWorker>,
 }
 
 /// The real shared-RAM hand-off for a branch VM. `guest_mem` is the mapping registered with KVM;
@@ -126,6 +128,12 @@ pub enum SharedCowError {
     Mapping(String),
     #[error("failed to register the shared guest-RAM mapping with KVM: {0}")]
     Kvm(#[from] kvm_ioctls::Error),
+    #[error("shared CoW branch state restore failed: {0}")]
+    Restore(#[from] baud_snapshot::linux::RestoreError),
+    #[error("shared CoW branch counter setup failed: {0}")]
+    BranchCounter(#[from] io::Error),
+    #[error("shared CoW branch dirty-ring setup failed: {0}")]
+    DirtyRing(#[from] baud_snapshot::linux::DirtyRingError),
 }
 
 /// The `Kvm::new → create_vm → [negotiate dirty ring] → register zeroed guest RAM → create_vcpu →
@@ -171,6 +179,7 @@ fn create_vm_vcpu_shell(
             vcpu,
             guest_mem,
             ram_backing,
+            cow_worker: None,
         },
         dirty_ring,
     ))
@@ -1092,6 +1101,76 @@ impl Multiverse {
         Ok(SharedCowGuestMemory {
             guest_mem,
             fault_worker,
+        })
+    }
+
+    /// Create a real continuation VM whose clean RAM pages remain backed by this VM's memfd.
+    /// Unlike [`Self::branch`], this path does not restore serialized RAM pages. The captured
+    /// universe must have been taken from this parent immediately before the call, so its RAM is
+    /// already present in the shared backing. First writes are resolved by the live UFFD worker.
+    pub fn branch_shared(
+        &self,
+        universe: &Universe,
+        tape_suffix: Vec<u8>,
+        k: u64,
+        dirty_ring_entries: Option<u32>,
+    ) -> Result<Self, SharedCowError> {
+        let kvm = Kvm::new()?;
+        let vm = kvm.create_vm()?;
+        if let Some(entries) = dirty_ring_entries {
+            baud_snapshot::linux::DirtyRing::negotiate_capability(&vm, entries)?;
+        }
+        let shared = self.open_shared_cow_guest_memory(&vm, 0, layout::GUEST_RAM_START)?;
+        let vcpu = vm.create_vcpu(0)?;
+        apply_cpuid_mask(&kvm, &vcpu)?;
+        configure_msr_filter(&vm)?;
+        let dirty_ring = dirty_ring_entries
+            .map(|entries| baud_snapshot::linux::DirtyRing::open(&vcpu, entries))
+            .transpose()?;
+        baud_snapshot::linux::restore_without_ram(
+            &kvm,
+            &vm,
+            &vcpu,
+            &shared.guest_mem,
+            layout::GUEST_RAM_START,
+            universe,
+            false,
+        )?;
+        let counter = LinuxBranchCounter::new()?;
+        let bus = DeviceBus::restore(
+            tape_suffix,
+            universe.device.tape_cursor,
+            universe.device.console.clone(),
+        );
+        let time = WorkClock::restore(
+            universe.clock.work_clock_base,
+            k,
+            universe.clock.rcb_anchor,
+            universe.clock.tsc_deadline,
+            universe.clock.tsc_aux,
+            universe.clock.entropy_state,
+            counter,
+        );
+        let SharedCowGuestMemory {
+            guest_mem,
+            fault_worker,
+        } = shared;
+        Ok(Self {
+            guest: BootedGuest {
+                kvm,
+                vm,
+                vcpu,
+                guest_mem,
+                ram_backing: self.guest.ram_backing.clone(),
+                cow_worker: Some(fault_worker),
+            },
+            bus,
+            time,
+            dirty_ring,
+            watchdog_budget: DEFAULT_WATCHDOG_BUDGET,
+            periodic_tick_watchdog_budget: PERIODIC_TICK_WATCHDOG_BUDGET,
+            cancel: None,
+            console_irq_pending: false,
         })
     }
 
@@ -2024,13 +2103,13 @@ impl Multiverse {
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
-        info!(
-            "virtio-blk service: processed {processed} request(s), notify_count {}",
-            self.virtio_pci_blk()
-                .map(|transport| transport.notify_count())
-                .unwrap_or(0),
-        );
         if processed > 0 {
+            info!(
+                "virtio-blk service: processed {processed} request(s), notify_count {}",
+                self.virtio_pci_blk()
+                    .map(|transport| transport.notify_count())
+                    .unwrap_or(0),
+            );
             self.inject_timer_tick(0, vector)?;
         }
         Ok(processed)
@@ -2695,11 +2774,11 @@ impl Multiverse {
         if let Some(vector) = virtio_blk_vector {
             devices.push(TickPolledDevice {
                 vector,
-                // `virtio_blk_poll_counter` includes both the transport notify counter and a
-                // queue scan for a request posted by the guest. Polling every raw exit made a
-                // real Ubuntu boot spend nearly all of its time issuing empty block services
-                // while udev was starting, starving the timer path without changing state.
-                poll_always: false,
+                // A distro block driver can post a request without a fresh notify exit while it
+                // is being resumed from HLT. Poll every exit in the login-pattern path so a
+                // queued rootfs request cannot wait for another timer tick; the service method
+                // remains a no-op when the queue is empty.
+                poll_always: true,
                 notify_count: Multiverse::virtio_blk_poll_counter,
                 service_running: Multiverse::service_virtio_blk_interrupt,
                 service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,

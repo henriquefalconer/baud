@@ -4545,3 +4545,74 @@ The selected batch is still open in todo-build.md: G3 UFFD end-to-end scaling, G
   - Focused tests and all completed gate units passed; H9 still stalls after systemd-udevd.
 
 ---
+
+## 2026-09-12T05:46:37 UTC (48min) - Session usage — ralph-14 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.2790 (summed from 5 session transcripts: main $0.1960 · subagents $0.0831)
+- tokens input 503,170 · cache-read 7,561,216 · cache-write 0 · output 22,652 · reasoning 6,546
+- context 160,747 tok peak of 272K (59%) across 72 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2790 (in 503,170 / out 29,198 / cache-read 7,561,216)
+- subagents (4) pi process x4
+  - delegate-2fc3d025763ac42c7cd9df1b89368921: gpt-5.6-luna $0.0242, 5 inference calls
+  - delegate-56975451399483b7a5459d5812d9e7d3: gpt-5.6-luna $0.0268, 6 inference calls
+  - delegate-61725d4e26cb713eae0b55e1d74ec36f: gpt-5.6-luna $0.0214, 4 inference calls
+  - 01a09400-ca3a-766a-9e61-39140b63b4df: gpt-5.6-luna $0.0107, 9 inference calls
+- transcript: ralph/.run/20260911T161941Z/023-ralph-14.json
+- transcript: ralph/.run/20260911T161941Z/024-ralph-14.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 15 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications and repository state, then implementing and validating the selected batch end to end.
+
+Chose these 5 items: G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 5 pending items in the queue.
+
+Starting G3 write-set-scaled branching by tracing the existing backing and multiverse integration before changing code.
+
+Added durable live pixel payloads so stream tail can deliver actual frame data while preserving hash-only replay storage; now compiling server and CLI paths.
+
+Connected live shared-CoW branching to a restored continuation VM: child KVM memory uses the parent memfd, UFFD resolves faults concurrently, and CPU state restores without copying RAM pages.
+
+Snapshot and multiverse tests are green, including real KVM branch, restore, timer, virtio, and determinism coverage; formatting the changed Rust and SQL paths next.
+
+The shared-CoW implementation is formatted; a single verification subagent is running the workspace test and clippy protocol while I inspect the remaining H9 and API acceptance gaps.
+
+Ubuntu artifacts are present, so running the real H9 drive now with the pinned 0xee timer vector to capture the actual userspace progress or root cause.
+
+H9 stopped after 600 seconds with no block-service records after the udev banner, so I changed the login-pattern path to poll the virtio-blk queue on every exit and am re-testing the real guest.
+
+The second H9 run confirmed the root cause is earlier than userspace: the Ubuntu guest reaches udev but never posts a virtio-blk request, even with every-exit polling. Recording this measured blocker and moving to the full gate for the code paths that are complete.
+
+The gate passed build, clippy, workspace tests, H5, and all completed drives before the H9 long pole; its leftover process was stopped after timeout. H9 polling proved no block request is posted, so I am reducing diagnostic noise and preserving that evidence.
+
+Found the H9 root cause: the PCI bridge advertised virtio block as PCI ID 0x1002 by reusing the transport type, but Linux 4.15 expects transitional block ID 0x1001 and therefore never loaded virtio_blk. Fixed the mapping and its unit assertion; rerunning H9.
+
+The PCI ID correction is now in place, but the real H9 retry still lacks a block queue notify; running focused regression tests before the final repository validation and commit.
+
+Focused PCI and stream regressions are green. G3 and G5 are collapsed to DONE; G6 remains open because the real Ubuntu drive still fails before virtio-blk queue setup, so the selected batch is not yet fully closed.
+
+
+
+## 2026-09-12T06:26:03 UTC - Changes committed.
+
+- Implemented live shared-CoW continuation VMs and RAM-preserving restore state.
+
+- Added durable optional live frame pixels and real SSE payload delivery.
+
+- Corrected transitional virtio PCI block ID mapping and documented the remaining Ubuntu probe gap.
+
+- Files changed: crates/baud-multiverse/src/linux/mod.rs, crates/baud-multiverse/src/pci.rs, crates/baud-server/src/routes/stream.rs, crates/baud-server/migrations/0016_frame_pixels.sql, crates/baud-snapshot/src/linux.rs, todo-build.md, ralph/progress.txt.
+
+- **Brief description of changes:**
+
+  - Shared memfd-backed child KVM mappings retain UFFD workers and restore CPU/device state without RAM copying.
+
+  - Frame append and tail routes validate and carry optional raw pixels while replay storage stays hash-only.
+
+  - Ubuntu H9 diagnostics identified the remaining 4.15 virtio-pci probe/queue gap after correcting the PCI ID.
+
+---

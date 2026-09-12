@@ -213,7 +213,14 @@ impl PciVirtioFunction {
     }
 
     fn device_id(&self) -> u16 {
-        VIRTIO_LEGACY_DEVICE_ID_BASE + self.device_kind as u16
+        // Transitional PCI IDs are not the same sequence as the virtio transport IDs:
+        // block is PCI ID 0x1001, while the common device ID is 2; rng remains 0x1004.
+        let pci_kind = if self.device_kind == crate::virtio_mmio::VIRTIO_DEVICE_ID_BLK {
+            1
+        } else {
+            self.device_kind
+        };
+        VIRTIO_LEGACY_DEVICE_ID_BASE + pci_kind as u16
     }
 
     fn bar0_read(&self) -> u32 {
@@ -830,8 +837,8 @@ mod tests {
         assert_eq!(dword & 0xFFFF, VIRTIO_VENDOR_ID as u32);
         assert_eq!(
             dword >> 16,
-            VIRTIO_LEGACY_DEVICE_ID_BASE as u32 + crate::virtio_mmio::VIRTIO_DEVICE_ID_BLK,
-            "legacy device ID = 0x1000 + virtio device type"
+            VIRTIO_LEGACY_DEVICE_ID_BASE as u32 + 1,
+            "transitional PCI block device ID is 0x1001"
         );
 
         write_u32(
