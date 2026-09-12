@@ -4293,3 +4293,5 @@ The required gate timed out after H5 completed its 1000-branch proof and before 
   - Real Ubuntu boot progress improved by removing unconditional empty virtio-blk polls.
   - Focused snapshot and server tests are green; the full gate timed out in the long H5 sequence, and H9 still needs the login/fingerprint proof.
 ---
+
+Push landed at 8685329; origin/main matches HEAD and the working tree is clean.
