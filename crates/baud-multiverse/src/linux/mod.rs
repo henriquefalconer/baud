@@ -2601,7 +2601,11 @@ impl Multiverse {
         if let Some(vector) = virtio_blk_vector {
             devices.push(TickPolledDevice {
                 vector,
-                poll_always: true,
+                // `virtio_blk_poll_counter` includes both the transport notify counter and a
+                // queue scan for a request posted by the guest. Polling every raw exit made a
+                // real Ubuntu boot spend nearly all of its time issuing empty block services
+                // while udev was starting, starving the timer path without changing state.
+                poll_always: false,
                 notify_count: Multiverse::virtio_blk_poll_counter,
                 service_running: Multiverse::service_virtio_blk_interrupt,
                 service_halted: Multiverse::service_virtio_blk_interrupt_while_halted,

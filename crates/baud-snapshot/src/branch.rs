@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
 /// How a live branch obtained guest RAM. Persisted universes must report `FullRestore` because
 /// their process-local backing fd cannot be serialized or reopened from the wire format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +56,78 @@ pub fn negotiate_shared_cow(
             BranchMode::FullRestore { fallback }
         },
     )
+}
+
+/// A live branch memory owner. It is intentionally process-local and cannot be serialized into a
+/// `Universe`. The parent memfd and shared mapping stay alive while KVM uses the branch mapping;
+/// UFFD faults turn the first write to each page into a private page and record the write set.
+#[cfg(target_os = "linux")]
+pub struct LiveCowBranch {
+    backing: Arc<crate::backing::GuestRamBacking>,
+    mapping: crate::backing::PrivateCowMapping,
+    uffd: crate::userfaultfd::CowRegion,
+    page_size: usize,
+    dirty_pages: std::collections::BTreeSet<usize>,
+}
+
+#[cfg(target_os = "linux")]
+impl LiveCowBranch {
+    pub fn open(backing: Arc<crate::backing::GuestRamBacking>) -> Result<Self, BranchMode> {
+        let mapping = backing.map_shared().map_err(|_| BranchMode::FullRestore {
+            fallback: FallbackReason::MappingFailed,
+        })?;
+        let uffd = negotiate_shared_cow(&mapping)?;
+        uffd.write_protect(true)
+            .map_err(|_| BranchMode::FullRestore {
+                fallback: FallbackReason::RequiredCapabilityMissing,
+            })?;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+        Ok(Self {
+            backing,
+            mapping,
+            uffd,
+            page_size,
+            dirty_pages: std::collections::BTreeSet::new(),
+        })
+    }
+
+    pub fn mapping(&self) -> &crate::backing::PrivateCowMapping {
+        &self.mapping
+    }
+
+    pub fn dirty_pages(&self) -> impl Iterator<Item = usize> + '_ {
+        self.dirty_pages.iter().copied()
+    }
+
+    /// Drain all currently available faults. A caller normally runs this on a dedicated worker
+    /// while the vCPU uses the registered mapping, and treats any error as a failed branch.
+    pub fn service_faults(&mut self) -> Result<usize, crate::userfaultfd::Error> {
+        let mut serviced = 0;
+        while let Some(fault) = self.uffd.read_fault()? {
+            let offset = fault
+                .address
+                .checked_sub(self.mapping.as_ptr() as u64)
+                .ok_or(crate::userfaultfd::Error::UnalignedRange)?
+                as usize;
+            if offset >= self.mapping.len() {
+                return Err(crate::userfaultfd::Error::UnalignedRange);
+            }
+            let page = offset / self.page_size;
+            let address = self.mapping.as_ptr() as u64 + (page * self.page_size) as u64;
+            let source = address;
+            if fault.minor {
+                self.uffd
+                    .continue_from(address, self.page_size as u64, source)?;
+            } else if fault.write_protect && fault.write {
+                self.uffd.copy_page(address, source)?;
+                self.dirty_pages.insert(page);
+            } else {
+                return Err(crate::userfaultfd::Error::UnexpectedEvent(0));
+            }
+            serviced += 1;
+        }
+        Ok(serviced)
+    }
 }
 
 #[cfg(test)]

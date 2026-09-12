@@ -6,6 +6,7 @@
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::sse::{Event, Sse},
     Json,
 };
@@ -68,14 +69,50 @@ pub async fn append(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
     Json(body): Json<AppendObsBody>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM runs WHERE id = ? LIMIT 1")
+        .bind(&run_id)
+        .fetch_optional(&state.db)
+        .await;
+    match exists {
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": "run not found", "run_id": run_id })),
+            )
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": format!("run lookup failed: {error}") })),
+            )
+        }
+        Ok(Some(_)) => {}
+    }
+    let value = match serde_json::to_vec(&body.value) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(
+                    json!({ "ok": false, "error": format!("observation value is not JSON: {error}") }),
+                ),
+            )
+        }
+    };
     let result = sqlx::query("INSERT INTO observations (run_id, step, node, probe, value, recorded_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&run_id).bind(body.step as i64).bind(body.node as i64).bind(&body.probe)
-        .bind(serde_json::to_vec(&body.value).unwrap_or_default()).bind(crate::state::unix_now() as i64)
+        .bind(value).bind(crate::state::unix_now() as i64)
         .execute(&state.db).await;
     match result {
-        Ok(_) => Json(json!({ "ok": true, "run_id": run_id, "step": body.step })),
-        Err(e) => Json(json!({ "error": format!("db error: {e}") })),
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(json!({ "ok": true, "run_id": run_id, "step": body.step })),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": format!("observation insert failed: {error}") })),
+        ),
     }
 }
 
@@ -103,6 +140,48 @@ fn rows_to_json(rows: Vec<Row>) -> Vec<Value> {
 }
 
 fn decode_value_for_display(bytes: &[u8]) -> Value {
-    serde_json::from_slice(bytes)
-        .unwrap_or_else(|_| Value::String(bytes.iter().map(|b| format!("{b:02x}")).collect()))
+    let value = serde_json::from_slice(bytes)
+        .unwrap_or_else(|_| Value::String(bytes.iter().map(|b| format!("{b:02x}")).collect()));
+    redact_value(value)
+}
+
+fn redact_value(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                let name = key.to_ascii_lowercase();
+                if name.contains("secret") || name.contains("token") || name.contains("password") {
+                    *child = Value::String("[REDACTED]".to_owned());
+                } else {
+                    *child = redact_value(std::mem::take(child));
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                *item = redact_value(std::mem::take(item));
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_value;
+    use serde_json::json;
+
+    #[test]
+    fn display_redacts_secret_shaped_fields_recursively() {
+        let value = redact_value(json!({
+            "token": "a",
+            "nested": [{"password": "b", "visible": 4}],
+            "secret_name": "c"
+        }));
+        assert_eq!(value["token"], "[REDACTED]");
+        assert_eq!(value["nested"][0]["password"], "[REDACTED]");
+        assert_eq!(value["nested"][0]["visible"], 4);
+        assert_eq!(value["secret_name"], "[REDACTED]");
+    }
 }

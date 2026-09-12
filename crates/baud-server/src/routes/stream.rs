@@ -184,6 +184,11 @@ pub async fn render(
     let to_step = body.to_step;
     let fmt = body.format.as_deref().unwrap_or("y4m").to_string();
     let out_path = body.out.as_deref().unwrap_or("output.y4m").to_string();
+    let (shared_cancel, owns_registry_entry) = state.register_or_get_run(&run_id);
+    let cancel_guard = owns_registry_entry.then(|| {
+        crate::routes::run_kvm::CancelGuard::from_flag(std::sync::Arc::clone(&shared_cancel))
+    });
+    let cancel_flag = std::sync::Arc::clone(&shared_cancel);
 
     #[allow(clippy::type_complexity)]
     let kvm_meta = sqlx::query_as::<
@@ -264,6 +269,7 @@ pub async fn render(
                         virtio_rng,
                         from_step,
                         to_step,
+                        cancel: std::sync::Arc::clone(&cancel_flag),
                     })
                     .await
                     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(error)))
@@ -279,6 +285,7 @@ pub async fn render(
                     acpi,
                     from_step,
                     to_step,
+                    cancel: std::sync::Arc::clone(&cancel_flag),
                 })
                 .await
                 .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(error))),
@@ -296,6 +303,10 @@ pub async fn render(
         )),
     };
 
+    if owns_registry_entry {
+        state.remove_run(&run_id);
+    }
+    drop(cancel_guard);
     let frames = match frames {
         Ok(frames) => frames,
         Err(error) => return Err(error),
@@ -384,6 +395,7 @@ struct RealReplayParams {
     acpi: bool,
     from_step: u64,
     to_step: Option<u64>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Real replay: re-boot the exact kernel/cmdline/tape a `/run/kvm { run_id: ... }` call recorded
@@ -408,6 +420,7 @@ async fn render_frames_from_real_replay(
         acpi,
         from_step,
         to_step,
+        cancel: shared_cancel,
     } = params;
     let tape = match hex_decode(&tape_hex) {
         Some(t) => t,
@@ -440,8 +453,6 @@ async fn render_frames_from_real_replay(
     let virtio_blk_meta = virtio_blk.map(|(_, v, m)| (v, m));
     let kernel_path_buf = PathBuf::from(&kernel_path);
     // Same client-disconnect cancellation as `/run/kvm`: a replay is a full KVM boot.
-    let cancel = crate::routes::run_kvm::CancelGuard::new();
-    let cancel_flag = cancel.flag();
     let records = tokio::task::spawn_blocking(move || {
         let virtio_blk = match (virtio_blk_image, virtio_blk_meta) {
             (Some(image), Some((vector, max_exits))) => Some((image, vector, max_exits)),
@@ -456,12 +467,11 @@ async fn render_frames_from_real_replay(
             virtio_rng,
             virtio_blk,
             acpi,
-            Some(cancel_flag),
+            Some(shared_cancel),
         )
     })
     .await
     .map_err(|error| json!({ "error": format!("replay task failed: {error}") }))?;
-    drop(cancel); // held across the `.await` above on purpose — that is the whole mechanism
 
     let records = match records {
         Ok(records) => records,
@@ -531,6 +541,7 @@ struct RealRestoreParams {
     virtio_rng: Option<(u64, u8, u32)>,
     from_step: u64,
     to_step: Option<u64>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(target_os = "linux")]
@@ -546,6 +557,7 @@ async fn render_frames_from_real_restore(
         virtio_rng,
         from_step,
         to_step,
+        cancel: shared_cancel,
     } = params;
     let tape_suffix = match hex_decode(&tape_suffix_hex) {
         Some(t) => t,
@@ -555,9 +567,6 @@ async fn render_frames_from_real_restore(
             )
         }
     };
-    // Keep the ownership guard across the blocking restore/replay just like the reboot path.
-    let cancel = crate::routes::run_kvm::CancelGuard::new();
-    let cancel_flag = cancel.flag();
     let records = tokio::task::spawn_blocking(move || -> Result<Vec<baud_proto::Msg>, String> {
         let universe =
             crate::routes::run_kvm::reconstruct_universe(&store, &store_run_id, &snapshot_node_id)?;
@@ -568,7 +577,7 @@ async fn render_frames_from_real_restore(
             None,
         )
         .map_err(|e| format!("restore branch error: {e}"))?;
-        branch.set_cancel_flag(cancel_flag);
+        branch.set_cancel_flag(shared_cancel);
         if let Some((seed, _, _)) = virtio_rng {
             branch.enable_virtio_rng();
             branch.seed_virtio_rng_entropy(seed);
@@ -609,8 +618,6 @@ async fn render_frames_from_real_restore(
     })
     .await
     .map_err(|error| json!({ "error": format!("restore task failed: {error}") }))?;
-    drop(cancel);
-
     let records = match records {
         Ok(records) => records,
         Err(e) => return Err(json!({ "error": format!("restore-replay error: {e}") })),

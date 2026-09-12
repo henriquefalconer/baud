@@ -88,6 +88,9 @@ pub mod backing;
 mod xsave;
 
 pub use branch::{BranchMode, FallbackReason};
+
+#[cfg(target_os = "linux")]
+pub use branch::LiveCowBranch;
 pub use dirty_ring::{harvest, RawDirtyGfn, DIRTY_BIT, RESET_BIT};
 pub use page_store::{PageHash, PageRef, PageStore, PAGE_SIZE};
 pub use tree::{NodeId, Tree};

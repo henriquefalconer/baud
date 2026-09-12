@@ -84,12 +84,23 @@ impl GuestRamBacking {
     /// Map this snapshot privately. Clean pages may be shared by the kernel, while a branch write
     /// is isolated from the source and every other mapping.
     pub fn map_private(&self) -> Result<PrivateCowMapping, BackingError> {
+        self.map_with_flags(libc::MAP_PRIVATE)
+    }
+
+    /// Map the backing shared. This is the mapping mode required for UFFD minor faults. The
+    /// live branch write-protects it before KVM runs, so a first write is copied into a private
+    /// page by `UFFDIO_COPY` rather than modifying the memfd.
+    pub fn map_shared(&self) -> Result<PrivateCowMapping, BackingError> {
+        self.map_with_flags(libc::MAP_SHARED)
+    }
+
+    fn map_with_flags(&self, flags: i32) -> Result<PrivateCowMapping, BackingError> {
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 self.len,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE,
+                flags,
                 self.file.as_raw_fd(),
                 0,
             )

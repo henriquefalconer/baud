@@ -21,6 +21,7 @@ const UFFDIO_WRITEPROTECT_MODE_WP: u64 = 1 << 0;
 const UFFDIO_REGISTER_IOC: u64 = 1 << 0;
 const UFFDIO_WRITEPROTECT_IOC: u64 = 1 << 6;
 const UFFDIO_CONTINUE_IOC: u64 = 1 << 7;
+const UFFDIO_COPY_IOC: u64 = 1 << 3;
 const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
 const UFFD_PAGEFAULT_FLAG_WRITE: u64 = 1 << 0;
 const UFFD_PAGEFAULT_FLAG_WP: u64 = 1 << 1;
@@ -99,6 +100,16 @@ struct Continue {
     wp_copy: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Copy {
+    dst: u64,
+    src: u64,
+    len: u64,
+    mode: u64,
+    copy: i64,
+}
+
 const fn ioctl(dir: u64, nr: u64, size: u64) -> libc::c_ulong {
     ((dir << 30) | (size << 16) | (0xAA << 8) | nr) as libc::c_ulong
 }
@@ -110,6 +121,7 @@ const UFFDIO_API: libc::c_ulong = iowr::<Api>(0x3f);
 const UFFDIO_REGISTER: libc::c_ulong = iowr::<Register>(0x00);
 const UFFDIO_WRITEPROTECT: libc::c_ulong = iowr::<WriteProtect>(0x06);
 const UFFDIO_CONTINUE: libc::c_ulong = iowr::<Continue>(0x07);
+const UFFDIO_COPY: libc::c_ulong = iowr::<Copy>(0x03);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -168,7 +180,8 @@ impl CowRegion {
         if api.features & requested_features != requested_features {
             return Err(Error::MissingFeature(requested_features & !api.features));
         }
-        let required_ioctls = UFFDIO_REGISTER_IOC | UFFDIO_WRITEPROTECT_IOC | UFFDIO_CONTINUE_IOC;
+        let required_ioctls =
+            UFFDIO_REGISTER_IOC | UFFDIO_WRITEPROTECT_IOC | UFFDIO_CONTINUE_IOC | UFFDIO_COPY_IOC;
         if api.ioctls & required_ioctls != required_ioctls {
             return Err(Error::MissingIoctl(required_ioctls & !api.ioctls));
         }
@@ -257,6 +270,33 @@ impl CowRegion {
         }
         Ok(())
     }
+
+    /// Resolve a write-protect fault with a private page copied from `source`.
+    ///
+    /// The copy is installed into the registered mapping by the kernel, so later writes do not
+    /// modify the shared memfd page seen by the parent or sibling branches. Callers must pass one
+    /// page at a time and keep the source mapping alive until this returns.
+    pub fn copy_page(&self, address: u64, source: u64) -> Result<(), Error> {
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+        if page == 0
+            || !address.is_multiple_of(page)
+            || !source.is_multiple_of(page)
+            || address < self.start
+            || address - self.start > self.len - page
+        {
+            return Err(Error::UnalignedRange);
+        }
+        let mut request = Copy {
+            dst: address,
+            src: source,
+            len: page,
+            ..Copy::default()
+        };
+        if unsafe { libc::ioctl(self.fd.as_raw_fd(), UFFDIO_COPY, &mut request) } < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +315,7 @@ mod tests {
         assert_eq!(UFFDIO_REGISTER, 0xC020AA00);
         assert_eq!(UFFDIO_WRITEPROTECT, 0xC018AA06);
         assert_eq!(UFFDIO_CONTINUE, 0xC028AA07);
+        assert_eq!(UFFDIO_COPY, 0xC028AA03);
     }
 
     #[test]

@@ -4181,3 +4181,115 @@ Repeating the focused baseline test command in the foreground as requested, then
   - H9 default ticks now match examples/ubuntu/spec.toml.
 
 ---
+
+## 2026-09-12T01:06:40 UTC (39min) - Session usage — ralph-9 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4734 (summed from 6 session transcripts: main $0.3767 · subagents $0.0967)
+- tokens input 706,615 · cache-read 15,086,592 · cache-write 0 · output 25,272 · reasoning 8,174
+- context 243,006 tok peak of 272K (89%) across 93 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.4734 (in 706,615 / out 33,446 / cache-read 15,086,592)
+- subagents (5) pi process x5
+  - delegate-672483c19bcd16d3bf032bef1a2f925d: gpt-5.6-luna $0.0224, 4 inference calls
+  - delegate-06b421594908460d0133f1c8975c972c: gpt-5.6-luna $0.0253, 5 inference calls
+  - delegate-e54a9e96714192eed3d83c29cef8477c: gpt-5.6-luna $0.0198, 4 inference calls
+  - delegate-909dcee3d89d6842dd1809da94c6264e: gpt-5.6-luna $0.0262, 5 inference calls
+  - 01a09304-f7e0-743e-a08f-4657a18ac95d: gpt-5.6-luna $0.0031, 2 inference calls
+- transcript: ralph/.run/20260911T161941Z/016-ralph-9.json
+- transcript: ralph/.run/20260911T161941Z/017-ralph-9.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 10 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address, studying the specifications, and tracing each selected implementation path before changing code.
+
+Set the iteration liveness marker. Reading the task register and repository shape now.
+
+Chose these 5 items: G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 5 pending items in todo-build.md.
+
+Starting G3 write-set-scaled branching. I am assigning the remaining selected paths to the next focused passes after tracing shared dependencies.
+
+Starting specification study and repository searches before edits.
+
+The code search confirms G3 has only an ioctl wrapper and explicit full-restore fallback; G5 has several partial registries and routes; G6 has a documented post-initramfs gap. Reading delegate reports next, then I will make the smallest complete changes that close the real paths.
+
+Preparing real-KVM verification prerequisites and checking the current build before edits.
+
+Tracing the branch allocation boundary and existing tests. The key integration point is restore_guest memory registration, where a shared memfd-backed private map can replace the full byte copy.
+
+The focused test agent is running. I am auditing the public command and route tables for mismatches and will wire any real missing endpoint without touching its test scope.
+
+Added real UFFD copy-on-write page resolution and a live fault-servicing owner, plus structured observation errors and recursive redaction. Continuing with compile feedback before wiring further lifecycle changes.
+
+The test subagent only launched its own detached test and exited before collecting results, so I am running the required focused suite directly now to validate the new UFFD and API code.
+
+Render replay and restore now borrow the same AppState ownership cancellation token as abort, while the handler guard cancels dropped clients and removes registry state after the worker returns. Focused validation is still running.
+
+Focused Rust tests have passed through the real KVM multiverse cases so far, including virtio-blk and periodic watchdog coverage; waiting for the remaining server/CLI assertions before the end-to-end drives.
+
+The suite is still in the long real-KVM branch section. I am leaving the KVM host uncontended and will use its final result as the next debugging input.
+
+The multiverse test set is green, including exact-boundary timing, restore, shell continuation, virtio-blk, and fingerprint stability. The suite has moved on to server/CLI compilation.
+
+The focused suite reports 238 multiverse tests passed and the server tests, including new redaction coverage, are green so far. Continuing to the final CLI result.
+
+Server route tests have compiled the unified render cancellation path and are green through branch persistence; two longer real-KVM persistence tests are finishing.
+
+All selected server KVM persistence tests observed so far are green, including restore/branch cancellation paths and real ACPI boot. I will not start H9 until this shared KVM suite exits.
+
+Focused validation is fully green: baud-snapshot 44, baud-multiverse 238, baud-server 61, and CLI tests all passed with no failures. Starting the real Ubuntu H9 acceptance path now.
+
+H9 caught a compile regression in the render cancellation edit: a trailing comment fragment remained after removing the local guard. Fixing that root cause before rerunning the real acceptance.
+
+Fixed the two compile issues exposed by H9, then restarted the real acceptance. The focused suite had passed before these final route edits; this build now validates the edited path itself.
+
+H9 is now past build and host probe, running the real Ubuntu fingerprint with the corrected virtio-blk/timer loop. The server is servicing the guest without compile errors; I am preserving the evidence while it runs.
+
+The H9 process remains inside the bounded first fingerprint run with no new progress line after the initial device polling burst. I am letting its own watchdog and diagnostics decide the result rather than treating the quiet period as success.
+
+H9 diagnostics isolated a real stall after tick 13, during the next periodic injection, with no virtio-blk request completion. I am rerunning with the documented watchdog override at 30 seconds to capture the guest RIP and console tail instead of waiting six hundred seconds.
+
+The bounded diagnostic reached tick 100 and proved the guest was progressing through udev, but block polling ran an empty service on every raw exit. Since virtio_blk_poll_counter already detects both notify changes and pending descriptors, I disabled unconditional polling to stop starving timer progress.
+
+The optimization build exposed and fixed one initializer omission immediately. Relaunching the bounded H9 diagnostic with the corrected device registration.
+
+The optimization removed the empty-service overhead and cut each tick to about 1.3 seconds, but 100 ticks still only reaches udev startup. The remaining userspace handoff needs the full H9 budget, so I am starting the real 20,000-tick acceptance with the optimized path.
+
+The full optimized H9 proof is running now. I also tightened live UFFD fault bounds so a malformed out-of-range event fails closed instead of being rounded into a valid page.
+
+The optimized full run now reaches tick 200 in 16 seconds and advances past the previous stall, with 20,114 bytes of kernel/udev console output. The rootfs handoff is alive; continuing the bounded real proof.
+
+The optimized run reached the same post-udev plateau around tick 200, so the empty-poll starvation was real but not the only H9 blocker. I am preserving that diagnostic and validating the code changes before the final gate.
+
+baud-snapshot now passes all 44 tests, including the UFFD ABI and branch fault-owner code. Running the server unit suite once more after the shared render-token changes.
+
+Focused server validation passed all 61 tests after the final edits. Starting the project-defined full gate now; any failure will drive the next root-cause pass rather than being waived.
+
+Review found a lifecycle race before the gate: a render request attached to an already-live run must not drop a guard that cancels that run on normal completion. The guard now exists only for a newly-owned render entry; restarting the full gate on this corrected state.
+
+The corrected full gate is in its warm-up build phase. No code changes are being made while the required validation owns the workspace.
+
+Gate warm-up passed in 65 seconds; clippy, workspace tests, and uncontended H5 are now running. This is the required pre-push sequence, not a substitute check.
+
+The gate remains in H5, the documented long pole that runs 1000 real KVM branches uncontended. No failure has been reported; preserving the run until its own timeout or completion.
+
+The gate log shows H5.1 through H5.6 all passed, including 1000 branches in 491 seconds; the timeout occurred only while H5.7 server shell regressions were queued. Running that exact unit in isolation to distinguish a slow test from a failure.
+
+The required gate timed out after H5 completed its 1000-branch proof and before H5.7 finished; the exact H5.7 unit passes in isolation in 29 seconds. H9’s real path now reaches tick 200 with the optimized polling fix but still needs the full userspace/login proof.
+
+## 2026-09-12T01:52:14 UTC - Changes committed.
+- Added live userfaultfd copy-on-write fault handling and shared memfd mapping helpers.
+- Unified render replay and restore cancellation with the run ownership registry.
+- Made observation writes return structured HTTP errors and redact secret-shaped values.
+- Fixed Ubuntu virtio-blk polling to avoid empty service work on every raw exit.
+- Files changed: crates/baud-snapshot/src/{userfaultfd.rs,backing.rs,branch.rs,lib.rs}, crates/baud-multiverse/src/linux/mod.rs, crates/baud-server/src/routes/{obs.rs,stream.rs}, ralph/progress.txt.
+- **Brief description of changes:**
+  - UFFD negotiation now requires COPY and can resolve write-protect faults into private pages.
+  - Render workers share abort/disconnect cancellation with their persisted run.
+  - Observation API errors no longer return HTTP 200, and display redaction is recursive.
+  - Real Ubuntu boot progress improved by removing unconditional empty virtio-blk polls.
+  - Focused snapshot and server tests are green; the full gate timed out in the long H5 sequence, and H9 still needs the login/fingerprint proof.
+---
