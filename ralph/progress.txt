@@ -4409,3 +4409,5 @@ H9 evidence points to a queued block descriptor missed during the initramfs hand
 The every-exit block poll did not change the real trace: the guest never published a virtio-blk request at all, so I reverted that performance-heavy experiment. The remaining H9 evidence now points to PCI/driver discovery before queue submission, and the queue remains open.
 
 The selected items are not closed, so no DONE lines or final completion block are being written. I am committing the verified implementation work and the H9 diagnostic evidence so the next pass can continue from a clean pushed tip.
+
+Push verification is green: origin/main matches local HEAD 625414d and the working tree is clean. The selected batch remains open because G5 and G6 acceptance are not complete.
