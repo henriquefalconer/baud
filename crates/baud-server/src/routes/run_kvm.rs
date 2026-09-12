@@ -223,9 +223,9 @@ pub struct PeriodicTimerSpec {
     /// single-step target. `guest_kernel_boots_to_userspace`'s own real-hardware-tuned value for
     /// the `linux-guest` fixture is `500_000`.
     pub period_rcb: u64,
-    /// Interrupt vector to inject at each tick. Defaults to `0xec`, Linux's own
-    /// `LOCAL_TIMER_VECTOR` (`arch/x86/include/asm/irq_vectors.h`) — the value every real-Linux-
-    /// guest test in this workspace uses.
+    /// Interrupt vector to inject at each tick. Defaults to `0xee`, Linux 4.15's
+    /// `LOCAL_TIMER_VECTOR` (`arch/x86/include/asm/irq_vectors.h`), which the pinned Ubuntu 18.04
+    /// guest uses. Newer kernels may override this field explicitly.
     #[serde(default = "default_timer_vector")]
     pub vector: u8,
     /// Bound on ticks before giving up (`DeterminismHole`, never silent non-termination) — the
@@ -235,7 +235,7 @@ pub struct PeriodicTimerSpec {
 }
 
 fn default_timer_vector() -> u8 {
-    0xec
+    0xee
 }
 
 fn default_max_ticks() -> u32 {
@@ -503,8 +503,12 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
         None => (CancelGuard::new(), false),
     };
     let cancel_flag = cancel.flag();
+    let owns_image_mapping = virtio_blk_image.is_some();
     if let Some(run_id) = registered_run_id.as_deref() {
         state.add_run_resource(run_id, "kvm");
+        if owns_image_mapping {
+            state.add_run_resource(run_id, "image-map");
+        }
         state.mark_run_running(run_id);
     }
 
@@ -538,6 +542,9 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     // resources are still held. Dropping the guard also marks any late disconnect cancellation.
     if let Some(run_id) = registered_run_id.as_deref() {
         state.release_run_resource(run_id, "kvm");
+        if owns_image_mapping {
+            state.release_run_resource(run_id, "image-map");
+        }
     }
     // Cancellation and successful completion race at the boundary between the blocking worker
     // and this handler. Never turn a cancellation that won the race into an HTTP 200 success.
@@ -2414,6 +2421,11 @@ mod tests {
     fn virtio_rng_guest_kernel_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../baud-multiverse/tests/fixtures/virtio-rng-guest/bzImage")
+    }
+
+    #[test]
+    fn omitted_periodic_timer_vector_targets_pinned_ubuntu_kernel() {
+        assert_eq!(default_timer_vector(), 0xee);
     }
 
     /// Pure deserialization, no KVM needed. Closes todo.md §14's "production callers default to a

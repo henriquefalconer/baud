@@ -4411,3 +4411,52 @@ The every-exit block poll did not change the real trace: the guest never publish
 The selected items are not closed, so no DONE lines or final completion block are being written. I am committing the verified implementation work and the H9 diagnostic evidence so the next pass can continue from a clean pushed tip.
 
 Push verification is green: origin/main matches local HEAD 625414d and the working tree is clean. The selected batch remains open because G5 and G6 acceptance are not complete.
+
+## 2026-09-12T04:22:04 UTC (1h04min) - Session usage — ralph-12 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2020705, receipt ralph/.run/20260911T161941Z/020-ralph-12.json.processes/receipt.json)
+- cost $0.6156 (summed from 7 session transcripts: main $0.3265 · subagents $0.2891)
+- tokens input 1,103,889 · cache-read 17,040,896 · cache-write 0 · output 45,002 · reasoning 15,995
+- context 202,570 tok peak of 272K (74%) across 94 inference calls, monotonic
+- models gpt-5.6-luna $0.6156 (in 1,103,889 / out 60,997 / cache-read 17,040,896)
+- subagents (6) pi process x6
+  - delegate-7d68e42b365ce8f3cd428586e2b6f254: gpt-5.6-luna $0.0226, 5 inference calls
+  - delegate-448e58a34bffa5e65f291789e5896dca: gpt-5.6-luna $0.0232, 5 inference calls
+  - delegate-9863f142de4e98466405a0ce76c20b33: gpt-5.6-luna $0.0213, 4 inference calls
+  - 01a0939f-e827-705b-9dd3-34d3634afc1a: gpt-5.6-luna $0.0898, 32 inference calls
+  - delegate-d1cc025daca957287416eb3fa9822003: gpt-5.6-luna $0.0285, 8 inference calls
+  - 01a093a7-d91c-75ef-a7c7-7f6f22c3182f: gpt-5.6-luna $0.1037, 39 inference calls
+- transcript: ralph/.run/20260911T161941Z/020-ralph-12.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 13 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important pending items, studying the specifications, and tracing each item through the code before implementation.
+
+Chose these 5 items: G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all pending entries in todo-build.md.
+
+Starting G3 write-set-scaled branching. I am tracing the current snapshot and multiverse paths while the specification searches run.
+
+The repository already contains low-level UFFD and shared-memfd primitives, but the public branch path still uses serialized full restore. I am mapping the missing live-parent handoff and checking server ownership before editing.
+
+G6 routing now defaults omitted periodic timer vectors to Ubuntu 4.15’s 0xee and has a regression test. I am validating this alongside the existing snapshot and server paths.
+
+The G5 code already has token middleware, shared cancellation, journaling, SSE, and ownership registries wired across most routes. I am comparing every CLI command against router registrations to find the remaining real gaps instead of duplicating completed work.
+
+CLI and router inventories match for the advertised groups, including reconstruct, SSE tails, auth middleware, run abort, replay, render, restore, and shell routes. I am holding edits until the specification agents identify a concrete uncovered contract.
+
+Unified run ownership now leases the virtio-blk image mapping explicitly alongside KVM, and releases both only after the blocking worker unwinds. I am waiting for focused validation and specification reports before deciding whether more concrete gaps remain.
+
+Specification reports confirm G3 remains unintegrated in Multiverse::branch, G5 still lacks durable run-agent/journal lifecycle, and G6 still stalls after rootfs handoff. I added two concrete root-cause fixes rather than disguising those gaps: backend stop on canceled run provisioning and explicit image-map ownership, plus the pinned Ubuntu timer default.
+
+Focused verification is running in the single test subagent. No queue item is being marked DONE: the reports explicitly confirm the remaining G3, durable G5, and H9 end-to-end acceptance gaps.
+
+Focused tests passed: baud-server 62 and baud-snapshot 46, plus the new Ubuntu vector test. The only failure was cargo fmt --check on the cancellation SQL block, so I am formatting that root cause and will rerun the same focused protocol.
+
+The formatted focused protocol is fully green: fmt check, the Ubuntu timer regression, snapshot tests, and 62 server tests. I am running the repository-defined full gate now; any H9 or integration failure will remain root-cause work, not a completion claim.
+
+The exact gate exceeded its 600-second allowance before the agent could report; I am reading the gate’s durable logs now to identify whether it was a real failing unit or the known long H5/H9 path.
+
+The full gate passed every unit except H9. H9 still reaches 20,115 bytes and RIP 0xffffffffc009b0da after systemd-udevd, then the 600-second watchdog fails before ubuntu login; this is the same real post-rootfs userspace stall, so no selected item can be collapsed to DONE.
+
+I am preserving the verified ownership, cancellation, and timer-default fixes in a commit with the gate evidence. The selected batch remains open because G3 live branch integration, durable G5 lifecycle/journal paths, and G6 login proof are not green.

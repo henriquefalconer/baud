@@ -288,13 +288,18 @@ async fn provision_run(
     cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        // SQLite state is not the backend's lifecycle. Stop the real sandbox before publishing
+        // the aborted terminal state, including the narrow window where abort wins during create.
+        if let Err(error) = state.tape_backend.stop(tape_id).await {
+            tracing::warn!(%tape_id, %error, "backend stop during run cancellation failed");
+        }
         let now = crate::state::unix_now() as i64;
         let _ = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status IN ('pending','provisioning')")
             .bind(now)
             .bind(run_id)
             .execute(&state.db)
             .await;
-        let _ = sqlx::query("UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = ? AND state = 'creating'")
+        let _ = sqlx::query("UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = ? AND state IN ('creating','running')")
             .bind(now)
             .bind(tape_id)
             .execute(&state.db)
@@ -334,11 +339,21 @@ async fn provision_run(
     let _ = tx.commit().await;
     state.mark_run_running(run_id);
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Err(error) = state.tape_backend.stop(tape_id).await {
+            tracing::warn!(%tape_id, %error, "backend stop after run provisioning cancellation failed");
+        }
         let _ = sqlx::query("UPDATE runs SET status = 'aborted', updated_at = ? WHERE id = ? AND status = 'running'")
             .bind(crate::state::unix_now() as i64)
             .bind(run_id)
             .execute(&state.db)
             .await;
+        let _ = sqlx::query(
+            "UPDATE tapes SET state = 'stopped', updated_at = ? WHERE id = ? AND state = 'running'",
+        )
+        .bind(crate::state::unix_now() as i64)
+        .bind(tape_id)
+        .execute(&state.db)
+        .await;
         state.finish_run(run_id);
     }
 }
