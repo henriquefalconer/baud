@@ -5504,3 +5504,49 @@ The EOI lifecycle is unit-tested and focused tests remain green, but H9 still st
   - `cargo test -p baud-vcpu --lib`: 41 passed, 0 failed.
 - H9 acceptance remains red. No item was marked `DONE` and no completion claim is made.
 - Commit `3c0ec6c` was pushed to `main`.
+
+## 2026-09-12T19:58:08 UTC (17min) - Session usage — ralph-30 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3934 (summed from 5 session transcripts: main $0.3085 · subagents $0.0849)
+- tokens input 726,464 · cache-read 11,011,584 · cache-write 0 · output 23,197 · reasoning 10,094
+- context 252,166 tok peak of 272K (93%) across 81 inference calls, 1 drop(s), final 86,758, resumed 1x
+- models gpt-5.6-luna $0.3934 (in 726,464 / out 33,291 / cache-read 11,011,584)
+- subagents (4) pi process x4
+  - delegate-313e5af133abdbe9b525bbcd8476cd40: gpt-5.6-luna $0.0276, 5 inference calls
+  - delegate-2c54f4a457366aa4cef603d97ddf2e6f: gpt-5.6-luna $0.0267, 6 inference calls
+  - delegate-6b979cf59ec8223e5850ccd0c9a0da34: gpt-5.6-luna $0.0278, 4 inference calls
+  - 01a0972c-dd8d-7434-b56a-a9ff0a82cda8: gpt-5.6-luna $0.0028, 3 inference calls
+- transcript: ralph/.run/20260911T161941Z/054-ralph-30.json
+- transcript: ralph/.run/20260911T161941Z/055-ralph-30.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 31 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items, studying the specifications, then implementing and validating the selected batch end to end.
+
+Started repository study and selection.
+
+Selected G6 Ubuntu H9 proof, the only pending build item. Mapping the real interrupt completion path and existing evidence before editing.
+
+Chose these 1 item: G6 Ubuntu H9 proof, because it is the only pending item in todo-build.md.
+
+The code already models PCI INTx, IOAPIC EOI clearing, virtio-blk servicing, and a combined periodic/device loop. Running the real H9 drive now to capture the remaining stall instead of guessing.
+
+The first real run reproduces the stall at tick 300 with no console progress. Re-running with the documented bounded watchdog override to capture the exact guest RIP and failure phase.
+
+The bounded run confirms the guest is not wedged in one call: 400 ticks complete, but no banner. Instrumenting virtio-blk queue notifications and completion counts around the vda stall to identify whether the IRQ is missing or the request is malformed.
+
+The previous trace was suppressed by the drive default BAUD_LOG=warn, so it could not show queue activity. Re-running one bounded capture with BAUD_LOG=info and extracting transport events.
+
+Queue notifications are present and Linux programs IRQ vector 0x21. Added completion-count tracing to distinguish an empty ring from a delivered-but-unacknowledged completion.
+
+The completion trace proves the block path is not merely missing a request or interrupt. The guest drains 207 successful virtio-blk requests, including the final rootfs reads, and reads the transport ISR with value 1. The bounded run still never emits `ubuntu login:`. A longer 1000-tick run ends with the wall-clock watchdog at guest RIP `0xffffffffc00a50da`, with the console unchanged. The remaining failure is therefore an unclosed real Ubuntu boot/runtime stall, not a transport assertion that can be honestly declared fixed.
+
+Removed temporary request/ISR tracing after the capture. No new code change is retained in this iteration. G6 stays open and `todo-build.md` is intentionally unchanged.
+
+## 2026-09-12T20:16:00 UTC - Iteration 31 closeout
+
+- Selected item: G6 Ubuntu H9 proof. It remains open because the real drive still fails before `ubuntu login:`.
+- Read-only specification reviews completed for core determinism, runtime/CLI integration, and pending-item mapping.
+- Diagnostic result: 207 successful block requests and repeated ISR reads are observed; the guest still stops after partition discovery. A 1000-tick run hits the bounded watchdog in guest code.
+- Temporary tracing was removed. No acceptance claim or `DONE` mark is made.
