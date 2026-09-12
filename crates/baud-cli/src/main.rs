@@ -118,11 +118,26 @@ async fn main() {
             .filter(|code| *code == 2)
             .map_or(1, |_| 2);
         if json {
-            // Machine-readable error output on stdout (baud-cli.md §4):
-            // When --json is set, errors are emitted as {"ok": false, "error": "..."} to stdout.
-            // This allows scripts to distinguish and parse error cases without inspecting stderr.
-            let msg = format!("{e:#}");
-            println!("{}", serde_json::json!({ "ok": false, "error": msg }));
+            // Keep the server's structured non-success payload intact. Flattening every HTTP
+            // failure to a display string used to discard `exit_code`, status, and diagnostic
+            // fields that scripts need to distinguish an error from a goal or violation.
+            if let Some(error) = e
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<client::ClientError>())
+            {
+                let mut body = error.body.clone();
+                if let Some(object) = body.as_object_mut() {
+                    object.insert("ok".to_owned(), serde_json::Value::Bool(false));
+                    object.insert(
+                        "http_status".to_owned(),
+                        serde_json::Value::from(error.status),
+                    );
+                }
+                println!("{body}");
+            } else {
+                let msg = format!("{e:#}");
+                println!("{}", serde_json::json!({ "ok": false, "error": msg }));
+            }
         } else {
             eprintln!("error: {e:#}");
         }

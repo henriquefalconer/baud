@@ -4295,3 +4295,60 @@ The required gate timed out after H5 completed its 1000-branch proof and before 
 ---
 
 Push landed at 8685329; origin/main matches HEAD and the working tree is clean.
+
+## 2026-09-12T01:53:45 UTC (47min) - Session usage — ralph-10 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.8715 (summed from 6 session transcripts: main $0.7681 · subagents $0.1035)
+- tokens input 935,220 · cache-read 31,859,200 · cache-write 0 · output 39,422 · reasoning 11,729
+- context 200,378 tok peak of 272K (74%) across 209 inference calls, 1 drop(s), final 200,378
+- models gpt-5.6-luna $0.8715 (in 935,220 / out 51,151 / cache-read 31,859,200)
+- subagents (5) pi process x5
+  - delegate-3335207cf51f7e57fd3957c35860852f: gpt-5.6-luna $0.0250, 5 inference calls
+  - delegate-2b8ee7112891e57e33cd4c3391dd1fea: gpt-5.6-luna $0.0261, 7 inference calls
+  - delegate-ad104abe0c735bab9aa9a402a383f25c: gpt-5.6-luna $0.0218, 5 inference calls
+  - delegate-12c5f84da4ee64b6492bdfeb39357fb6: gpt-5.6-luna $0.0286, 6 inference calls
+  - 01a09328-f932-7668-9534-19558aa8e777: gpt-5.6-luna $0.0020, 3 inference calls
+- transcript: ralph/.run/20260911T161941Z/018-ralph-10.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 11 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each implementation path before coding.
+
+Chose these 5 items: G3 write-set-scaled branching, G5 authenticated lifecycle and public API contract, G5 unified run ownership and image memory, G5 complete advertised CLI and route coverage, G6 Ubuntu H9 proof — they are all 5 pending items in todo-build.md.
+
+The queue has five pending entries, so all five are binding. The existing code contains scaffolding for each, but the specs still identify real integration gaps. Tracing the live KVM memory path and server ownership paths now.
+
+Search results confirm G3 UFFD is orphaned from live KVM, G5 render ownership ends too early, and H9 stalls before any virtio-blk QueueNotify after Freeing unused kernel memory. Running the required host setup and focused tests before repairs.
+
+The focused suite exposed one syntax error in the new UFFD source-mapping change; fixed it immediately. The render path now holds a resource lease through encoding and file output, SSE recognizes every terminal run state, and JSON CLI errors preserve structured server fields. Re-running focused tests.
+
+Focused server, CLI, and snapshot suites are green: 61 server tests and 44 snapshot tests, including real-KVM branch/restore and shell coverage. The remaining proof is the real H9 drive and full gate; first running H9 to capture the userspace/device failure on this tip.
+
+H9 reproduced the documented blocker on the real path: KVM reaches the exact post-kernel udev console but the 600-second bounded run never reaches a virtio-blk QueueNotify or login banner, so the watchdog correctly fails rather than claiming success. The failure is now recorded with fresh logs; continuing with code cleanup and validation.
+
+Clippy found three unrelated pre-existing warnings in baud-identity under the required -D warnings policy. Fixed both redundant error closures and the manual base64 capacity division, then re-running the lint rather than bypassing it.
+
+Ownership is now leased across real KVM runs, replay, and stream rendering, including output encoding and file writes; replay and render cleanup happens on every return path. The CLI now exposes the server restore route and documents it. Snapshot tests remain green after UFFD source separation. Running the maintained shell-into integration drive.
+
+M10 and M13 both pass end-to-end on real KVM: shell restore/interaction/repeatability and restore-based branch/frame/render determinism. H9 remains the only real acceptance failure, with the same post-udev stall. Starting the repository-defined full gate now.
+
+The first gate attempt reached green H5, H4, H7, H2, H1, M10, M12, and the image/rng branch-resume drives, but timed out during the parallel phase and several concurrent KVM scripts failed with only generic CLI failure lines. Re-running the first failing package drive alone to separate contention from regression.
+
+Root cause found in the isolated virtio-rng drive: run_kvm dropped CancelGuard before checking its flag, and the guard deliberately sets that flag on Drop, so every successful stateless KVM run was mislabeled canceled. Moved the race check before guard drop; rerunning the failing drive.
+
+The isolated failures were real root causes, not contention: stateless run cancellation was inverted by guard drop. After the fix, pkg virtio-rng, pkg boot, M9 branch/resume, M10 shell, M11 frame render, and M13 restore render all pass end-to-end on real KVM. Re-running the full server and CLI suites before the next gate.
+
+The second gate reached H5 but its 1000-real-VM branch test did not finish inside the 600-second call while clippy/workspace tests ran concurrently; the first gate had already passed H5 in 372 seconds. I am isolating H5, then will rerun the gate with the long pole warm.
+
+The final gate run passed warm build, clippy, workspace tests, H5, H0-H4/H7, M9-M13, and every package drive before its 600-second wall limit; only H9 remained active and reproduced the same no-QueueNotify userspace stall. H9 is still not green, so the selected G6 item cannot be marked done.
+
+The short H9 run added one useful fact: Ubuntu never reads the virtio-pci I/O BAR at all. The model sees PCI config identity/BAR enumeration and the guest writes PCI command/status, but no host-feature, queue-size, status, or QueueNotify access reaches the transport. The blocker is PCI driver binding/probe before queue setup, not slow block completion. Keeping this diagnostic and continuing validation of the repaired paths.
+
+All 238 baud-multiverse tests, 61 server tests, and the CLI test pass after the ownership and cancellation fixes. The selected batch is not closed: G3 still lacks live KVM/UFFD integration, G5 still lacks durable agent ownership/watchdog coverage, and G6 still fails H9 at PCI probe. No DONE lines or promise are being emitted yet.
+
+The selected contract remains open. I am preserving the verified fixes and diagnostics in a commit so the next pass can continue from a clean tip instead of losing the cancellation regression fix, route ownership leases, CLI coverage, and UFFD fault-source correction.

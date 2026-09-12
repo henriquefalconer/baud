@@ -503,6 +503,10 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
         None => (CancelGuard::new(), false),
     };
     let cancel_flag = cancel.flag();
+    if let Some(run_id) = registered_run_id.as_deref() {
+        state.add_run_resource(run_id, "kvm");
+        state.mark_run_running(run_id);
+    }
 
     // Real ioctls (KVM_RUN and friends) block; keep them off the async executor.
     let worker_cancel_flag = std::sync::Arc::clone(&cancel_flag);
@@ -529,25 +533,28 @@ pub async fn run(State(state): State<AppState>, Json(body): Json<RunKvmBody>) ->
     })
     .await
     .expect("run/kvm task panicked");
-    // The run has already returned, so the flag is nobody's business now; dropping the guard here
-    // is only to make it explicit that it had to stay alive across the `.await` above — that is
-    // the entire mechanism, and a future "unused binding" tidy-up would silently remove it.
+    // The blocking worker has unwound all KVM/image locals. Release the shared lease only now,
+    // after the join, so abort and disconnect cannot observe a terminal-looking run while those
+    // resources are still held. Dropping the guard also marks any late disconnect cancellation.
+    if let Some(run_id) = registered_run_id.as_deref() {
+        state.release_run_resource(run_id, "kvm");
+    }
+    // Cancellation and successful completion race at the boundary between the blocking worker
+    // and this handler. Never turn a cancellation that won the race into an HTTP 200 success.
+    // Check the shared flag while the guard is still alive. `CancelGuard::drop` sets the flag as a
+    // final safety net, so dropping it before this check would turn every successful stateless
+    // run into a false cancellation.
+    let result = if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        Err("run cancelled before completion".to_owned())
+    } else {
+        result
+    };
     drop(cancel);
     if owns_registry_entry {
         if let Some(run_id) = registered_run_id.as_deref() {
             state.remove_run(run_id);
         }
     }
-
-    // Cancellation and successful completion race at the boundary between the blocking worker
-    // and this handler. Never turn a cancellation that won the race into an HTTP 200 success.
-    // The worker may have returned a complete-looking outcome just as an abort or disconnect set
-    // the shared flag, so check the flag after the join and before constructing the response.
-    let result = if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
-        Err("run cancelled before completion".to_owned())
-    } else {
-        result
-    };
 
     match result {
         Ok(((console_output, ram_hash, _mark_branch_step, _node_id), records)) => {

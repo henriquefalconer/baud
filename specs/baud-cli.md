@@ -57,7 +57,7 @@ baud doctor
 baud host     probe          # H0 capability spike; specs/baud-host.md — exit 1 if regime=rejected
 baud secrets  init|edit|show --redacted|rotate
 baud spec     new|lint|show <spec.toml>
-baud tape     create|ls|status|ensure|kill|reconstruct|exec|probe-caps <id>
+baud tape     create|ls|status|start|stop|ensure|restore|kill|reconstruct|exec|probe-caps|endpoint <id>
 baud run      start --spec S --strategy ST --tactics T --seed N --budget-minutes M
 baud run      ls|status|watch|pause|resume|abort <run>
 baud obs      ls|get|tail --run <id> [--probe X] [--node I]

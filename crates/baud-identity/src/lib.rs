@@ -65,7 +65,7 @@ pub struct RootKey {
 impl RootKey {
     /// Create a new root key from a base64-encoded 32-byte ed25519 seed.
     pub fn from_seed_b64(seed_b64: &str) -> Result<Self, IdentityError> {
-        let bytes = decode_b64(seed_b64).map_err(|e| IdentityError::InvalidSigningKey(e))?;
+        let bytes = decode_b64(seed_b64).map_err(IdentityError::InvalidSigningKey)?;
         if bytes.len() != 32 {
             return Err(IdentityError::InvalidSigningKey(format!(
                 "expected 32 bytes, got {}",
@@ -152,7 +152,7 @@ impl RootKey {
     fn mint_claims(&self, claims: Claims) -> Result<SecretString, IdentityError> {
         // Reconstruct signing key from stored bytes
         let bytes = decode_b64(self.signing_key_bytes.expose())
-            .map_err(|e| IdentityError::InvalidSigningKey(e))?;
+            .map_err(IdentityError::InvalidSigningKey)?;
         let seed: [u8; 32] = bytes
             .try_into()
             .map_err(|_| IdentityError::InvalidSigningKey("bad length".into()))?;
@@ -344,7 +344,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 fn encode_b64(bytes: &[u8]) -> String {
     static CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() * 4 + 2) / 3);
+    let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     let mut i = 0;
     while i + 2 < bytes.len() {
         let a = bytes[i] as u32;

@@ -337,7 +337,13 @@ impl Bus for VirtioPciTransport {
             return;
         }
         let word: [u8; 4] = match offset {
-            REG_HOST_FEATURES => self.host_features.to_le_bytes(),
+            REG_HOST_FEATURES => {
+                tracing::info!(
+                    features = self.host_features,
+                    "virtio-pci host features read"
+                );
+                self.host_features.to_le_bytes()
+            }
             REG_GUEST_FEATURES => self.guest_features.to_le_bytes(),
             REG_QUEUE_ADDRESS => self
                 .selected_queue()
@@ -384,7 +390,13 @@ impl Bus for VirtioPciTransport {
         let n = data.len().min(4);
         word[..n].copy_from_slice(&data[..n]);
         match offset {
-            REG_GUEST_FEATURES => self.guest_features = u32::from_le_bytes(word),
+            REG_GUEST_FEATURES => {
+                self.guest_features = u32::from_le_bytes(word);
+                tracing::info!(
+                    features = self.guest_features,
+                    "virtio-pci guest features write"
+                );
+            }
             REG_QUEUE_ADDRESS => {
                 let pfn = u32::from_le_bytes(word);
                 tracing::info!(queue = self.queue_select, pfn, "virtio-pci queue PFN write");

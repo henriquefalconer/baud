@@ -58,12 +58,13 @@
 //     post-fork CoW pages. Proven correct and independent on real hardware
 //     (`thousand_branches_are_independent_and_deterministic`, todo.md §14), at `O(total RAM)` cost
 //     per branch rather than the spec's `O(write-set)` guarantee.
-//   - NOT built: userfaultfd-based CoW branching, the spec's actual `O(write-set)` "cheap N-way
-//     branching" mechanism — `UFFDIO_CONTINUE`-based page sharing needs guest RAM backed by a
-//     shared (memfd/hugetlbfs) mapping for the kernel's "minor fault" mechanism, but today's guest
-//     RAM (`baud_multiverse::linux::GuestMemory` = `GuestMemoryMmap::from_ranges`) is a private
-//     anonymous mapping — a real architecture change, not just a missing ioctl wrapper, so it
-//     remains scoped out rather than built on a foundation that cannot support it.
+//   - NOT built: userfaultfd-based CoW branching is still not connected to the live KVM slot. The
+//     multiverse now allocates guest RAM from memfd-backed `GuestMemoryMmap` regions, which removes
+//     the old anonymous-mapping blocker. The remaining integration work is to retain and share the
+//     backing fd across branch VMs, register each UFFD-managed mapping with KVM, and service faults
+//     alongside the vCPU run loop. `branch::LiveCowBranch` keeps a separate source mapping so its
+//     `UFFDIO_CONTINUE`/`UFFDIO_COPY` calls are safe, while unsupported hosts still select the
+//     explicit full-restore mode.
 
 #![allow(dead_code)]
 

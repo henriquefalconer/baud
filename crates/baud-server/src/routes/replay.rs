@@ -33,6 +33,20 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
     (status, Json(json!({ "error": message.into() })))
 }
 
+/// Keeps replay ownership registered until every observation write and the terminal status update
+/// finish. The registry entry is removed on all error returns as well as success.
+struct ReplayLease {
+    state: AppState,
+    run_id: String,
+}
+
+impl Drop for ReplayLease {
+    fn drop(&mut self) {
+        self.state.release_run_resource(&self.run_id, "replay");
+        self.state.remove_run(&self.run_id);
+    }
+}
+
 pub async fn replay(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -118,6 +132,14 @@ pub async fn replay(
     .execute(&state.db)
     .await
     .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("replay journal error: {e}")))?;
+
+    let (_cancellation, _inserted) = state.register_or_get_run(&replay_run_id);
+    state.add_run_resource(&replay_run_id, "replay");
+    state.mark_run_running(&replay_run_id);
+    let _replay_lease = ReplayLease {
+        state: state.clone(),
+        run_id: replay_run_id.clone(),
+    };
 
     // 4. Fetch original observations from the run being replayed
     let original_rows = sqlx::query_as::<_, (i64, i64, String, Vec<u8>, i64)>(

@@ -48,6 +48,11 @@ pub enum TapeAction {
         /// Tape ID
         id: String,
     },
+    /// Restore an archived tape without changing its durable identity
+    Restore {
+        /// Tape ID
+        id: String,
+    },
     /// Kill (permanently delete) a tape
     Kill {
         /// Tape ID
@@ -128,6 +133,10 @@ pub async fn run(cmd: TapeCmd, c: &Client, json: bool) -> Result<()> {
         }
         TapeAction::Ensure { id } => {
             let v = c.post(&format!("/tapes/{id}/ensure"), &json!({})).await?;
+            print_value(&v, json);
+        }
+        TapeAction::Restore { id } => {
+            let v = c.post(&format!("/tapes/{id}/restore"), &json!({})).await?;
             print_value(&v, json);
         }
         TapeAction::Kill { id } => {

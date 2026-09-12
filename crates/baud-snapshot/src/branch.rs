@@ -64,7 +64,12 @@ pub fn negotiate_shared_cow(
 #[cfg(target_os = "linux")]
 pub struct LiveCowBranch {
     backing: Arc<crate::backing::GuestRamBacking>,
+    /// The registered destination mapping is write-protected. A separate read-only source
+    /// mapping is required for UFFDIO_CONTINUE/COPY because the destination page is unresolved or
+    /// already private when the fault arrives; using the faulting address as both source and
+    /// destination can feed an unresolved page back into the kernel and deadlock the vCPU.
     mapping: crate::backing::PrivateCowMapping,
+    source: crate::backing::PrivateCowMapping,
     uffd: crate::userfaultfd::CowRegion,
     page_size: usize,
     dirty_pages: std::collections::BTreeSet<usize>,
@@ -76,6 +81,9 @@ impl LiveCowBranch {
         let mapping = backing.map_shared().map_err(|_| BranchMode::FullRestore {
             fallback: FallbackReason::MappingFailed,
         })?;
+        let source = backing.map_shared().map_err(|_| BranchMode::FullRestore {
+            fallback: FallbackReason::MappingFailed,
+        })?;
         let uffd = negotiate_shared_cow(&mapping)?;
         uffd.write_protect(true)
             .map_err(|_| BranchMode::FullRestore {
@@ -85,6 +93,7 @@ impl LiveCowBranch {
         Ok(Self {
             backing,
             mapping,
+            source,
             uffd,
             page_size,
             dirty_pages: std::collections::BTreeSet::new(),
@@ -114,7 +123,7 @@ impl LiveCowBranch {
             }
             let page = offset / self.page_size;
             let address = self.mapping.as_ptr() as u64 + (page * self.page_size) as u64;
-            let source = address;
+            let source = self.source.as_ptr() as u64 + (page * self.page_size) as u64;
             if fault.minor {
                 self.uffd
                     .continue_from(address, self.page_size as u64, source)?;

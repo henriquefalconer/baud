@@ -23,6 +23,25 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{convert::Infallible, path::PathBuf, time::Duration};
 
+/// Owns the render lease until the response has been encoded and written. Dropping the lease
+/// earlier would let an abort or watchdog report a clean terminal state while the output file was
+/// still being produced.
+struct RenderLease {
+    state: AppState,
+    run_id: String,
+    remove_registry_entry: bool,
+}
+
+impl Drop for RenderLease {
+    fn drop(&mut self) {
+        self.state
+            .release_run_resource(&self.run_id, "stream-render");
+        if self.remove_registry_entry {
+            self.state.remove_run(&self.run_id);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // POST /runs/:id/frames — append a frame record
 // ---------------------------------------------------------------------------
@@ -189,6 +208,13 @@ pub async fn render(
         crate::routes::run_kvm::CancelGuard::from_flag(std::sync::Arc::clone(&shared_cancel))
     });
     let cancel_flag = std::sync::Arc::clone(&shared_cancel);
+    state.add_run_resource(&run_id, "stream-render");
+    state.mark_run_running(&run_id);
+    let _render_lease = RenderLease {
+        state: state.clone(),
+        run_id: run_id.clone(),
+        remove_registry_entry: owns_registry_entry,
+    };
 
     #[allow(clippy::type_complexity)]
     let kvm_meta = sqlx::query_as::<
@@ -303,9 +329,6 @@ pub async fn render(
         )),
     };
 
-    if owns_registry_entry {
-        state.remove_run(&run_id);
-    }
     drop(cancel_guard);
     let frames = match frames {
         Ok(frames) => frames,
@@ -773,7 +796,16 @@ pub async fn tail(
 fn is_terminal_run_status(status: &str) -> bool {
     matches!(
         status,
-        "done" | "failed" | "aborted" | "divergent" | "error"
+        "done"
+            | "completed"
+            | "failed"
+            | "aborted"
+            | "divergent"
+            | "error"
+            | "goal"
+            | "violation"
+            | "violation_found"
+            | "crashed"
     )
 }
 

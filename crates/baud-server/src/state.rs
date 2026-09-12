@@ -194,6 +194,22 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// Release one named resource without changing the worker phase. Every route that owns a
+    /// blocking task calls this before publishing its terminal response, so a canceled task can
+    /// never be mistaken for a clean success merely because its SQL status raced ahead of cleanup.
+    pub fn release_run_resource(&self, run_id: &str, resource: &str) -> bool {
+        self.run_ownership
+            .write()
+            .expect("run ownership registry poisoned")
+            .get_mut(run_id)
+            .map(|owner| {
+                let before = owner.resources.len();
+                owner.release_resource(resource);
+                owner.resources.len() != before
+            })
+            .unwrap_or(false)
+    }
+
     pub fn mark_run_running(&self, run_id: &str) -> bool {
         self.run_ownership
             .write()

@@ -212,8 +212,8 @@ pub fn load_native_probes() -> Option<NativeProbeHandle> {
 
     // Create an aya Bpf loader.  The CO-RE object is built for the host kernel
     // using BTF-based relocation — aya handles the relocation at load time.
-    use aya::Bpf;
-    let mut bpf = match Bpf::load(&bpf_bytes) {
+    use aya::Ebpf;
+    let mut bpf = match Ebpf::load(&bpf_bytes) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!("baud-tracing: aya Bpf::load failed: {e}");
@@ -253,7 +253,7 @@ pub fn load_native_probes() -> Option<NativeProbeHandle> {
 /// duration of the handle's lifetime.
 #[cfg(target_os = "linux")]
 pub struct NativeProbeHandle {
-    _bpf: aya::Bpf,
+    _bpf: aya::Ebpf,
 }
 
 #[cfg(not(target_os = "linux"))]
