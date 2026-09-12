@@ -197,6 +197,7 @@ mod linux {
         let raw = match (periodic_timer, expected_banner) {
             (Some((period, vector, max_ticks)), Some(pattern)) => vm
                 .capture_fingerprint_until_console_pattern(
+                    target_rcb,
                     period,
                     vector,
                     Some(0x3a),

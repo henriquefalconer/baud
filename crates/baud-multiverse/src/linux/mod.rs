@@ -3139,6 +3139,7 @@ impl Multiverse {
     /// console pattern appears, then capture at the exact event count reached there.
     pub fn capture_fingerprint_until_console_pattern(
         &mut self,
+        target_rcb: u64,
         period_rcb: u64,
         timer_vector: u8,
         rng_vector: Option<u8>,
@@ -3158,8 +3159,13 @@ impl Multiverse {
             max_exits_per_burst,
         )
         .map_err(|error| DeterminismHole(error.to_string()))?;
-        let target = self.time.current_rcb();
-        let raw = self.capture_fingerprint(target)?;
+        if self.time.current_rcb() > target_rcb {
+            return Err(DeterminismHole(format!(
+                "console pattern reached at rcb={} after requested fingerprint target {target_rcb}",
+                self.time.current_rcb()
+            )));
+        }
+        let raw = self.capture_fingerprint(target_rcb)?;
         let tail_start = raw.console_output.len().saturating_sub(banner_tail_len);
         Ok(TimedExitFingerprint {
             console_output: raw.console_output[tail_start..].to_vec(),
