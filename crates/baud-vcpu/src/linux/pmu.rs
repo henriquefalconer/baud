@@ -37,6 +37,7 @@ use kvm_ioctls::VcpuFd;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use vm_memory::GuestMemoryMmap;
 
 /// Is the supervisor's cancellation flag installed *and* set? A free function taking the field by
 /// reference, rather than only a `&self` method, because every `KVM_RUN` loop below needs to test
@@ -112,6 +113,7 @@ pub struct LinuxPmuStepper<'vcpu, 'io> {
     /// makes `EINTR` from the watchdog's own `pthread_kill` stop the retry loop the same way
     /// `cancel` does, without this crate needing to know which reason a caller will report it as.
     timed_out: Option<Arc<AtomicBool>>,
+    device_mem: Option<&'io GuestMemoryMmap<()>>,
 }
 
 impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
@@ -128,6 +130,7 @@ impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
             halted: false,
             cancel: None,
             timed_out: None,
+            device_mem: None,
         }
     }
 
@@ -147,6 +150,38 @@ impl<'vcpu, 'io> LinuxPmuStepper<'vcpu, 'io> {
     pub fn with_watchdog(mut self, timed_out: Option<Arc<AtomicBool>>) -> Self {
         self.timed_out = timed_out;
         self
+    }
+
+    /// Poll block devices after each guest exit so a request posted during the coarse boundary
+    /// walk cannot strand the guest in a native wait before the next timer tick.
+    pub fn with_device_memory(mut self, mem: &'io GuestMemoryMmap<()>) -> Self {
+        self.device_mem = Some(mem);
+        self
+    }
+
+    fn poll_devices(&mut self) -> io::Result<()> {
+        let Some(mem) = self.device_mem else {
+            return Ok(());
+        };
+        // KVM has one userspace-staged external interrupt slot. Do not drain a block request
+        // while a timer or other interrupt occupies it, because completing the request would
+        // raise the legacy ISR bit and the completion vector would then have nowhere to go.
+        // Leave the available-ring entry untouched and service it on the next real exit after
+        // KVM consumes the older event.
+        let mut events = self.vcpu.get_vcpu_events().map_err(io::Error::from)?;
+        if events.interrupt.injected != 0 {
+            return Ok(());
+        }
+        let Some(vector) = self.bus.poll_virtio_blk(mem).map_err(io::Error::other)? else {
+            return Ok(());
+        };
+        events.interrupt.injected = 1;
+        events.interrupt.nr = vector;
+        events.interrupt.soft = 0;
+        self.vcpu
+            .set_vcpu_events(&events)
+            .map_err(io::Error::from)?;
+        Ok(())
     }
 
     /// Whether either the supervisor's cancellation flag or a per-call watchdog's `fired` flag is
@@ -221,8 +256,14 @@ impl<'vcpu, 'io> PmuStepper for LinuxPmuStepper<'vcpu, 'io> {
             };
             match exit {
                 Ok(exit) => match dispatch_exit(exit, self.bus, self.time) {
-                    Ok(DispatchOutcome::Continue) => continue,
-                    Ok(DispatchOutcome::SingleStepBoundary) => continue,
+                    Ok(DispatchOutcome::Continue) => {
+                        self.poll_devices()?;
+                        continue;
+                    }
+                    Ok(DispatchOutcome::SingleStepBoundary) => {
+                        self.poll_devices()?;
+                        continue;
+                    }
                     Ok(DispatchOutcome::ServeEnforcedRdtsc(value)) => {
                         match write_enforced_rdtsc_result(self.vcpu, value) {
                             Ok(()) => continue,

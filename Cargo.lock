@@ -724,6 +724,7 @@ dependencies = [
  "proptest",
  "thiserror 2.0.19",
  "tracing",
+ "vm-memory",
  "vmm-sys-util",
 ]
 

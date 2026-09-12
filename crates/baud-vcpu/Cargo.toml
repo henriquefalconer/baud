@@ -8,6 +8,7 @@ description = "Single-vCPU state machine and deterministic VM-exit dispatch (spe
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+vm-memory = { version = "0.18", features = ["backend-mmap"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.25"

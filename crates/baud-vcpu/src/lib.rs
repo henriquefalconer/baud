@@ -255,6 +255,15 @@ pub enum DispatchOutcome {
 /// The paravirtual bus every `IoIn`/`IoOut`/`MmioRead`/`MmioWrite` exit is routed through
 /// (served by `baud-tape-device` and the console in the full VMM; specs/baud-vcpu.md §3).
 pub trait Bus {
+    /// Poll devices after a guest exit. Real device buses may complete queued work and return
+    /// the interrupt vector that should be staged; simple buses have nothing to poll.
+    fn poll_virtio_blk(
+        &mut self,
+        _mem: &vm_memory::GuestMemoryMmap<()>,
+    ) -> Result<Option<u8>, String> {
+        Ok(None)
+    }
+
     fn pio_read(&mut self, port: u16, data: &mut [u8]);
     fn pio_write(&mut self, port: u16, data: &[u8]);
     fn mmio_read(&mut self, addr: u64, data: &mut [u8]);

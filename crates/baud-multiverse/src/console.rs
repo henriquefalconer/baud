@@ -715,6 +715,20 @@ impl DeviceBus {
         fallback
     }
 
+    /// Resolve the vector Linux programmed for the PCI entropy device. MSI is not modeled for
+    /// legacy virtio-rng, so use the IO APIC route for its Interrupt Line and retain the supplied
+    /// vector only for callers using a bus without an IRQ route.
+    #[cfg(target_os = "linux")]
+    pub fn virtio_pci_rng_interrupt_vector(&self, fallback: u8) -> u8 {
+        if let Some(irq) = self.pci.virtio_rng_interrupt_line() {
+            if let Some(vector) = self.ioapic.vector_for_irq(irq) {
+                return vector;
+            }
+            return crate::pic8259::isa_irq_vector(irq);
+        }
+        fallback
+    }
+
     /// Check the block queue producer cursor without consuming a request. This lets the Linux
     /// run loop notice work even when a legacy guest's queue-notify write did not produce a
     /// separate userspace exit.
@@ -822,6 +836,14 @@ impl DeviceBus {
 }
 
 impl Bus for DeviceBus {
+    fn poll_virtio_blk(
+        &mut self,
+        mem: &vm_memory::GuestMemoryMmap<()>,
+    ) -> Result<Option<u8>, String> {
+        let processed = self.service_virtio_blk(mem).map_err(|e| e.to_string())?;
+        Ok((processed > 0).then(|| self.virtio_pci_blk_interrupt_vector(0x3b)))
+    }
+
     fn pio_read(&mut self, port: u16, data: &mut [u8]) {
         if Console::in_range(port).is_some() {
             self.console.pio_read(port, data);
@@ -1196,6 +1218,18 @@ mod tests {
         bus.ioapic
             .mmio_write(crate::layout::IOAPIC_MMIO_BASE + 0x10, &[0x59, 0, 0, 0]);
         assert_eq!(bus.virtio_pci_blk_interrupt_vector(0xee), 0x59);
+    }
+
+    #[test]
+    fn virtio_pci_rng_interrupt_vector_uses_its_legacy_irq_route() {
+        let mut bus = DeviceBus::default();
+        bus.enable_virtio_pci_rng();
+        let register = 0x10 + 10 * 2;
+        bus.ioapic
+            .mmio_write(crate::layout::IOAPIC_MMIO_BASE, &[register, 0, 0, 0]);
+        bus.ioapic
+            .mmio_write(crate::layout::IOAPIC_MMIO_BASE + 0x10, &[0x58, 0, 0, 0]);
+        assert_eq!(bus.virtio_pci_rng_interrupt_vector(0xee), 0x58);
     }
 
     #[test]

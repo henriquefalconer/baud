@@ -46,7 +46,7 @@ guarantee and the test that proves it.
 
 - **G5 complete advertised CLI and route coverage.** DONE. Advertised commands, routes, aliases, schemas, redaction, identifier errors, stable exits, tape reconstruction, and SSE frame tails are synchronized; live frame payloads now persist when supplied and migrations cover fresh/upgraded databases.
 
-- **G6 Ubuntu H9 proof.** Use pinned Ubuntu 18.04.1/Linux 4.15 vector `0xee` (238) and finish the real rootfs/userspace path to `ubuntu login:`; current evidence reaches `systemd-udevd` but Ubuntu never advances virtio-blk status beyond ACK or posts a queue request, so add PCI interrupt/MSI routing or the matching virtio-pci capability path next, then rerun `drive/h/h9.sh` and require the two-VM fingerprint tests.
+- **G6 Ubuntu H9 proof.** Use pinned Ubuntu 18.04.1/Linux 4.15 vector `0xee` (238) and finish the real rootfs/userspace path to `ubuntu login:`; PCI now enumerates vda and the host drains requests, but Ubuntu still waits after the final completion, so finish the real legacy INTx completion/EOI path and rerun `drive/h/h9.sh` with the two-VM fingerprint tests.
 
 
 - **G8 production host safety contract.** DONE. Linux probing, regime reporting, sibling-safe placement, inherited affinity selection, housekeeping reservations, doctor diagnostics, and real H0/H6 capacity/fleet checks now pass without silent downgrade.

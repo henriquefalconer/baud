@@ -5045,3 +5045,306 @@ The watchdog identifies RIP 0xffffffffc00a50da, inside the Ubuntu initramfs btrf
 - Re-ran `cargo test -p baud-multiverse`: 242 passed, 10 ignored. `git diff --check` passed and formatting check passed.
 - Committed and pushed the implementation as `a56fa6a` (`wire Ubuntu PCI interrupt routing`).
 - G6 remains open. The next iteration must diagnose the post-block btrfs spin and rerun the full H9 gate before claiming completion.
+
+## 2026-09-12T14:24:32 UTC (42min) - Session usage — ralph-22 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5358 (summed from 6 session transcripts: main $0.4067 · subagents $0.1290)
+- tokens input 990,612 · cache-read 14,727,168 · cache-write 0 · output 35,921 · reasoning 13,368
+- context 255,592 tok peak of 272K (94%) across 114 inference calls, 1 drop(s), final 158,430, resumed 1x
+- models gpt-5.6-luna $0.5358 (in 990,612 / out 49,289 / cache-read 14,727,168)
+- subagents (5) pi process x5
+  - delegate-2c20fc518024659640c92e12bf4d2c9d: gpt-5.6-luna $0.0225, 4 inference calls
+  - delegate-5d4d52b8311ea7f7e33f41e7384dcdfa: gpt-5.6-luna $0.0256, 5 inference calls
+  - delegate-c99675b06e71f581634c70e928109728: gpt-5.6-luna $0.0271, 7 inference calls
+  - delegate-8b64a9dae8f417b5a4671e7722c37077: gpt-5.6-luna $0.0275, 6 inference calls
+  - delegate-916012143d4a8042cab51d84b4cd4b0d: gpt-5.6-luna $0.0264, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/038-ralph-22.json
+- transcript: ralph/.run/20260911T161941Z/039-ralph-22.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 23 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and then implementing and validating the selected batch.
+
+Resetting the required perf_event setting before repository work.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending build item.
+
+Starting G6 Ubuntu H9 proof. Reading the guest, PCI, block, and acceptance paths before changing code.
+
+Running the real H9 drive to reproduce the current Ubuntu post-block failure before patching.
+
+The reproduction still stalls after vda partition discovery. Inspecting ACPI _PRT and IRQ injection mappings, then running the focused real-KVM block test.
+
+Focused block-driver KVM test is green, so the remaining defect is Ubuntu filesystem boot integration. Enabling the short watchdog to capture the stuck guest location and request activity.
+
+Fixed the combined run loop to service PCI virtio-rng instead of the dormant MMIO queue, and to inject its completion on the guest-programmed IRQ vector. Formatting and compiling the focused path next.
+
+The first focused command used two cargo filters, which cargo rejects. Re-running each required unit separately.
+
+Added the Multiverse forwarding method required by the run loop. Re-running PCI IRQ and real guest tests.
+
+The focused tests pass, including the new PCI entropy IRQ routing test. Running H9 with a bounded diagnostic budget to verify the Ubuntu path now advances.
+
+The ACPI-enabled Ubuntu boot selects IRQ 11 for the entropy function, so the model now advertises that same line and shares the resolved vector with block. Testing the consistency change.
+
+IRQ plumbing alone did not move the Ubuntu stall. Isolating the second device now by temporarily disabling PCI RNG in the fingerprint route, which will distinguish entropy completion from block/filesystem corruption.
+
+Found the generated ACPI _PRT encoded wildcard and pin entries instead of device addresses 1 and 2, so Ubuntu selected the wrong link. Replaced it with spec-correct device-specific routes and testing the table before rerunning H9.
+
+The corrected _PRT now makes Ubuntu select IRQ 10/11 as intended, but the filesystem still spins. The focused test proves the small owned image path only, so I am isolating the large mapped-image path next.
+
+## 2026-09-12T15:10:07 UTC (45min) - Session usage — ralph-23 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.7462 (summed from 5 session transcripts: main $0.6475 · subagents $0.0986)
+- tokens input 1,168,517 · cache-read 22,891,008 · cache-write 0 · output 45,554 · reasoning 18,103
+- context 251,046 tok peak of 272K (92%) across 181 inference calls, 1 drop(s), final 152,987, resumed 1x
+- models gpt-5.6-luna $0.7462 (in 1,168,517 / out 63,657 / cache-read 22,891,008)
+- subagents (4) pi process x4
+  - delegate-3be684afe51bcf533a19439be8bb77bf: gpt-5.6-luna $0.0242, 7 inference calls
+  - delegate-66755de8abfe4a68dedce556be3b6e86: gpt-5.6-luna $0.0210, 5 inference calls
+  - delegate-9c19e77d0fe34fc23b61346c4a7d6787: gpt-5.6-luna $0.0284, 6 inference calls
+  - delegate-82b3827f133edd03beea8dcf36da6921: gpt-5.6-luna $0.0251, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/040-ralph-23.json
+- transcript: ralph/.run/20260911T161941Z/041-ralph-23.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 24 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing the existing implementation before making changes.
+
+Starting repository inventory and required KVM permission reset.
+
+Inventory complete; reading the build queue and specification index next.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item in todo-build.md.
+
+Starting G6 Ubuntu H9 proof. Inspecting the existing PCI, ACPI, console, and Linux boot changes before editing.
+
+Delegated specification studies are still running; independently tracing the H9 boot entrypoint and virtio PCI IRQ path.
+
+The production path already selects the three-device run loop and assigns PCI BARs; checking compilation and focused unit coverage before the real Ubuntu drive.
+
+Focused multiverse coverage is green: 243 passed. Checking whether the pinned Ubuntu artifacts are present for the real H9 drive.
+
+Pinned Ubuntu artifacts are present. Running the real H9 end-to-end drive now, including two independent servers and comparator checks.
+
+H9 reached real virtio-blk enumeration and vda partition discovery but stalled before login. Analyzing IRQ routing and ACPI link consistency rather than marking the item complete.
+
+Corrected the entropy function to ACPI LNKA/IRQ10, matching the generated _PRT and Linux 4.15 output. Re-running H9 with concise logging to test the real interrupt path.
+
+The corrected IRQ mapping did not change the stall. Capturing a bounded H9 attempt to a file with all logging suppressed, then inspecting the actual terminal result.
+
+The host is consuming block requests, so the remaining question is whether the pinned cloud image simply needs more deterministic ticks or whether completion injection is rejected. Running one bounded H9 drive at 5000 ticks to distinguish them.
+
+The request stream stops at notify_count 113, which confirms the guest is waiting on the final completion interrupt. Added temporary vector telemetry and rebuilding a short real attempt to identify the injected vector.
+
+Separated device completion delivery from the timer boundary by letting the timer vector enter the guest once before staging the PCI vector. Running focused compile/tests to catch borrow or state-machine errors.
+
+The new completion staging compiles; one unit expected the old IRQ11 test fixture and was corrected to IRQ10. Running a short real H9 attempt to see whether the guest now consumes the final used-ring completion.
+
+Compilation caught and fixed a telemetry accessor typo. Running one more bounded attempt to distinguish the MSI vector from the IOAPIC route before finalizing the interrupt implementation.
+
+The completion path now stages the PCI vector directly whenever the vCPU reports an open interrupt window, avoiding a second timer-boundary walk; the PMU path remains only as a readiness fallback. Testing the real guest again.
+
+The real drive still fails before login, so G6 remains open. Restored IOAPIC routing after a controlled PIC-vector experiment and delegating the focused validation run now.
+
+Root-cause refinement: a staged device vector could still be overwritten by the next periodic tick before Linux entered its ISR. The helper now always performs one KVM entry after staging, then testing compilation and a bounded real boot.
+
+Focused validation reports the multiverse tests and clippy green; cargo fmt fixed the new completion helper formatting. H9 remains the blocking acceptance and is not being marked DONE while the real guest still waits after the final block request.
+
+The refined delivery timing did not yet make Ubuntu consume the final completion. Current measured state: PCI enumerates, vda partitions appear, 112–113 block requests are serviced, the IOAPIC route resolves to vector 0x21, and the guest remains before login. G6 stays open with the exact INTx completion/EOI gap recorded in todo-build.md.
+
+Found a concrete regression in the halted completion path: it staged the PCI vector but no longer entered KVM to deliver it. Restored the missing step, which directly matches the observed final-request stall, and rerunning the real H9 path.
+
+Latest focused multiverse test status=0 after restoring halted completion delivery; the real H9 drive still stalls after request 113 and therefore G6 is not DONE.
+
+Repeating the focused G6 validation in the foreground as requested: cargo fmt --check, multiverse tests, and multiverse clippy.
+
+## 2026-09-12T16:05:21 UTC (55min) - Session usage — ralph-24 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5206 (summed from 8 session transcripts: main $0.3630 · subagents $0.1576)
+- tokens input 963,639 · cache-read 14,239,232 · cache-write 0 · output 35,928 · reasoning 16,737
+- context 246,151 tok peak of 272K (90%) across 83 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.5206 (in 963,639 / out 52,665 / cache-read 14,239,232)
+- subagents (7) pi process x7
+  - delegate-75b28bb8434d53cb3abfdffed053d59c: gpt-5.6-luna $0.0270, 5 inference calls
+  - delegate-cf285354fb8a03f8b73afc6272c4869d: gpt-5.6-luna $0.0239, 4 inference calls
+  - delegate-3b45ea207bca8ddbc4988c94d127140a: gpt-5.6-luna $0.0260, 5 inference calls
+  - delegate-202f492c0788f44644e61c5ad6db673f: gpt-5.6-luna $0.0252, 6 inference calls
+  - delegate-4ffa036b713ce2a4e295df6c05b6b73a: gpt-5.6-luna $0.0249, 5 inference calls
+  - delegate-79c64b3663cf7db0dd0d1ec2fe39535a: gpt-5.6-luna $0.0248, 5 inference calls
+  - 01a09655-5364-7790-93ef-6b305f609ae4: gpt-5.6-luna $0.0058, 2 inference calls
+- transcript: ralph/.run/20260911T161941Z/042-ralph-24.json
+- transcript: ralph/.run/20260911T161941Z/043-ralph-24.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 25 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing their real implementation paths before making changes.
+
+Studying the G6 Ubuntu specification and tracing the current PCI, interrupt, console, and drive paths before locking the single pending item.
+
+The current diff already adds PCI legacy routes and staged completion delivery; I am validating those changes before extending them.
+
+The first focused test command used incompatible multiple filters; rerunning the crate unit suite with one valid cargo invocation.
+
+Unit coverage is green for the modified multiverse crate. I am now checking the independent spec and boot-path audits before changing the completion/EOI logic.
+
+The G6 audits agree the remaining proof is the real Ubuntu path. Running H9 now to capture the concrete guest-visible failure before the next code change.
+
+H9 reached vda and drained requests but stalled after completions were routed as vector 0x21. I changed PCI completion delivery to stage the actual MSI/INTx vector through KVM vCPU events instead of the timer injector.
+
+The focused PCI block regression remains green. Rerunning H9 with warning-level logs to test whether the real Ubuntu interrupt handler now advances past root discovery.
+
+The second H9 run stalled inside the next periodic KVM entry after a running-device helper consumed an extra exit. I removed that extra entry so the periodic boundary engine delivers the staged completion and owns halt/window handling.
+
+The combined cargo filter syntax is unsupported here; rerunning the full multiverse unit suite to validate the helper change.
+
+The full multiverse suite is green. Running a bounded H9 diagnostic again to verify the staged completion no longer strands the periodic loop.
+
+The bounded run still stops after vda discovery, so I am instrumenting the PCI-rng completion count to distinguish an entropy wake failure from block IRQ delivery.
+
+The diagnostic showed no PCI-rng completion and no console progress after 113 block notifications. I restored the required interrupt-window wait when KVM is not ready, while keeping the actual MSI/INTx vector in vCPU events.
+
+The focused real block test remains green after the readiness fix. Running a 1000-tick H9 diagnostic to check for login progress.
+
+The readiness path did not advance the guest. I am running one controlled legacy-PIC vector experiment, 0x3b instead of Linux’s IOAPIC-programmed 0x21, to isolate whether the direct injection route or the guest’s EOI path is wrong.
+
+The PIC experiment delivered vector 0x3b but Linux correctly rejected it, confirming the guest registered the IOAPIC vector. I am testing unconditional boundary delivery for the correct 0x21 vector to remove stale KVM readiness state from the path.
+
+The unconditional boundary experiment also stalled after request 113, so the issue is not readiness timing. I am waiting for an independent source-level IRQ analysis before changing the ACPI/IOAPIC contract again.
+
+The remaining hypothesis is a pending periodic timer vector being overwritten when block service runs at the same host exit; checking the independent IRQ analysis before implementing pending-event serialization.
+
+The likely root cause is confirmed by the run-loop order: timer injection leaves one pending KVM external vector, and device polling was overwriting it. Device delivery now first enters KVM when a vector is pending, then stages the completion.
+
+The combined-device regression is green. Running the bounded real Ubuntu path once more to see whether the guest now consumes the final block completion and reaches userspace.
+
+Removing the wildcard _PRT entry produced a valid two-entry table and Linux again reported IRQ 10/11, but H9 still stalls after vda discovery. The wildcard was not the root cause. The tree is not ready for a DONE/commit claim.
+
+Repeated bash drive/h/h9.sh in the foreground as requested. H9.1 passed, but H9.2 remained at the same post-vda console state through the 600-second command timeout. G6 is still pending; no commit or push.
+
+## 2026-09-12T16:57:42 UTC (52min) - Session usage — ralph-25 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.5068 (summed from 5 session transcripts: main $0.4048 · subagents $0.1021)
+- tokens input 1,169,615 · cache-read 11,535,872 · cache-write 0 · output 35,163 · reasoning 17,800
+- context 259,479 tok peak of 272K (95%) across 101 inference calls, 1 drop(s), final 128,473, resumed 1x
+- models gpt-5.6-luna $0.5068 (in 1,169,615 / out 52,963 / cache-read 11,535,872)
+- subagents (4) pi process x4
+  - delegate-d9d8c55afc2609d41a02d4a62c95749a: gpt-5.6-luna $0.0241, 4 inference calls
+  - delegate-541b57469191d919831c2ad53a67dc18: gpt-5.6-luna $0.0186, 3 inference calls
+  - delegate-a05850e7e179ec3509569113f1e70905: gpt-5.6-luna $0.0281, 7 inference calls
+  - delegate-c5e6ad57107d71f7427a8e1f275cac70: gpt-5.6-luna $0.0313, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/044-ralph-25.json
+- transcript: ralph/.run/20260911T161941Z/045-ralph-25.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 26 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address by studying the specifications and build backlog, then implementing and validating the selected batch end to end.
+
+Starting the specification and backlog study now.
+
+Chose these 1 items: G6 Ubuntu H9 proof — it is the only pending item in the build queue.
+
+Starting G6 Ubuntu H9 proof: locating the real PCI, IRQ, and block completion path before editing.
+
+The code already contains PCI and virtio-blk support plus a combined timer loop; now running the real H9 path to expose the remaining completion defect.
+
+H9 reproduced the real stall after vda enumeration: Linux probes the disk but the boot never advances beyond tick 400. Inspecting the completion and halt-wake state machine now.
+
+The stall is inside a single periodic tick after vda appears, so I am bounding that tick and rerunning with quiet logs to capture the actual watchdog RIP and error.
+
+Added temporary completion diagnostics to distinguish missing requests from a lost interrupt, then rerunning the bounded real boot.
+
+The completion path now refuses to overwrite an unconsumed timer event and drains fault-like exits until KVM clears it; compiling the changed crate before another real boot.
+
+The changed crate compiles cleanly. Running the bounded H9 acceptance again to test whether preserving the timer releases Ubuntu past the vda wait.
+
+The run loop now services newly queued block work at each tick boundary before arming the next timer, covering a request followed by a branchless wait; compiling and testing the real path again.
+
+The requested foreground H9 rerun used the documented perf-event reset and a three-second watchdog. It still fails at tick 400, after `vda1/vda14/vda15` discovery, with the guest spinning at `0xffffffffc00a50da` and no login banner. An exit-time virtio-blk polling hook compiles, but this run produced no completion progress, so it is not accepted as the fix. G6 remains open. No DONE mark, commit, push, or completion promise.
+
+## 2026-09-12T17:21:23 UTC (24min) - Session usage — ralph-26 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.4452 (summed from 5 session transcripts: main $0.3469 · subagents $0.0983)
+- tokens input 875,280 · cache-read 11,594,240 · cache-write 0 · output 31,917 · reasoning 13,903
+- context 253,602 tok peak of 272K (93%) across 109 inference calls, 1 drop(s), final 83,675, resumed 1x
+- models gpt-5.6-luna $0.4452 (in 875,280 / out 45,820 / cache-read 11,594,240)
+- subagents (4) pi process x4
+  - delegate-fe51397d04e1db5cffd4b4d96aa93b49: gpt-5.6-luna $0.0246, 4 inference calls
+  - delegate-eac47847b37f5f25e7ea9bf2304ec736: gpt-5.6-luna $0.0251, 6 inference calls
+  - delegate-0a3f20da5655bbe9f06f3f041aa9820c: gpt-5.6-luna $0.0261, 6 inference calls
+  - delegate-f199b5caca46263ac601f96e7fe45c0a: gpt-5.6-luna $0.0224, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/046-ralph-26.json
+- transcript: ralph/.run/20260911T161941Z/047-ralph-26.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 27 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items in @todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+Chose these 1 items: G6 Ubuntu H9 proof — it is the only pending item in the build queue.
+
+Starting G6 Ubuntu H9 proof: studying the boot, PCI, IRQ, and block-completion specifications and searching the existing implementation.
+
+Running focused multiverse and vcpu tests before the real H9 drive, so compile or unit regressions are fixed first.
+
+Focused tests are green. Resetting the host perf policy and running the documented real Ubuntu H9 drive to reproduce or close the remaining end-to-end stall.
+
+The real trace confirms vda discovery but no login banner. The completion path can consume a request while the timer vector occupies KVM’s one pending slot, then lose the still-asserted legacy ISR wake. Preserving and retrying that ISR assertion is the next root-cause fix; running focused tests now.
+
+The ISR-preservation change compiles and all block-device service unit tests pass. Running the real KVM virtio-blk integration regression before another Ubuntu attempt.
+
+The first retry implementation exposed KVM_EXIT_FAIL_ENTRY because it tried to drive exits while a timer was still staged. I changed the contract: leave the timer untouched, retain the virtio ISR assertion, and retry the device vector on the next real exit.
+
+The remaining FailEntry points at direct userspace staging, not the ISR retry. Device completions now go through the established exact-boundary injector whenever the slot is free, while still refusing to overwrite a staged timer.
+
+Adding a bounded FailEntry reason log, then rerunning the real integration test to identify the KVM entry invariant being violated instead of guessing.
+
+The retry logic itself caused duplicate-entry pressure, so I isolated the regression by restoring block delivery to its previously green exact-boundary path. I am checking whether the remaining failure predates the ISR change before designing a guarded retry state.
+
+Root cause is now addressed at the earliest safe point: the PMU exit poll checks KVM’s staged-event slot before draining virtio-blk, so an available request cannot be converted into an uninjectable completion. Running the real block integration and focused tests.
+
+The real Ubuntu-shaped virtio-blk driver regression is green with the guarded poll. Rerunning the full H9 CLI/server/fingerprint drive now.
+
+The guarded poll prevents timer overwrite but H9 still stops at tick 500, so I am capturing only completion events and watchdog state from a bounded diagnostic run to see whether post-partition requests are ever serviced.
+
+The bounded trace shows 114 block completions, all delivered as vector 0x21, then Linux stops making progress. I am checking the guest-programmed IRQ line and IOAPIC route directly on the smaller real-KVM integration before changing the routing model.
+
+No completion is missing. The guest receives more than 100 block completions, then enters a stable post-device state. Adding the guest RIP to periodic progress will identify whether this is a timer/interrupt return loop or a filesystem wait.
+
+The guest RIP at ticks 100-400 is stable in the kernel idle/btrfs-adjacent path, not a missing queue request. Testing the only plausible guest-side escape, blacklisting the initramfs btrfs module, with the bounded real H9 path before deciding whether the rootfs probe itself is corrupted.
+
+The real failure still had one unsafe path: periodic pre-tick service could drain a request while the prior timer remained staged, even though the PMU exit path was guarded. That path now leaves the avail entry untouched until KVM consumes the timer; temporary diagnostics and the blacklist experiment are reverted.
+
+The guarded periodic path compiles and the real virtio-blk integration remains green. Running a 600-tick H9 capture to check whether Ubuntu now leaves the idle/btrfs state.
+
+The stable RIP suggests a staged external event is surviving into the next timer boundary. I added a bounded, shared drain before every timer injection so KVM never overwrites an unconsumed timer or PCI completion.
+
+The event drain did not change the RIP, so I am tracing the exact sector requests at the btrfs probe boundary. This will distinguish a real filesystem probe from a partition-offset or descriptor-chain bug.
+
+The block trace confirms normal absolute sectors and one-descriptor reads, so partition offset and descriptor corruption are not the cause. I am testing a smaller deterministic timer period to see whether the btrfs wait is a missed scheduling wake rather than bad disk data.
+
+The watchdog evidence changes the diagnosis: the hang is inside one long native btrfs loop while waiting for the next 500000-RCB boundary, not between ticks. Testing a much smaller deterministic period to force a reachable interrupt inside that loop.
+
+Formatting is clean. The smaller-period experiment only changed the drive temporarily and did not escape the guest btrfs path, so the documented 500000-RCB acceptance period is restored; running the full focused crate suite after the final guarded changes.
+
+Focused final verification passes: `cargo fmt --all`, all 14 virtio-rng tests, and the baud-vcpu crate tests. The full H9 acceptance remains open: Ubuntu reaches vda and receives block completions but still does not reach `ubuntu login:`; G6 is intentionally not marked DONE. The device-event staging fix is committed as an intermediate iteration result for the next H9 investigation.

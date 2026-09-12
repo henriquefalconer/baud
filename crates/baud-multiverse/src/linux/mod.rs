@@ -1472,6 +1472,7 @@ impl Multiverse {
             &mut self.time,
         )
         .with_cancel(cancel)
+        .with_device_memory(&self.guest.guest_mem)
     }
 
     /// Classify a boundary-engine (`inject_at`/`PmuStepper`) failure: a run whose supervisor
@@ -1761,6 +1762,39 @@ impl Multiverse {
         period_rcb: u64,
         vector: u8,
     ) -> Result<TimerTick, RunLoopError> {
+        // KVM has one staged external-interrupt slot. A previous timer or device completion may
+        // still be waiting there when the next deterministic boundary is reached. Retire that
+        // event first instead of overwriting it, which otherwise leaves Linux permanently in an
+        // idle wait after a burst of virtio-blk completions.
+        const MAX_PENDING_EVENT_EXITS: u32 = 1024;
+        for _ in 0..MAX_PENDING_EVENT_EXITS {
+            let pending = self
+                .guest
+                .vcpu
+                .get_vcpu_events()
+                .map_err(|e| DeterminismHole(e.to_string()))?
+                .interrupt
+                .injected
+                != 0;
+            if !pending {
+                break;
+            }
+            self.step_exit_cancellable()?;
+        }
+        let pending = self
+            .guest
+            .vcpu
+            .get_vcpu_events()
+            .map_err(|e| DeterminismHole(e.to_string()))?
+            .interrupt
+            .injected
+            != 0;
+        if pending {
+            return Err(DeterminismHole(
+                "interrupt remained staged before the next timer boundary".to_owned(),
+            )
+            .into());
+        }
         let baseline = self.time.current_rcb();
         let target_rcb = baseline.saturating_add(period_rcb);
         let mut stepper = self.cancellable_stepper();
@@ -2020,6 +2054,11 @@ impl Multiverse {
         self.bus.virtio_pci_rng()
     }
 
+    /// Resolve the CPU vector for the PCI entropy device's guest-programmed legacy IRQ.
+    pub fn virtio_pci_rng_interrupt_vector(&self, fallback: u8) -> u8 {
+        self.bus.virtio_pci_rng_interrupt_vector(fallback)
+    }
+
     /// The dual-8259 PIC bookkeeping stub's current state (`crate::pic8259::Pic8259`) — read
     /// access for a caller/test that wants to confirm a guest's own `probe_8259A()`/
     /// `init_8259A()`/`enable_8259A_irq()` sequence, issued through real `IN`/`OUT` PIO exits,
@@ -2107,21 +2146,43 @@ impl Multiverse {
     }
 
     pub fn service_virtio_blk_interrupt(&mut self, vector: u8) -> Result<u32, RunLoopError> {
+        // The periodic loop calls device service before each timer boundary. Never consume a
+        // request while the previous timer is still staged in KVM's single external-interrupt
+        // slot, or the completion interrupt would overwrite that timer. The PMU exit poll will
+        // service the untouched avail entry after the next real guest exit.
+        let pending = self
+            .guest
+            .vcpu
+            .get_vcpu_events()
+            .map_err(|e| DeterminismHole(e.to_string()))?
+            .interrupt
+            .injected
+            != 0;
+        if pending {
+            return Ok(0);
+        }
         let processed = self
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         if processed > 0 {
             let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
-            info!(
-                "virtio-blk service: processed {processed} request(s), notify_count {}",
-                self.virtio_pci_blk()
-                    .map(|transport| transport.notify_count())
-                    .unwrap_or(0),
-            );
             self.inject_timer_tick(0, vector)?;
         }
         Ok(processed)
+    }
+
+    /// Deliver a device completion at the next interruptible boundary. If KVM reports that the
+    /// guest is ready, staging the vector is enough. Otherwise the same boundary helper used for
+    /// timer delivery requests an interrupt window before staging it. Device completions are not
+    /// timer ticks, so the vector is always carried through `KVM_SET_VCPU_EVENTS`, including when
+    /// virtio-pci selected MSI.
+    fn inject_external_device_interrupt(&mut self, vector: u8) -> Result<(), RunLoopError> {
+        // `inject_timer_tick` drains an older staged vector before placing this one. Do not
+        // return early here: the device has already published its used entry, so dropping the
+        // delivery would leave Linux waiting forever for a completion interrupt.
+        self.inject_timer_tick(0, vector)?;
+        Ok(())
     }
 
     /// [`service_virtio_blk_interrupt`](Self::service_virtio_blk_interrupt)'s counterpart for a
@@ -2255,7 +2316,7 @@ impl Multiverse {
                 .unwrap_or(0),
         );
         if processed > 0 {
-            self.inject_timer_tick(0, vector)?;
+            self.inject_external_device_interrupt(vector)?;
         }
         Ok(processed)
     }
@@ -2267,7 +2328,7 @@ impl Multiverse {
             .service_virtio_pci_rng(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
         if processed > 0 {
-            self.inject_timer_tick(0, vector)?;
+            self.inject_external_device_interrupt(vector)?;
         }
         Ok(processed)
     }
@@ -2483,6 +2544,17 @@ impl Multiverse {
                     console_tail(self.bus.console.output()),
                     progress_start.elapsed().as_secs_f64(),
                 );
+            }
+            // A guest can post a block request and then enter a wait loop with no further
+            // conditional branches before the next timer boundary. Service such work before
+            // arming the next boundary, otherwise `inject_at` cannot reach the boundary that
+            // would have given the device a chance to wake the guest.
+            for (i, dev) in devices.iter().enumerate() {
+                let notify_count = (dev.notify_count)(self).unwrap_or(0);
+                if dev.poll_always || notify_count != last_notify[i] {
+                    last_notify[i] = notify_count;
+                    (dev.service_running)(self, dev.vector)?;
+                }
             }
             let baseline = self.time.current_rcb();
             let target_rcb = baseline.saturating_add(period_rcb);
@@ -2859,17 +2931,28 @@ impl Multiverse {
         virtio_blk_vector: u8,
         max_ticks: u32,
     ) -> Result<(Vec<TimerTick>, HaltOutcome), RunLoopError> {
+        let rng_device = if self.virtio_pci_rng().is_some() {
+            TickPolledDevice {
+                vector: self.virtio_pci_rng_interrupt_vector(virtio_rng_vector),
+                poll_always: false,
+                notify_count: |mv| mv.virtio_pci_rng().map(|t| t.notify_count()),
+                service_running: Multiverse::service_virtio_pci_rng_interrupt,
+                service_halted: Multiverse::service_virtio_pci_rng_interrupt_while_halted,
+            }
+        } else {
+            TickPolledDevice {
+                vector: virtio_rng_vector,
+                poll_always: false,
+                notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
+                service_running: Multiverse::service_virtio_rng_interrupt,
+                service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
+            }
+        };
         self.run_to_first_halt_with_periodic_timer_and_devices(
             period_rcb,
             timer_vector,
             &[
-                TickPolledDevice {
-                    vector: virtio_rng_vector,
-                    poll_always: false,
-                    notify_count: |mv| mv.virtio_rng().map(|t| t.notify_count()),
-                    service_running: Multiverse::service_virtio_rng_interrupt,
-                    service_halted: Multiverse::service_virtio_rng_interrupt_while_halted,
-                },
+                rng_device,
                 TickPolledDevice {
                     vector: virtio_blk_vector,
                     poll_always: true,

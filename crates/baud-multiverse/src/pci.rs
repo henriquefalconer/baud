@@ -155,6 +155,8 @@ const INTERRUPT_PIN_INTA: u32 = 1;
 /// RTC/ATA modeled here, and the periodic-timer engine injects the LAPIC's own
 /// `LOCAL_TIMER_VECTOR` directly, never a legacy IRQ0 PIT tick), and distinct from each other so
 /// the two devices never share a line.
+// The ACPI _PRT maps 00:01.0 to LNKA/IRQ 10. Keep this PCI Interrupt Line byte aligned with
+// that link so Linux's legacy virtio-pci driver and the host's injected completion use one route.
 const VIRTIO_RNG_DEFAULT_IRQ_LINE: u8 = 10;
 const VIRTIO_BLK_DEFAULT_IRQ_LINE: u8 = 11;
 
@@ -382,6 +384,14 @@ impl PciHostBridge {
         self.virtio_blk
             .as_ref()
             .and_then(|f| (f.msi_control & 1 != 0).then_some((f.msi_data & 0xff) as u8))
+    }
+
+    /// The PCI Interrupt Line byte for the entropy function. Linux uses this legacy IRQ number
+    /// when MSI is unavailable, and the IO APIC turns it into the CPU vector.
+    pub fn virtio_rng_interrupt_line(&self) -> Option<u8> {
+        self.virtio_rng
+            .as_ref()
+            .map(|function| function.interrupt_line)
     }
 
     /// The PCI Interrupt Line byte for the block function. Linux uses this legacy IRQ number
