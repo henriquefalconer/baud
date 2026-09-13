@@ -6075,3 +6075,5 @@ Virtio-blk GET_ID now returns `baud-virtio-blk` through the real request chain a
 GET_ID did not move H9. Testing a much tighter 5,000-branch periodic cadence as a bounded diagnostic for scheduler starvation, then restoring the acceptance script unchanged.
 
 Background trace review confirmed the used-ring indices and sector reads are correct. I audited the remaining legacy INTx path and fixed an interrupt-loss race: EOI now clears asserted IOAPIC lines only when the virtio ISR has no newer completion reason, so a completion arriving during an earlier handler survives EOI. Focused console tests pass; the real H9 stall remains at the same btrfs RIP, so G6 is still open.
+
+Iteration 41 final verification: ran `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && timeout 600 bash drive/gate.sh` in the foreground as required. Warm-up build, clippy, workspace tests, H5, and the completed drive units passed. The gate reached its 600-second timeout while long-running units were still in flight and reaped them cleanly; no KVM holders remained. G6 H9 still does not reach `ubuntu login:`, so this iteration is not complete.
