@@ -5911,3 +5911,60 @@ Foreground H9 rerun completed and reproduced the same failure: Ubuntu reaches vd
   - Preserved virtio-blk completion servicing across staged interrupts and validated descriptor direction.
   - Repeated the foreground H9 acceptance; it still fails before the login banner.
 ---
+
+## 2026-09-13T00:15:48 UTC (20min) - Session usage — ralph-38 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3668392, receipt ralph/.run/20260911T161941Z/069-ralph-38.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3668390, receipt ralph/.run/20260911T161941Z/069-ralph-38.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3668393, receipt ralph/.run/20260911T161941Z/069-ralph-38.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3671381, receipt ralph/.run/20260911T161941Z/069-ralph-38.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3674105, receipt ralph/.run/20260911T161941Z/069-ralph-38.json.processes/receipt.json)
+- cost $0.2871 (summed from 4 session transcripts: main $0.2212 · subagents $0.0659)
+- tokens input 497,991 · cache-read 8,033,792 · cache-write 0 · output 22,377 · reasoning 10,469
+- context 188,838 tok peak of 272K (69%) across 70 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.2871 (in 497,991 / out 32,846 / cache-read 8,033,792)
+- subagents (3) pi process x3
+  - delegate-8bc71e2c0a9a17ae86615069fed6fda2: gpt-5.6-luna $0.0141, 5 inference calls
+  - delegate-80950bfbac311ae6b080b297e9345545: gpt-5.6-luna $0.0269, 5 inference calls
+  - delegate-0e451d460cf8609a2b8baf9b09f3cc33: gpt-5.6-luna $0.0249, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/069-ralph-38.json
+- transcript: ralph/.run/20260911T161941Z/070-ralph-38.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 39 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items to address in @todo-build.md, studying the specifications, then implementing and validating the full batch.
+
+Starting repository and specification review.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item in the build queue.
+
+Starting G6 Ubuntu H9 proof. Reading the plan, H9 drive, and guest boot code before changing anything.
+
+Inspecting available Ubuntu artifacts and the current real boot failure before selecting the code fix.
+
+Running the real H9 drive with the pinned Ubuntu artifacts to capture the current btrfs/device-scan failure and its guest console tail.
+
+Testing the only evidence-backed userspace workaround in a disposable artifact: remove the initramfs btrfs hook without changing the repository acceptance path, to separate a VMM fault from the userspace probe.
+
+Running the disposable no-btrfs-initramfs boot with the real CLI to determine whether the guest reaches login when the scan hook is absent.
+
+Capturing the disposable boot error response and guest RIP with a short watchdog instead of waiting on an unbounded CLI timeout.
+
+The disposable initramfs experiment still stalls at the same post-vda boundary, so it does not justify changing the stock image or claiming H9. I am preserving the exact evidence and waiting for focused validation before closing this iteration honestly.
+
+Focused validation found baud-multiverse green and exposed an invalid baud-server --lib target; rerunning the server package with its actual binary test target.
+
+Focused validation is green for baud-multiverse (244 passed) and the actual baud-server binary tests (62 passed). G6 is still open: both stock and disposable no-btrfs initramfs boots stop after vda partition discovery, so no DONE marker or commit is honest yet.
+
+Repeating the real H9 acceptance command in the foreground, without backgrounding it, then recording the result and closing this iteration.
+
+The foreground H9 rerun reproduced the same failure: it reached tick 400 with vda partitions discovered, then timed out after 600 seconds without ubuntu login. G6 remains pending; recording this result and committing the iteration evidence.
+
+## 2026-09-13T00:52:39 UTC - Changes committed.
+- Repeated the real Ubuntu H9 acceptance drive in the foreground.
+- Files changed: ralph/progress.txt.
+- **Brief description of changes:**
+  - Recorded the reproducible timeout after vda partition discovery.
+  - Confirmed focused multiverse and server tests remain green while G6 stays open.
+---
