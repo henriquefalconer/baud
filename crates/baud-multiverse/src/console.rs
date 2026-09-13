@@ -1010,10 +1010,12 @@ impl Bus for DeviceBus {
         if let Some(offset) = LocalApic::in_range(addr) {
             self.lapic.mmio_write(addr, data);
             if offset == crate::lapic::EOI_OFFSET {
-                // A level-triggered PCI line remains asserted until the guest's APIC
-                // acknowledgement. Clear every line here, after the LAPIC has accepted the EOI,
-                // so a later completion can raise the same route again without a stale assertion.
-                self.ioapic.clear_all_asserted();
+                // Clear a line that no longer has a device reason. If virtio published another
+                // completion while Linux handled the earlier interrupt, its ISR bit is still set
+                // and the newer level must survive this EOI.
+                if !self.virtio_pci_blk_interrupt_pending() {
+                    self.ioapic.clear_all_asserted();
+                }
                 self.ioapic.eoi_all();
             }
             return;

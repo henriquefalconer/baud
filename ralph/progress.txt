@@ -6073,3 +6073,5 @@ The request trace found a real advertised-path gap: Ubuntu issues VIRTIO_BLK_T_G
 Virtio-blk GET_ID now returns `baud-virtio-blk` through the real request chain and all 19 block tests pass; rerunning the bounded Ubuntu path to test early probe completion.
 
 GET_ID did not move H9. Testing a much tighter 5,000-branch periodic cadence as a bounded diagnostic for scheduler starvation, then restoring the acceptance script unchanged.
+
+Background trace review confirmed the used-ring indices and sector reads are correct. I audited the remaining legacy INTx path and fixed an interrupt-loss race: EOI now clears asserted IOAPIC lines only when the virtio ISR has no newer completion reason, so a completion arriving during an earlier handler survives EOI. Focused console tests pass; the real H9 stall remains at the same btrfs RIP, so G6 is still open.
