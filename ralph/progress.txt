@@ -5692,3 +5692,222 @@ Changes committed: 2026-09-12T21:33:00Z
 
 - Recorded the H9 investigation and foreground gate result.
 - No implementation change was made without a reproducible fix.
+
+## 2026-09-12T21:32:52 UTC (18min) - Session usage — ralph-34 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3883 (summed from 6 session transcripts: main $0.2718 · subagents $0.1165)
+- tokens input 1,025,357 · cache-read 7,832,064 · cache-write 0 · output 22,153 · reasoning 7,082
+- context 255,693 tok peak of 272K (94%) across 57 inference calls, 1 drop(s), final 111,292, resumed 1x
+- models gpt-5.6-luna $0.3883 (in 1,025,357 / out 29,235 / cache-read 7,832,064)
+- subagents (5) pi process x5
+  - delegate-06bb597b803f2a7bfd9726f3065027f9: gpt-5.6-luna $0.0287, 6 inference calls
+  - delegate-91d5c40fe87a19260e57669637b0f35d: gpt-5.6-luna $0.0227, 5 inference calls
+  - delegate-276b682bcf4d70c3b1be6a6505e4fedc: gpt-5.6-luna $0.0241, 5 inference calls
+  - delegate-6aa10939e581c47a27f61826d7969080: gpt-5.6-luna $0.0307, 6 inference calls
+  - delegate-d90ca4d5efef6aa4ed524872e69539dd: gpt-5.6-luna $0.0103, 2 inference calls
+- transcript: ralph/.run/20260911T161941Z/061-ralph-34.json
+- transcript: ralph/.run/20260911T161941Z/062-ralph-34.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 35 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing their real implementation paths before coding.
+
+The queue and interrupt models are already wired; I am narrowing the H9 failure to the real guest request/completion path and will validate a concrete fix rather than changing the drive.
+
+The stock image is a GPT disk with an ext4 root partition, and the code serves raw sectors correctly; I am checking whether the remaining stall is a missing Linux timer/interrupt contract rather than storage bytes.
+
+The remaining evidence shows 207 successful block requests and ISR reads, so I am running one fresh bounded real capture with the current tree and verbose guest output before changing interrupt semantics again.
+
+The verbose capture confirms the guest reaches a clean kernel/userspace handoff and then spends the entire run in btrfs resolve_indirect_refs; I am testing a much tighter deterministic timer boundary as a diagnostic for interrupt starvation, then will keep only a real hardware fix.
+
+I found a concrete guest-visible fault: the periodic engine injected vector 0xee before Linux installed its LAPIC timer LVT, producing repeated spurious timer entries and an early #DB warning. I added a bounded initialization phase that waits for Linux to select the requested timer vector before any synthetic tick.
+
+The timer-LVT guard compiles and the LAPIC/ACPI unit tests pass. I am rerunning the real Ubuntu acceptance with the documented 500000-branch period to see whether eliminating pre-LVT injections releases userspace.
+
+The source inspection exposed a real gap: LAPIC EOI writes were dispatched to the LAPIC model but never reached IOAPIC state, despite comments and prior focused coverage claiming that lifecycle. I wired EOI to clear asserted level-triggered lines and added an end-to-end DeviceBus regression.
+
+The EOI regression passes. I am rerunning the real Ubuntu path at the normal period and a bounded tick budget; this is the acceptance check for whether the missing acknowledgement was the post-vda deadlock.
+
+The remaining interrupt contract also lacked IOAPIC remote-IRR state and masked-LVT handling. I added explicit remote-IRR lifetime through ISR read to APIC EOI, made EOI clear it, and now refuse synthetic timer delivery while Linux keeps its timer LVT masked.
+
+The combined cargo test filter was invalid because cargo accepts one filter; rerunning the two focused tests separately now.
+
+The IOAPIC/LAPIC regressions pass. I am running one final bounded real H9 attempt after honoring the timer mask and EOI remote-IRR semantics.
+
+The final bounded H9 run still stops in the same btrfs metadata loop despite correct early timer setup and EOI state, so G6 is not yet green. I am preserving the real interrupt fixes and running the full changed-crate verification before the next root-cause pass.
+
+## Iteration 35 final status
+
+G6 remains open. The legacy INTx path now records IOAPIC remote-IRR separately from the device's asserted line and clears that state on LAPIC EOI. Focused IOAPIC, virtio-blk, and burst-loop tests pass. The real H9 run still stalls in the Ubuntu btrfs metadata probe after vda discovery, so this iteration does not claim the H9 acceptance, does not mark G6 DONE, and does not emit a completion promise.
+
+The requested foreground H9 rerun was repeated with the same bounded command. It timed out at tick 400/700 with Ubuntu still stopped after `vda: vda1 vda14 vda15` and udev activity. G6 remains open. This iteration ends with no completion claim.
+
+## 2026-09-12T22:19:43 UTC (47min) - Session usage — ralph-35 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2777772, receipt ralph/.run/20260911T161941Z/063-ralph-35.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2777773, receipt ralph/.run/20260911T161941Z/063-ralph-35.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2777774, receipt ralph/.run/20260911T161941Z/063-ralph-35.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2780317, receipt ralph/.run/20260911T161941Z/063-ralph-35.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 2787314, receipt ralph/.run/20260911T161941Z/063-ralph-35.json.processes/receipt.json)
+- cost $0.4830 (summed from 5 session transcripts: main $0.3836 · subagents $0.0994)
+- tokens input 867,888 · cache-read 13,442,560 · cache-write 0 · output 33,789 · reasoning 15,505
+- context 255,683 tok peak of 272K (94%) across 113 inference calls, 1 drop(s), final 85,126, resumed 1x
+- models gpt-5.6-luna $0.4830 (in 867,888 / out 49,294 / cache-read 13,442,560)
+- subagents (4) pi process x4
+  - delegate-b8ff2f3bcedd757073b11d9fb5b983cc: gpt-5.6-luna $0.0280, 3 inference calls
+  - delegate-8db6e05cf27d4f994832b69ffd152e11: gpt-5.6-luna $0.0206, 4 inference calls
+  - delegate-3c1c54cad46d882979c8da4f533cdaf8: gpt-5.6-luna $0.0229, 5 inference calls
+  - delegate-f27694af50dbab9def849afe8b2cc70c: gpt-5.6-luna $0.0278, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/063-ralph-35.json
+- transcript: ralph/.run/20260911T161941Z/064-ralph-35.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 36 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items to address in @todo-build.md, then implementing and validating each one end to end.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item of 1.
+
+Starting G6 Ubuntu H9 proof: tracing the real initramfs boot and interrupt completion path before changing code.
+
+The Ubuntu artifacts are present and focused IOAPIC tests pass; running the real H9 drive to expose the remaining boot-path failure.
+
+H9 reached real PCI discovery and vda partition enumeration but stalled after the first rootfs activity; narrowing the stalled completion with a bounded run and device tracing.
+
+I found prior evidence that Ubuntu 4.15 receives synthetic timer ticks before its LAPIC clockevent is installed; adding a guest-owned LVT readiness gate, then rerunning focused tests and H9.
+
+The timer-LVT gate, IOAPIC remote-IRR/EOI handling, and virtio-blk pending-event servicing all compile and their focused tests pass. The foreground `bash drive/h/h9.sh` rerun with the normal 20,000-tick budget still timed out after Ubuntu printed `vda: vda1 vda14 vda15` and udev activity. It never reached the ext4 root mount or `ubuntu login:`. G6 remains open. No completion claim, commit, or push is justified in this iteration.
+
+## Iteration 36 final status
+
+G6 Ubuntu H9 proof remains blocked by the post-partition guest stall. The real acceptance command was run in the foreground as requested and timed out after 600 seconds. Focused multiverse tests passed, but the required login banner and two-VM fingerprint comparison did not occur. Continue with the next root-cause pass.
+
+## 2026-09-12T23:15:02 UTC (55min) - Session usage — ralph-36 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3269640, receipt ralph/.run/20260911T161941Z/065-ralph-36.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3269641, receipt ralph/.run/20260911T161941Z/065-ralph-36.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3269639, receipt ralph/.run/20260911T161941Z/065-ralph-36.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3276952, receipt ralph/.run/20260911T161941Z/065-ralph-36.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3279426, receipt ralph/.run/20260911T161941Z/065-ralph-36.json.processes/receipt.json)
+- cost $0.5722 (summed from 5 session transcripts: main $0.4832 · subagents $0.0890)
+- tokens input 1,096,147 · cache-read 15,745,024 · cache-write 0 · output 31,721 · reasoning 13,880
+- context 247,445 tok peak of 272K (91%) across 122 inference calls, 2 drop(s), final 133,325, resumed 1x
+- models gpt-5.6-luna $0.5722 (in 1,096,147 / out 45,601 / cache-read 15,745,024)
+- subagents (4) pi process x4
+  - delegate-fbc4075ebe73e6c60592e9ae6b3a65a5: gpt-5.6-luna $0.0241, 5 inference calls
+  - delegate-b9043ba69abc50fb42ebc72769ce53bc: gpt-5.6-luna $0.0110, 4 inference calls
+  - delegate-bd0b5251e85cffeb01f1a92b81c25c14: gpt-5.6-luna $0.0287, 4 inference calls
+  - delegate-59b64848974456062d3fc07833111d3f: gpt-5.6-luna $0.0252, 5 inference calls
+- transcript: ralph/.run/20260911T161941Z/065-ralph-36.json
+- transcript: ralph/.run/20260911T161941Z/066-ralph-36.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 37 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items, studying the specifications, and tracing each item through the real implementation before making changes.
+
+Chose these 1 items: G6 Ubuntu H9 proof — it is the only pending item of 10 queue entries.
+
+Starting G6 Ubuntu H9 proof. I am tracing the real boot and interrupt path before editing it.
+
+The source review confirms the completion path is wired, so I am running a bounded real H9 capture to obtain fresh post-change evidence before the next fix.
+
+The bounded H9 rerun reproduces the same kernel-module RIP, while the host image has ext4 magic and no btrfs superblock at standard offsets. I am treating this as a protocol/data-path defect, not a timer timeout, and narrowing virtio legacy semantics next.
+
+The block parser now rejects direction-invalid scatter-gather descriptors instead of returning a false successful read, with the existing valid multi-descriptor path unchanged. I am formatting and running the focused block/queue tests before deciding whether this is sufficient for the real boot.
+
+The virtio-specific unit set is green, including real-KVM PCI block reads and reproducibility. I am running one controlled root filesystem type diagnostic through the same real H9 server path; it will not alter the acceptance script.
+
+The focused virtio test set passes 79/79, and the rootfstype=ext4 diagnostic reproduces the same post-vda stall. G6 is still open because the real H9 login banner and fingerprint comparison remain red; no DONE marker or commit is claimed.
+
+I found the initramfs btrfs hook invokes `btrfs device scan`; I am checking the exact standard superblock sectors returned to the guest rather than treating the module RIP as proof of filesystem corruption.
+
+The DMA trace showed valid 4 KiB and scatter-gather destinations, with the virtqueue PFN at 0x50e2000 and request buffers allocated after the ring, so the suspected ring/data overlap is not present. The remaining H9 failure is still unresolved; temporary tracing is removed.
+
+The request-level DMA trace confirms sequential, aligned reads through the GPT and ext4 partition, all within guest RAM, and the focused 79-test virtio suite remains green. H9 still fails before login, so G6 cannot be marked DONE or committed.
+
+Repeating the focused multiverse test command in the foreground as requested, without backgrounding it.
+
+The foreground full multiverse suite exposed watchdog and halt-resume failures, with several tests hanging beyond ten minutes. I am isolating those failures before the required validation can be green.
+
+The isolated failures were caused by applying the Ubuntu-specific LAPIC readiness gate to fixture vectors; scoping it to vector 0xee restored all watchdog and halt-resume tests. Re-running the complete multiverse suite in the foreground now.
+
+The complete multiverse suite is now green: 244 passed, 10 ignored. I am repeating the real H9 acceptance command in the foreground, as requested, to verify whether the corrected fixture-vector gate changes the Ubuntu path.
+
+Foreground full multiverse validation is green at 244 passed and 10 ignored after scoping the 0xee timer gate. The required foreground drive/h/h9.sh still times out reproducibly at tick 500 after vda partition discovery, so G6 remains pending and this iteration cannot honestly claim DONE.
+
+## 2026-09-12T23:55:49 UTC (41min) - Session usage — ralph-37 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3452494, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3452493, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3452492, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3455270, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3457796, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3499786, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3499785, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3499784, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3501404, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3503755, receipt ralph/.run/20260911T161941Z/067-ralph-37.json.processes/receipt.json)
+- cost $0.5301 (summed from 5 session transcripts: main $0.4433 · subagents $0.0868)
+- tokens input 752,835 · cache-read 16,940,032 · cache-write 0 · output 33,904 · reasoning 17,167
+- context 247,632 tok peak of 272K (91%) across 119 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.5301 (in 752,835 / out 51,071 / cache-read 16,940,032)
+- subagents (4) pi process x4
+  - delegate-eb614d9fa9bed23e7ff5e68cd8d346cc: gpt-5.6-luna $0.0277, 7 inference calls
+  - delegate-f519c6da8672a01262b1d8068886df9f: gpt-5.6-luna $0.0263, 4 inference calls
+  - delegate-96d57d96a8455bc1d136d61d41d4386b: gpt-5.6-luna $0.0280, 5 inference calls
+  - 01a097e7-ee9c-74f5-8441-d0ad86483edc: gpt-5.6-luna $0.0048, 2 inference calls
+- transcript: ralph/.run/20260911T161941Z/067-ralph-37.json
+- transcript: ralph/.run/20260911T161941Z/068-ralph-37.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 38 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each selected path before implementation.
+
+Chose this 1 item: G6 Ubuntu H9 proof — it is the only pending implementation item in todo-build.md.
+
+Starting G6 Ubuntu H9 proof: tracing the real boot, interrupt, and filesystem path before running focused acceptance.
+
+The current run-loop and virtio tests are green, but H9 still stalls in btrfs metadata resolution; waiting for independent spec/path reviews while comparing Linux interrupt semantics.
+
+Independent reviews confirm the queue is the only credible fault domain; I am running a bounded H9 capture with the current code to obtain the exact post-completion guest state before changing semantics.
+
+The raw GPT confirms vda1 starts at sector 227328 and its ext4 superblock is at 227330; I added a narrow diagnostic to verify those exact requests complete and return the expected status.
+
+The exact root-partition reads are serviced through sectors 227330 onward, including the GPT and ext4 region; the stall is therefore after successful queue drain, so I am capturing the guest RIP at the bounded watchdog before choosing the next fix.
+
+The filesystem probe receives zeroes at sector 128 and the exact ext4 magic at sector 227330, eliminating a simple image-offset error; diagnostics are removed. I am validating the retained implementation before applying the next evidence-driven change.
+
+The retained code passes formatting, diff checks, and all 17 focused virtio-blk tests; real H9 still fails before login, so G6 stays open while I preserve the evidence in progress.
+
+The complete multiverse suite is green at 244 passed and 10 ignored, but independent reasoning points back to descriptor ownership and long-ring wrap; H9 remains red, so I am not marking G6 DONE or claiming completion.
+
+Repeating the real H9 acceptance command in the foreground now, without backgrounding it, then I will use its result to finish the selected G6 item or continue root-cause work.
+
+The required foreground H9 rerun again timed out at tick 400 after vda partition discovery; I am running one isolated diagnostic with btrfs blacklisted to distinguish a btrfs false-positive scan from a generic userspace stall, without changing the acceptance script.
+
+Foreground H9 rerun completed and reproduced the same failure: Ubuntu reaches vda partition discovery, then watchdog kills guest RIP 0xffffffffc00a50da in btrfs resolve_indirect_refs; blacklisting btrfs as an isolated diagnostic does not change the stall. G6 remains open.
+
+## 2026-09-13T00:15:27 UTC - Changes committed.
+- Implemented and tested the deterministic Ubuntu interrupt and virtio-blk lifecycle fixes.
+- Files changed: crates/baud-multiverse/src/console.rs, ioapic.rs, linux/mod.rs, virtio_blk.rs, crates/baud-server/src/routes/verify_fingerprint.rs, todo-build.md, ralph/progress.txt.
+- **Brief description of changes:**
+  - Added LAPIC timer readiness gating for Ubuntu's vector 0xee path.
+  - Added level-triggered IOAPIC remote-IRR and EOI handling.
+  - Preserved virtio-blk completion servicing across staged interrupts and validated descriptor direction.
+  - Repeated the foreground H9 acceptance; it still fails before the login banner.
+---

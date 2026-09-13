@@ -24,6 +24,7 @@ pub struct IoApic {
     register: u8,
     redirection: [u64; REDIR_COUNT],
     asserted: [bool; REDIR_COUNT],
+    remote_irr: [bool; REDIR_COUNT],
 }
 
 impl Default for IoApic {
@@ -32,6 +33,7 @@ impl Default for IoApic {
             register: 0,
             redirection: [MASKED; REDIR_COUNT],
             asserted: [false; REDIR_COUNT],
+            remote_irr: [false; REDIR_COUNT],
         }
     }
 }
@@ -58,16 +60,26 @@ impl IoApic {
 
     /// Assert a level-triggered PCI INTx line after publishing a used-ring entry.
     pub fn assert_irq(&mut self, irq: u8) {
-        if let Some(line) = self.asserted.get_mut(irq as usize) {
+        let index = irq as usize;
+        if let Some(line) = self.asserted.get_mut(index) {
             *line = true;
+        }
+        if let Some(remote) = self.remote_irr.get_mut(index) {
+            *remote = true;
         }
     }
 
-    /// Clear the asserted PCI line when the guest completes its APIC EOI.
+    /// Clear the guest-visible line when the legacy virtio transport's ISR is read. A level
+    /// interrupt's remote-IRR remains set until the APIC EOI, matching the IOAPIC contract.
     pub fn clear_irq(&mut self, irq: u8) {
         if let Some(line) = self.asserted.get_mut(irq as usize) {
             *line = false;
         }
+    }
+
+    /// Complete the APIC acknowledgement for every modeled level-triggered line.
+    pub fn eoi_all(&mut self) {
+        self.remote_irr.fill(false);
     }
 
     pub fn irq_asserted(&self, irq: u8) -> bool {
@@ -191,5 +203,6 @@ mod tests {
         io.clear_all_asserted();
         assert!(!io.irq_asserted(10));
         assert!(!io.irq_asserted(11));
+        io.eoi_all();
     }
 }

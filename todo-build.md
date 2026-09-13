@@ -46,7 +46,7 @@ guarantee and the test that proves it.
 
 - **G5 complete advertised CLI and route coverage.** DONE. Advertised commands, routes, aliases, schemas, redaction, identifier errors, stable exits, tape reconstruction, and SSE frame tails are synchronized; live frame payloads now persist when supplied and migrations cover fresh/upgraded databases.
 
-- **G6 Ubuntu H9 proof.** Use pinned Ubuntu 18.04.1/Linux 4.15 vector `0xee` (238) and finish the real rootfs/userspace path to `ubuntu login:`; PCI now exposes the ACPI I/O window and vda, but Ubuntu still spins in the initramfs btrfs probe after completion, so finish the legacy INTx completion/EOI and guest-progress path and rerun `drive/h/h9.sh` with the two-VM fingerprint tests.
+- **G6 Ubuntu H9 proof.** Use pinned Ubuntu 18.04.1/Linux 4.15 vector `0xee` (238) and finish the real rootfs/userspace path to `ubuntu login:`; PCI/INTx and aligned ext4 sector reads are verified, but Ubuntu still spins in `btrfs device scan`, so isolate the remaining guest-state fault and rerun `drive/h/h9.sh` with the two-VM fingerprint tests.
 
 
 - **G8 production host safety contract.** DONE. Linux probing, regime reporting, sibling-safe placement, inherited affinity selection, housekeeping reservations, doctor diagnostics, and real H0/H6 capacity/fleet checks now pass without silent downgrade.

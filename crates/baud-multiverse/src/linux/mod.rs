@@ -2146,10 +2146,9 @@ impl Multiverse {
     }
 
     pub fn service_virtio_blk_interrupt(&mut self, vector: u8) -> Result<u32, RunLoopError> {
-        // The periodic loop calls device service before each timer boundary. Never consume a
-        // request while the previous timer is still staged in KVM's single external-interrupt
-        // slot, or the completion interrupt would overwrite that timer. The PMU exit poll will
-        // service the untouched avail entry after the next real guest exit.
+        // Service the queue even when KVM still has a timer or device interrupt staged. The guest
+        // can post its next request while that event is pending. Skipping the queue here leaves
+        // the request in avail.idx while the guest waits for its completion.
         let pending = self
             .guest
             .vcpu
@@ -2158,16 +2157,13 @@ impl Multiverse {
             .interrupt
             .injected
             != 0;
-        if pending {
-            return Ok(0);
-        }
         let processed = self
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
-        // Legacy virtio INTx is level-triggered by the transport ISR. Retry an asserted line
-        // even after its request was drained, until the guest reads ISR_STATUS and deasserts it.
-        if processed > 0 || self.bus.virtio_pci_blk_interrupt_pending() {
+        // Legacy virtio INTx is level-triggered by the transport ISR. Do not replace an already
+        // staged event, but leave the ISR asserted so the next exit retries this vector.
+        if !pending && (processed > 0 || self.bus.virtio_pci_blk_interrupt_pending()) {
             let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
             self.inject_timer_tick(0, vector)?;
         }
@@ -2533,6 +2529,24 @@ impl Multiverse {
             .iter()
             .map(|d| (d.notify_count)(self).unwrap_or(0))
             .collect();
+        // Ubuntu 4.15 enters its spurious-timer path if its 0xee clockevent is injected before
+        // the LAPIC timer LVT exists. Keep this guard scoped to that real distro path. The small
+        // fixture guests deliberately use arbitrary vectors without programming a LAPIC LVT, and
+        // changing their old run-loop contract would make unrelated timer tests fail.
+        if timer_vector == 0xee {
+            const MAX_TIMER_SETUP_EXITS: u32 = 1_000_000;
+            let mut timer_setup_exits = 0u32;
+            while !self.bus.lapic_timer_ready(timer_vector) {
+                if timer_setup_exits >= MAX_TIMER_SETUP_EXITS {
+                    return Err(DeterminismHole(format!(
+                        "run_to_first_halt_with_periodic_timer_and_devices: guest did not install timer vector {timer_vector:#x}"
+                    ))
+                    .into());
+                }
+                self.step_exit_cancellable()?;
+                timer_setup_exits += 1;
+            }
+        }
         let progress_start = std::time::Instant::now();
         for tick_index in 0..max_ticks {
             if self.is_cancelled() {

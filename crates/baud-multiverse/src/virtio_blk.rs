@@ -212,9 +212,17 @@ pub fn service_request<M: GuestMemoryBackend>(
 
     let status = match request_type {
         VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT => {
-            let in_range = total_sectors(data_descriptors)
-                .and_then(|n| sector.checked_add(n))
-                .is_some_and(|end| end <= store.capacity_sectors());
+            let direction_ok = data_descriptors.iter().all(|descriptor| {
+                // VIRTIO_BLK_T_IN writes disk data into the driver's buffers. OUT reads the
+                // buffers. Refusing a chain with the wrong direction is important here: silently
+                // accepting it can make a malformed descriptor look like a successful filesystem
+                // read while leaving the guest buffer unchanged.
+                descriptor.write == (request_type == VIRTIO_BLK_T_IN)
+            });
+            let in_range = direction_ok
+                && total_sectors(data_descriptors)
+                    .and_then(|n| sector.checked_add(n))
+                    .is_some_and(|end| end <= store.capacity_sectors());
             if in_range {
                 let mut current_sector = sector;
                 for descriptor in data_descriptors {
@@ -224,6 +232,7 @@ pub fn service_request<M: GuestMemoryBackend>(
                         let mut buf = [0u8; SECTOR_SIZE as usize];
                         if request_type == VIRTIO_BLK_T_IN {
                             store.read_sector(current_sector, &mut buf);
+
                             mem.write_slice(&buf, GuestAddress(addr))
                                 .map_err(VirtqueueError::GuestMemory)?;
                         } else {

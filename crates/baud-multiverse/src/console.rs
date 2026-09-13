@@ -448,6 +448,14 @@ impl DeviceBus {
         &self.lapic
     }
 
+    /// Whether the guest has installed and unmasked the LAPIC timer gate for `vector`.
+    /// Synthetic scheduler ticks must wait for this guest-owned setup; injecting the vector
+    /// earlier enters the 4.15 kernel's spurious-timer path before its clockevent exists.
+    pub fn lapic_timer_ready(&self, vector: u8) -> bool {
+        let lvt = self.lapic.lvt_timer();
+        lvt & 0xff == u32::from(vector) && lvt & (1 << 16) == 0
+    }
+
     /// Installs a virtio-rng transport at [`crate::layout::VIRTIO_MMIO_RNG_BASE`] — opt-in (no
     /// existing caller does this yet), so [`Bus::mmio_read`]/[`Bus::mmio_write`] start dispatching
     /// that address window to it instead of [`OpenBusFallback`]. The entropy stream starts seeded
@@ -999,8 +1007,15 @@ impl Bus for DeviceBus {
                 return;
             }
         }
-        if LocalApic::in_range(addr).is_some() {
+        if let Some(offset) = LocalApic::in_range(addr) {
             self.lapic.mmio_write(addr, data);
+            if offset == crate::lapic::EOI_OFFSET {
+                // A level-triggered PCI line remains asserted until the guest's APIC
+                // acknowledgement. Clear every line here, after the LAPIC has accepted the EOI,
+                // so a later completion can raise the same route again without a stale assertion.
+                self.ioapic.clear_all_asserted();
+                self.ioapic.eoi_all();
+            }
             return;
         }
         if IoApic::in_range(addr).is_some() {
@@ -1874,6 +1889,15 @@ mod virtio_blk_service_tests {
         assert!(
             !bus.ioapic.irq_asserted(11),
             "ISR read deasserts legacy INTx"
+        );
+        bus.ioapic.assert_irq(11);
+        bus.mmio_write(
+            crate::layout::LAPIC_MMIO_BASE + crate::lapic::EOI_OFFSET,
+            &0u32.to_le_bytes(),
+        );
+        assert!(
+            !bus.ioapic.irq_asserted(11),
+            "LAPIC EOI deasserts any remaining level-triggered INTx line"
         );
         bus.pio_read(IO_BASE + REG_ISR_STATUS, &mut isr);
         assert_eq!(isr, [0], "reading the ISR register clears it");
