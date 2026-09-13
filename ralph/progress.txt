@@ -6077,3 +6077,62 @@ GET_ID did not move H9. Testing a much tighter 5,000-branch periodic cadence as 
 Background trace review confirmed the used-ring indices and sector reads are correct. I audited the remaining legacy INTx path and fixed an interrupt-loss race: EOI now clears asserted IOAPIC lines only when the virtio ISR has no newer completion reason, so a completion arriving during an earlier handler survives EOI. Focused console tests pass; the real H9 stall remains at the same btrfs RIP, so G6 is still open.
 
 Iteration 41 final verification: ran `echo baud | sudo -S sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' && timeout 600 bash drive/gate.sh` in the foreground as required. Warm-up build, clippy, workspace tests, H5, and the completed drive units passed. The gate reached its 600-second timeout while long-running units were still in flight and reaped them cleanly; no KVM holders remained. G6 H9 still does not reach `ubuntu login:`, so this iteration is not complete.
+
+## 2026-09-13T01:53:30 UTC (38min) - Session usage — ralph-41 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.7276 (summed from 7 session transcripts: main $0.6069 · subagents $0.1207)
+- tokens input 1,045,408 · cache-read 22,686,208 · cache-write 0 · output 53,987 · reasoning 22,838
+- context 257,676 tok peak of 272K (95%) across 170 inference calls, 1 drop(s), final 194,996, resumed 1x
+- models gpt-5.6-luna $0.7276 (in 1,045,408 / out 76,825 / cache-read 22,686,208)
+- subagents (6) pi process x6
+  - delegate-cef274a17245bc9a787d2f8e36413589: gpt-5.6-luna $0.0213, 4 inference calls
+  - delegate-ecfd79c5faf051fee3b2b81a24377b93: gpt-5.6-luna $0.0263, 5 inference calls
+  - delegate-bccb6a0d822d45912a5260c5a7989448: gpt-5.6-luna $0.0218, 5 inference calls
+  - 01a09858-832a-726e-bb12-b3bd67c76af1: gpt-5.6-luna $0.0039, 4 inference calls
+  - delegate-71139e0f918f6660f5e244d23974a15b: gpt-5.6-luna $0.0236, 4 inference calls
+  - delegate-8cac5853f82493ad20000e717fbb8808: gpt-5.6-luna $0.0238, 4 inference calls
+- transcript: ralph/.run/20260911T161941Z/074-ralph-41.json
+- transcript: ralph/.run/20260911T161941Z/075-ralph-41.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 42 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the ten most important build items, studying the specifications, then implementing and validating the full batch.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending implementation item in todo-build.md.
+
+Starting G6. I am reading the Ubuntu specification and tracing the H9 drive, guest boot, filesystem, and KVM state paths before changing code.
+
+The existing H9 path has already fixed several real PCI, virtio, and interrupt defects; I am keeping the focused acceptance worker running while I inspect the remaining block/guest-state boundary for a concrete root cause.
+
+Specification review confirms H9 is the complete contract: repeated real boots, exact banner failure, separate-server comparison, and non-vacuous target divergence; the acceptance worker is now executing that protocol.
+
+No implementation change is being claimed yet. The only pending queue entry remains bound to the real stock-image login path, and I am waiting for the focused worker to return evidence rather than converting diagnostics into a false pass.
+
+The focused H9 worker is actively consuming a KVM run, with baud-server at full CPU, so the test is exercising the real guest rather than failing during setup. Continuing to wait for its bounded result.
+
+The acceptance worker reproduced the known long KVM path and is now correlating timer, block, and recent interrupt changes against the recorded btrfs stall; no unsupported queue closure has been made.
+
+The test worker found no safe fix and restored the acceptance script. I am using the recorded exact disk geometry and transport code to isolate the remaining protocol defect rather than marking the queue item open again without new work.
+
+The worker restored all diagnostics and confirmed H9 still stalls at the same guest RIP. I am now testing the only remaining production-safe hypothesis: the periodic boundary is too coarse around a long userspace/device probe, using environment-only bounds before changing core semantics.
+
+The finer-tick diagnostic still reaches the same btrfs instruction, so I am tracing only the fixed-sector reads that Linux uses for btrfs superblock discovery; this will distinguish corrupt guest buffers from a genuine guest-side loop.
+
+The read trace proved the block model returns the raw GPT/ext4 bytes at btrfs probe positions and never returns a btrfs superblock magic; I removed the trace and retained only an explicit release fence before used-ring publication, then I am running the focused queue regression.
+
+Queue regression is green. I am giving the finer-boundary production run the full allowed window now; if it reaches login, I will restore the acceptance defaults and rerun the exact drive before closing G6.
+
+The full finer-boundary run still timed out after 600 seconds at the same RIP, and the release-fence experiment was reverted because it did not change the guest state. G6 remains genuinely unresolved; no DONE marker or completion commit is being claimed.
+
+Repeating the real Ubuntu H9 acceptance drive in the foreground as requested, then I will record the result and close this iteration with the queue state honestly reflected.
+
+## 2026-09-13T02:44:10Z, iteration 42 closeout
+
+- Repeated `bash drive/h/h9.sh` in the foreground with the required perf-event setting and the full 600-second timeout.
+- Result: FAIL/TIMEOUT. Ubuntu reached virtio disk discovery (`vda: vda1 vda14 vda15`) and then stopped producing console output. It did not reach `ubuntu login:`.
+- G6 is not complete. No implementation change is claimed. The working tree contains only this progress record.
