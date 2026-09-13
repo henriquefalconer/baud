@@ -33,7 +33,7 @@ const VIRTQ_DESC_F_NEXT: u16 = 1;
 /// is driver-supplied input the device must only read.
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 /// This descriptor's `addr`/`len` describe an indirect descriptor table, not a data buffer (spec
-/// 1.1 §2.6.5.3) — unsupported here; rejected loud rather than silently mis-parsed as data.
+/// 1.1 §2.6.5.3).
 const VIRTQ_DESC_F_INDIRECT: u16 = 4;
 
 /// `struct virtq_avail { le16 flags; le16 idx; le16 ring[...]; }` (spec 1.1 §2.6.6) — the `idx`
@@ -65,8 +65,12 @@ pub enum VirtqueueError {
     DescriptorOutOfRange(u16, u32),
     #[error("descriptor chain did not terminate within {0} hops (the negotiated queue size) — corrupt or malicious ring")]
     ChainTooLong(u32),
-    #[error("indirect descriptors are not supported")]
-    IndirectUnsupported,
+    #[error("indirect descriptor table has invalid length {0}")]
+    IndirectInvalidLength(u32),
+    #[error("indirect descriptor table contains a nested indirect descriptor")]
+    IndirectNested,
+    #[error("indirect descriptor uses the NEXT flag")]
+    IndirectHasNext,
 }
 
 /// A split virtqueue's live processing state: the negotiated ring addresses/size
@@ -135,17 +139,21 @@ impl SplitVirtqueue {
             .map_err(VirtqueueError::GuestMemory)
     }
 
-    /// Read descriptor-table slot `index`, returning the decoded [`Descriptor`] plus `Some(next)`
-    /// if [`VIRTQ_DESC_F_NEXT`] is set (the chain continues at descriptor index `next`).
-    fn read_descriptor<M: GuestMemoryBackend>(
+    /// Decode one ordinary descriptor-table entry. `base` and `count` identify the table being
+    /// walked, while `allow_indirect` is false for entries inside an indirect table because the
+    /// virtio format forbids nesting indirect tables.
+    fn read_descriptor_at<M: GuestMemoryBackend>(
         &self,
         mem: &M,
+        base: u64,
+        count: u32,
         index: u16,
-    ) -> Result<(Descriptor, Option<u16>), VirtqueueError> {
-        if u32::from(index) >= self.config.num {
-            return Err(VirtqueueError::DescriptorOutOfRange(index, self.config.num));
+        allow_indirect: bool,
+    ) -> Result<(Descriptor, Option<u16>, Option<(u64, u32)>), VirtqueueError> {
+        if u32::from(index) >= count {
+            return Err(VirtqueueError::DescriptorOutOfRange(index, count));
         }
-        let addr = self.config.desc + u64::from(index) * DESC_SIZE;
+        let addr = base + u64::from(index) * DESC_SIZE;
         let mut raw = [0u8; DESC_SIZE as usize];
         mem.read_slice(&mut raw, GuestAddress(addr))
             .map_err(VirtqueueError::GuestMemory)?;
@@ -154,35 +162,86 @@ impl SplitVirtqueue {
         let flags = u16::from_le_bytes(raw[12..14].try_into().unwrap());
         let next = u16::from_le_bytes(raw[14..16].try_into().unwrap());
         if flags & VIRTQ_DESC_F_INDIRECT != 0 {
-            return Err(VirtqueueError::IndirectUnsupported);
+            if !allow_indirect {
+                return Err(VirtqueueError::IndirectNested);
+            }
+            if flags & VIRTQ_DESC_F_NEXT != 0 {
+                return Err(VirtqueueError::IndirectHasNext);
+            }
+            if len == 0 || len % DESC_SIZE as u32 != 0 {
+                return Err(VirtqueueError::IndirectInvalidLength(len));
+            }
+            return Ok((
+                Descriptor {
+                    addr: buf_addr,
+                    len,
+                    write: false,
+                },
+                None,
+                Some((buf_addr, len / DESC_SIZE as u32)),
+            ));
         }
-        let descriptor = Descriptor {
-            addr: buf_addr,
-            len,
-            write: flags & VIRTQ_DESC_F_WRITE != 0,
-        };
-        let next_index = (flags & VIRTQ_DESC_F_NEXT != 0).then_some(next);
-        Ok((descriptor, next_index))
+        Ok((
+            Descriptor {
+                addr: buf_addr,
+                len,
+                write: flags & VIRTQ_DESC_F_WRITE != 0,
+            },
+            (flags & VIRTQ_DESC_F_NEXT != 0).then_some(next),
+            None,
+        ))
     }
 
-    /// Walk one descriptor chain starting at descriptor index `head`, following [`VIRTQ_DESC_F_NEXT`]
-    /// links. Bounded to at most `config.num` hops — the queue's own negotiated size is the spec's
-    /// own bound on a legitimate chain's length, so a chain that hasn't terminated within that many
-    /// hops is corrupt or malicious and must never be trusted further (never looped on indefinitely).
-    fn read_chain<M: GuestMemoryBackend>(
+    fn read_indirect_chain<M: GuestMemoryBackend>(
         &self,
         mem: &M,
-        head: u16,
+        base: u64,
+        count: u32,
     ) -> Result<Vec<Descriptor>, VirtqueueError> {
         let mut descriptors = Vec::new();
-        let mut index = head;
-        for _ in 0..=self.config.num {
-            let (descriptor, next) = self.read_descriptor(mem, index)?;
+        let mut index = 0u16;
+        for _ in 0..=count {
+            let (descriptor, next, indirect) =
+                self.read_descriptor_at(mem, base, count, index, false)?;
+            if indirect.is_some() {
+                return Err(VirtqueueError::IndirectNested);
+            }
             descriptors.push(descriptor);
             match next {
                 Some(next_index) => index = next_index,
                 None => return Ok(descriptors),
             }
+        }
+        Err(VirtqueueError::ChainTooLong(count))
+    }
+
+    /// Walk one descriptor chain, flattening a virtio indirect table when the outer head uses
+    /// `VIRTQ_DESC_F_INDIRECT`. Linux's legacy virtio-blk driver uses this form for normal disk
+    /// requests, so treating it as an unsupported extension prevents a real root filesystem from
+    /// ever completing its reads.
+    fn read_chain<M: GuestMemoryBackend>(
+        &self,
+        mem: &M,
+        head: u16,
+    ) -> Result<Vec<Descriptor>, VirtqueueError> {
+        let (first, next, indirect) =
+            self.read_descriptor_at(mem, self.config.desc, self.config.num, head, true)?;
+        if let Some((base, count)) = indirect {
+            return self.read_indirect_chain(mem, base, count);
+        }
+        let mut descriptors = vec![first];
+        let mut index = next;
+        for _ in 1..=self.config.num {
+            let Some(index_value) = index else {
+                return Ok(descriptors);
+            };
+            let (descriptor, next, indirect) =
+                self.read_descriptor_at(mem, self.config.desc, self.config.num, index_value, true)?;
+            if indirect.is_some() {
+                return Err(VirtqueueError::IndirectNested);
+            }
+            descriptors.push(descriptor);
+            index = next;
         }
         Err(VirtqueueError::ChainTooLong(self.config.num))
     }
@@ -297,12 +356,24 @@ mod tests {
     }
 
     fn write_descriptor(mem: &GuestMemory, index: u16, addr: u64, len: u32, flags: u16, next: u16) {
+        write_descriptor_at(mem, DESC_BASE, index, addr, len, flags, next);
+    }
+
+    fn write_descriptor_at(
+        mem: &GuestMemory,
+        base: u64,
+        index: u16,
+        addr: u64,
+        len: u32,
+        flags: u16,
+        next: u16,
+    ) {
         let mut raw = [0u8; 16];
         raw[0..8].copy_from_slice(&addr.to_le_bytes());
         raw[8..12].copy_from_slice(&len.to_le_bytes());
         raw[12..14].copy_from_slice(&flags.to_le_bytes());
         raw[14..16].copy_from_slice(&next.to_le_bytes());
-        mem.write_slice(&raw, GuestAddress(DESC_BASE + u64::from(index) * DESC_SIZE))
+        mem.write_slice(&raw, GuestAddress(base + u64::from(index) * DESC_SIZE))
             .expect("write descriptor");
     }
 
@@ -517,13 +588,36 @@ mod tests {
     }
 
     #[test]
-    fn an_indirect_descriptor_is_rejected_as_unsupported() {
+    fn an_indirect_descriptor_table_is_flattened() {
         let mem = test_guest_mem();
-        write_descriptor(&mem, 0, BUF_BASE, 16, VIRTQ_DESC_F_INDIRECT, 0);
+        let indirect_base = 0x5000;
+        write_descriptor(&mem, 0, indirect_base, 32, VIRTQ_DESC_F_INDIRECT, 0);
+        write_descriptor_at(
+            &mem,
+            indirect_base,
+            0,
+            BUF_BASE,
+            8,
+            VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
+            1,
+        );
+        write_descriptor_at(
+            &mem,
+            indirect_base,
+            1,
+            BUF_BASE + 8,
+            8,
+            VIRTQ_DESC_F_WRITE,
+            0,
+        );
         set_avail(&mem, 1, &[0]);
+
         let mut vq = SplitVirtqueue::new(config(256));
-        let err = vq.process_available(&mem, |_| {}).unwrap_err();
-        assert!(matches!(err, VirtqueueError::IndirectUnsupported));
+        let processed = vq.process_available(&mem, |buf| buf.fill(0xCD)).unwrap();
+        assert_eq!(processed, 1);
+        let mut out = [0u8; 16];
+        mem.read_slice(&mut out, GuestAddress(BUF_BASE)).unwrap();
+        assert_eq!(out, [0xCD; 16]);
     }
 
     #[test]

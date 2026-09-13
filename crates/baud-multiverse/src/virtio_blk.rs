@@ -39,6 +39,9 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 /// Flush any buffered writes (`VIRTIO_BLK_T_FLUSH`) — a no-op here: every write already lands
 /// directly in the overlay, so there is nothing buffered to flush.
 const VIRTIO_BLK_T_FLUSH: u32 = 4;
+/// Return the deterministic device identifier (`VIRTIO_BLK_T_GET_ID`).
+const VIRTIO_BLK_T_GET_ID: u32 = 8;
+const VIRTIO_BLK_ID: &[u8] = b"baud-virtio-blk";
 
 /// Request completed successfully (spec §5.2.6.2).
 const VIRTIO_BLK_S_OK: u8 = 0;
@@ -203,61 +206,101 @@ pub fn service_request<M: GuestMemoryBackend>(
     let header_desc = &chain[0];
     let status_desc = &chain[chain.len() - 1];
     let data_descriptors = &chain[1..chain.len() - 1];
+    let status_writable = status_desc.write && status_desc.len >= 1;
 
+    // The device must not read beyond a descriptor's declared length, even when the guest posts
+    // malformed ring contents. A valid status descriptor still gets IOERR so the driver can make
+    // progress; a chain without one is consumed with no guest-memory write.
+    let header_valid = !header_desc.write && header_desc.len as usize >= REQ_HEADER_LEN;
     let mut header = [0u8; REQ_HEADER_LEN];
-    mem.read_slice(&mut header, GuestAddress(header_desc.addr))
-        .map_err(VirtqueueError::GuestMemory)?;
+    if header_valid {
+        mem.read_slice(&mut header, GuestAddress(header_desc.addr))
+            .map_err(VirtqueueError::GuestMemory)?;
+    }
     let request_type = u32::from_le_bytes(header[0..4].try_into().unwrap());
     let sector = u64::from_le_bytes(header[8..16].try_into().unwrap());
 
-    let status = match request_type {
-        VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT => {
-            let direction_ok = data_descriptors.iter().all(|descriptor| {
-                // VIRTIO_BLK_T_IN writes disk data into the driver's buffers. OUT reads the
-                // buffers. Refusing a chain with the wrong direction is important here: silently
-                // accepting it can make a malformed descriptor look like a successful filesystem
-                // read while leaving the guest buffer unchanged.
-                descriptor.write == (request_type == VIRTIO_BLK_T_IN)
-            });
-            let in_range = direction_ok
-                && total_sectors(data_descriptors)
-                    .and_then(|n| sector.checked_add(n))
-                    .is_some_and(|end| end <= store.capacity_sectors());
-            if in_range {
-                let mut current_sector = sector;
-                for descriptor in data_descriptors {
-                    let sectors_in_descriptor = descriptor.len / SECTOR_SIZE as u32;
-                    for i in 0..sectors_in_descriptor {
-                        let addr = descriptor.addr + u64::from(i) * SECTOR_SIZE;
-                        let mut buf = [0u8; SECTOR_SIZE as usize];
-                        if request_type == VIRTIO_BLK_T_IN {
-                            store.read_sector(current_sector, &mut buf);
+    let mut request_data_bytes_written = 0u32;
+    let status = if !header_valid || !status_writable {
+        VIRTIO_BLK_S_IOERR
+    } else {
+        match request_type {
+            VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT => {
+                let direction_ok = data_descriptors.iter().all(|descriptor| {
+                    // VIRTIO_BLK_T_IN writes disk data into the driver's buffers. OUT reads the
+                    // buffers. Refusing a chain with the wrong direction is important here: silently
+                    // accepting it can make a malformed descriptor look like a successful filesystem
+                    // read while leaving the guest buffer unchanged.
+                    descriptor.write == (request_type == VIRTIO_BLK_T_IN)
+                });
+                let in_range = direction_ok
+                    && total_sectors(data_descriptors)
+                        .and_then(|n| sector.checked_add(n))
+                        .is_some_and(|end| end <= store.capacity_sectors());
+                if in_range {
+                    let mut current_sector = sector;
+                    for descriptor in data_descriptors {
+                        let sectors_in_descriptor = descriptor.len / SECTOR_SIZE as u32;
+                        for i in 0..sectors_in_descriptor {
+                            let addr = descriptor.addr + u64::from(i) * SECTOR_SIZE;
+                            let mut buf = [0u8; SECTOR_SIZE as usize];
+                            if request_type == VIRTIO_BLK_T_IN {
+                                store.read_sector(current_sector, &mut buf);
 
-                            mem.write_slice(&buf, GuestAddress(addr))
-                                .map_err(VirtqueueError::GuestMemory)?;
-                        } else {
-                            mem.read_slice(&mut buf, GuestAddress(addr))
-                                .map_err(VirtqueueError::GuestMemory)?;
-                            store.write_sector(current_sector, &buf);
+                                mem.write_slice(&buf, GuestAddress(addr))
+                                    .map_err(VirtqueueError::GuestMemory)?;
+                            } else {
+                                mem.read_slice(&mut buf, GuestAddress(addr))
+                                    .map_err(VirtqueueError::GuestMemory)?;
+                                store.write_sector(current_sector, &buf);
+                            }
+                            current_sector += 1;
                         }
-                        current_sector += 1;
+                    }
+                    VIRTIO_BLK_S_OK
+                } else {
+                    VIRTIO_BLK_S_IOERR
+                }
+            }
+            VIRTIO_BLK_T_FLUSH => {
+                if data_descriptors.is_empty() {
+                    VIRTIO_BLK_S_OK
+                } else {
+                    VIRTIO_BLK_S_IOERR
+                }
+            }
+            VIRTIO_BLK_T_GET_ID => {
+                if data_descriptors.is_empty() || data_descriptors.iter().any(|d| !d.write) {
+                    VIRTIO_BLK_S_IOERR
+                } else {
+                    let mut remaining = VIRTIO_BLK_ID;
+                    for descriptor in data_descriptors {
+                        if remaining.is_empty() {
+                            break;
+                        }
+                        let count = remaining.len().min(descriptor.len as usize);
+                        mem.write_slice(&remaining[..count], GuestAddress(descriptor.addr))
+                            .map_err(VirtqueueError::GuestMemory)?;
+                        request_data_bytes_written += count as u32;
+                        remaining = &remaining[count..];
+                    }
+                    if remaining.is_empty() {
+                        VIRTIO_BLK_S_OK
+                    } else {
+                        VIRTIO_BLK_S_IOERR
                     }
                 }
-                VIRTIO_BLK_S_OK
-            } else {
-                VIRTIO_BLK_S_IOERR
             }
+            _ => VIRTIO_BLK_S_UNSUPP,
         }
-        VIRTIO_BLK_T_FLUSH => VIRTIO_BLK_S_OK,
-        _ => VIRTIO_BLK_S_UNSUPP,
     };
 
-    let mut data_bytes_written: u32 = 0;
+    let mut data_bytes_written = request_data_bytes_written;
     if request_type == VIRTIO_BLK_T_IN && status == VIRTIO_BLK_S_OK {
         data_bytes_written = data_descriptors.iter().map(|d| d.len).sum();
     }
 
-    let status_written = if status_desc.len >= 1 {
+    let status_written = if status_writable {
         mem.write_slice(&[status], GuestAddress(status_desc.addr))
             .map_err(VirtqueueError::GuestMemory)?;
         1
@@ -421,14 +464,18 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_request_type_reports_unsupp() {
+    fn get_id_returns_a_deterministic_identifier() {
         let mem = test_guest_mem();
         let mut store = BlockBackingStore::new(base_image(2));
-        write_header(&mem, 8, 0); // VIRTIO_BLK_T_GET_ID, not implemented
+        write_header(&mem, VIRTIO_BLK_T_GET_ID, 0);
         let chain = chain(SECTOR_SIZE as u32, true);
 
-        service_request(&mem, &chain, &mut store).unwrap();
-        assert_eq!(read_status(&mem), VIRTIO_BLK_S_UNSUPP);
+        let written = service_request(&mem, &chain, &mut store).unwrap();
+        assert_eq!(written, VIRTIO_BLK_ID.len() as u32 + 1);
+        assert_eq!(read_status(&mem), VIRTIO_BLK_S_OK);
+        let mut id = vec![0u8; VIRTIO_BLK_ID.len()];
+        mem.read_slice(&mut id, GuestAddress(DATA_BASE)).unwrap();
+        assert_eq!(id, VIRTIO_BLK_ID);
     }
 
     #[test]
@@ -520,6 +567,35 @@ mod tests {
             write: false,
         }];
         assert_eq!(service_request(&mem, &chain, &mut store).unwrap(), 0);
+    }
+
+    #[test]
+    fn malformed_header_and_status_descriptors_fail_closed() {
+        let mem = test_guest_mem();
+        let mut store = BlockBackingStore::new(base_image(2));
+        write_header(&mem, VIRTIO_BLK_T_IN, 0);
+
+        let mut short_header = chain(SECTOR_SIZE as u32, true);
+        short_header[0].len = 8;
+        assert_eq!(service_request(&mem, &short_header, &mut store).unwrap(), 1);
+        assert_eq!(read_status(&mem), VIRTIO_BLK_S_IOERR);
+
+        let mut readonly_status = chain(SECTOR_SIZE as u32, true);
+        readonly_status[2].write = false;
+        assert_eq!(
+            service_request(&mem, &readonly_status, &mut store).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn flush_with_data_is_rejected() {
+        let mem = test_guest_mem();
+        let mut store = BlockBackingStore::new(base_image(2));
+        write_header(&mem, VIRTIO_BLK_T_FLUSH, 0);
+        let request = chain(1, false);
+        assert_eq!(service_request(&mem, &request, &mut store).unwrap(), 1);
+        assert_eq!(read_status(&mem), VIRTIO_BLK_S_IOERR);
     }
 
     /// The whole point of [`BlockBase::Mapped`]: a store backed by a read-only mapping of an

@@ -5968,3 +5968,108 @@ The foreground H9 rerun reproduced the same failure: it reached tick 400 with vd
   - Recorded the reproducible timeout after vda partition discovery.
   - Confirmed focused multiverse and server tests remain green while G6 stays open.
 ---
+
+## 2026-09-13T00:53:09 UTC (37min) - Session usage — ralph-39 [pi/openai-codex/gpt-5.6-luna] [medium]
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3827366, receipt ralph/.run/20260911T161941Z/071-ralph-39.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3827365, receipt ralph/.run/20260911T161941Z/071-ralph-39.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3827367, receipt ralph/.run/20260911T161941Z/071-ralph-39.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3835465, receipt ralph/.run/20260911T161941Z/071-ralph-39.json.processes/receipt.json)
+- WARNING: unattributed Pi descendant: missing or malformed transcript (pid 3838125, receipt ralph/.run/20260911T161941Z/071-ralph-39.json.processes/receipt.json)
+- cost $0.3079 (summed from 5 session transcripts: main $0.2334 · subagents $0.0745)
+- tokens input 706,407 · cache-read 7,161,344 · cache-write 0 · output 19,500 · reasoning 7,871
+- context 189,348 tok peak of 272K (70%) across 56 inference calls, monotonic, resumed 1x
+- models gpt-5.6-luna $0.3079 (in 706,407 / out 27,371 / cache-read 7,161,344)
+- subagents (4) pi process x4
+  - delegate-884691a3d6b643c96470e2df79ecc534: gpt-5.6-luna $0.0276, 5 inference calls
+  - delegate-84504aa8cadfcdccc6d7e7b21bbcd5a5: gpt-5.6-luna $0.0230, 4 inference calls
+  - delegate-60d29fcfe8f854e2bd533e4adc2ebf94: gpt-5.6-luna $0.0215, 4 inference calls
+  - 01a09832-c308-7708-a04f-b833ef9bfa44: gpt-5.6-luna $0.0024, 2 inference calls
+- transcript: ralph/.run/20260911T161941Z/071-ralph-39.json
+- transcript: ralph/.run/20260911T161941Z/072-ralph-39.json
+
+═══════════════════════════════════════════════════════
+  Ralph Iteration 40 (Build Mode)
+═══════════════════════════════════════════════════════
+
+Finding the 10 most important items to address from @todo-build.md, studying the specifications, then implementing and validating the complete batch.
+
+Inspecting repository structure and recent progress before selecting the batch.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item in the build queue.
+
+Starting G6 Ubuntu H9 proof. Reading the plan, H9 drive, Ubuntu specification, and recent diagnostics before changing code.
+
+Inspecting the current H9 implementation and guest-state diagnostics.
+
+Running the real H9 acceptance path again with the current timer, IOAPIC, and virtio-blk code to obtain fresh root-cause evidence.
+
+Using the bounded H9 watchdog diagnostic to capture the exact guest RIP and console state instead of waiting for the full drive timeout.
+
+Mapping the watchdog RIP into the stock Ubuntu btrfs module and comparing the failing instruction with the filesystem scan call path.
+
+Following the plan order now: inspect the exact initramfs startup handlers and btrfs scan invocation before touching the VMM.
+
+Adding a narrow completion/vector trace and rerunning the bounded boot to determine whether the post-vda wait is a missing block IRQ or a guest-side loop.
+
+Tracing the Linux-programmed IOAPIC redirection entries to verify whether the delivered block vector matches the guest IRQ table.
+
+Testing the concrete interrupt hypothesis by temporarily delivering block completions at the caller-provided legacy vector instead of the IOAPIC-selected vector.
+
+Testing the stock kernel’s documented btrfs scan suppression as a diagnostic, while keeping the repository acceptance command unchanged.
+
+Testing whether the remaining userspace wait depends on timer cadence rather than a filesystem or IRQ data error, using a temporary tenfold-faster periodic timer diagnostic.
+
+The diagnostics ruled out timer cadence and btrfs scan suppression: vector 0xee at 50,000 RCB, the stock btrfs.noscan parameter, and legacy-vector fallback all still stop at the same btrfs resolve_indirect_refs loop; restoring the acceptance script and removing all temporary traces, then running focused regression tests.
+
+Focused IOAPIC regression is green. The real G6 acceptance remains red at the immutable guest-state loop, so I am preserving the exact evidence rather than marking a false DONE.
+
+## 2026-09-13T01:15:50 UTC (23min) - Session usage — ralph-40 [pi/openai-codex/gpt-5.6-luna] [medium]
+- cost $0.3625 (summed from 4 session transcripts: main $0.2864 · subagents $0.0761)
+- tokens input 683,714 · cache-read 9,866,752 · cache-write 0 · output 23,684 · reasoning 10,678
+- context 245,221 tok peak of 272K (90%) across 68 inference calls, monotonic
+- models gpt-5.6-luna $0.3625 (in 683,714 / out 34,362 / cache-read 9,866,752)
+- subagents (3) pi process x3
+  - delegate-8b75df145d63bcad5019e6a438110cc3: gpt-5.6-luna $0.0253, 6 inference calls
+  - delegate-f28be60fa08124a38738bf07ec0274fe: gpt-5.6-luna $0.0237, 5 inference calls
+  - delegate-b6630dcaa5ad331275f039d203896dd7: gpt-5.6-luna $0.0271, 6 inference calls
+- transcript: ralph/.run/20260911T161941Z/073-ralph-40.json
+
+═══════════════════════════════════════════════════════
+
+  Ralph Iteration 41 (Build Mode)
+
+═══════════════════════════════════════════════════════
+
+
+
+Finding the 10 most important items, studying the specifications, and tracing each implementation path before coding.
+
+Chose these 1 item: G6 Ubuntu H9 proof — it is the only pending item in the build queue.
+
+Starting G6 Ubuntu H9 proof. Reading the Ubuntu specification, block path, and existing diagnostics before changing code.
+
+Running the bounded real H9 boot with the current watchdog diagnostics to capture the exact guest instruction and console state before editing.
+
+The bounded boot confirms normal virtio-blk requests reach the device but the guest stops after filesystem crypto setup; I found the generic virtqueue rejects indirect descriptor tables, which Linux uses for disk requests. Implementing flattening with malformed-table checks and a real unit test.
+
+Focused multiverse verification passed 244 tests, including the new indirect-descriptor test; rustfmt alone reported the edited queue file, so formatting it before the real H9 rerun.
+
+Rerunning the bounded real Ubuntu boot after enabling indirect virtqueue chains and fail-closed block validation; this tests whether rootfs probing now reaches login.
+
+Indirect virtqueue support did not change the bounded Ubuntu stall, which still reaches the same btrfs-module loop; I am preserving that fix and validating the new malformed-request checks while the deeper run-loop diagnosis continues.
+
+The combined Cargo filter was invalid because Cargo accepts one test filter; formatting and diff checks passed, so I am rerunning the two focused filters separately.
+
+The new malformed-status test caught a real bug: the device could perform a successful data transfer before noticing a read-only status descriptor. Requests now fail before touching data when the status buffer is invalid; rerunning focused block and queue tests.
+
+The completion path had been explicitly skipping block injection whenever a timer event was staged, even though the durable ISR remained asserted. I changed it to retire the staged event through the existing boundary helper and then inject the still-pending block completion, preserving both events.
+
+The adjacent timer/block completion regression is green; running the bounded real H9 capture once more to test whether the durable interrupt change releases the Ubuntu userspace probe.
+
+The durable interrupt change also leaves the guest at the same RIP. I am collecting one request-level trace now to distinguish a repeated/invalid block sector from a pure guest CPU loop; the trace will be removed after analysis.
+
+The request trace found a real advertised-path gap: Ubuntu issues VIRTIO_BLK_T_GET_ID during early disk probing, and the model returned UNSUPP. I am implementing a deterministic identifier response and testing it before another H9 capture.
+
+Virtio-blk GET_ID now returns `baud-virtio-blk` through the real request chain and all 19 block tests pass; rerunning the bounded Ubuntu path to test early probe completion.
+
+GET_ID did not move H9. Testing a much tighter 5,000-branch periodic cadence as a bounded diagnostic for scheduler starvation, then restoring the acceptance script unchanged.

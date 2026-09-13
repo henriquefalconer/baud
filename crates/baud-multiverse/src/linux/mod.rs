@@ -2149,21 +2149,15 @@ impl Multiverse {
         // Service the queue even when KVM still has a timer or device interrupt staged. The guest
         // can post its next request while that event is pending. Skipping the queue here leaves
         // the request in avail.idx while the guest waits for its completion.
-        let pending = self
-            .guest
-            .vcpu
-            .get_vcpu_events()
-            .map_err(|e| DeterminismHole(e.to_string()))?
-            .interrupt
-            .injected
-            != 0;
         let processed = self
             .bus
             .service_virtio_blk(&self.guest.guest_mem)
             .map_err(|e| DeterminismHole(e.to_string()))?;
-        // Legacy virtio INTx is level-triggered by the transport ISR. Do not replace an already
-        // staged event, but leave the ISR asserted so the next exit retries this vector.
-        if !pending && (processed > 0 || self.bus.virtio_pci_blk_interrupt_pending()) {
+        // Legacy virtio INTx is level-triggered by the transport ISR. If another external event
+        // is staged, inject_timer_tick first retires it at a guest boundary instead of silently
+        // overwriting it, then stages this still-pending completion. Keeping the ISR asserted is
+        // what makes a completion durable until Linux reads the ISR and sends EOI.
+        if processed > 0 || self.bus.virtio_pci_blk_interrupt_pending() {
             let vector = self.bus.virtio_pci_blk_interrupt_vector(vector);
             self.inject_timer_tick(0, vector)?;
         }
